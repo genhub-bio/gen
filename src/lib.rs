@@ -1,8 +1,10 @@
+use clap::{Parser, Subcommand};
 use std::fs::File;
 use std::io::BufRead;
 use std::path::Path;
 use std::{io, str};
 pub mod annotations;
+pub mod commands;
 pub mod config;
 pub mod diffs;
 pub mod exports;
@@ -111,6 +113,23 @@ where
 
 pub fn normalize_string(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum Commands {
+    /// Commands for importing
+    Import(commands::import::Command),
+}
+
+#[derive(Parser)]
+#[command(version, about, long_about = None, arg_required_else_help(true))]
+pub struct NewCli {
+    /// The path to the database you wish to utilize
+    #[arg(short, long)]
+    pub db: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<Commands>,
 }
 
 #[cfg(test)]

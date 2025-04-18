@@ -3,9 +3,12 @@ use clap::{Parser, Subcommand};
 use core::ops::Range;
 use gen::config;
 use gen::config::{get_gen_dir, get_operation_connection};
+use gen::Commands;
+use gen::NewCli;
 use rusqlite::params;
 
 use gen::annotations::gff::propagate_gff;
+use gen::commands::cli_context::CliContext;
 use gen::diffs::gfa::gfa_sample_diff;
 use gen::exports::fasta::export_fasta;
 use gen::exports::genbank::export_genbank;
@@ -52,12 +55,12 @@ use std::{io, str};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None, arg_required_else_help(true))]
-struct Cli {
+pub struct Cli {
     /// The path to the database you wish to utilize
     #[arg(short, long)]
-    db: Option<String>,
+    pub db: Option<String>,
     #[command(subcommand)]
-    command: Option<Commands>,
+    pub command: Option<OldCommands>,
 }
 
 fn get_default_collection(conn: &Connection) -> String {
@@ -70,7 +73,7 @@ fn get_default_collection(conn: &Connection) -> String {
 
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
-enum Commands {
+enum OldCommands {
     /// Commands for transforming file types for input to Gen.
     #[command(arg_required_else_help(true))]
     Transform {
@@ -93,37 +96,6 @@ enum Commands {
         /// The sample name whose graph coordinates are mapped against
         #[arg(short, long)]
         sample: Option<String>,
-    },
-    /// Import a new sequence collection.
-    #[command(arg_required_else_help(true))]
-    Import {
-        /// Fasta file path
-        #[arg(short, long)]
-        fasta: Option<String>,
-        /// Genbank file path
-        #[arg(long)]
-        gb: Option<String>,
-        /// GFA file path
-        #[arg(short, long)]
-        gfa: Option<String>,
-        /// The name of the collection to store the entry under
-        #[arg(short, long)]
-        name: Option<String>,
-        /// A sample name to associate the fasta file with
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// Don't store the sequence in the database, instead store the filename
-        #[arg(long, action)]
-        shallow: bool,
-        /// The name of the region if importing a library
-        #[arg(long)]
-        region_name: Option<String>,
-        /// The path to the combinatorial library parts
-        #[arg(long)]
-        parts: Option<String>,
-        /// The path to the combinatorial library csv
-        #[arg(long)]
-        library: Option<String>,
     },
     /// Update a sequence collection with new data
     #[command(arg_required_else_help(true))]
@@ -493,17 +465,30 @@ fn main() {
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();
 
+    let cli = NewCli::parse();
+    let cli_context = CliContext::from(&cli);
+
+    match cli.command {
+        Some(Commands::Import(cmd)) => gen::commands::import::execute(&cli_context, cmd),
+        None => println!("No command provided."),
+    }
+}
+
+fn main2() {
+    // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
+    env_logger::init();
+
     let cli = Cli::parse();
 
     // commands not requiring a db connection are handled here
-    if let Some(Commands::Init {}) = &cli.command {
+    if let Some(OldCommands::Init {}) = &cli.command {
         config::get_or_create_gen_dir();
         println!("Gen repository initialized.");
         return;
     }
 
     let operation_conn = get_operation_connection(None);
-    if let Some(Commands::Defaults {
+    if let Some(OldCommands::Defaults {
         database,
         collection,
     }) = &cli.command
@@ -525,7 +510,7 @@ fn main() {
         }
         return;
     }
-    if let Some(Commands::SetRemote { remote }) = &cli.command {
+    if let Some(OldCommands::SetRemote { remote }) = &cli.command {
         operation_conn
             .execute("update defaults set remote_url=?1 where id = 1", (remote,))
             .unwrap();
@@ -533,7 +518,7 @@ fn main() {
         return;
     }
 
-    if let Some(Commands::Transform { format_csv_for_gaf }) = &cli.command {
+    if let Some(OldCommands::Transform { format_csv_for_gaf }) = &cli.command {
         let csv = format_csv_for_gaf
             .clone()
             .expect("csv for transformation not provided.");
@@ -568,109 +553,7 @@ fn main() {
     setup_db(&operation_conn, &db_uuid);
 
     match &cli.command {
-        Some(Commands::Import {
-            fasta,
-            gb,
-            gfa,
-            name,
-            shallow,
-            sample,
-            region_name,
-            parts,
-            library,
-        }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            if fasta.is_some() {
-                match import_fasta(
-                    &fasta.clone().unwrap(),
-                    name,
-                    sample.as_deref(),
-                    *shallow,
-                    &conn,
-                    &operation_conn,
-                ) {
-                    Ok(_) => println!("Fasta imported."),
-                    Err(FastaError::OperationError(OperationError::NoChanges)) => {
-                        println!("Fasta contents already exist.")
-                    }
-                    Err(_) => {
-                        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        panic!("Import failed.");
-                    }
-                }
-            } else if gfa.is_some() {
-                match import_gfa(
-                    &PathBuf::from(gfa.clone().unwrap()),
-                    name,
-                    sample.as_deref(),
-                    &conn,
-                    &operation_conn,
-                ) {
-                    Ok(_) => println!("GFA Imported."),
-                    Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
-                        println!("GFA already exists.")
-                    }
-                    Err(_) => {
-                        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        panic!("Import failed.");
-                    }
-                }
-            } else if let Some(gb) = gb {
-                let mut reader: Box<dyn std::io::Read> = if gb.ends_with(".gz") {
-                    let file = File::open(gb.clone()).unwrap();
-                    Box::new(flate2::read::GzDecoder::new(file))
-                } else {
-                    Box::new(File::open(gb.clone()).unwrap())
-                };
-                match import_genbank(
-                    &conn,
-                    &operation_conn,
-                    &mut reader,
-                    name.deref(),
-                    sample.as_deref(),
-                    OperationInfo {
-                        files: vec![OperationFile {
-                            file_path: gb.clone(),
-                            file_type: FileTypes::GenBank,
-                        }],
-                        description: "GenBank Import".to_string(),
-                    },
-                ) {
-                    Ok(_) => println!("GenBank Imported."),
-                    Err(err) => {
-                        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        panic!("Import failed: {err:?}");
-                    }
-                }
-            } else if region_name.is_some() && parts.is_some() && library.is_some() {
-                import_library(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.as_deref(),
-                    parts.as_deref().unwrap(),
-                    library.as_deref().unwrap(),
-                    region_name.as_deref().unwrap(),
-                )
-                .unwrap();
-            } else {
-                conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                panic!(
-                    "ERROR: Import command attempted but no recognized file format was specified"
-                );
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
-        }
-        Some(Commands::View {
+        Some(OldCommands::View {
             graph,
             sample,
             collection,
@@ -689,7 +572,7 @@ fn main() {
                 position.clone(),
             );
         }
-        Some(Commands::Update {
+        Some(OldCommands::Update {
             name,
             fasta,
             vcf,
@@ -797,7 +680,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::UpdateGaf {
+        Some(OldCommands::UpdateGaf {
             name,
             gaf,
             csv,
@@ -821,7 +704,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::Translate {
+        Some(OldCommands::Translate {
             bed,
             gff,
             collection,
@@ -864,7 +747,7 @@ fn main() {
                 }
             }
         }
-        Some(Commands::Operations {
+        Some(OldCommands::Operations {
             interactive,
             branch,
         }) => {
@@ -910,7 +793,7 @@ fn main() {
                 println!("No operations found.");
             }
         }
-        Some(Commands::Branch {
+        Some(OldCommands::Branch {
             create,
             delete,
             checkout,
@@ -1007,7 +890,7 @@ fn main() {
                 println!("No options selected.");
             }
         }
-        Some(Commands::Merge { branch_name }) => {
+        Some(OldCommands::Merge { branch_name }) => {
             let branch_name = branch_name.clone().expect("Branch name must be provided.");
             let other_branch = Branch::get_by_name(&operation_conn, &db_uuid, &branch_name)
                 .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
@@ -1033,7 +916,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::Apply { hash }) => {
+        Some(OldCommands::Apply { hash }) => {
             conn.execute("BEGIN TRANSACTION", []).unwrap();
             operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
             match operation_management::apply(&conn, &operation_conn, hash, None) {
@@ -1047,7 +930,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::Checkout { branch, hash }) => {
+        Some(OldCommands::Checkout { branch, hash }) => {
             if let Some(name) = branch.clone() {
                 if Branch::get_by_name(&operation_conn, &db_uuid, &name).is_none() {
                     Branch::create(&operation_conn, &db_uuid, &name);
@@ -1080,10 +963,10 @@ fn main() {
                 println!("No branch or hash to checkout provided.");
             }
         }
-        Some(Commands::Reset { hash }) => {
+        Some(OldCommands::Reset { hash }) => {
             operation_management::reset(&conn, &operation_conn, &db_uuid, hash);
         }
-        Some(Commands::Export {
+        Some(OldCommands::Export {
             name,
             gb,
             gfa,
@@ -1124,7 +1007,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::PatchCreate {
+        Some(OldCommands::PatchCreate {
             name,
             operation,
             branch,
@@ -1147,12 +1030,12 @@ fn main() {
             let mut f = File::create(format!("{name}.gz")).unwrap();
             patch::create_patch(&operation_conn, &operations, &mut f);
         }
-        Some(Commands::PatchApply { patch }) => {
+        Some(OldCommands::PatchApply { patch }) => {
             let mut f = File::open(patch).unwrap();
             let patches = patch::load_patches(&mut f);
             patch::apply_patches(&conn, &operation_conn, &patches);
         }
-        Some(Commands::PatchView { prefix, patch }) => {
+        Some(OldCommands::PatchView { prefix, patch }) => {
             let patch_path = Path::new(patch);
             let mut f = File::open(patch_path).unwrap();
             let patches = patch::load_patches(&mut f);
@@ -1180,17 +1063,17 @@ fn main() {
         }
         None => {}
         // these will never be handled by this method as we search for them earlier.
-        Some(Commands::Init {}) => {
+        Some(OldCommands::Init {}) => {
             config::get_or_create_gen_dir();
             println!("Gen repository initialized.");
         }
-        Some(Commands::Defaults {
+        Some(OldCommands::Defaults {
             database,
             collection,
         }) => {}
-        Some(Commands::SetRemote { remote }) => {}
-        Some(Commands::Transform { format_csv_for_gaf }) => {}
-        Some(Commands::PropagateAnnotations {
+        Some(OldCommands::SetRemote { remote }) => {}
+        Some(OldCommands::Transform { format_csv_for_gaf }) => {}
+        Some(OldCommands::PropagateAnnotations {
             name,
             from_sample,
             to_sample,
@@ -1217,7 +1100,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::ListSamples {}) => {
+        Some(OldCommands::ListSamples {}) => {
             let sample_names = Sample::get_all_names(&conn);
             // Null sample
             println!();
@@ -1225,7 +1108,7 @@ fn main() {
                 println!("{}", sample_name);
             }
         }
-        Some(Commands::ListGraphs { name, sample }) => {
+        Some(OldCommands::ListGraphs { name, sample }) => {
             let name = &name
                 .clone()
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
@@ -1234,7 +1117,7 @@ fn main() {
                 println!("{}", block_group.name);
             }
         }
-        Some(Commands::GetSequence {
+        Some(OldCommands::GetSequence {
             name,
             sample,
             graph,
@@ -1281,7 +1164,7 @@ fn main() {
                 &sequence[start_coordinate as usize..end_coordinate as usize]
             );
         }
-        Some(Commands::Diff {
+        Some(OldCommands::Diff {
             name,
             sample1,
             sample2,
@@ -1298,7 +1181,7 @@ fn main() {
                 sample2.as_deref(),
             );
         }
-        Some(Commands::DeriveSubgraph {
+        Some(OldCommands::DeriveSubgraph {
             name,
             sample,
             new_sample,
@@ -1335,7 +1218,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::DeriveChunks {
+        Some(OldCommands::DeriveChunks {
             name,
             sample,
             new_sample,
@@ -1418,7 +1301,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::MakeStitch {
+        Some(OldCommands::MakeStitch {
             name,
             sample,
             new_sample,
@@ -1450,7 +1333,7 @@ fn main() {
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::Push {}) => match push(&operation_conn, &db_uuid) {
+        Some(OldCommands::Push {}) => match push(&operation_conn, &db_uuid) {
             Ok(_) => {
                 println!("Push succeeded.");
             }
@@ -1458,6 +1341,6 @@ fn main() {
                 println!("Push failed: {e}");
             }
         },
-        Some(Commands::Pull {}) => {}
+        Some(OldCommands::Pull {}) => {}
     }
 }
