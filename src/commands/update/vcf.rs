@@ -1,30 +1,32 @@
 use crate::commands::cli_context::CliContext;
 use crate::commands::get_db_for_command;
 use crate::config::get_operation_connection;
-use crate::fasta::FastaError;
 use crate::get_connection;
-use crate::imports::fasta::import_fasta;
 use crate::models::metadata;
 use crate::models::operations::setup_db;
 use crate::operation_management::OperationError;
+use crate::updates::vcf::{update_with_vcf, VcfError};
 use clap::Args;
 use rusqlite::Connection;
 
-/// Import a fasta file
+/// Update with a VCF file
 #[derive(Debug, Args)]
 pub struct Command {
-    /// Fasta file path
+    /// VCF file path
     #[clap(index = 1)]
     pub path: String,
-    /// Don't store the sequence in the database, instead store the filename
-    #[arg(long, action)]
-    shallow: bool,
-    /// The name of the collection to store the entry under
+    /// The name of the collection to update
     #[arg(short, long)]
     name: Option<String>,
-    /// A sample name to associate the fasta file with
+    /// If no genotype is provided, enter the genotype to assign variants
+    #[arg(short, long)]
+    genotype: Option<String>,
+    /// The name of the sample to update
     #[arg(short, long)]
     sample: Option<String>,
+    /// Use the given sample as the parent sample for changes.
+    #[arg(long, alias = "cf")]
+    coordinate_frame: Option<String>,
 }
 
 fn get_default_collection(conn: &Connection) -> String {
@@ -36,7 +38,7 @@ fn get_default_collection(conn: &Connection) -> String {
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {
-    println!("Fasta import called");
+    println!("Update with VCF called");
 
     let operation_conn = get_operation_connection(None);
     let db = get_db_for_command(cli_context, &operation_conn);
@@ -52,28 +54,21 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
-    match import_fasta(
-        &cmd.path.clone(),
+
+    match update_with_vcf(
+        &cmd.path,
         name,
-        cmd.sample.as_deref(),
-        cmd.shallow,
+        cmd.genotype.clone().unwrap_or("".to_string()),
+        cmd.sample.clone().unwrap_or("".to_string()),
         &conn,
         &operation_conn,
+        cmd.coordinate_frame.as_deref(),
     ) {
         Ok(_) => {
-            println!("Fasta imported.");
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
-        }
-        Err(FastaError::OperationError(OperationError::NoChanges)) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("Fasta contents already exist.")
-        }
-        Err(_) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed.");
-        }
+	    conn.execute("END TRANSACTION;", []).unwrap();
+	    operation_conn.execute("END TRANSACTION;", []).unwrap();
+	},
+        Err(VcfError::OperationError(OperationError::NoChanges)) => println!("No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."),
+        Err(e) => panic!("Error updating with vcf: {e}"),
     }
 }

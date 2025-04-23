@@ -9,11 +9,6 @@ use rusqlite::params;
 use gen::annotations::gff::propagate_gff;
 use gen::commands::cli_context::CliContext;
 use gen::diffs::gfa::gfa_sample_diff;
-use gen::exports::fasta::export_fasta;
-use gen::exports::genbank::export_genbank;
-use gen::exports::gfa::export_gfa;
-use gen::fasta::FastaError;
-use gen::genbank::GenBankError;
 use gen::get_connection;
 use gen::graph_operators::{derive_chunks, get_path, make_stitch};
 use gen::models::block_group::BlockGroup;
@@ -28,12 +23,7 @@ use gen::operation_management;
 use gen::operation_management::{parse_patch_operations, push, OperationError};
 use gen::patch;
 use gen::translate;
-use gen::updates::fasta::update_with_fasta;
-use gen::updates::gaf::{transform_csv_to_fasta, update_with_gaf};
-use gen::updates::genbank::update_with_genbank;
-use gen::updates::gfa::update_with_gfa;
-use gen::updates::library::update_with_library;
-use gen::updates::vcf::{update_with_vcf, VcfError};
+use gen::updates::gaf::transform_csv_to_fasta;
 use gen::views::block_group::view_block_group;
 use gen::views::operations::view_operations;
 use gen::views::patch::view_patches;
@@ -143,6 +133,9 @@ fn main() {
         Some(Commands::Import(cmd)) => {
             gen::commands::import::execute(&cli_context, cmd);
         }
+        Some(Commands::Update(cmd)) => {
+            gen::commands::update::execute(&cli_context, cmd);
+        }
         Some(Commands::Export(cmd)) => {
             gen::commands::export::execute(&cli_context, cmd);
         }
@@ -164,138 +157,6 @@ fn main() {
                 collection_name,
                 position.clone(),
             );
-        }
-        Some(Commands::Update {
-            name,
-            fasta,
-            vcf,
-            gb,
-            library,
-            parts,
-            genotype,
-            sample,
-            new_sample,
-            path_name,
-            region_name,
-            start,
-            end,
-            no_reference_path_update,
-            coordinate_frame,
-            create_missing,
-            gfa,
-        }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            if let Some(library_path) = library {
-                update_with_library(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &new_sample.clone().unwrap(),
-                    &path_name.clone().unwrap(),
-                    start.unwrap(),
-                    end.unwrap(),
-                    &parts.clone().unwrap(),
-                    &library_path,
-                )
-                .unwrap();
-            } else if let Some(fasta_path) = fasta {
-                // NOTE: This has to go after library because the library update also uses a fasta
-                // file
-                update_with_fasta(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &new_sample
-                        .clone()
-                        .expect("new-sample flag must be provided."),
-                    &region_name.clone().expect("region-name must be provided."),
-                    start.expect("start flag must be provided."),
-                    end.expect("end flag must be provided."),
-                    &fasta_path,
-                    no_reference_path_update,
-                )
-                .unwrap();
-            } else if let Some(vcf_path) = vcf {
-                match update_with_vcf(
-                    &vcf_path,
-                    name,
-                    genotype.clone().unwrap_or("".to_string()),
-                    sample.clone().unwrap_or("".to_string()),
-                    &conn,
-                    &operation_conn,
-                    coordinate_frame.as_deref(),
-                ) {
-                    Ok(_) => {},
-                    Err(VcfError::OperationError(OperationError::NoChanges)) => println!("No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."),
-                    Err(e) => panic!("Error updating with vcf: {e}"),
-                }
-            } else if let Some(gb_path) = gb {
-                let f = File::open(&gb_path).unwrap();
-                match update_with_genbank(
-                    &conn,
-                    &operation_conn,
-                    &f,
-                    name.deref(),
-                    create_missing,
-                    &OperationInfo {
-                        files: vec![OperationFile {
-                            file_path: gb_path.clone(),
-                            file_type: FileTypes::GenBank,
-                        }],
-                        description: "Update from GenBank".to_string(),
-                    },
-                ) {
-                    Ok(_) => {}
-                    Err(e) => panic!("Failed to update. Error is: {e}"),
-                }
-            } else if let Some(gfa_path) = gfa {
-                match update_with_gfa(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &new_sample.clone().unwrap(),
-                    &gfa_path,
-                ) {
-                    Ok(_) => {}
-                    Err(e) => panic!("Failed to update. Error is: {e}"),
-                }
-            } else {
-                panic!("Unknown file type provided for update.");
-            }
-
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
-        }
-        Some(Commands::UpdateGaf {
-            name,
-            gaf,
-            csv,
-            sample,
-            parent_sample,
-        }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            update_with_gaf(
-                &conn,
-                &operation_conn,
-                gaf,
-                csv,
-                name,
-                Some(sample.as_ref()),
-                parent_sample.as_deref(),
-            );
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
         }
         Some(Commands::Translate {
             bed,

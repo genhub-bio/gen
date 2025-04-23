@@ -1,30 +1,40 @@
 use crate::commands::cli_context::CliContext;
 use crate::commands::get_db_for_command;
 use crate::config::get_operation_connection;
-use crate::fasta::FastaError;
 use crate::get_connection;
-use crate::imports::fasta::import_fasta;
 use crate::models::metadata;
 use crate::models::operations::setup_db;
-use crate::operation_management::OperationError;
+use crate::updates::library::update_with_library;
 use clap::Args;
 use rusqlite::Connection;
 
-/// Import a fasta file
+/// Update with library files
 #[derive(Debug, Args)]
 pub struct Command {
-    /// Fasta file path
-    #[clap(index = 1)]
-    pub path: String,
-    /// Don't store the sequence in the database, instead store the filename
-    #[arg(long, action)]
-    shallow: bool,
-    /// The name of the collection to store the entry under
+    /// The name of the collection to update
     #[arg(short, long)]
     name: Option<String>,
-    /// A sample name to associate the fasta file with
+    /// The name of the sample to update
     #[arg(short, long)]
     sample: Option<String>,
+    /// A new sample name to associate with the update
+    #[arg(long)]
+    new_sample: String,
+    /// The name of the path to add the library to
+    #[arg(short, long)]
+    path_name: String,
+    /// The start coordinate for the region to add the library to
+    #[arg(long)]
+    start: i64,
+    /// The end coordinate for the region to add the library to
+    #[arg(short, long)]
+    end: i64,
+    /// A CSV with combinatorial library information
+    #[arg(short, long)]
+    library: String,
+    /// A fasta with the combinatorial library parts
+    #[arg(long)]
+    parts: String,
 }
 
 fn get_default_collection(conn: &Connection) -> String {
@@ -36,7 +46,7 @@ fn get_default_collection(conn: &Connection) -> String {
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {
-    println!("Fasta import called");
+    println!("Update with library called");
 
     let operation_conn = get_operation_connection(None);
     let db = get_db_for_command(cli_context, &operation_conn);
@@ -52,28 +62,21 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
-    match import_fasta(
-        &cmd.path.clone(),
-        name,
-        cmd.sample.as_deref(),
-        cmd.shallow,
+
+    update_with_library(
         &conn,
         &operation_conn,
-    ) {
-        Ok(_) => {
-            println!("Fasta imported.");
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
-        }
-        Err(FastaError::OperationError(OperationError::NoChanges)) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("Fasta contents already exist.")
-        }
-        Err(_) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed.");
-        }
-    }
+        name,
+        cmd.sample.clone().as_deref(),
+        &cmd.new_sample,
+        &cmd.path_name,
+        cmd.start,
+        cmd.end,
+        &cmd.parts,
+        &cmd.library,
+    )
+    .unwrap();
+
+    conn.execute("END TRANSACTION;", []).unwrap();
+    operation_conn.execute("END TRANSACTION;", []).unwrap();
 }

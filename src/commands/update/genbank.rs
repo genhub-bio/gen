@@ -1,30 +1,27 @@
 use crate::commands::cli_context::CliContext;
 use crate::commands::get_db_for_command;
 use crate::config::get_operation_connection;
-use crate::fasta::FastaError;
 use crate::get_connection;
-use crate::imports::fasta::import_fasta;
+use crate::models::file_types::FileTypes;
 use crate::models::metadata;
-use crate::models::operations::setup_db;
-use crate::operation_management::OperationError;
+use crate::models::operations::{setup_db, OperationFile, OperationInfo};
+use crate::updates::genbank::update_with_genbank;
 use clap::Args;
 use rusqlite::Connection;
+use std::fs::File;
 
-/// Import a fasta file
+/// Update with a GenBank file
 #[derive(Debug, Args)]
 pub struct Command {
-    /// Fasta file path
+    /// GenBank file path
     #[clap(index = 1)]
     pub path: String,
-    /// Don't store the sequence in the database, instead store the filename
-    #[arg(long, action)]
-    shallow: bool,
-    /// The name of the collection to store the entry under
+    /// The name of the collection to update
     #[arg(short, long)]
     name: Option<String>,
-    /// A sample name to associate the fasta file with
-    #[arg(short, long)]
-    sample: Option<String>,
+    /// If a new entity is found, create it as a normal import
+    #[arg(long, action, alias = "cm")]
+    create_missing: bool,
 }
 
 fn get_default_collection(conn: &Connection) -> String {
@@ -36,7 +33,7 @@ fn get_default_collection(conn: &Connection) -> String {
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {
-    println!("Fasta import called");
+    println!("Update with GenBank called");
 
     let operation_conn = get_operation_connection(None);
     let db = get_db_for_command(cli_context, &operation_conn);
@@ -52,28 +49,30 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
-    match import_fasta(
-        &cmd.path.clone(),
-        name,
-        cmd.sample.as_deref(),
-        cmd.shallow,
+
+    let f = File::open(&cmd.path).unwrap();
+    match update_with_genbank(
         &conn,
         &operation_conn,
+        &f,
+        name.as_ref(),
+        cmd.create_missing,
+        &OperationInfo {
+            files: vec![OperationFile {
+                file_path: cmd.path.clone(),
+                file_type: FileTypes::GenBank,
+            }],
+            description: "Update from GenBank".to_string(),
+        },
     ) {
         Ok(_) => {
-            println!("Fasta imported.");
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
         }
-        Err(FastaError::OperationError(OperationError::NoChanges)) => {
+        Err(e) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("Fasta contents already exist.")
-        }
-        Err(_) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed.");
+            panic!("Failed to update. Error is: {e}");
         }
     }
 }

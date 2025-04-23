@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub mod cli_context;
 pub mod export;
 pub mod import;
+pub mod update;
 
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
@@ -14,6 +15,8 @@ pub enum Commands {
     Init {},
     /// Commands for importing
     Import(import::Command),
+    /// Commands for updating
+    Update(update::Command),
     /// Commands for exporting
     Export(export::Command),
     /// Commands for transforming file types for input to Gen.
@@ -39,61 +42,6 @@ pub enum Commands {
         #[arg(short, long)]
         sample: Option<String>,
     },
-    /// Update a sequence collection with new data
-    #[command(arg_required_else_help(true))]
-    Update {
-        /// The name of the collection to update
-        #[arg(short, long)]
-        name: Option<String>,
-        /// A fasta file to insert
-        #[arg(short, long)]
-        fasta: Option<String>,
-        /// A VCF file to incorporate
-        #[arg(short, long)]
-        vcf: Option<String>,
-        /// A GenBank file to update from
-        #[arg(long)]
-        gb: Option<String>,
-        /// If no genotype is provided, enter the genotype to assign variants
-        #[arg(short, long)]
-        genotype: Option<String>,
-        /// If no sample is provided, enter the sample to associate variants to
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// New sample name if we are updating with intentional edits
-        #[arg(long)]
-        new_sample: Option<String>,
-        /// Use the given sample as the parent sample for changes.
-        #[arg(long, alias = "cf")]
-        coordinate_frame: Option<String>,
-        /// A CSV with combinatorial library information
-        #[arg(short, long)]
-        library: Option<String>,
-        /// A fasta with the combinatorial library parts
-        #[arg(long)]
-        parts: Option<String>,
-        /// The name of the path to add the library to
-        #[arg(short, long)]
-        path_name: Option<String>,
-        /// The name of the region to update (eg "chr1")
-        #[arg(long)]
-        region_name: Option<String>,
-        /// The start coordinate for the region to add the library to
-        #[arg(long)]
-        start: Option<i64>,
-        /// The end coordinate for the region to add the library to
-        #[arg(short, long)]
-        end: Option<i64>,
-        /// For fasta updates, do not update the sample's reference path if there is a single fasta entry
-        #[arg(long, action)]
-        no_reference_path_update: bool,
-        /// If a new entity is found, create it as a normal import
-        #[arg(long, action, alias = "cm")]
-        create_missing: bool,
-        /// A GFA file to update from
-        #[arg(long)]
-        gfa: Option<String>,
-    },
     /// Show a visual representation of a graph in the terminal
     #[command()]
     View {
@@ -109,25 +57,6 @@ pub enum Commands {
         /// Position as "node id:coordinate" to center the graph on
         #[arg(short, long)]
         position: Option<String>,
-    },
-    /// Update a sequence collecting using GAF results.
-    #[command(name = "update-gaf", arg_required_else_help(true))]
-    UpdateGaf {
-        /// The name of the collection to update
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The GAF input
-        #[arg(short, long)]
-        gaf: String,
-        /// The csv describing changes to make
-        #[arg(short, long)]
-        csv: String,
-        /// The sample to update or create
-        #[arg(short, long)]
-        sample: String,
-        /// If specified, the newly created sample will inherit this sample's existing graph
-        #[arg(short, long)]
-        parent_sample: Option<String>,
     },
     /// Export a set of operations to a patch file
     #[command(name = "patch-create", arg_required_else_help(true))]
