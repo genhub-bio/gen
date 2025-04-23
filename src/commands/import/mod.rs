@@ -20,13 +20,7 @@ pub struct Command {
 enum Import {
     /// Import a library
     #[command(arg_required_else_help(true))]
-    Library {
-    },
+    Library {},
 }
 
-generate_sync_commands!(
-    fasta,
-    genbank,
-    gfa,
-    library
-);
+generate_sync_commands!(fasta, genbank, gfa, library);

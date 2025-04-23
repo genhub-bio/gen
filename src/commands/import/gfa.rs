@@ -1,14 +1,14 @@
 use crate::commands::cli_context::CliContext;
 use crate::config::{get_gen_dir, get_operation_connection};
 use crate::get_connection;
-use crate::imports::gfa::{GFAImportError, import_gfa};
+use crate::imports::gfa::{import_gfa, GFAImportError};
 use crate::models::metadata;
 use crate::models::operations::setup_db;
 use crate::operation_management::OperationError;
 use clap::Args;
 use rusqlite::Connection;
 use std::path::PathBuf;
-    
+
 /// Import a GFA file
 #[derive(Debug, Args)]
 pub struct Command {
@@ -61,7 +61,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = &cmd.name
+    let name = &cmd
+        .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
     match import_gfa(

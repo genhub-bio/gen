@@ -1,5 +1,5 @@
-use crate::commands::get_db_for_command;
 use crate::commands::cli_context::CliContext;
+use crate::commands::get_db_for_command;
 use crate::config::get_operation_connection;
 use crate::get_connection;
 use crate::imports::library::import_library;
@@ -49,7 +49,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = &cmd.name
+    let name = &cmd
+        .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
     import_library(
@@ -61,5 +62,5 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         cmd.library.as_deref().unwrap(),
         &cmd.region_name,
     )
-        .unwrap();
+    .unwrap();
 }

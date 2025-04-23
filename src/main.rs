@@ -1,10 +1,9 @@
 #![allow(warnings)]
 use clap::{Parser, Subcommand};
 use core::ops::Range;
+use gen::commands::{Cli, Commands};
 use gen::config;
 use gen::config::{get_gen_dir, get_operation_connection};
-use gen::commands::Commands;
-use gen::commands::Cli;
 use rusqlite::params;
 
 use gen::annotations::gff::propagate_gff;
@@ -140,13 +139,13 @@ fn main() {
     setup_db(&operation_conn, &db_uuid);
 
     match cli.command {
-	Some(Commands::Init {}) => {
+        Some(Commands::Init {}) => {
             config::get_or_create_gen_dir();
             println!("Gen repository initialized.");
-	}
+        }
         Some(Commands::Import(cmd)) => {
-	    gen::commands::import::execute(&cli_context, cmd);
-	}
+            gen::commands::import::execute(&cli_context, cmd);
+        }
         Some(Commands::View {
             graph,
             sample,

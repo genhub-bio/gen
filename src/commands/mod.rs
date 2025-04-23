@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand};
 use crate::commands::cli_context::CliContext;
 use crate::config::get_gen_dir;
+use clap::{Parser, Subcommand};
 use rusqlite::Connection;
 use std::path::PathBuf;
 

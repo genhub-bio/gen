@@ -65,7 +65,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = &cmd.name
+    let name = &cmd
+        .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
     match import_fasta(

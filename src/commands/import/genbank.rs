@@ -1,13 +1,11 @@
-use crate::commands::get_db_for_command;
 use crate::commands::cli_context::CliContext;
+use crate::commands::get_db_for_command;
 use crate::config::get_operation_connection;
 use crate::get_connection;
 use crate::imports::genbank::import_genbank;
 use crate::models::file_types::FileTypes;
 use crate::models::metadata;
-use crate::models::operations::{
-    setup_db, OperationFile, OperationInfo
-};
+use crate::models::operations::{setup_db, OperationFile, OperationInfo};
 use clap::Args;
 use rusqlite::Connection;
 use std::fs::File;
@@ -47,7 +45,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = &cmd.name
+    let name = &cmd
+        .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
     let mut reader: Box<dyn std::io::Read> = if cmd.path.ends_with(".gz") {
