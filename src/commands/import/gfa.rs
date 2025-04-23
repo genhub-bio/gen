@@ -1,28 +1,24 @@
 use crate::commands::cli_context::CliContext;
 use crate::config::{get_gen_dir, get_operation_connection};
-use crate::fasta::FastaError;
 use crate::get_connection;
-use crate::imports::fasta::import_fasta;
+use crate::imports::gfa::{GFAImportError, import_gfa};
 use crate::models::metadata;
 use crate::models::operations::setup_db;
 use crate::operation_management::OperationError;
 use clap::Args;
 use rusqlite::Connection;
 use std::path::PathBuf;
-
-/// Import a fasta file
+    
+/// Import a GFA file
 #[derive(Debug, Args)]
 pub struct Command {
-    /// Fasta file path
+    /// GFA file path
     #[clap(index = 1)]
     pub path: String,
-    /// Don't store the sequence in the database, instead store the filename
-    #[arg(long, action)]
-    shallow: bool,
     /// The name of the collection to store the entry under
     #[arg(short, long)]
     name: Option<String>,
-    /// A sample name to associate the fasta file with
+    /// A sample name to associate the GFA file with
     #[arg(short, long)]
     sample: Option<String>,
 }
@@ -36,7 +32,7 @@ fn get_default_collection(conn: &Connection) -> String {
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {
-    println!("Fasta import called");
+    println!("GFA import called");
 
     let operation_conn = get_operation_connection(None);
 
@@ -68,19 +64,18 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     let name = &cmd.name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
-    match import_fasta(
-        &cmd.path.clone(),
+    match import_gfa(
+        &PathBuf::from(cmd.path.clone()),
         name,
         cmd.sample.as_deref(),
-        cmd.shallow,
         &conn,
         &operation_conn,
     ) {
-        Ok(_) => println!("Fasta imported."),
-        Err(FastaError::OperationError(OperationError::NoChanges)) => {
+        Ok(_) => println!("GFA imported."),
+        Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("Fasta contents already exist.")
+            println!("GFA already exists.")
         }
         Err(_) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
