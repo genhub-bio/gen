@@ -69,7 +69,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
             description: "GenBank Import".to_string(),
         },
     ) {
-        Ok(_) => println!("GenBank Imported."),
+        Ok(_) => {
+            println!("GenBank imported.");
+            conn.execute("END TRANSACTION;", []).unwrap();
+            operation_conn.execute("END TRANSACTION;", []).unwrap();
+        }
         Err(err) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();

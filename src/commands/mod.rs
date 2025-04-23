@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 
 pub mod cli_context;
+pub mod export;
 pub mod import;
 
 #[derive(Subcommand)]
@@ -13,6 +14,8 @@ pub enum Commands {
     Init {},
     /// Commands for importing
     Import(import::Command),
+    /// Commands for exporting
+    Export(export::Command),
     /// Commands for transforming file types for input to Gen.
     #[command(arg_required_else_help(true))]
     Transform {
@@ -219,28 +222,6 @@ pub enum Commands {
         /// The operation hash to apply
         #[clap(index = 1)]
         hash: String,
-    },
-    /// Export sequence data
-    #[command(arg_required_else_help(true))]
-    Export {
-        /// The name of the collection to export
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the GFA file to export to
-        #[arg(short, long)]
-        gfa: Option<String>,
-        /// An optional sample name
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// The name of the fasta file to export to
-        #[arg(short, long)]
-        fasta: Option<String>,
-        /// The name of the GenBank file to export to
-        #[arg(long)]
-        gb: Option<String>,
-        /// The max node size for gfa export
-        #[arg(long)]
-        node_max: Option<i64>,
     },
     /// Configure default options
     #[command(arg_required_else_help(true))]

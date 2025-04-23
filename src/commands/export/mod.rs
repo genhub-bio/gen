@@ -5,13 +5,12 @@ use clap_nested_commands::generate_sync_commands;
 mod fasta;
 mod genbank;
 mod gfa;
-mod library;
 
-/// Import commands
+/// Export commands
 #[derive(Debug, Args)]
 pub struct Command {
     #[command(subcommand)]
     pub command: Commands,
 }
 
-generate_sync_commands!(fasta, genbank, gfa, library);
+generate_sync_commands!(fasta, genbank, gfa);

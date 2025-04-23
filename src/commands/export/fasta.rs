@@ -1,29 +1,24 @@
 use crate::commands::cli_context::CliContext;
 use crate::commands::get_db_for_command;
 use crate::config::get_operation_connection;
+use crate::exports::fasta::export_fasta;
 use crate::get_connection;
-use crate::imports::library::import_library;
 use crate::models::metadata;
 use crate::models::operations::setup_db;
 use clap::Args;
 use rusqlite::Connection;
+use std::path::PathBuf;
 
-/// Import Library files
+/// Export a FASTA file
 #[derive(Debug, Args)]
 pub struct Command {
-    /// The name of the region
+    /// FASTA file path
     #[clap(index = 1)]
-    region_name: String,
-    /// The path to the combinatorial library parts fasta file
-    #[clap(index = 2)]
-    parts: Option<String>,
-    /// The path to the combinatorial library csv file
-    #[clap(index = 3)]
-    library: Option<String>,
-    /// The name of the collection to store the entry under
+    pub path: String,
+    /// The name of the collection for exporting
     #[arg(short, long)]
     name: Option<String>,
-    /// A sample name to associate the library with
+    /// The name of the sample for exporting
     #[arg(short, long)]
     sample: Option<String>,
 }
@@ -37,8 +32,7 @@ fn get_default_collection(conn: &Connection) -> String {
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {
-    println!("Library import called");
-
+    println!("GFA export called");
     let operation_conn = get_operation_connection(None);
     let db = get_db_for_command(cli_context, &operation_conn);
     let conn = get_connection(&db);
@@ -53,18 +47,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
-    import_library(
+    export_fasta(
         &conn,
-        &operation_conn,
         name,
-        cmd.sample.as_deref(),
-        cmd.parts.as_deref().unwrap(),
-        cmd.library.as_deref().unwrap(),
-        &cmd.region_name,
-    )
-    .unwrap();
+        cmd.sample.clone().as_deref(),
+        &PathBuf::from(cmd.path),
+    );
 
-    println!("Library imported.");
-    conn.execute("END TRANSACTION;", []).unwrap();
-    operation_conn.execute("END TRANSACTION;", []).unwrap();
+    conn.execute("END TRANSACTION", []).unwrap();
+    operation_conn.execute("END TRANSACTION", []).unwrap();
 }

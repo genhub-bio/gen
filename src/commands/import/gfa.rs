@@ -1,5 +1,6 @@
 use crate::commands::cli_context::CliContext;
-use crate::config::{get_gen_dir, get_operation_connection};
+use crate::commands::get_db_for_command;
+use crate::config::get_operation_connection;
 use crate::get_connection;
 use crate::imports::gfa::{import_gfa, GFAImportError};
 use crate::models::metadata;
@@ -35,25 +36,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     println!("GFA import called");
 
     let operation_conn = get_operation_connection(None);
-
-    let binding = cli_context.db.clone().unwrap_or_else(|| {
-        let mut stmt = operation_conn
-            .prepare("select db_name from defaults where id = 1;")
-            .unwrap();
-        let row: Option<String> = stmt.query_row((), |row| row.get(0)).unwrap();
-        row.unwrap_or_else(|| match get_gen_dir() {
-            Some(dir) => PathBuf::from(dir)
-                .join("default.db")
-                .to_str()
-                .unwrap()
-                .to_string(),
-            None => {
-                panic!("No .gen directory found. Please run 'gen init' first.")
-            }
-        })
-    });
-    let db = binding.as_str();
-    let conn = get_connection(db);
+    let db = get_db_for_command(cli_context, &operation_conn);
+    let conn = get_connection(&db);
     let db_uuid = metadata::get_db_uuid(&conn);
 
     // initialize the selected database if needed.
@@ -72,7 +56,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         &conn,
         &operation_conn,
     ) {
-        Ok(_) => println!("GFA imported."),
+        Ok(_) => {
+            println!("GFA imported.");
+            conn.execute("END TRANSACTION;", []).unwrap();
+            operation_conn.execute("END TRANSACTION;", []).unwrap();
+        }
         Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();

@@ -16,9 +16,6 @@ use gen::fasta::FastaError;
 use gen::genbank::GenBankError;
 use gen::get_connection;
 use gen::graph_operators::{derive_chunks, get_path, make_stitch};
-use gen::imports::genbank::import_genbank;
-use gen::imports::gfa::{import_gfa, GFAImportError};
-use gen::imports::library::import_library;
 use gen::models::block_group::BlockGroup;
 use gen::models::file_types::FileTypes;
 use gen::models::metadata;
@@ -145,6 +142,9 @@ fn main() {
         }
         Some(Commands::Import(cmd)) => {
             gen::commands::import::execute(&cli_context, cmd);
+        }
+        Some(Commands::Export(cmd)) => {
+            gen::commands::export::execute(&cli_context, cmd);
         }
         Some(Commands::View {
             graph,
@@ -558,47 +558,6 @@ fn main() {
         }
         Some(Commands::Reset { hash }) => {
             operation_management::reset(&conn, &operation_conn, &db_uuid, &hash);
-        }
-        Some(Commands::Export {
-            name,
-            gb,
-            gfa,
-            sample,
-            fasta,
-            node_max,
-        }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            if let Some(gfa_path) = gfa {
-                export_gfa(
-                    &conn,
-                    name,
-                    &PathBuf::from(gfa_path),
-                    sample.clone(),
-                    node_max,
-                );
-            } else if let Some(fasta_path) = fasta {
-                export_fasta(
-                    &conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &PathBuf::from(fasta_path),
-                );
-            } else if let Some(gb_path) = gb {
-                export_genbank(
-                    &conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &PathBuf::from(gb_path),
-                );
-            } else {
-                println!("No file type specified for export.");
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
         }
         Some(Commands::PatchCreate {
             name,

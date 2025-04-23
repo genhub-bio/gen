@@ -77,7 +77,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         &conn,
         &operation_conn,
     ) {
-        Ok(_) => println!("Fasta imported."),
+        Ok(_) => {
+            println!("Fasta imported.");
+            conn.execute("END TRANSACTION;", []).unwrap();
+            operation_conn.execute("END TRANSACTION;", []).unwrap();
+        }
         Err(FastaError::OperationError(OperationError::NoChanges)) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
