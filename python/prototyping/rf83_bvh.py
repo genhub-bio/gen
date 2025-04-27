@@ -1,7 +1,6 @@
 #! /usr/bin/env python3
 from itertools import combinations, product, chain
 import networkx as nx
-from networkx.algorithms import bipartite
 
 
 class Router:
@@ -51,91 +50,7 @@ class Router:
         self.G = nx.Graph()
 
     def create_terminals(self, edges):
-        """
-        Finds maximal bicliques in the input bipartite graph.
-        Stores results in self.bicliques and self.node_to_bicliques.
-
-        Implementation will be based on maximal biclique enumeration algorithms.
-
-        Args:
-            edges: A list of tuples (source, target) representing the edges
-                   of the *bipartite* input graph.
-
-        Raises:
-            ValueError: If the input graph is not bipartite.
-            nx.NetworkXError: If partitions cannot be determined.
-        """
-        # 1. Build the graph
-        B = nx.Graph()
-        B.add_edges_from(edges)
-        all_nodes = set(B.nodes())
-
-        # 2. Verify bipartiteness and get partitions
-        if not bipartite.is_bipartite(B):
-            raise ValueError("Input graph for create_terminals must be bipartite.")
-        
-        try:
-            # Use bipartite.sets which handles disconnected graphs
-            partitions = list(bipartite.sets(B))
-            if len(partitions) != 2:
-                # This case should ideally be caught by is_bipartite,
-                # but handle defensively (e.g., graph with nodes but no edges)
-                if B.number_of_edges() == 0:
-                    U, V = set(B.nodes()), set()
-                    # Or handle based on node naming convention if possible?
-                    # For now, assume nodes might belong to either partition if disconnected
-                    print("Warning: Input graph has no edges. Proceeding with empty bicliques.")
-                else:
-                  raise nx.NetworkXError("Could not determine exactly two partitions.")
-            else:
-               U, V = partitions[0], partitions[1]
-        except Exception as e:
-             raise nx.NetworkXError(f"Error determining bipartite partitions: {e}") from e
-
-        # Ensure U and V cover all nodes, handle potential isolated nodes if necessary
-        found_nodes = U.union(V)
-        if found_nodes != all_nodes:
-             # This might happen if bipartite.sets misses isolated nodes
-             # Add them to a default partition (e.g., U) or handle as needed
-             missing_nodes = all_nodes - found_nodes
-             print(f"Warning: Nodes {missing_nodes} not found in partitions, adding to U.")
-             U.update(missing_nodes)
-             # Re-initialize all_nodes based on combined partitions if necessary
-             all_nodes = U.union(V)
-
-        # 3. Initialize result storage
-        self.bicliques = [] # List to store tuples: (list_of_U_nodes, list_of_V_nodes)
-        self.node_to_bicliques = {node: [] for node in all_nodes}
-
-        # 4. Placeholder for Core Algorithm Implementation
-        #    (e.g., based on MBEA/iMBEA from the paper https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-15-110)
-        #    This part will involve recursive calls or iterative expansion.
-        #    It needs access to B, U, V, self.bicliques, self.node_to_bicliques
-        
-        # Example recursive function structure (to be implemented):
-        # def _find_bicliques_recursive(potential_U, potential_V, candidates):
-        #     # Pruning logic
-        #     # Maximality checks
-        #     # Branching/Recursive calls
-        #     # Add maximal bicliques found to self.bicliques
-        #     # Update self.node_to_bicliques
-        #     pass
-
-        # Initial call to the recursive function would start here
-        # _find_bicliques_recursive(set(), set(), initial_candidates)
-        print("Placeholder: Core biclique finding algorithm needs implementation.")
-
-        # 5. Post-processing (if needed)
-        #    e.g., update node_to_bicliques map based on found bicliques
-        #    (This might be handled within the recursive function)
-        biclique_counter = 0
-        temp_node_map = {node: [] for node in all_nodes}
-        for idx, (L, R) in enumerate(self.bicliques):
-             for node in L:
-                 temp_node_map[node].append(idx)
-             for node in R:
-                 temp_node_map[node].append(idx)
-        self.node_to_bicliques = temp_node_map
+        pass
 
     # Getters
     # -------
