@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import unittest
-from rf83_bvh import Router, Plotter
+import random
+from rectilinear_router import Router, Plotter
+
 class TestRouterSkeletons(unittest.TestCase):
     def setUp(self):
         self.T = [1, 2, 3]
@@ -77,63 +79,6 @@ class TestRouterSkeletons(unittest.TestCase):
     def test_pins(self):
         # Initial state
         self.assertEqual(self.router.pins, (1,3))      
-
-    def test_create_terminals(self):
-        # Test 1: Simple bipartite graph
-        self.router.reset()
-        edges = [('A', 1), ('A', 2),  ('A', 3), ('a', 1), ('a', 2), ('a', 3), ('B', 1), ('C', 3)]
-        self.router.create_terminals(edges)
-        # Expected bicliques (may vary in order):
-        # Biclique 0: (['A', 'B'], [1])
-        # Biclique 1: (['A'], [2])
-        # Biclique 2: (['C'], [3])
-        print(self.router.bicliques)
-        self.assertIsInstance(self.router.bicliques, list)
-        self.assertGreater(len(self.router.bicliques), 0)
-        # Check structure of a biclique
-        self.assertIsInstance(self.router.bicliques[0], tuple)
-        self.assertEqual(len(self.router.bicliques[0]), 2)
-        self.assertIsInstance(self.router.bicliques[0][0], list)
-        self.assertIsInstance(self.router.bicliques[0][1], list)
-
-        # Check node_to_bicliques mapping (content depends on biclique order)
-        self.assertIsInstance(self.router.node_to_bicliques, dict)
-        self.assertIn('A', self.router.node_to_bicliques)
-        self.assertIn(1, self.router.node_to_bicliques)
-        # Find the biclique index for (['A', 'B'], [1])
-        biclique_idx_AB1 = -1
-        for i, (L, R) in enumerate(self.router.bicliques):
-            if set(L) == {'A', 'B'} and set(R) == {1}:
-                biclique_idx_AB1 = i
-                break
-        self.assertNotEqual(biclique_idx_AB1, -1, "Biclique (['A', 'B'], [1]) not found")
-        self.assertIn(biclique_idx_AB1, self.router.node_to_bicliques['A'])
-        self.assertIn(biclique_idx_AB1, self.router.node_to_bicliques['B'])
-        self.assertIn(biclique_idx_AB1, self.router.node_to_bicliques[1])
-
-        # Test 2: Empty edges list
-        self.router.reset()
-        self.router.create_terminals([])
-        self.assertEqual(self.router.bicliques, [])
-        self.assertEqual(self.router.node_to_bicliques, {})
-
-        # Test 3: Non-bipartite graph
-        self.router.reset()
-        edges_non_bipartite = [('A', 'B'), ('B', 'C'), ('C', 'A')] # Triangle
-        with self.assertRaises(ValueError):
-            self.router.create_terminals(edges_non_bipartite)
-
-        # Test 4: Disconnected components
-        self.router.reset()
-        edges_disconnected = [('A', 1), ('B', 2)]
-        self.router.create_terminals(edges_disconnected)
-        self.assertEqual(len(self.router.bicliques), 2)
-        self.assertIn(0, self.router.node_to_bicliques['A'])
-        self.assertIn(0, self.router.node_to_bicliques[1])
-        self.assertIn(1, self.router.node_to_bicliques['B'])
-        self.assertIn(1, self.router.node_to_bicliques[2])
-        self.assertEqual(len(self.router.node_to_bicliques['A']), 1)
-        self.assertEqual(len(self.router.node_to_bicliques[2]), 1)
 
     def test_powerset(self):
         # Should return all subsets including empty set
@@ -571,75 +516,140 @@ class TestRouterSkeletons(unittest.TestCase):
         pass
 
     def test_render_text_graph(self):
-        pass
+        # Create snapshots for each test case
+        snapshots = [
+"""
+         
+1 ──╮    
+    │    
+    ╰── 1        
+""",
+"""
+              
+    ╭── 1
+    │    
+1 ──┴── 1        
+""",
+"""
+    ╭── 1
+1 ──┼── 1
+    ╰── 1
+""",
+"""
+        ╭── 2
+1 ────╮ │    
+    ╭─│─│── 3
+2 ──│─│─╯    
+3 ──╯ ╰──── 1
+""",
+"""
+1 ────╮     ╭── 5
+    ╭─│───╮ │    
+2 ──│─│─╮ ╰─│── 4
+    │ │ │   │    
+3 ──│─│─│───│── 3
+    │ │ │   │    
+4 ──╯ │ ╰───│── 2
+    ╭─│─────╯    
+5 ──╯ ╰──────── 1
 
-    def test_simple_shapes(self):
-        print('==============')
+""",
+"""
+            ╭───╮        
+        ╭───╯ ╭─│─╮      
+    ╭───│─╮ ╭─│─│─│─╮    
+1 ──│─╮ │ ╰─│─│─│─│─│── 8
+2 ──│─│─│─╮ │ │ ╰─│─│── 7
+3 ──│─│─│─│─│─│─╮ ╰─│── 6
+4 ──│─│─│─│─╯ │ │ ╭─│── 5
+5 ──│─│─│─│───│─│─╯ ╰── 4
+6 ──│─│─│─│───╯ ╰────── 3
+7 ──│─│─╯ ╰──────────── 2
+8 ──╯ ╰──────────────── 1
+""",
+"""
+3 ──┬────── 3
+2 ──│─┬──── 2
+1 ──│─│─┬── 1
+3 ──┴─│─│── 3
+2 ────┴─│── 2
+1 ──────┴── 1
+""",
 
-        T = [1, 0, 3, 0, 2]
-        B = [3, 2, 0, 1, 0]
-        R = Router(T,B)
-        Graph = R.route()
-        P = Plotter(Graph)
-        print(P.render_text_graph())
-        print('==============')
+        ]
 
+        # Test cases
+        test_cases = [
+            ([0, 1, 0, 0], [0, 0, 0, 1]),
+            ([0, 0, 1, 0, 1, 0], [0, 0, 1, 0, 0, 0]),
+            ([0, 1, 1, 1, 0], [0, 0, 1, 0, 0]),
+            ([1, 0, 3, 0, 2], [3, 2, 0, 1, 0]),
+            ([1, 0, 2, 0, 3, 0, 4, 0, 5], [5, 0, 4, 0, 3, 0, 2, 0, 1]),
+            ([1, 2, 3, 4, 5, 6, 7, 8], [8, 7, 6, 5, 4, 3, 2, 1]),
+            ([1, 2, 3, 1, 2, 3], [1, 2, 3, 1, 2, 3]),
+        ]
+
+        # Run tests and compare with snapshots
+        print("Testing render_text_graph:")
+        for i, (T, B) in enumerate(test_cases):
+            R = Router(T, B)
+            Graph = R.route()
+            P = Plotter(Graph)
+            result = P.render_text_graph()
+            print(result)
+            print('='*60)
+            # Compare with snapshot, normalizing strings to handle formatting differences
+            result_normalized = self._normalize_string(result)
+            snapshot_normalized = self._normalize_string(snapshots[i])
+            
+            self.assertEqual(result_normalized, snapshot_normalized, 
+                            f"Test case {i+1} failed: output doesn't match snapshot")
     
+    def _normalize_string(self, s):
+        """Normalize a string for robust comparison by:
+        1. Stripping leading/trailing whitespace from each line
+        2. Removing empty lines
+        3. Normalizing line endings
+        """
+        # Split the string into lines, normalize whitespace
+        lines = s.splitlines()
+        # Filter out empty lines and strip each line
+        non_empty_lines = [line.rstrip() for line in lines if line.strip()]
+        # Join back with newline and return
+        return '\n'.join(non_empty_lines)
+    
+    def _random_pins(self,N, M):
+        pins = list(range(N+1))
+        pins.extend(random.choices(pins, k = M - N))
+        random.shuffle(pins)
+        # Add spacing between pins
+        pins_spaced = []
+        for pin in pins:
+            pins_spaced.extend([pin, 0])
+        pins_spaced.pop()
+        return pins_spaced
 
-        T = [1, 0, 2, 0, 3, 0, 4, 0, 5]
-        B = [5, 0, 4, 0, 3, 0, 2, 0, 1]
-        R = Router(T,B)
-        Graph = R.route()
-        P = Plotter(Graph)
-        print(P.render_text_graph())
-        print('==============')
+    def test_random_graphs(self):
+        # Set random seed for reproducibility
+        random.seed(42)
 
-        T = [1, 2, 3, 4, 5, 6, 7, 8]
-        B = [8, 7, 6, 5, 4, 3, 2, 1]
-        R = Router(T,B)
-        Graph = R.route()
-        P = Plotter(Graph)
-        print(P.render_text_graph())
-        print('==============')
+        with open('edge_router_snapshot_test.txt', 'w') as f:
+            print()
+            for i in range(10):
+                L = self._random_pins(10, 15)
+                R = self._random_pins(10, 15)
+                router = Router(L, R)
+                G = router.route_and_retry()
+                output = Plotter(G).render_text_graph()
+                f.write(output)
+                f.write('\n\n')
 
-        T = [1, 2, 3, 1, 2, 3]
-        B = [1, 2, 3, 1, 2, 3]
-        R = Router(T,B)
-        Graph = R.route_and_retry()
-        P = Plotter(Graph)
-        print(P.render_text_graph())
-        print('==============')
-
-        T = [0, 1, 0, 0]
-        B = [0, 0, 0, 1]
-        R = Router(T,B)
-        Graph = R.route()
-        P = Plotter(Graph)
-        print(P.render_text_graph())
-        print('==============')
-
-
-        T = [0, 0, 1, 0, 1, 0]
-        B = [0, 0, 1, 0, 0, 0]
-        R = Router(T,B)
-        Graph = R.route()
-        P = Plotter(Graph)
-        print(P.render_text_graph())
-        print('==============')
-        
-
-        
-        
-        T = [0, 1, 1, 1, 0]
-        B = [0, 0, 1, 0, 0]
-        R = Router(T,B)
-        Graph = R.route()
-        P = Plotter(Graph)
-        print(P.render_text_graph())
-        print('==============') 
-
-        
-
+        # Assert that this file is the same as edge_router_snapshot_reference.txt
+        with open('edge_router_snapshot_reference.txt', 'r') as f:
+            reference = f.read()
+        with open('edge_router_snapshot_test.txt', 'r') as f:
+            test = f.read()
+        self.assertEqual(reference, test)
 
 if __name__ == '__main__':
     unittest.main() 

@@ -265,28 +265,13 @@ if __name__ == "__main__":
     for (Ln, Lp, Rp, Rn) in reversed(list(zip(L_node_pos, L_pin_list, R_pin_list, R_node_pos))):
         print(f"{Ln} ... {Lp} ... {Rp} ... {Rn}")
 
+    # Plot the nets for testing
+    import rectilinear_router
+    R = rectilinear_router.Router(R_pin_list, L_pin_list)
+    G = R.route()
+    P = rectilinear_router.Plotter(G)
+    print(P.render_text_graph())
 
-
-        
-    # Draw the nets (just for testing)
-    G = nx.Graph()
-
-    U, V = map(set, zip(*edges))
-    G.add_nodes_from(U, bipartite=0)
-    G.add_nodes_from(V, bipartite=1)
-    G.add_edges_from(edges)
-
-    coord = {}
-    coord.update((node, (0, i)) for i, node in enumerate(sorted(U, reverse=True)))
-    coord.update((node, (1, i)) for i, node in enumerate(sorted(V, reverse=True)))
-
-
-    plt.figure(figsize=(6,4))
-    nx.draw(G, coord, with_labels=True, node_size=500, node_color='lightblue', edge_color='grey')
-    colors = plt.cm.rainbow(np.linspace(0, 1, len(nets)))
-    for i, net in enumerate(nets):
-        nx.draw_networkx_edges(G, coord, edgelist=net, edge_color=[colors[i],]*len(net), width=2)
-    plt.show()
 
 
    

@@ -72,7 +72,7 @@ class Router:
     
     @property
     def vertical_wiring(self):
-        return [(y1, y2, net) for ((x1, y1), (x2, y2), net) in self.G.edges(data='net')
+        return [(min(y1, y2), max(y1, y2), net) for ((x1, y1), (x2, y2), net) in self.G.edges(data='net')
                 if x1 == x2 and x1 == self.current_column]
 
     @property
@@ -356,6 +356,13 @@ class Router:
         y1 = 0
         y2 = self.channel_width + 1
 
+        # Use the vertical wires to check if the pins have already been connected
+        bottom_connected = any(y1 == 0 for y1, y2, net in self.vertical_wiring)
+        top_connected = any(y2 == self.channel_width + 1 for y1, y2, net in self.vertical_wiring)
+
+        if top_connected and bottom_connected:
+            return
+
         # Special case: 
         #     if there are no empty tracks, and net Ti = Bi =/=0 is a net which has connections in this column only, 
         #     then run a vertical wire from top to bottom of this column
@@ -370,16 +377,17 @@ class Router:
             return 
         
         # Find the nearest track for the top and/or bottom pins
-        if bottom_net != 0:
+        if bottom_net != 0 and not bottom_connected:
             possible_tracks = self.free_tracks.union(self.Y[bottom_net])
             bottom_track = min(possible_tracks) if possible_tracks else None
-        if top_net != 0:
+        if top_net != 0 and not top_connected:
             possible_tracks = self.free_tracks.union(self.Y[top_net])
             top_track = max(possible_tracks) if possible_tracks else None
 
         # If there is overlap, only keep the shortest vertical wire,
         # the other pin will be connected when the channel is widened.
-        if bottom_net != 0 and top_net != 0 and bottom_track is not None and top_track is not None:
+        if (bottom_net != 0 and not bottom_connected and bottom_track is not None
+            and top_net != 0 and not top_connected and top_track is not None):
             # Check if the same net is connecting top and bottom
             if top_net == bottom_net:
                 # Same net (T[i] == B[i] != 0): Allow overlap 
@@ -406,10 +414,10 @@ class Router:
                         self.Y[top_net].add(top_track)
                         self.add_vertical_wire(top_net, top_track, self.channel_width + 1)
 
-        elif bottom_net != 0 and bottom_track is not None:
+        elif bottom_net != 0 and not bottom_connected and bottom_track is not None:
             self.Y[bottom_net].add(bottom_track)
             self.add_vertical_wire(bottom_net, 0, bottom_track)
-        elif top_net != 0 and top_track is not None:
+        elif top_net != 0 and not top_connected and top_track is not None:
             self.Y[top_net].add(top_track)
             self.add_vertical_wire(top_net, top_track, self.channel_width + 1)
 
@@ -717,7 +725,6 @@ class Router:
         else:
             min_start = min(self.vertical_wiring, key=lambda x: x[0])[0] # y1
             max_end = max(self.vertical_wiring, key=lambda x: x[1])[1]# y2
-    
         if from_side == 'B':
             # Moving upwards from the bottom: the start of the first vertical wire, 
             # or the middle, whichever comes first
@@ -726,6 +733,7 @@ class Router:
             # Moving downwards from the top: the end of the last vertical wire,
             # or the middle, whichever comes first
             new_track = max(max_end + 1, mid_track)
+
         elif from_side == None:
             new_track = mid_track
         else:
@@ -777,7 +785,6 @@ class Router:
             # 1) Connect the pins
             if x < self.channel_length:
                 self.connect_pins()
-
             # 2) Collapse split nets to free up tracks
             self.collapse_split_nets()
 
@@ -794,6 +801,7 @@ class Router:
             if top_net is not None:
                 self.widen_channel(from_side='T')
                 self.connect_pins()
+
             if bottom_net is not None:
                 self.widen_channel(from_side='B')
                 self.connect_pins()
@@ -823,7 +831,6 @@ class Router:
             print(f"  initial_channel_width = {self.initial_channel_width}")
             print(f"  minimum_jog_length = {self.minimum_jog_length}")
             raise ValueError("Failed to route the edges")
-
         try:
             return self.route()
         except ValueError as e:
@@ -1003,26 +1010,25 @@ class Plotter:
 
 
 
-def random_pins(N, M):
-    import random
-    pins = list(range(N+1))
-    pins.extend(random.choices(pins, k = M - N))
-    random.shuffle(pins)
-    # Add spacing between pins
-    pins_spaced = []
-    for pin in pins:
-        pins_spaced.extend([pin, 0])
-    pins_spaced.pop()
-    return pins_spaced
 
 
 if __name__ == '__main__':
     import random
+    def random_pins(N, M):
+        pins = list(range(N+1))
+        pins.extend(random.choices(pins, k = M - N))
+        random.shuffle(pins)
+        # Add spacing between pins
+        pins_spaced = []
+        for pin in pins:
+            pins_spaced.extend([pin, 0])
+        pins_spaced.pop()
+        return pins_spaced
 
     # Set random seed for reproducibility
     random.seed(42)
 
-    with open('outputs_v2.txt', 'w') as f:
+    with open('edge_router_snapshot.txt', 'w') as f:
         for i in range(10):
             L = random_pins(10, 15)
             R = random_pins(10, 15)
