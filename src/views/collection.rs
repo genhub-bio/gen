@@ -2,11 +2,13 @@ use crate::models::block_group::BlockGroup;
 use crate::models::collection::Collection;
 use crate::models::sample::Sample;
 use crate::models::traits::Query;
+use crate::config::col;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph, StatefulWidget},
 };
@@ -414,7 +416,7 @@ impl CollectionExplorer {
 
         // Samples section
         items.push(ExplorerItem::Header {
-            text: "Samples:".to_string(),
+            text: "Sample graphs:".to_string(),
         });
 
         // Samples and their block groups
@@ -509,7 +511,7 @@ impl StatefulWidget for &CollectionExplorer {
                 }
                 ExplorerItem::Sample { name, expanded } => Paragraph::new(Line::from(vec![
                     Span::raw(if *expanded { "   ▼ " } else { "   ▶ " }),
-                    Span::styled(name, Style::default().fg(Color::Gray)),
+                    Span::styled(name, Style::default()),
                 ])),
                 ExplorerItem::Header { text } => Paragraph::new(Line::from(vec![Span::styled(
                     format!("  {}", text),
@@ -529,9 +531,13 @@ impl StatefulWidget for &CollectionExplorer {
             let item = display_items[context.index].clone();
             if context.is_selected {
                 let style = if has_focus {
-                    Style::default().bg(Color::Blue).fg(Color::White)
+                    Style::default()
+                    .fg(col("base04").unwrap())
+                    .bg(col("base07").unwrap())
                 } else {
-                    Style::default().bg(Color::DarkGray).fg(Color::Gray)
+                    Style::default()
+                    .fg(col("base05").unwrap())
+                    .bg(col("base03").unwrap())
                 };
                 (item.style(style), 1)
             } else {

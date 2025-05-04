@@ -5,6 +5,8 @@ use crate::models::{
 use crate::progress_bar::{get_handler, get_time_elapsed_bar};
 use crate::views::block_group_viewer::{PlotParameters, Viewer};
 use crate::views::collection::{CollectionExplorer, CollectionExplorerState, FocusZone};
+use crate::config::col;
+
 use crossterm::{
     event::{self, KeyCode, KeyEventKind},
     execute,
@@ -188,7 +190,7 @@ pub fn view_block_group(
             if show_sidebar {
                 let sidebar_block = Block::default()
                     .padding(Padding::new(0, 0, 1, 1))
-                    .style(Style::default().bg(Color::Indexed(233)));
+                    .style(Style::default().bg(col("base02").unwrap()));
                 let sidebar_content_area = sidebar_block.inner(sidebar_area);
 
                 frame.render_widget(sidebar_block.clone(), sidebar_area);
@@ -213,7 +215,7 @@ pub fn view_block_group(
 
             let status_bar = Paragraph::new(Text::styled(
                 status_bar_contents,
-                Style::default().bg(Color::Black).fg(Color::DarkGray),
+                Style::default().bg(col("base01").unwrap()).fg(col("base04").unwrap()),
             ));
 
             frame.render_widget(status_bar, status_bar_area);
@@ -224,7 +226,7 @@ pub fn view_block_group(
                 let loading_text = Text::styled(
                     "Loading...",
                     Style::default()
-                        .fg(Color::White)
+                        .fg(col("base05").unwrap())
                         .add_modifier(Modifier::BOLD),
                 );
                 let loading_para =
@@ -253,13 +255,13 @@ pub fn view_block_group(
                 let panel_block = Block::bordered()
                     .padding(Padding::new(2, 2, 1, 1))
                     .title("Details")
-                    .style(Style::default().bg(Color::Indexed(233)))
+                    .style(Style::default().bg(col("base00").unwrap()))
                     .border_style(if focus_zone == FocusZone::Panel {
                         Style::default()
-                            .fg(Color::Blue)
+                            .fg(col("base07").unwrap())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(col("base05").unwrap())
                     });
 
                 let panel_text = if let Some(selected_block) = viewer.state.selected_block {
@@ -290,7 +292,7 @@ pub fn view_block_group(
                 } else {
                     vec![Line::from(vec![Span::styled(
                         "No block selected",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(col("base05").unwrap()),
                     )])]
                 };
 
@@ -388,7 +390,7 @@ pub fn view_block_group(
                                     );
                                     match current_path {
                                         Ok(path) => {
-                                            if let Err(err) = viewer.show_path(&path, Color::Red) {
+                                            if let Err(err) = viewer.show_path(&path, col("base08").unwrap()) {
                                                 // todo: pop up a message in the panel
                                                 warn!("{}", err);
                                             }

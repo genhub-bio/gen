@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
     sync::LazyLock,
 };
+use ratatui_base16::Base16Palette;
+use ratatui::style::Color;
 
 thread_local! {
 pub static BASE_DIR: LazyLock<RwLock<PathBuf>> =
@@ -89,6 +91,47 @@ pub fn get_changeset_path(operation: &Operation) -> PathBuf {
     path
 }
 
+// Color palette:
+thread_local! {
+    pub static PALETTE: LazyLock<RwLock<Base16Palette>> = 
+            LazyLock::new(|| {
+                let palette_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("config/mocha.yaml");
+                RwLock::new(Base16Palette::from_yaml(palette_path).expect("Failed to load theme"))
+            });
+    }
+
+pub fn col(color_name: &str) -> Result<Color, String> {
+    PALETTE.with(|palette_lock| {
+        let palette = palette_lock.read().map_err(|e| format!("Failed to read palette: {}", e))?;
+        match color_name {
+            "base00" => Ok(palette.base00),
+            "base01" => Ok(palette.base01),
+            "base02" => Ok(palette.base02),
+            "base03" => Ok(palette.base03),
+            "base04" => Ok(palette.base04),
+            "base05" => Ok(palette.base05),
+            "base06" => Ok(palette.base06),
+            "base07" => Ok(palette.base07),
+            "base08" => Ok(palette.base08),
+            "base09" => Ok(palette.base09),
+            "base0a" => Ok(palette.base0a),
+            "base0b" => Ok(palette.base0b),
+            "base0c" => Ok(palette.base0c),
+            "base0d" => Ok(palette.base0d),
+            "base0e" => Ok(palette.base0e),
+            "base0f" => Ok(palette.base0f),
+            "base0A" => Ok(palette.base0a),
+            "base0B" => Ok(palette.base0b),
+            "base0C" => Ok(palette.base0c),
+            "base0D" => Ok(palette.base0d),
+            "base0E" => Ok(palette.base0e),
+            "base0F" => Ok(palette.base0f),
+            _ => Err(format!("Color '{}' not found in palette", color_name)),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +141,14 @@ mod tests {
     fn test_finds_gen_dir() {
         setup_gen_dir();
         assert!(get_gen_dir().is_some());
+    }
+    
+    #[test]
+    fn test_get_theme_color() {
+        let color = col("base00");
+        assert!(color.is_ok());
+        
+        let color = col("invalid_color");
+        assert!(color.is_err());
     }
 }

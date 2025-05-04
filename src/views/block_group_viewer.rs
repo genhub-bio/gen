@@ -3,6 +3,7 @@ use crate::models::node::Node;
 use crate::models::path::Path;
 use crate::models::sequence::Sequence;
 use crate::views::block_layout::{BaseLayout, ScaledLayout};
+use crate::config::col;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use log::info;
@@ -19,6 +20,7 @@ use ratatui::{
 };
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
+
 /// Labels used in the graph visualization (selected, not-selected)
 /// the trick is to get them to align with the braille characters
 /// we use to draw lines:
@@ -652,7 +654,7 @@ impl<'a> Viewer<'a> {
         self.state.world_viewport = ((x_min, y_min), (x_max, y_max));
 
         let canvas = Canvas::default()
-            .background_color(Color::Black)
+            .background_color(col("base00").unwrap())
             .block(canvas_block)
             // Adjust the x_bounds and y_bounds by the scroll offsets.
             .x_bounds([x_min, x_max])
@@ -664,7 +666,7 @@ impl<'a> Viewer<'a> {
 
                 // Draw all edges (does not consider highlights)
                 for &(source, target) in self.scaled_layout.lines.keys() {
-                    self.draw_edge(ctx, &(source, target), Color::DarkGray);
+                    self.draw_edge(ctx, &(source, target), col("base03").unwrap());
                 }
 
                 // Print the labels
@@ -686,24 +688,27 @@ impl<'a> Viewer<'a> {
                     // Get the label text
                     let label = self.make_label(&block, (x2 - x) as u32);
 
-                    // The style of a label is determined by 3 factors:
+                    // The style of a label is determined by 2 factors:
                     // 1. Whether the viewer has focus
                     // 2. Whether the block is selected
-                    // 3. Whether the label consists of text or a glyph (the dot for zoomed out views)
                     let is_selected = Some(block) == self.state.selected_block;
-                    let is_glyph = label.as_str() == label::NODE;
 
-                    let style = match (self.has_focus, is_selected, is_glyph) {
-                        (true, true, false) => Style::default().fg(Color::White).bg(Color::Blue),
-                        (true, true, true) => Style::default().fg(Color::Blue),
-                        (true, false, false) => {
-                            Style::default().fg(Color::White).bg(Color::Indexed(236))
+                    let style = match (self.has_focus, is_selected) {
+                        (true, false) => {
+                            Style::default()
+                            .fg(col("base05").unwrap())
+                            .bg(col("base03").unwrap()) 
                         }
-                        (true, false, true) => Style::default().fg(Color::White),
-                        (false, _, false) => {
-                            Style::default().fg(Color::White).bg(Color::Indexed(236))
+                        (true, true) => {
+                            Style::default()
+                            .fg(col("base04").unwrap())
+                            .bg(col("base07").unwrap())
                         }
-                        (false, _, true) => Style::default().fg(Color::White),
+                        (false, _) => {
+                            Style::default()
+                            .fg(col("base05").unwrap())
+                            .bg(col("base03").unwrap())
+                        }
                     };
 
                     self.place_label(ctx, &label, (x, y), style);
@@ -720,7 +725,7 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::START,
                             (x3, y),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(col("base04").unwrap()),
                         );
                     }
 
@@ -736,7 +741,7 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::END,
                             (x3, y),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(col("base04").unwrap()),
                         );
                     }
                 }
@@ -751,7 +756,7 @@ impl<'a> Viewer<'a> {
                     ctx.print(
                         x_mid as f64,
                         y_mid as f64,
-                        Span::styled("█", Style::default().fg(Color::Blue)),
+                        Span::styled("█", col("base07").unwrap()),
                     );
                 }
             });
