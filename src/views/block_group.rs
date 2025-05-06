@@ -233,7 +233,7 @@ pub fn view_block_group(
             let mut status_message = match focus_zone {
                 FocusZone::Canvas => {
                     Viewer::get_status_line()
-                        + " | *p* toggle current path | *esc* back to sidebar "
+                        + " | *p* toggle current path | *esc* back to sidebar"
                 }
                 FocusZone::Panel => "*esc* close panel".to_string(),
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
