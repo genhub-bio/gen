@@ -1,8 +1,8 @@
+use crate::config::col;
 use crate::models::block_group::BlockGroup;
 use crate::models::collection::Collection;
 use crate::models::sample::Sample;
 use crate::models::traits::Query;
-use crate::config::col;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -10,7 +10,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, StatefulWidget},
+    widgets::{Block, Paragraph, StatefulWidget, Wrap},
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -378,7 +378,7 @@ impl CollectionExplorer {
     }
 
     pub fn get_status_line() -> String {
-        "▼ ▲ navigate | return: select".to_string()
+        "*▼ ▲* navigate | *return* select".to_string()
     }
 
     /// Get all items to display, taking into account the current state
@@ -483,15 +483,18 @@ impl StatefulWidget for &CollectionExplorer {
                     if *is_current {
                         // This is the current collection header
                         Paragraph::new(Line::from(vec![
+                            Span::raw("  "),
                             Span::styled(
-                                "  Collection:",
-                                Style::default().add_modifier(Modifier::BOLD),
+                                "Collection:",
+                                Style::default().add_modifier(Modifier::UNDERLINED),
                             ),
                             Span::raw(format!(" {}", name)),
                         ]))
+                        .wrap(Wrap { trim: false })
                     } else {
                         // This is a link to another collection
                         Paragraph::new(Line::from(vec![Span::raw(format!("  • {}", name))]))
+                            .wrap(Wrap { trim: false })
                     }
                 }
                 ExplorerItem::BlockGroup { id, name, .. } => {
@@ -505,18 +508,22 @@ impl StatefulWidget for &CollectionExplorer {
 
                     if is_reference {
                         Paragraph::new(Line::from(vec![Span::raw(format!("   • {}", name))]))
+                            .wrap(Wrap { trim: false })
                     } else {
                         Paragraph::new(Line::from(vec![Span::raw(format!("     • {}", name))]))
+                            .wrap(Wrap { trim: false })
                     }
                 }
                 ExplorerItem::Sample { name, expanded } => Paragraph::new(Line::from(vec![
                     Span::raw(if *expanded { "   ▼ " } else { "   ▶ " }),
                     Span::styled(name, Style::default()),
-                ])),
-                ExplorerItem::Header { text } => Paragraph::new(Line::from(vec![Span::styled(
-                    format!("  {}", text),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )])),
+                ]))
+                .wrap(Wrap { trim: false }),
+                ExplorerItem::Header { text } => Paragraph::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(text, Style::default().add_modifier(Modifier::UNDERLINED)),
+                ]))
+                .wrap(Wrap { trim: false }),
             };
 
             display_items.push(paragraph);
@@ -529,19 +536,22 @@ impl StatefulWidget for &CollectionExplorer {
         // Create and render the list
         let builder = ListBuilder::new(move |context| {
             let item = display_items[context.index].clone();
+            let available_width = context.cross_axis_size;
+            let item_height = item.line_count(available_width) as u16;
+
             if context.is_selected {
                 let style = if has_focus {
                     Style::default()
-                    .fg(col("base04").unwrap())
-                    .bg(col("base07").unwrap())
+                        .fg(col("text_muted").unwrap())
+                        .bg(col("highlight").unwrap())
                 } else {
                     Style::default()
-                    .fg(col("base05").unwrap())
-                    .bg(col("base03").unwrap())
+                        .fg(col("text").unwrap())
+                        .bg(col("highlight_muted").unwrap())
                 };
-                (item.style(style), 1)
+                (item.style(style), item_height)
             } else {
-                (item, 1)
+                (item, item_height)
             }
         });
 

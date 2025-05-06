@@ -51,7 +51,7 @@ thiserror = "2.0.12"
 indicatif = "0.17.11"
 html-escape = "0.2.13"
 rust-sugiyama = {git = "https://github.com/paddison/rust-sugiyama", rev = "4d15b35124adac1de3a3b2cc42af8d68290935f2" }
-ratatui = "0.29.0"
+ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 color-eyre = "0.6.3"
 crossterm = "0.28.1"
 log = "0.4.26"

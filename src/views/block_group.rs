@@ -1,3 +1,4 @@
+use crate::config::col;
 use crate::graph::{GenGraph, GraphNode};
 use crate::models::{
     block_group::BlockGroup, node::Node, node::PATH_START_NODE_ID, path::Path, traits::Query,
@@ -5,7 +6,6 @@ use crate::models::{
 use crate::progress_bar::{get_handler, get_time_elapsed_bar};
 use crate::views::block_group_viewer::{PlotParameters, Viewer};
 use crate::views::collection::{CollectionExplorer, CollectionExplorerState, FocusZone};
-use crate::config::col;
 
 use crossterm::{
     event::{self, KeyCode, KeyEventKind},
@@ -35,6 +35,28 @@ fn get_empty_graph() -> GenGraph {
         sequence_end: 0,
     });
     g
+}
+
+/// Parses a string with markdown-like asterisk syntax for highlighting.
+/// Segments surrounded by '*' are styled with `highlight_style`.
+/// Other segments are styled with `default_style`.
+fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line {
+    let mut spans = Vec::new();
+    let mut is_highlighted = false;
+    for part in text.split('*') {
+        if !part.is_empty() {
+            spans.push(Span::styled(
+                part,
+                if is_highlighted {
+                    highlight_style
+                } else {
+                    default_style
+                },
+            ));
+        }
+        is_highlighted = !is_highlighted;
+    }
+    Line::from(spans)
 }
 
 pub fn view_block_group(
@@ -188,35 +210,50 @@ pub fn view_block_group(
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;
             if show_sidebar {
-                let sidebar_block = Block::default()
-                    .padding(Padding::new(0, 0, 1, 1))
-                    .style(Style::default().bg(col("base02").unwrap()));
+                let sidebar_block = Block::default().padding(Padding::new(0, 0, 1, 1)).style(
+                    Style::default()
+                        .bg(col("sidebar").unwrap())
+                        .fg(col("text").unwrap()),
+                );
                 let sidebar_content_area = sidebar_block.inner(sidebar_area);
 
                 frame.render_widget(sidebar_block.clone(), sidebar_area);
                 frame.render_stateful_widget(&explorer, sidebar_content_area, &mut explorer_state);
+
+                // Draw the vertical separator line at the right edge of the sidebar
+                let line_char = "▕";
+                let line_style = Style::default().fg(col("separator").unwrap());
+                let x = sidebar_area.right() - 1;
+                for y in sidebar_area.top()..sidebar_area.bottom() {
+                    frame.buffer_mut().set_string(x, y, line_char, line_style);
+                }
             }
 
             // Status bar
             let mut status_message = match focus_zone {
-                FocusZone::Canvas => Viewer::get_status_line(),
-                FocusZone::Panel => "esc: close panel".to_string(),
+                FocusZone::Canvas => {
+                    Viewer::get_status_line()
+                        + " | *p* toggle current path | *esc* back to sidebar "
+                }
+                FocusZone::Panel => "*esc* close panel".to_string(),
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
-
-            // Paths may be too specific an application, so we don't include the controls in the Viewer widget itself
-            // Instead, we add them to the status bar along with the other controls
-            status_message.push_str(" | p: show current path | tab: cycle focus | q: quit");
+            status_message.push_str(" | *q* quit"); // Universal controls
 
             let status_bar_contents = format!(
                 "{status_message:^width$}",
                 width = status_bar_area.width as usize
             );
 
-            let status_bar = Paragraph::new(Text::styled(
-                status_bar_contents,
-                Style::default().bg(col("base01").unwrap()).fg(col("base04").unwrap()),
-            ));
+            // Style the status bar text
+            let status_line = style_text(
+                &status_bar_contents,
+                Style::default().fg(col("text_muted").unwrap()), // default color
+                Style::default().fg(col("highlight").unwrap()),  // highlight color
+            );
+
+            let status_bar =
+                Paragraph::new(status_line).style(Style::default().bg(col("statusbar").unwrap()));
 
             frame.render_widget(status_bar, status_bar_area);
 
@@ -226,7 +263,7 @@ pub fn view_block_group(
                 let loading_text = Text::styled(
                     "Loading...",
                     Style::default()
-                        .fg(col("base05").unwrap())
+                        .fg(col("text").unwrap())
                         .add_modifier(Modifier::BOLD),
                 );
                 let loading_para =
@@ -255,13 +292,17 @@ pub fn view_block_group(
                 let panel_block = Block::bordered()
                     .padding(Padding::new(2, 2, 1, 1))
                     .title("Details")
-                    .style(Style::default().bg(col("base00").unwrap()))
+                    .style(
+                        Style::default()
+                            .bg(col("panel").unwrap())
+                            .fg(col("text").unwrap()),
+                    )
                     .border_style(if focus_zone == FocusZone::Panel {
                         Style::default()
-                            .fg(col("base07").unwrap())
+                            .fg(col("highlight").unwrap())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(col("base05").unwrap())
+                        Style::default().fg(col("text").unwrap())
                     });
 
                 let panel_text = if let Some(selected_block) = viewer.state.selected_block {
@@ -292,7 +333,9 @@ pub fn view_block_group(
                 } else {
                     vec![Line::from(vec![Span::styled(
                         "No block selected",
-                        Style::default().fg(col("base05").unwrap()),
+                        Style::default()
+                            .fg(col("text").unwrap())
+                            .add_modifier(Modifier::BOLD),
                     )])]
                 };
 
@@ -375,6 +418,12 @@ pub fn view_block_group(
                                     tui_layout_change = true;
                                 }
                             }
+                            KeyCode::Esc => {
+                                if !show_panel {
+                                    focus_zone = FocusZone::Sidebar;
+                                    viewer.state.selected_block = None;
+                                }
+                            }
                             KeyCode::Char('p') => {
                                 // TODO: make current path highlighted by default, and boundary edges indicated as dashed lines
                                 // Toggle current path highlighting
@@ -390,7 +439,9 @@ pub fn view_block_group(
                                     );
                                     match current_path {
                                         Ok(path) => {
-                                            if let Err(err) = viewer.show_path(&path, col("base08").unwrap()) {
+                                            if let Err(err) =
+                                                viewer.show_path(&path, col("error").unwrap())
+                                            {
                                                 // todo: pop up a message in the panel
                                                 warn!("{}", err);
                                             }

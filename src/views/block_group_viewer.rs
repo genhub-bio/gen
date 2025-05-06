@@ -1,11 +1,11 @@
+use crate::config::col;
 use crate::graph::{project_path, GenGraph, GraphNode};
 use crate::models::node::Node;
 use crate::models::path::Path;
 use crate::models::sequence::Sequence;
 use crate::views::block_layout::{BaseLayout, ScaledLayout};
-use crate::config::col;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use log::info;
 use log::warn;
 use petgraph::graphmap::DiGraphMap;
@@ -29,6 +29,7 @@ pub mod label {
     pub const START: &str = "Start >";
     pub const END: &str = "> End";
     pub const NODE: &str = "⏺";
+    pub const SELECTED: &str = "█";
 }
 
 /// Used for scrolling through the graph.
@@ -650,11 +651,15 @@ impl<'a> Viewer<'a> {
         // Add the 1/2 and 3/4 units to account for the braille cell size on the right and top
         let x_max = x_max + 1.0 / 2.0;
         let y_max = y_max + 3.0 / 4.0;
-
         self.state.world_viewport = ((x_min, y_min), (x_max, y_max));
 
+        // Make sure we always have a block selected when we come into focus
+        if self.state.selected_block.is_none() && self.has_focus {
+            self.select_center_block();
+        }
+
         let canvas = Canvas::default()
-            .background_color(col("base00").unwrap())
+            .background_color(col("canvas").unwrap())
             .block(canvas_block)
             // Adjust the x_bounds and y_bounds by the scroll offsets.
             .x_bounds([x_min, x_max])
@@ -666,7 +671,7 @@ impl<'a> Viewer<'a> {
 
                 // Draw all edges (does not consider highlights)
                 for &(source, target) in self.scaled_layout.lines.keys() {
-                    self.draw_edge(ctx, &(source, target), col("base03").unwrap());
+                    self.draw_edge(ctx, &(source, target), col("edge").unwrap());
                 }
 
                 // Print the labels
@@ -682,33 +687,26 @@ impl<'a> Viewer<'a> {
                         continue;
                     }
 
-                    // Get the block position and available space
                     let ((x, y), (x2, _y2)) = self.scaled_layout.labels[&block];
+                    let mut label = self.make_label(&block, (x2 - x) as u32);
 
-                    // Get the label text
-                    let label = self.make_label(&block, (x2 - x) as u32);
-
-                    // The style of a label is determined by 2 factors:
-                    // 1. Whether the viewer has focus
-                    // 2. Whether the block is selected
+                    // Style the label
+                    // This depends on the zoom level (at lower zoom levels we only show glyphs)
+                    // and whether the block is selected or not.
                     let is_selected = Some(block) == self.state.selected_block;
-
-                    let style = match (self.has_focus, is_selected) {
-                        (true, false) => {
-                            Style::default()
-                            .fg(col("base05").unwrap())
-                            .bg(col("base03").unwrap()) 
-                        }
+                    let is_glyph = label == label::NODE;
+                    let style = match (is_glyph, is_selected) {
                         (true, true) => {
-                            Style::default()
-                            .fg(col("base04").unwrap())
-                            .bg(col("base07").unwrap())
+                            label = label::SELECTED.to_string();
+                            Style::default().fg(col("highlight").unwrap())
                         }
-                        (false, _) => {
-                            Style::default()
-                            .fg(col("base05").unwrap())
-                            .bg(col("base03").unwrap())
-                        }
+                        (true, false) => Style::default().fg(col("text").unwrap()),
+                        (false, true) => Style::default()
+                            .fg(col("text_muted").unwrap())
+                            .bg(col("highlight").unwrap()),
+                        (false, false) => Style::default()
+                            .fg(col("text").unwrap())
+                            .bg(col("node").unwrap()),
                     };
 
                     self.place_label(ctx, &label, (x, y), style);
@@ -725,7 +723,7 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::START,
                             (x3, y),
-                            Style::default().fg(col("base04").unwrap()),
+                            Style::default().fg(col("text_muted").unwrap()),
                         );
                     }
 
@@ -741,23 +739,9 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::END,
                             (x3, y),
-                            Style::default().fg(col("base04").unwrap()),
+                            Style::default().fg(col("text_muted").unwrap()),
                         );
                     }
-                }
-
-                // Draw a cursor if no block is currently selected
-                // TODO: don't force the cursor to the center of the viewport,
-                // actually track its position in the state
-                if self.state.selected_block.is_none() {
-                    // Determine the middle of the viewport
-                    let x_mid = self.state.offset_x + (self.state.viewport.width - 1) as i32 / 2;
-                    let y_mid = self.state.offset_y + (self.state.viewport.height - 1) as i32 / 2;
-                    ctx.print(
-                        x_mid as f64,
-                        y_mid as f64,
-                        Span::styled("█", col("base07").unwrap()),
-                    );
                 }
             });
         frame.render_widget(canvas, area);
@@ -768,6 +752,7 @@ impl<'a> Viewer<'a> {
         Canvas::default()
             .x_bounds([x_min, x_max])
             .y_bounds([y_min, y_max])
+            .background_color(col("canvas").unwrap())
             .paint(|ctx| {
                 for (color, highlight_graph) in &self.highlights {
                     for (source, target, _) in highlight_graph.all_edges() {
@@ -1137,60 +1122,48 @@ impl<'a> Viewer<'a> {
     }
 
     pub fn handle_input(&mut self, key: KeyEvent) {
-        // Clear selection when using SHIFT or ALT with arrow keys for panning
-        if matches!(
-            key.code,
-            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
-        ) && (key.modifiers.contains(KeyModifiers::SHIFT)
-            || key.modifiers.contains(KeyModifiers::ALT))
-        {
-            self.state.selected_block = None;
-        }
+        // Panning a cursor with shift/alt was too inconsistent
+        // (e.g. on mac os, alt-left/right is intercepted by the system)
+        // so now we make it automatic based on blocks being cut off on the left/right.
+        const SCROLL_STEP_X: i32 = 12;
 
         match key.code {
             KeyCode::Left => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_x -= self.state.viewport.width as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_x -= 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Left);
+                if let Some(selected_block) = self.state.selected_block {
+                    let ((block_x1_f, _), (_, _)) =
+                        self.scaled_layout.labels.get(&selected_block).unwrap();
+                    // Selected block is cut off on the left.
+                    // TODO: make this more about the next block being visible
+                    if (block_x1_f.round() as i32) < self.state.offset_x {
+                        self.state.offset_x -= SCROLL_STEP_X;
+                    } else {
+                        self.move_selection(NavDirection::Left);
+                    }
                 } else {
-                    self.snap_cursor(NavDirection::Left);
+                    self.state.offset_x -= self.state.viewport.width as i32 / 3;
                 }
             }
             KeyCode::Right => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_x += self.state.viewport.width as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_x += 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Right);
+                if let Some(selected_block) = self.state.selected_block {
+                    let ((_, _), (block_x2_f, _)) =
+                        self.scaled_layout.labels.get(&selected_block).unwrap();
+                    // Selected block is cut off on the right.
+                    if (block_x2_f.round() as i32)
+                        > self.state.offset_x + self.state.viewport.width as i32
+                    {
+                        self.state.offset_x += SCROLL_STEP_X;
+                    } else {
+                        self.move_selection(NavDirection::Right);
+                    }
                 } else {
-                    self.snap_cursor(NavDirection::Right);
+                    self.state.offset_x += self.state.viewport.width as i32 / 3;
                 }
             }
             KeyCode::Up => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_y += self.state.viewport.height as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_y += 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Up);
-                } else {
-                    self.snap_cursor(NavDirection::Up);
-                }
+                self.move_selection(NavDirection::Up);
             }
             KeyCode::Down => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_y -= self.state.viewport.height as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_y -= 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Down);
-                } else {
-                    self.snap_cursor(NavDirection::Down);
-                }
+                self.move_selection(NavDirection::Down);
             }
             // Zooming in and out
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -1277,7 +1250,7 @@ impl<'a> Viewer<'a> {
     }
 
     pub fn get_status_line() -> String {
-        "◀ ▼ ▲ ▶ select blocks (+shift/alt to scroll) | +/- zoom | s: edge style".to_string()
+        "*◀ ▼ ▲ ▶* scroll | *+/-* zoom | *s* edge style".to_string()
     }
 }
 
