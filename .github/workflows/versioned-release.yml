@@ -20,7 +20,7 @@ jobs:
         id: bump-cargo-version
         uses: tj-actions/cargo-bump@v3
       - name: Commit cargo version bump and apply tag and push
-        run: |
+      	run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 	  echo "Dry run: would bump version from ${{ steps.bump-cargo-version.outputs.old_version }} to ${{ steps.bump-cargo-version.outputs.new_version }}." >> "$GITHUB_OUTPUT"
