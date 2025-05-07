@@ -234,6 +234,7 @@ pub struct State {
     pub world_viewport: ((f64, f64), (f64, f64)), // (min_x, min_y), (max_x, max_y)
     pub selected_block: Option<GraphNode>,
     pub first_render: bool,
+    pub show_splash_screen: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -245,6 +246,7 @@ impl Default for State {
             world_viewport: ((0.0, 0.0), (0.0, 0.0)),
             selected_block: None,
             first_render: true,
+            show_splash_screen: false,
         }
     }
 }
@@ -269,12 +271,22 @@ impl<'a> Viewer<'a> {
         conn: &'a Connection,
         plot_parameters: PlotParameters,
     ) -> Viewer<'a> {
-        Self::with_origin(
+        let mut new_viewer = Self::with_origin(
             block_graph,
             conn,
             plot_parameters,
             (Node::get_start_node(), 0),
-        )
+        );
+
+        // If we're being asked to view an empty graph, show the splash screen
+        if block_graph.node_count() == 1 {
+            if let Some(node) = block_graph.nodes().next() {
+                if node.node_id == crate::models::node::PATH_START_NODE_ID && node.block_id == -1 {
+                    new_viewer.state.show_splash_screen = true;
+                }
+            }
+        }
+        new_viewer
     }
 
     pub fn with_origin(
@@ -308,13 +320,19 @@ impl<'a> Viewer<'a> {
             .nodes()
             .find(|node| node.node_id == origin.0.id);
 
+        // If using with_origin, the splash screen is never shown as we have a specific focus
+        let initial_state = State {
+            show_splash_screen: false,
+            ..Default::default()
+        };
+
         Viewer {
             block_graph,
             conn,
             base_layout,
             scaled_layout,
             node_sequences,
-            state: State::default(),
+            state: initial_state,
             parameters: plot_parameters,
             origin_block,                 // Gen block
             view_block: Block::default(), //Ratatui block (TODO: make Viewer a proper widget with nesting, or find a better name)
@@ -596,6 +614,52 @@ impl<'a> Viewer<'a> {
         let canvas_block = self.view_block.clone();
         let viewport = canvas_block.inner(area);
 
+        // Splashscreen logic
+        if self.state.show_splash_screen && self.state.selected_block.is_none() {
+            let splashscreen_lines: Vec<&str> = vec![
+                " ██████╗ ███████╗███╗   ██╗",
+                "██╔════╝ ██╔════╝████╗  ██║",
+                "██║  ███╗█████╗  ██╔██╗ ██║",
+                "██║   ██║██╔══╝  ██║╚██╗██║",
+                "╚██████╔╝███████╗██║ ╚████║",
+                " ╚═════╝ ╚══════╝╚═╝  ╚═══╝",
+            ];
+            let splashscreen_height = splashscreen_lines.len() as u16;
+            let splashscreen_width = splashscreen_lines
+                .iter()
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(0) as u16;
+
+            if viewport.width >= splashscreen_width && viewport.height >= splashscreen_height {
+                let start_x = viewport.x + (viewport.width - splashscreen_width) / 2;
+                let start_y = viewport.y + (viewport.height - splashscreen_height) / 2;
+
+                let splash_canvas = Canvas::default()
+                    .background_color(col("canvas").unwrap())
+                    .block(canvas_block)
+                    .x_bounds([
+                        viewport.x as f64,
+                        (viewport.x + viewport.width - 1) as f64 + 0.5,
+                    ])
+                    .y_bounds([
+                        viewport.y as f64,
+                        (viewport.y + viewport.height - 1) as f64 + 0.75,
+                    ])
+                    .paint(|ctx| {
+                        for (i, line) in splashscreen_lines.iter().enumerate() {
+                            ctx.print(
+                                start_x as f64,
+                                (start_y + (splashscreen_height - 1 - i as u16)) as f64,
+                                Span::styled(*line, Style::default().fg(col("base07").unwrap())),
+                            );
+                        }
+                    });
+                frame.render_widget(splash_canvas, area);
+                return;
+            }
+        }
+
         // Check if the viewport has changed size, and if so, update the offset to keep our reference
         // frame intact.
         if self.state.viewport != viewport {
@@ -637,8 +701,8 @@ impl<'a> Viewer<'a> {
                 if let Some(center_block) = self.state.selected_block {
                     self.center_on_block(center_block).unwrap();
                 }
-                self.state.first_render = false;
             }
+            self.state.first_render = false;
         }
 
         // Define the viewport from the world perspective

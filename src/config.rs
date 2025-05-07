@@ -93,7 +93,8 @@ pub fn get_changeset_path(operation: &Operation) -> PathBuf {
 }
 
 // Theme support (TODO: make this configurable)
-const THEME_PATH: &str = "config/mocha.yaml";
+const THEME_PATH: &str = "config/mocha.yaml"; // dark
+                                              // const THEME_PATH: &str = "config/latte.yaml"; // light
 
 /// Converts HTML color code (hex) to closest indexed color
 pub fn html_to_ansi_color(html_code: &str) -> Color {
@@ -128,13 +129,15 @@ pub fn html_to_ansi_color(html_code: &str) -> Color {
     Color::Indexed(16 + closest_index as u8)
 }
 
+//
+
 thread_local! {
 pub static PALETTE: LazyLock<RwLock<Base16Palette>> =
         LazyLock::new(|| {
             let palette_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join(THEME_PATH);
             let mut palette = Base16Palette::from_yaml(palette_path).expect("Failed to load theme");
-
+            //
             // If the terminal does not support truecolor, convert to ansi colors
             // (The mac os terminal degrades poorly when presented with truecolor)
             if !std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit") {

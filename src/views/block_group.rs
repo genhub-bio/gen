@@ -232,8 +232,7 @@ pub fn view_block_group(
             // Status bar
             let mut status_message = match focus_zone {
                 FocusZone::Canvas => {
-                    Viewer::get_status_line()
-                        + " | *p* toggle current path | *esc* back to sidebar"
+                    Viewer::get_status_line() + " | *p* toggle current path | *esc* back to sidebar"
                 }
                 FocusZone::Panel => "*esc* close panel".to_string(),
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
@@ -373,6 +372,9 @@ pub fn view_block_group(
             .unwrap_or_else(|| Duration::from_secs(0));
         if crossterm::event::poll(timeout)? {
             if let event::Event::Key(key) = event::read()? {
+                if viewer.state.show_splash_screen {
+                    viewer.state.show_splash_screen = false;
+                }
                 if key.kind == KeyEventKind::Press {
                     // Global handlers
                     match key.code {
