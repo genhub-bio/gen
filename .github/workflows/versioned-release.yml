@@ -19,7 +19,7 @@ jobs:
       - name: Bump cargo version
         id: bump-cargo-version
         uses: tj-actions/cargo-bump@v3
-      - name: Commit cargo version bump, apply tag, push
+      - name: Commit cargo version bump and apply tag and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
