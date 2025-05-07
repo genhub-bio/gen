@@ -1,9 +1,6 @@
 name: Versioned Release
 
-on:
-  pull_request:
-    inputs:
-      release_type: 'patch'
+on: pull_request
 
 #  workflow_dispatch:
 #    inputs:
