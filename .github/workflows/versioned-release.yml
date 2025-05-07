@@ -1,4 +1,5 @@
 name: Versioned Release
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +12,9 @@ on:
           - 'minor'
           - 'major'
         default: 'patch'
+  pull_request:
+    inputs:
+      release_type: 'patch'
 
 jobs:
   versioned-release:
