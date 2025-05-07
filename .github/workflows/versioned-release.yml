@@ -25,7 +25,7 @@ jobs:
       uses: tj-actions/cargo-bump@v3
     - name: Commit cargo version bump, apply git tag, push
       run: |
-        echo "The event type is ${{ github.event.action }}" >> "$GITHUB_OUTPUT"
+        echo "The event type is ${{ github.event.action }}"
         echo "Done."
 #        git config user.name "github-actions[bot]"
 #        git config user.email "github-actions[bot]@users.noreply.github.com"
