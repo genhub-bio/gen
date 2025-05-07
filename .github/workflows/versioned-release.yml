@@ -1,20 +1,21 @@
 name: Versioned Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      release_type:
-        required: true
-        type: choice
-        description: 'The semver bump level'
-        options:
-          - 'patch'
-          - 'minor'
-          - 'major'
-        default: 'patch'
   pull_request:
+    types: [opened, synchronize, reopened]
     inputs:
       release_type: 'patch'
+#  workflow_dispatch:
+#    inputs:
+#      release_type:
+#        required: true
+#        type: choice
+#        description: 'The semver bump level'
+#        options:
+#          - 'patch'
+#          - 'minor'
+#          - 'major'
+#        default: 'patch'
 
 jobs:
   versioned-release:
@@ -27,6 +28,7 @@ jobs:
       uses: tj-actions/cargo-bump@v3
     - name: Commit cargo version bump, apply git tag, push
       run: |
+        echo "The event type is ${{ github.event.action }}"
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         echo "Dry run: would bump version from ${{ steps.bump-cargo-version.outputs.old_version }} to ${{ steps.bump-cargo-version.outputs.new_version }}." >> "$GITHUB_OUTPUT"
