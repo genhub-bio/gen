@@ -1,16 +1,17 @@
 name: Versioned Release
 
-workflow_dispatch:
-  inputs:
-    release_type:
-      required: true
-      type: choice
-      description: 'The semver bump level'
-      options:
-        - 'patch'
-        - 'minor'
-        - 'major'
-      default: 'patch'
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        required: true
+        type: choice
+        description: 'The semver bump level'
+        options:
+          - 'patch'
+          - 'minor'
+          - 'major'
+        default: 'patch'
 
 jobs:
   versioned-release:
