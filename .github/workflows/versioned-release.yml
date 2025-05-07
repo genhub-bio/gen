@@ -26,12 +26,12 @@ jobs:
     - name: Commit cargo version bump, apply git tag, push
       run: |
         echo "The event type is ${{ github.event.action }}" >> "$GITHUB_OUTPUT"
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
+        echo "Done."
+#        git config user.name "github-actions[bot]"
+#        git config user.email "github-actions[bot]@users.noreply.github.com"
 #        echo "Dry run: would bump version from ${{ steps.bump-cargo-version.outputs.old_version }} to ${{ steps.bump-cargo-version.outputs.new_version }}." >> "$GITHUB_OUTPUT"
 #        echo "${{ steps.bump-cargo-version.outputs.old_version }}" >> "$GITHUB_OUTPUT"
 #        echo "${{ steps.bump-cargo-version.outputs.new_version }}" >> "$GITHUB_OUTPUT"
-        echo "Done."
 #          git add Cargo.toml Cargo.lock
 #          git commit -m "Bump version"
 #          git push
