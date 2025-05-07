@@ -1,18 +1,16 @@
 name: Versioned Release
 
-on: pull_request
-
-#  workflow_dispatch:
-#    inputs:
-#      release_type:
-#        required: true
-#        type: choice
-#        description: 'The semver bump level'
-#        options:
-#          - 'patch'
-#          - 'minor'
-#          - 'major'
-#        default: 'patch'
+workflow_dispatch:
+  inputs:
+    release_type:
+      required: true
+      type: choice
+      description: 'The semver bump level'
+      options:
+        - 'patch'
+        - 'minor'
+        - 'major'
+      default: 'patch'
 
 jobs:
   versioned-release:
@@ -25,15 +23,12 @@ jobs:
       uses: tj-actions/cargo-bump@v3
     - name: Commit cargo version bump, apply git tag, push
       run: |
-        echo "The event type is ${{ github.event.action }}"
+        echo "Bumping version from ${{ steps.bump-cargo-version.outputs.old_version }} to ${{ steps.bump-cargo-version.outputs.new_version }}."
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        echo "${{ jobs.steps.bump-cargo-version.outputs.old_version }}"
-        echo "${{ jobs.steps.bump-cargo-version.outputs.new_version }}"
-        echo "Dry run: would bump version from ${{ steps.bump-cargo-version.outputs.old_version }} to ${{ steps.bump-cargo-version.outputs.new_version }}."
+        git add Cargo.toml Cargo.lock
+        git commit -m "Bump version"
+        git push
+        git tag -a "${{ steps.bump-cargo-version.outputs.new_version }}" -m "Release: ${{ steps.bump-cargo-version.outputs.new_version }}"
+        git push origin "${{ steps.bump-cargo-version.outputs.new_version }}"
         echo "Done."
-#          git add Cargo.toml Cargo.lock
-#          git commit -m "Bump version"
-#          git push
-#          git tag -a "${{ steps.bump-cargo-version.outputs.new_version }}" -m "Release: ${{ steps.bump-cargo-version.outputs.new_version }}"
-#          git push origin "${{ steps.bump-cargo-version.outputs.new_version }}"
