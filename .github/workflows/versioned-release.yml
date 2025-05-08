@@ -33,9 +33,10 @@ jobs:
         git tag -a "${{ steps.bump-cargo-version.outputs.new_version }}" -m "Release: ${{ steps.bump-cargo-version.outputs.new_version }}"
         git push origin "${{ steps.bump-cargo-version.outputs.new_version }}"
         echo "Version updated and tag created."
+    - name: Generate release tarball
+      run: git archive --format=tar.gz -o "gen-${{ steps.bump-cargo-version.outputs.new_version }}.tar.gz" --prefix=gen/ main
     - name: Upload release tarball
       uses: actions/upload-artifact@v4
       with:
-        git archive --format=tar.gz -o "gen-${{ steps.bump-cargo-version.outputs.new_version }}.tar.gz" --prefix=gen/ main
         name: gen-release-tarball
         path: "gen-${{ steps.bump-cargo-version.outputs.new_version }}.tar.gz"
