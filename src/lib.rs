@@ -3,6 +3,7 @@ use std::io::BufRead;
 use std::path::Path;
 use std::{io, str};
 pub mod annotations;
+pub mod commands;
 pub mod config;
 pub mod diffs;
 pub mod exports;

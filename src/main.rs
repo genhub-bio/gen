@@ -1,23 +1,16 @@
 #![allow(warnings)]
 use clap::{Parser, Subcommand};
 use core::ops::Range;
+use gen::commands::{Cli, Commands};
 use gen::config;
 use gen::config::{get_gen_dir, get_operation_connection};
 use rusqlite::params;
 
 use gen::annotations::gff::propagate_gff;
+use gen::commands::cli_context::CliContext;
 use gen::diffs::gfa::gfa_sample_diff;
-use gen::exports::fasta::export_fasta;
-use gen::exports::genbank::export_genbank;
-use gen::exports::gfa::export_gfa;
-use gen::fasta::FastaError;
-use gen::genbank::GenBankError;
 use gen::get_connection;
 use gen::graph_operators::{derive_chunks, get_path, make_stitch};
-use gen::imports::fasta::import_fasta;
-use gen::imports::genbank::import_genbank;
-use gen::imports::gfa::{import_gfa, GFAImportError};
-use gen::imports::library::import_library;
 use gen::models::block_group::BlockGroup;
 use gen::models::file_types::FileTypes;
 use gen::models::metadata;
@@ -30,12 +23,7 @@ use gen::operation_management;
 use gen::operation_management::{parse_patch_operations, push, OperationError};
 use gen::patch;
 use gen::translate;
-use gen::updates::fasta::update_with_fasta;
-use gen::updates::gaf::{transform_csv_to_fasta, update_with_gaf};
-use gen::updates::genbank::update_with_genbank;
-use gen::updates::gfa::update_with_gfa;
-use gen::updates::library::update_with_library;
-use gen::updates::vcf::{update_with_vcf, VcfError};
+use gen::updates::gaf::transform_csv_to_fasta;
 use gen::views::block_group::view_block_group;
 use gen::views::operations::view_operations;
 use gen::views::patch::view_patches;
@@ -50,16 +38,6 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::{io, str};
 
-#[derive(Parser)]
-#[command(version, about, long_about = None, arg_required_else_help(true))]
-struct Cli {
-    /// The path to the database you wish to utilize
-    #[arg(short, long)]
-    db: Option<String>,
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
 fn get_default_collection(conn: &Connection) -> String {
     let mut stmt = conn
         .prepare("select collection_name from defaults where id = 1")
@@ -68,432 +46,12 @@ fn get_default_collection(conn: &Connection) -> String {
         .unwrap_or("default".to_string())
 }
 
-#[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)]
-enum Commands {
-    /// Commands for transforming file types for input to Gen.
-    #[command(arg_required_else_help(true))]
-    Transform {
-        /// For update-gaf, this transforms the csv to a fasta for use in alignments
-        #[arg(long)]
-        format_csv_for_gaf: Option<String>,
-    },
-    /// Translate coordinates of standard bioinformatic file formats.
-    #[command(arg_required_else_help(true))]
-    Translate {
-        /// Transform coordinates of a BED to graph nodes
-        #[arg(long)]
-        bed: Option<String>,
-        /// Transform coordinates of a GFF to graph nodes
-        #[arg(long)]
-        gff: Option<String>,
-        /// The name of the collection to map sequences against
-        #[arg(short, long)]
-        collection: Option<String>,
-        /// The sample name whose graph coordinates are mapped against
-        #[arg(short, long)]
-        sample: Option<String>,
-    },
-    /// Import a new sequence collection.
-    #[command(arg_required_else_help(true))]
-    Import {
-        /// Fasta file path
-        #[arg(short, long)]
-        fasta: Option<String>,
-        /// Genbank file path
-        #[arg(long)]
-        gb: Option<String>,
-        /// GFA file path
-        #[arg(short, long)]
-        gfa: Option<String>,
-        /// The name of the collection to store the entry under
-        #[arg(short, long)]
-        name: Option<String>,
-        /// A sample name to associate the fasta file with
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// Don't store the sequence in the database, instead store the filename
-        #[arg(long, action)]
-        shallow: bool,
-        /// The name of the region if importing a library
-        #[arg(long)]
-        region_name: Option<String>,
-        /// The path to the combinatorial library parts
-        #[arg(long)]
-        parts: Option<String>,
-        /// The path to the combinatorial library csv
-        #[arg(long)]
-        library: Option<String>,
-    },
-    /// Update a sequence collection with new data
-    #[command(arg_required_else_help(true))]
-    Update {
-        /// The name of the collection to update
-        #[arg(short, long)]
-        name: Option<String>,
-        /// A fasta file to insert
-        #[arg(short, long)]
-        fasta: Option<String>,
-        /// A VCF file to incorporate
-        #[arg(short, long)]
-        vcf: Option<String>,
-        /// A GenBank file to update from
-        #[arg(long)]
-        gb: Option<String>,
-        /// If no genotype is provided, enter the genotype to assign variants
-        #[arg(short, long)]
-        genotype: Option<String>,
-        /// If no sample is provided, enter the sample to associate variants to
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// New sample name if we are updating with intentional edits
-        #[arg(long)]
-        new_sample: Option<String>,
-        /// Use the given sample as the parent sample for changes.
-        #[arg(long, alias = "cf")]
-        coordinate_frame: Option<String>,
-        /// A CSV with combinatorial library information
-        #[arg(short, long)]
-        library: Option<String>,
-        /// A fasta with the combinatorial library parts
-        #[arg(long)]
-        parts: Option<String>,
-        /// The name of the path to add the library to
-        #[arg(short, long)]
-        path_name: Option<String>,
-        /// The name of the region to update (eg "chr1")
-        #[arg(long)]
-        region_name: Option<String>,
-        /// The start coordinate for the region to add the library to
-        #[arg(long)]
-        start: Option<i64>,
-        /// The end coordinate for the region to add the library to
-        #[arg(short, long)]
-        end: Option<i64>,
-        /// For fasta updates, do not update the sample's reference path if there is a single fasta entry
-        #[arg(long, action)]
-        no_reference_path_update: bool,
-        /// If a new entity is found, create it as a normal import
-        #[arg(long, action, alias = "cm")]
-        create_missing: bool,
-        /// A GFA file to update from
-        #[arg(long)]
-        gfa: Option<String>,
-    },
-    /// Show a visual representation of a graph in the terminal
-    #[command()]
-    View {
-        /// The name of the graph to view
-        #[clap(index = 1)]
-        graph: Option<String>,
-        /// View the graph for a specific sample
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// Look for the sample in a specific collection
-        #[arg(short, long)]
-        collection: Option<String>,
-        /// Position as "node id:coordinate" to center the graph on
-        #[arg(short, long)]
-        position: Option<String>,
-    },
-    /// Update a sequence collecting using GAF results.
-    #[command(name = "update-gaf", arg_required_else_help(true))]
-    UpdateGaf {
-        /// The name of the collection to update
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The GAF input
-        #[arg(short, long)]
-        gaf: String,
-        /// The csv describing changes to make
-        #[arg(short, long)]
-        csv: String,
-        /// The sample to update or create
-        #[arg(short, long)]
-        sample: String,
-        /// If specified, the newly created sample will inherit this sample's existing graph
-        #[arg(short, long)]
-        parent_sample: Option<String>,
-    },
-    /// Export a set of operations to a patch file
-    #[command(name = "patch-create", arg_required_else_help(true))]
-    PatchCreate {
-        /// To create a patch against a non-checked out branch.
-        #[arg(short, long)]
-        branch: Option<String>,
-        /// The patch name
-        #[arg(short, long)]
-        name: String,
-        /// The operation(s) to create a patch from. For a range, use start..end and for multiple
-        /// or discontinuous ranges, use commas. HEAD and HEAD~<number> syntax is supported.
-        #[clap(index = 1)]
-        operation: String,
-    },
-    /// Apply changes from a patch file
-    #[command(name = "patch-apply", arg_required_else_help(true))]
-    PatchApply {
-        /// The patch file
-        #[clap(index = 1)]
-        patch: String,
-    },
-    /// View a patch in dot format
-    #[command(name = "patch-view", arg_required_else_help(true))]
-    PatchView {
-        /// The prefix to use in the output filenames. One dot file is created for each operation and graph,
-        /// following the pattern {prefix}_{operation}_{graph_id}.dot. Defaults to patch filename.
-        #[arg(long, short)]
-        prefix: Option<String>,
-        /// The patch file
-        #[clap(index = 1)]
-        patch: String,
-    },
-    /// Initialize a gen repository
-    Init {},
-    /// Manage and create branches
-    #[command(arg_required_else_help(true))]
-    Branch {
-        /// Create a branch with the given name
-        #[arg(long, action)]
-        create: bool,
-        /// Delete a given branch
-        #[arg(short, long, action)]
-        delete: bool,
-        /// Checkout a given branch
-        #[arg(long, action)]
-        checkout: bool,
-        /// List all branches
-        #[arg(short, long, action)]
-        list: bool,
-        #[arg(short, long, action)]
-        merge: bool,
-        /// The branch name
-        #[clap(index = 1)]
-        branch_name: Option<String>,
-    },
-    /// Merge branches
-    #[command(arg_required_else_help(true))]
-    Merge {
-        /// The branch name to merge
-        #[clap(index = 1)]
-        branch_name: Option<String>,
-    },
-    /// Migrate a database to a given operation
-    #[command(arg_required_else_help(true))]
-    Checkout {
-        /// Create and checkout a new branch.
-        #[arg(short, long)]
-        branch: Option<String>,
-        /// The operation hash to move to
-        #[clap(index = 1)]
-        hash: Option<String>,
-    },
-    /// Reset a branch to a previous operation
-    #[command(arg_required_else_help(true))]
-    Reset {
-        /// The operation hash to reset to
-        #[clap(index = 1)]
-        hash: String,
-    },
-    /// View operations carried out against a database
-    #[command()]
-    Operations {
-        /// Edit operation messages
-        #[arg(short, long)]
-        interactive: bool,
-        /// The branch to list operations for
-        #[arg(short, long)]
-        branch: Option<String>,
-    },
-    /// Apply an operation to a branch
-    #[command(arg_required_else_help(true))]
-    Apply {
-        /// The operation hash to apply
-        #[clap(index = 1)]
-        hash: String,
-    },
-    /// Export sequence data
-    #[command(arg_required_else_help(true))]
-    Export {
-        /// The name of the collection to export
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the GFA file to export to
-        #[arg(short, long)]
-        gfa: Option<String>,
-        /// An optional sample name
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// The name of the fasta file to export to
-        #[arg(short, long)]
-        fasta: Option<String>,
-        /// The name of the GenBank file to export to
-        #[arg(long)]
-        gb: Option<String>,
-        /// The max node size for gfa export
-        #[arg(long)]
-        node_max: Option<i64>,
-    },
-    /// Configure default options
-    #[command(arg_required_else_help(true))]
-    Defaults {
-        /// The default database to use
-        #[arg(short, long)]
-        database: Option<String>,
-        /// The default collection to use
-        #[arg(short, long)]
-        collection: Option<String>,
-    },
-    /// Set the remote URL for this repo
-    #[command(arg_required_else_help(true))]
-    SetRemote {
-        /// The remote URL to set
-        #[arg(short, long)]
-        remote: String,
-    },
-    /// Push the local repo to the remote
-    #[command()]
-    Push {},
-    #[command()]
-    Pull {},
-    /// Convert annotation coordinates between two samples
-    #[command(arg_required_else_help(true))]
-    PropagateAnnotations {
-        /// The name of the collection to annotate
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the sample the annotations are referenced to (if not provided, the default)
-        #[arg(short, long)]
-        from_sample: Option<String>,
-        /// The name of the sample to annotate
-        #[arg(short, long)]
-        to_sample: String,
-        /// The name of the annotation file to propagate
-        #[arg(short, long)]
-        gff: String,
-        /// The name of the output file
-        #[arg(short, long)]
-        output_gff: String,
-    },
-    /// List all samples in the current collection
-    ListSamples {},
-    #[command()]
-    /// List all regions/contigs in the current collection and given sample
-    ListGraphs {
-        /// The name of the collection to list graphs for
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the sample to list graphs for
-        #[arg(short, long)]
-        sample: Option<String>,
-    },
-    /// Extract a sequence from a graph
-    #[command(arg_required_else_help(true))]
-    GetSequence {
-        /// The name of the collection containing the sequence
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the sample containing the sequence
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// The name of the graph to get the sequence for
-        #[arg(short, long)]
-        graph: Option<String>,
-        /// The start coordinate of the sequence
-        #[arg(long)]
-        start: Option<i64>,
-        /// The end coordinate of the sequence
-        #[arg(long)]
-        end: Option<i64>,
-        /// The region (name:start-end format) of the sequence
-        #[arg(long)]
-        region: Option<String>,
-    },
-    /// Output a file representing the "diff" between two samples
-    Diff {
-        /// The name of the collection to diff
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the first sample to diff
-        #[arg(long)]
-        sample1: Option<String>,
-        /// The name of the second sample to diff
-        #[arg(long)]
-        sample2: Option<String>,
-        /// The name of the output GFA file
-        #[arg(long)]
-        gfa: String,
-    },
-    /// Replace a sequence graph with a subgraph in the range of the specified coordinates
-    DeriveSubgraph {
-        /// The name of the collection to derive the subgraph from
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the parent sample
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// The name of the new sample
-        #[arg(long)]
-        new_sample: String,
-        /// The name of the region to derive the subgraph from
-        #[arg(short, long)]
-        region: String,
-        /// Name of alternate path (not current) to use
-        #[arg(long)]
-        backbone: Option<String>,
-    },
-    /// Replace a sequence graph with subgraphs in the ranges of the specified coordinates
-    DeriveChunks {
-        /// The name of the collection to derive the subgraph from
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the parent sample
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// The name of the new sample
-        #[arg(long)]
-        new_sample: String,
-        /// The name of the region to derive the subgraph from
-        #[arg(short, long)]
-        region: String,
-        /// Name of alternate path (not current) to use
-        #[arg(long)]
-        backbone: Option<String>,
-        /// Breakpoints to derive chunks from
-        #[arg(long)]
-        breakpoints: Option<String>,
-        /// The size of the chunks to derive
-        #[arg(long)]
-        chunk_size: Option<i64>,
-    },
-    #[command(
-        verbatim_doc_comment,
-        long_about = "Combine multiple sequence graphs into one. Example:
-    gen make-stitch --sample parent_sample --new-sample my_child_sample --regions chr1.2,chr1.3 --new-region spliced_chr1"
-    )]
-    MakeStitch {
-        /// The name of the collection to derive the subgraph from
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the parent sample
-        #[arg(short, long)]
-        sample: Option<String>,
-        /// The name of the new sample
-        #[arg(long)]
-        new_sample: String,
-        /// The names of the regions to combine
-        #[arg(long)]
-        regions: String,
-        /// The name of the new region
-        #[arg(long)]
-        new_region: String,
-    },
-}
-
 fn main() {
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();
 
     let cli = Cli::parse();
+    let cli_context = CliContext::from(&cli);
 
     // commands not requiring a db connection are handled here
     if let Some(Commands::Init {}) = &cli.command {
@@ -567,108 +125,19 @@ fn main() {
     // initialize the selected database if needed.
     setup_db(&operation_conn, &db_uuid);
 
-    match &cli.command {
-        Some(Commands::Import {
-            fasta,
-            gb,
-            gfa,
-            name,
-            shallow,
-            sample,
-            region_name,
-            parts,
-            library,
-        }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            if fasta.is_some() {
-                match import_fasta(
-                    &fasta.clone().unwrap(),
-                    name,
-                    sample.as_deref(),
-                    *shallow,
-                    &conn,
-                    &operation_conn,
-                ) {
-                    Ok(_) => println!("Fasta imported."),
-                    Err(FastaError::OperationError(OperationError::NoChanges)) => {
-                        println!("Fasta contents already exist.")
-                    }
-                    Err(_) => {
-                        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        panic!("Import failed.");
-                    }
-                }
-            } else if gfa.is_some() {
-                match import_gfa(
-                    &PathBuf::from(gfa.clone().unwrap()),
-                    name,
-                    sample.as_deref(),
-                    &conn,
-                    &operation_conn,
-                ) {
-                    Ok(_) => println!("GFA Imported."),
-                    Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
-                        println!("GFA already exists.")
-                    }
-                    Err(_) => {
-                        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        panic!("Import failed.");
-                    }
-                }
-            } else if let Some(gb) = gb {
-                let mut reader: Box<dyn std::io::Read> = if gb.ends_with(".gz") {
-                    let file = File::open(gb.clone()).unwrap();
-                    Box::new(flate2::read::GzDecoder::new(file))
-                } else {
-                    Box::new(File::open(gb.clone()).unwrap())
-                };
-                match import_genbank(
-                    &conn,
-                    &operation_conn,
-                    &mut reader,
-                    name.deref(),
-                    sample.as_deref(),
-                    OperationInfo {
-                        files: vec![OperationFile {
-                            file_path: gb.clone(),
-                            file_type: FileTypes::GenBank,
-                        }],
-                        description: "GenBank Import".to_string(),
-                    },
-                ) {
-                    Ok(_) => println!("GenBank Imported."),
-                    Err(err) => {
-                        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        panic!("Import failed: {err:?}");
-                    }
-                }
-            } else if region_name.is_some() && parts.is_some() && library.is_some() {
-                import_library(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.as_deref(),
-                    parts.as_deref().unwrap(),
-                    library.as_deref().unwrap(),
-                    region_name.as_deref().unwrap(),
-                )
-                .unwrap();
-            } else {
-                conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                panic!(
-                    "ERROR: Import command attempted but no recognized file format was specified"
-                );
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+    match cli.command {
+        Some(Commands::Init {}) => {
+            config::get_or_create_gen_dir();
+            println!("Gen repository initialized.");
+        }
+        Some(Commands::Import(cmd)) => {
+            gen::commands::import::execute(&cli_context, cmd);
+        }
+        Some(Commands::Update(cmd)) => {
+            gen::commands::update::execute(&cli_context, cmd);
+        }
+        Some(Commands::Export(cmd)) => {
+            gen::commands::export::execute(&cli_context, cmd);
         }
         Some(Commands::View {
             graph,
@@ -688,138 +157,6 @@ fn main() {
                 collection_name,
                 position.clone(),
             );
-        }
-        Some(Commands::Update {
-            name,
-            fasta,
-            vcf,
-            gb,
-            library,
-            parts,
-            genotype,
-            sample,
-            new_sample,
-            path_name,
-            region_name,
-            start,
-            end,
-            no_reference_path_update,
-            coordinate_frame,
-            create_missing,
-            gfa,
-        }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            if let Some(library_path) = library {
-                update_with_library(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &new_sample.clone().unwrap(),
-                    &path_name.clone().unwrap(),
-                    start.unwrap(),
-                    end.unwrap(),
-                    &parts.clone().unwrap(),
-                    library_path,
-                )
-                .unwrap();
-            } else if let Some(fasta_path) = fasta {
-                // NOTE: This has to go after library because the library update also uses a fasta
-                // file
-                update_with_fasta(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &new_sample
-                        .clone()
-                        .expect("new-sample flag must be provided."),
-                    &region_name.clone().expect("region-name must be provided."),
-                    start.expect("start flag must be provided."),
-                    end.expect("end flag must be provided."),
-                    fasta_path,
-                    *no_reference_path_update,
-                )
-                .unwrap();
-            } else if let Some(vcf_path) = vcf {
-                match update_with_vcf(
-                    vcf_path,
-                    name,
-                    genotype.clone().unwrap_or("".to_string()),
-                    sample.clone().unwrap_or("".to_string()),
-                    &conn,
-                    &operation_conn,
-                    coordinate_frame.as_deref(),
-                ) {
-                    Ok(_) => {},
-                    Err(VcfError::OperationError(OperationError::NoChanges)) => println!("No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."),
-                    Err(e) => panic!("Error updating with vcf: {e}"),
-                }
-            } else if let Some(gb_path) = gb {
-                let f = File::open(gb_path).unwrap();
-                match update_with_genbank(
-                    &conn,
-                    &operation_conn,
-                    &f,
-                    name.deref(),
-                    *create_missing,
-                    &OperationInfo {
-                        files: vec![OperationFile {
-                            file_path: gb_path.clone(),
-                            file_type: FileTypes::GenBank,
-                        }],
-                        description: "Update from GenBank".to_string(),
-                    },
-                ) {
-                    Ok(_) => {}
-                    Err(e) => panic!("Failed to update. Error is: {e}"),
-                }
-            } else if let Some(gfa_path) = gfa {
-                match update_with_gfa(
-                    &conn,
-                    &operation_conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &new_sample.clone().unwrap(),
-                    gfa_path,
-                ) {
-                    Ok(_) => {}
-                    Err(e) => panic!("Failed to update. Error is: {e}"),
-                }
-            } else {
-                panic!("Unknown file type provided for update.");
-            }
-
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
-        }
-        Some(Commands::UpdateGaf {
-            name,
-            gaf,
-            csv,
-            sample,
-            parent_sample,
-        }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            update_with_gaf(
-                &conn,
-                &operation_conn,
-                gaf,
-                csv,
-                name,
-                Some(sample.as_ref()),
-                parent_sample.as_deref(),
-            );
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
         }
         Some(Commands::Translate {
             bed,
@@ -884,7 +221,7 @@ fn main() {
                         .unwrap_or_else(|| panic!("No branch named {branch_name}."))
                         .id,
                 );
-                if *interactive {
+                if interactive {
                     view_operations(&conn, &operation_conn, &operations);
                 } else {
                     let mut indicator = "";
@@ -918,7 +255,7 @@ fn main() {
             merge,
             branch_name,
         }) => {
-            if *create {
+            if create {
                 Branch::create(
                     &operation_conn,
                     &db_uuid,
@@ -926,7 +263,7 @@ fn main() {
                         .clone()
                         .expect("Must provide a branch name to create."),
                 );
-            } else if *delete {
+            } else if delete {
                 Branch::delete(
                     &operation_conn,
                     &db_uuid,
@@ -934,7 +271,7 @@ fn main() {
                         .clone()
                         .expect("Must provide a branch name to delete."),
                 );
-            } else if *checkout {
+            } else if checkout {
                 operation_management::checkout(
                     &conn,
                     &operation_conn,
@@ -947,7 +284,7 @@ fn main() {
                     ),
                     None,
                 );
-            } else if *list {
+            } else if list {
                 let current_branch = OperationState::get_current_branch(&operation_conn, &db_uuid);
                 let mut indicator = "";
                 println!(
@@ -978,7 +315,7 @@ fn main() {
                             .unwrap_or(String::new())
                     );
                 }
-            } else if *merge {
+            } else if merge {
                 let branch_name = branch_name.clone().expect("Branch name must be provided.");
                 let other_branch = Branch::get_by_name(&operation_conn, &db_uuid, &branch_name)
                     .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
@@ -1036,7 +373,7 @@ fn main() {
         Some(Commands::Apply { hash }) => {
             conn.execute("BEGIN TRANSACTION", []).unwrap();
             operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            match operation_management::apply(&conn, &operation_conn, hash, None) {
+            match operation_management::apply(&conn, &operation_conn, &hash, None) {
                 Ok(_) => println!("Operation applied"),
                 Err(_) => {
                     conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
@@ -1081,48 +418,7 @@ fn main() {
             }
         }
         Some(Commands::Reset { hash }) => {
-            operation_management::reset(&conn, &operation_conn, &db_uuid, hash);
-        }
-        Some(Commands::Export {
-            name,
-            gb,
-            gfa,
-            sample,
-            fasta,
-            node_max,
-        }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            if let Some(gfa_path) = gfa {
-                export_gfa(
-                    &conn,
-                    name,
-                    &PathBuf::from(gfa_path),
-                    sample.clone(),
-                    *node_max,
-                );
-            } else if let Some(fasta_path) = fasta {
-                export_fasta(
-                    &conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &PathBuf::from(fasta_path),
-                );
-            } else if let Some(gb_path) = gb {
-                export_genbank(
-                    &conn,
-                    name,
-                    sample.clone().as_deref(),
-                    &PathBuf::from(gb_path),
-                );
-            } else {
-                println!("No file type specified for export.");
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            operation_management::reset(&conn, &operation_conn, &db_uuid, &hash);
         }
         Some(Commands::PatchCreate {
             name,
@@ -1130,7 +426,7 @@ fn main() {
             branch,
         }) => {
             let branch = if let Some(branch_name) = branch {
-                Branch::get_by_name(&operation_conn, &db_uuid, branch_name)
+                Branch::get_by_name(&operation_conn, &db_uuid, &branch_name)
                     .unwrap_or_else(|| panic!("No branch with name {branch_name} found."))
             } else {
                 let current_branch_id =
@@ -1142,7 +438,7 @@ fn main() {
             let operations = parse_patch_operations(
                 &branch_ops,
                 &branch.current_operation_hash.unwrap(),
-                operation,
+                &operation,
             );
             let mut f = File::create(format!("{name}.gz")).unwrap();
             patch::create_patch(&operation_conn, &operations, &mut f);
@@ -1153,13 +449,13 @@ fn main() {
             patch::apply_patches(&conn, &operation_conn, &patches);
         }
         Some(Commands::PatchView { prefix, patch }) => {
-            let patch_path = Path::new(patch);
+            let patch_path = Path::new(&patch);
             let mut f = File::open(patch_path).unwrap();
             let patches = patch::load_patches(&mut f);
             let diagrams = view_patches(&patches);
             for (patch_hash, patch_diagrams) in diagrams.iter() {
                 for (bg_id, dot) in patch_diagrams.iter() {
-                    let path = if let Some(p) = prefix {
+                    let path = if let Some(ref p) = prefix {
                         format!("{p}_{patch_hash:.7}_{bg_id}.dot")
                     } else {
                         format!(
@@ -1209,9 +505,9 @@ fn main() {
                 &conn,
                 name,
                 from_sample_name.as_deref(),
-                to_sample,
-                gff,
-                output_gff,
+                &to_sample,
+                &gff,
+                &output_gff,
             );
 
             conn.execute("END TRANSACTION", []).unwrap();
@@ -1442,7 +738,7 @@ fn main() {
                 sample_name.as_deref(),
                 &new_sample_name,
                 &region_names,
-                new_region,
+                &new_region,
             ) {
                 Ok(_) => {}
                 Err(e) => panic!("Error stitching subgraphs: {e}"),

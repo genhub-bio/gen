@@ -33,4 +33,3 @@ repos:
         language: script
         pass_filenames: false
         files: ^paper/.*\.(md|bib|svg|dot)$
-
