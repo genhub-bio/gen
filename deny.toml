@@ -74,6 +74,7 @@ ignore = [
     #{ id = "RUSTSEC-2024-0370", reason = "gb-io depends on this via err-derive" }, # advisory not detected
     { id = "RUSTSEC-2024-0436", reason = "paste is no longer maintained, but current version is OK" },
     { id = "RUSTSEC-2023-0050", reason = "multipart unmaintained, maturin depends on it, current version OK"},
+    { id = "RUSTSEC-2025-0021", reason = "cargo-deny depends on gix, which depends on older versions of gix-features"}
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
     #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
 ]
@@ -97,7 +98,10 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Zlib"
+    "Zlib",
+    "0BSD",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0"
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the

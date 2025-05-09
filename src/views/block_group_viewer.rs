@@ -1,10 +1,11 @@
+use crate::config::get_theme_color;
 use crate::graph::{project_path, GenGraph, GraphNode};
 use crate::models::node::Node;
 use crate::models::path::Path;
 use crate::models::sequence::Sequence;
 use crate::views::block_layout::{BaseLayout, ScaledLayout};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use log::info;
 use log::warn;
 use petgraph::graphmap::DiGraphMap;
@@ -19,6 +20,7 @@ use ratatui::{
 };
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
+
 /// Labels used in the graph visualization (selected, not-selected)
 /// the trick is to get them to align with the braille characters
 /// we use to draw lines:
@@ -27,6 +29,7 @@ pub mod label {
     pub const START: &str = "Start >";
     pub const END: &str = "> End";
     pub const NODE: &str = "⏺";
+    pub const SELECTED: &str = "█";
 }
 
 /// Used for scrolling through the graph.
@@ -231,6 +234,7 @@ pub struct State {
     pub world_viewport: ((f64, f64), (f64, f64)), // (min_x, min_y), (max_x, max_y)
     pub selected_block: Option<GraphNode>,
     pub first_render: bool,
+    pub show_splash_screen: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -242,6 +246,7 @@ impl Default for State {
             world_viewport: ((0.0, 0.0), (0.0, 0.0)),
             selected_block: None,
             first_render: true,
+            show_splash_screen: false,
         }
     }
 }
@@ -266,12 +271,22 @@ impl<'a> Viewer<'a> {
         conn: &'a Connection,
         plot_parameters: PlotParameters,
     ) -> Viewer<'a> {
-        Self::with_origin(
+        let mut new_viewer = Self::with_origin(
             block_graph,
             conn,
             plot_parameters,
             (Node::get_start_node(), 0),
-        )
+        );
+
+        // If we're being asked to view an empty graph, show the splash screen
+        if block_graph.node_count() == 1 {
+            if let Some(node) = block_graph.nodes().next() {
+                if node.node_id == crate::models::node::PATH_START_NODE_ID && node.block_id == -1 {
+                    new_viewer.state.show_splash_screen = true;
+                }
+            }
+        }
+        new_viewer
     }
 
     pub fn with_origin(
@@ -305,13 +320,19 @@ impl<'a> Viewer<'a> {
             .nodes()
             .find(|node| node.node_id == origin.0.id);
 
+        // If using with_origin, the splash screen is never shown as we have a specific focus
+        let initial_state = State {
+            show_splash_screen: false,
+            ..Default::default()
+        };
+
         Viewer {
             block_graph,
             conn,
             base_layout,
             scaled_layout,
             node_sequences,
-            state: State::default(),
+            state: initial_state,
             parameters: plot_parameters,
             origin_block,                 // Gen block
             view_block: Block::default(), //Ratatui block (TODO: make Viewer a proper widget with nesting, or find a better name)
@@ -593,6 +614,55 @@ impl<'a> Viewer<'a> {
         let canvas_block = self.view_block.clone();
         let viewport = canvas_block.inner(area);
 
+        // Splashscreen logic
+        if self.state.show_splash_screen && self.state.selected_block.is_none() {
+            let splashscreen_lines: Vec<&str> = vec![
+                " ██████╗ ███████╗███╗   ██╗",
+                "██╔════╝ ██╔════╝████╗  ██║",
+                "██║  ███╗█████╗  ██╔██╗ ██║",
+                "██║   ██║██╔══╝  ██║╚██╗██║",
+                "╚██████╔╝███████╗██║ ╚████║",
+                " ╚═════╝ ╚══════╝╚═╝  ╚═══╝",
+            ];
+            let splashscreen_height = splashscreen_lines.len() as u16;
+            let splashscreen_width = splashscreen_lines
+                .iter()
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(0) as u16;
+
+            if viewport.width >= splashscreen_width && viewport.height >= splashscreen_height {
+                let start_x = viewport.x + (viewport.width - splashscreen_width) / 2;
+                let start_y = viewport.y + (viewport.height - splashscreen_height) / 2;
+
+                let splash_canvas = Canvas::default()
+                    .background_color(get_theme_color("canvas").unwrap())
+                    .block(canvas_block)
+                    .x_bounds([
+                        viewport.x as f64,
+                        (viewport.x + viewport.width - 1) as f64 + 0.5,
+                    ])
+                    .y_bounds([
+                        viewport.y as f64,
+                        (viewport.y + viewport.height - 1) as f64 + 0.75,
+                    ])
+                    .paint(|ctx| {
+                        for (i, line) in splashscreen_lines.iter().enumerate() {
+                            ctx.print(
+                                start_x as f64,
+                                (start_y + (splashscreen_height - 1 - i as u16)) as f64,
+                                Span::styled(
+                                    *line,
+                                    Style::default().fg(get_theme_color("base07").unwrap()),
+                                ),
+                            );
+                        }
+                    });
+                frame.render_widget(splash_canvas, area);
+                return;
+            }
+        }
+
         // Check if the viewport has changed size, and if so, update the offset to keep our reference
         // frame intact.
         if self.state.viewport != viewport {
@@ -634,8 +704,8 @@ impl<'a> Viewer<'a> {
                 if let Some(center_block) = self.state.selected_block {
                     self.center_on_block(center_block).unwrap();
                 }
-                self.state.first_render = false;
             }
+            self.state.first_render = false;
         }
 
         // Define the viewport from the world perspective
@@ -648,11 +718,15 @@ impl<'a> Viewer<'a> {
         // Add the 1/2 and 3/4 units to account for the braille cell size on the right and top
         let x_max = x_max + 1.0 / 2.0;
         let y_max = y_max + 3.0 / 4.0;
-
         self.state.world_viewport = ((x_min, y_min), (x_max, y_max));
 
+        // Make sure we always have a block selected when we come into focus
+        if self.state.selected_block.is_none() && self.has_focus {
+            self.select_center_block();
+        }
+
         let canvas = Canvas::default()
-            .background_color(Color::Black)
+            .background_color(get_theme_color("canvas").unwrap())
             .block(canvas_block)
             // Adjust the x_bounds and y_bounds by the scroll offsets.
             .x_bounds([x_min, x_max])
@@ -664,7 +738,7 @@ impl<'a> Viewer<'a> {
 
                 // Draw all edges (does not consider highlights)
                 for &(source, target) in self.scaled_layout.lines.keys() {
-                    self.draw_edge(ctx, &(source, target), Color::DarkGray);
+                    self.draw_edge(ctx, &(source, target), get_theme_color("edge").unwrap());
                 }
 
                 // Print the labels
@@ -680,30 +754,26 @@ impl<'a> Viewer<'a> {
                         continue;
                     }
 
-                    // Get the block position and available space
                     let ((x, y), (x2, _y2)) = self.scaled_layout.labels[&block];
+                    let mut label = self.make_label(&block, (x2 - x) as u32);
 
-                    // Get the label text
-                    let label = self.make_label(&block, (x2 - x) as u32);
-
-                    // The style of a label is determined by 3 factors:
-                    // 1. Whether the viewer has focus
-                    // 2. Whether the block is selected
-                    // 3. Whether the label consists of text or a glyph (the dot for zoomed out views)
+                    // Style the label
+                    // This depends on the zoom level (at lower zoom levels we only show glyphs)
+                    // and whether the block is selected or not.
                     let is_selected = Some(block) == self.state.selected_block;
-                    let is_glyph = label.as_str() == label::NODE;
-
-                    let style = match (self.has_focus, is_selected, is_glyph) {
-                        (true, true, false) => Style::default().fg(Color::White).bg(Color::Blue),
-                        (true, true, true) => Style::default().fg(Color::Blue),
-                        (true, false, false) => {
-                            Style::default().fg(Color::White).bg(Color::Indexed(236))
+                    let is_glyph = label == label::NODE;
+                    let style = match (is_glyph, is_selected) {
+                        (true, true) => {
+                            label = label::SELECTED.to_string();
+                            Style::default().fg(get_theme_color("highlight").unwrap())
                         }
-                        (true, false, true) => Style::default().fg(Color::White),
-                        (false, _, false) => {
-                            Style::default().fg(Color::White).bg(Color::Indexed(236))
-                        }
-                        (false, _, true) => Style::default().fg(Color::White),
+                        (true, false) => Style::default().fg(get_theme_color("text").unwrap()),
+                        (false, true) => Style::default()
+                            .fg(get_theme_color("canvas").unwrap())
+                            .bg(get_theme_color("highlight").unwrap()),
+                        (false, false) => Style::default()
+                            .fg(get_theme_color("text").unwrap())
+                            .bg(get_theme_color("node").unwrap()),
                     };
 
                     self.place_label(ctx, &label, (x, y), style);
@@ -720,7 +790,7 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::START,
                             (x3, y),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(get_theme_color("text_muted").unwrap()),
                         );
                     }
 
@@ -736,23 +806,9 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::END,
                             (x3, y),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(get_theme_color("text_muted").unwrap()),
                         );
                     }
-                }
-
-                // Draw a cursor if no block is currently selected
-                // TODO: don't force the cursor to the center of the viewport,
-                // actually track its position in the state
-                if self.state.selected_block.is_none() {
-                    // Determine the middle of the viewport
-                    let x_mid = self.state.offset_x + (self.state.viewport.width - 1) as i32 / 2;
-                    let y_mid = self.state.offset_y + (self.state.viewport.height - 1) as i32 / 2;
-                    ctx.print(
-                        x_mid as f64,
-                        y_mid as f64,
-                        Span::styled("█", Style::default().fg(Color::Blue)),
-                    );
                 }
             });
         frame.render_widget(canvas, area);
@@ -763,6 +819,7 @@ impl<'a> Viewer<'a> {
         Canvas::default()
             .x_bounds([x_min, x_max])
             .y_bounds([y_min, y_max])
+            .background_color(get_theme_color("canvas").unwrap())
             .paint(|ctx| {
                 for (color, highlight_graph) in &self.highlights {
                     for (source, target, _) in highlight_graph.all_edges() {
@@ -1132,60 +1189,48 @@ impl<'a> Viewer<'a> {
     }
 
     pub fn handle_input(&mut self, key: KeyEvent) {
-        // Clear selection when using SHIFT or ALT with arrow keys for panning
-        if matches!(
-            key.code,
-            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
-        ) && (key.modifiers.contains(KeyModifiers::SHIFT)
-            || key.modifiers.contains(KeyModifiers::ALT))
-        {
-            self.state.selected_block = None;
-        }
+        // Panning a cursor with shift/alt was too inconsistent
+        // (e.g. on mac os, alt-left/right is intercepted by the system)
+        // so now we make it automatic based on blocks being cut off on the left/right.
+        const SCROLL_STEP_X: i32 = 12;
 
         match key.code {
             KeyCode::Left => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_x -= self.state.viewport.width as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_x -= 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Left);
+                if let Some(selected_block) = self.state.selected_block {
+                    let ((block_x1_f, _), (_, _)) =
+                        self.scaled_layout.labels.get(&selected_block).unwrap();
+                    // Selected block is cut off on the left.
+                    // TODO: make this more about the next block being visible
+                    if (block_x1_f.round() as i32) < self.state.offset_x {
+                        self.state.offset_x -= SCROLL_STEP_X;
+                    } else {
+                        self.move_selection(NavDirection::Left);
+                    }
                 } else {
-                    self.snap_cursor(NavDirection::Left);
+                    self.state.offset_x -= self.state.viewport.width as i32 / 3;
                 }
             }
             KeyCode::Right => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_x += self.state.viewport.width as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_x += 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Right);
+                if let Some(selected_block) = self.state.selected_block {
+                    let ((_, _), (block_x2_f, _)) =
+                        self.scaled_layout.labels.get(&selected_block).unwrap();
+                    // Selected block is cut off on the right.
+                    if (block_x2_f.round() as i32)
+                        > self.state.offset_x + self.state.viewport.width as i32
+                    {
+                        self.state.offset_x += SCROLL_STEP_X;
+                    } else {
+                        self.move_selection(NavDirection::Right);
+                    }
                 } else {
-                    self.snap_cursor(NavDirection::Right);
+                    self.state.offset_x += self.state.viewport.width as i32 / 3;
                 }
             }
             KeyCode::Up => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_y += self.state.viewport.height as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_y += 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Up);
-                } else {
-                    self.snap_cursor(NavDirection::Up);
-                }
+                self.move_selection(NavDirection::Up);
             }
             KeyCode::Down => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.state.offset_y -= self.state.viewport.height as i32 / 3;
-                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.state.offset_y -= 1;
-                } else if self.state.selected_block.is_some() {
-                    self.move_selection(NavDirection::Down);
-                } else {
-                    self.snap_cursor(NavDirection::Down);
-                }
+                self.move_selection(NavDirection::Down);
             }
             // Zooming in and out
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -1272,7 +1317,7 @@ impl<'a> Viewer<'a> {
     }
 
     pub fn get_status_line() -> String {
-        "◀ ▼ ▲ ▶ select blocks (+shift/alt to scroll) | +/- zoom | s: edge style".to_string()
+        "*◀ ▼ ▲ ▶* scroll | *+/-* zoom | *s* edge style".to_string()
     }
 }
 
