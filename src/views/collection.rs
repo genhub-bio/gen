@@ -1,4 +1,4 @@
-use crate::config::col;
+use crate::config::get_theme_color;
 use crate::models::block_group::BlockGroup;
 use crate::models::collection::Collection;
 use crate::models::sample::Sample;
@@ -542,12 +542,12 @@ impl StatefulWidget for &CollectionExplorer {
             if context.is_selected {
                 let style = if has_focus {
                     Style::default()
-                        .fg(col("text_muted").unwrap())
-                        .bg(col("highlight").unwrap())
+                        .fg(get_theme_color("text_muted").unwrap())
+                        .bg(get_theme_color("highlight").unwrap())
                 } else {
                     Style::default()
-                        .fg(col("text").unwrap())
-                        .bg(col("highlight_muted").unwrap())
+                        .fg(get_theme_color("text").unwrap())
+                        .bg(get_theme_color("highlight_muted").unwrap())
                 };
                 (item.style(style), item_height)
             } else {

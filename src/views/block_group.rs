@@ -1,4 +1,4 @@
-use crate::config::col;
+use crate::config::get_theme_color;
 use crate::graph::{GenGraph, GraphNode};
 use crate::models::{
     block_group::BlockGroup, node::Node, node::PATH_START_NODE_ID, path::Path, traits::Query,
@@ -212,8 +212,8 @@ pub fn view_block_group(
             if show_sidebar {
                 let sidebar_block = Block::default().padding(Padding::new(0, 0, 1, 1)).style(
                     Style::default()
-                        .bg(col("sidebar").unwrap())
-                        .fg(col("text").unwrap()),
+                        .bg(get_theme_color("sidebar").unwrap())
+                        .fg(get_theme_color("text").unwrap()),
                 );
                 let sidebar_content_area = sidebar_block.inner(sidebar_area);
 
@@ -222,7 +222,7 @@ pub fn view_block_group(
 
                 // Draw the vertical separator line at the right edge of the sidebar
                 let line_char = "▕";
-                let line_style = Style::default().fg(col("separator").unwrap());
+                let line_style = Style::default().fg(get_theme_color("separator").unwrap());
                 let x = sidebar_area.right() - 1;
                 for y in sidebar_area.top()..sidebar_area.bottom() {
                     frame.buffer_mut().set_string(x, y, line_char, line_style);
@@ -247,12 +247,12 @@ pub fn view_block_group(
             // Style the status bar text
             let status_line = style_text(
                 &status_bar_contents,
-                Style::default().fg(col("text_muted").unwrap()), // default color
-                Style::default().fg(col("highlight").unwrap()),  // highlight color
+                Style::default().fg(get_theme_color("text_muted").unwrap()), // default color
+                Style::default().fg(get_theme_color("highlight").unwrap()),  // highlight color
             );
 
-            let status_bar =
-                Paragraph::new(status_line).style(Style::default().bg(col("statusbar").unwrap()));
+            let status_bar = Paragraph::new(status_line)
+                .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
 
             frame.render_widget(status_bar, status_bar_area);
 
@@ -262,7 +262,7 @@ pub fn view_block_group(
                 let loading_text = Text::styled(
                     "Loading...",
                     Style::default()
-                        .fg(col("text").unwrap())
+                        .fg(get_theme_color("text").unwrap())
                         .add_modifier(Modifier::BOLD),
                 );
                 let loading_para =
@@ -293,15 +293,15 @@ pub fn view_block_group(
                     .title("Details")
                     .style(
                         Style::default()
-                            .bg(col("panel").unwrap())
-                            .fg(col("text").unwrap()),
+                            .bg(get_theme_color("panel").unwrap())
+                            .fg(get_theme_color("text").unwrap()),
                     )
                     .border_style(if focus_zone == FocusZone::Panel {
                         Style::default()
-                            .fg(col("highlight").unwrap())
+                            .fg(get_theme_color("highlight").unwrap())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(col("text").unwrap())
+                        Style::default().fg(get_theme_color("text").unwrap())
                     });
 
                 let panel_text = if let Some(selected_block) = viewer.state.selected_block {
@@ -333,7 +333,7 @@ pub fn view_block_group(
                     vec![Line::from(vec![Span::styled(
                         "No block selected",
                         Style::default()
-                            .fg(col("text").unwrap())
+                            .fg(get_theme_color("text").unwrap())
                             .add_modifier(Modifier::BOLD),
                     )])]
                 };
@@ -441,8 +441,8 @@ pub fn view_block_group(
                                     );
                                     match current_path {
                                         Ok(path) => {
-                                            if let Err(err) =
-                                                viewer.show_path(&path, col("error").unwrap())
+                                            if let Err(err) = viewer
+                                                .show_path(&path, get_theme_color("error").unwrap())
                                             {
                                                 // todo: pop up a message in the panel
                                                 warn!("{}", err);

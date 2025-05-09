@@ -66,6 +66,7 @@ maturin = { version = "1.8.2", optional = true }
 url-parse = "1.0.10"
 lazy_static = "1.5.0"
 ratatui-base16 = "0.3.7"
+once_cell = "1.21.3"
 
 [dev-dependencies]
 cargo-llvm-cov = "0.6.16"

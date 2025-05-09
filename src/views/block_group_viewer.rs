@@ -1,4 +1,4 @@
-use crate::config::col;
+use crate::config::get_theme_color;
 use crate::graph::{project_path, GenGraph, GraphNode};
 use crate::models::node::Node;
 use crate::models::path::Path;
@@ -636,7 +636,7 @@ impl<'a> Viewer<'a> {
                 let start_y = viewport.y + (viewport.height - splashscreen_height) / 2;
 
                 let splash_canvas = Canvas::default()
-                    .background_color(col("canvas").unwrap())
+                    .background_color(get_theme_color("canvas").unwrap())
                     .block(canvas_block)
                     .x_bounds([
                         viewport.x as f64,
@@ -651,7 +651,10 @@ impl<'a> Viewer<'a> {
                             ctx.print(
                                 start_x as f64,
                                 (start_y + (splashscreen_height - 1 - i as u16)) as f64,
-                                Span::styled(*line, Style::default().fg(col("base07").unwrap())),
+                                Span::styled(
+                                    *line,
+                                    Style::default().fg(get_theme_color("base07").unwrap()),
+                                ),
                             );
                         }
                     });
@@ -723,7 +726,7 @@ impl<'a> Viewer<'a> {
         }
 
         let canvas = Canvas::default()
-            .background_color(col("canvas").unwrap())
+            .background_color(get_theme_color("canvas").unwrap())
             .block(canvas_block)
             // Adjust the x_bounds and y_bounds by the scroll offsets.
             .x_bounds([x_min, x_max])
@@ -735,7 +738,7 @@ impl<'a> Viewer<'a> {
 
                 // Draw all edges (does not consider highlights)
                 for &(source, target) in self.scaled_layout.lines.keys() {
-                    self.draw_edge(ctx, &(source, target), col("edge").unwrap());
+                    self.draw_edge(ctx, &(source, target), get_theme_color("edge").unwrap());
                 }
 
                 // Print the labels
@@ -762,15 +765,15 @@ impl<'a> Viewer<'a> {
                     let style = match (is_glyph, is_selected) {
                         (true, true) => {
                             label = label::SELECTED.to_string();
-                            Style::default().fg(col("highlight").unwrap())
+                            Style::default().fg(get_theme_color("highlight").unwrap())
                         }
-                        (true, false) => Style::default().fg(col("text").unwrap()),
+                        (true, false) => Style::default().fg(get_theme_color("text").unwrap()),
                         (false, true) => Style::default()
-                            .fg(col("text_muted").unwrap())
-                            .bg(col("highlight").unwrap()),
+                            .fg(get_theme_color("canvas").unwrap())
+                            .bg(get_theme_color("highlight").unwrap()),
                         (false, false) => Style::default()
-                            .fg(col("text").unwrap())
-                            .bg(col("node").unwrap()),
+                            .fg(get_theme_color("text").unwrap())
+                            .bg(get_theme_color("node").unwrap()),
                     };
 
                     self.place_label(ctx, &label, (x, y), style);
@@ -787,7 +790,7 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::START,
                             (x3, y),
-                            Style::default().fg(col("text_muted").unwrap()),
+                            Style::default().fg(get_theme_color("text_muted").unwrap()),
                         );
                     }
 
@@ -803,7 +806,7 @@ impl<'a> Viewer<'a> {
                             ctx,
                             label::END,
                             (x3, y),
-                            Style::default().fg(col("text_muted").unwrap()),
+                            Style::default().fg(get_theme_color("text_muted").unwrap()),
                         );
                     }
                 }
@@ -816,7 +819,7 @@ impl<'a> Viewer<'a> {
         Canvas::default()
             .x_bounds([x_min, x_max])
             .y_bounds([y_min, y_max])
-            .background_color(col("canvas").unwrap())
+            .background_color(get_theme_color("canvas").unwrap())
             .paint(|ctx| {
                 for (color, highlight_graph) in &self.highlights {
                     for (source, target, _) in highlight_graph.all_edges() {
