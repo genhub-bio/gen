@@ -203,6 +203,56 @@ mod tests {
     }
 
     #[test]
+    fn test_supports_normal_gz_fasta() {
+        setup_gen_dir();
+        let fasta_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/gzipped.fa.gz");
+        let conn = get_connection(None);
+        let db_uuid = metadata::get_db_uuid(&conn);
+        let op_conn = &get_operation_connection(None);
+        setup_db(op_conn, &db_uuid);
+
+        import_fasta(
+            &fasta_path.to_str().unwrap().to_string(),
+            "test",
+            None,
+            false,
+            &conn,
+            op_conn,
+        )
+        .unwrap();
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, 1, false),
+            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_supports_bgzip_fasta() {
+        setup_gen_dir();
+        let fasta_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz");
+        let conn = get_connection(None);
+        let db_uuid = metadata::get_db_uuid(&conn);
+        let op_conn = &get_operation_connection(None);
+        setup_db(op_conn, &db_uuid);
+
+        import_fasta(
+            &fasta_path.to_str().unwrap().to_string(),
+            "test",
+            None,
+            false,
+            &conn,
+            op_conn,
+        )
+        .unwrap();
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, 1, false),
+            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    #[test]
     fn test_add_fasta_creates_sample() {
         setup_gen_dir();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
