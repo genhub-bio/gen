@@ -16,10 +16,14 @@ use crate::models::{
 };
 use crate::operation_management::{end_operation, start_operation};
 use crate::progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar};
+use flate2::read::GzDecoder;
+use noodles::bgzf;
 use noodles::fasta;
 use rusqlite;
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::str;
 
 pub fn import_fasta<'a>(
@@ -33,7 +37,16 @@ pub fn import_fasta<'a>(
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
 
-    let mut reader = fasta::io::reader::Builder.build_from_path(fasta).unwrap();
+    let path = PathBuf::from(fasta);
+
+    let file = std::fs::File::open(fasta)?;
+
+    let reader_stream: Box<dyn BufRead> = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("gz") => Box::new(BufReader::new(GzDecoder::new(file))),
+        Some("bgz") => Box::new(bgzf::Reader::new(file)),
+        _ => Box::new(BufReader::new(file)),
+    };
+    let mut reader = fasta::io::reader::Builder.build_from_reader(reader_stream)?;
 
     let collection = if !Collection::exists(conn, name) {
         Collection::create(conn, name)
