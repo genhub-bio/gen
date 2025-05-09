@@ -1,5 +1,5 @@
 use crate::commands::cli_context::CliContext;
-use crate::commands::get_db_for_command;
+use crate::commands::{get_db_for_command, get_default_collection};
 use crate::config::get_operation_connection;
 use crate::get_connection;
 use crate::imports::genbank::import_genbank;
@@ -7,7 +7,6 @@ use crate::models::file_types::FileTypes;
 use crate::models::metadata;
 use crate::models::operations::{setup_db, OperationFile, OperationInfo};
 use clap::Args;
-use rusqlite::Connection;
 use std::fs::File;
 
 /// Import a Genbank file
@@ -22,14 +21,6 @@ pub struct Command {
     /// A sample name to associate the Genbank file with
     #[arg(short, long)]
     sample: Option<String>,
-}
-
-fn get_default_collection(conn: &Connection) -> String {
-    let mut stmt = conn
-        .prepare("select collection_name from defaults where id = 1")
-        .unwrap();
-    stmt.query_row((), |row| row.get(0))
-        .unwrap_or("default".to_string())
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {

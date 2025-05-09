@@ -1,5 +1,5 @@
 use crate::commands::cli_context::CliContext;
-use crate::commands::get_db_for_command;
+use crate::commands::{get_db_for_command, get_default_collection};
 use crate::config::get_operation_connection;
 use crate::fasta::FastaError;
 use crate::get_connection;
@@ -8,7 +8,6 @@ use crate::models::metadata;
 use crate::models::operations::setup_db;
 use crate::operation_management::OperationError;
 use clap::Args;
-use rusqlite::Connection;
 
 /// Import a fasta file
 #[derive(Debug, Args)]
@@ -25,14 +24,6 @@ pub struct Command {
     /// A sample name to associate the fasta file with
     #[arg(short, long)]
     sample: Option<String>,
-}
-
-fn get_default_collection(conn: &Connection) -> String {
-    let mut stmt = conn
-        .prepare("select collection_name from defaults where id = 1")
-        .unwrap();
-    stmt.query_row((), |row| row.get(0))
-        .unwrap_or("default".to_string())
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {

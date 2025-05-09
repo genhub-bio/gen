@@ -1,5 +1,5 @@
 use crate::commands::cli_context::CliContext;
-use crate::commands::get_db_for_command;
+use crate::commands::{get_db_for_command, get_default_collection};
 use crate::config::get_operation_connection;
 use crate::get_connection;
 use crate::models::file_types::FileTypes;
@@ -7,7 +7,6 @@ use crate::models::metadata;
 use crate::models::operations::{setup_db, OperationFile, OperationInfo};
 use crate::updates::genbank::update_with_genbank;
 use clap::Args;
-use rusqlite::Connection;
 use std::fs::File;
 
 /// Update with a GenBank file
@@ -22,14 +21,6 @@ pub struct Command {
     /// If a new entity is found, create it as a normal import
     #[arg(long, action, alias = "cm")]
     create_missing: bool,
-}
-
-fn get_default_collection(conn: &Connection) -> String {
-    let mut stmt = conn
-        .prepare("select collection_name from defaults where id = 1")
-        .unwrap();
-    stmt.query_row((), |row| row.get(0))
-        .unwrap_or("default".to_string())
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {

@@ -337,3 +337,11 @@ pub fn get_db_for_command(cli_context: &CliContext, operation_conn: &Connection)
     });
     binding
 }
+
+pub fn get_default_collection(conn: &Connection) -> String {
+    let mut stmt = conn
+        .prepare("select collection_name from defaults where id = 1")
+        .unwrap();
+    stmt.query_row((), |row| row.get(0))
+        .unwrap_or("default".to_string())
+}
