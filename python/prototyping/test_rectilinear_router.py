@@ -2,7 +2,8 @@
 
 import unittest
 import random
-from rectilinear_router import Router, Plotter
+from route_channel import Router, Plotter
+
 
 class TestRouterSkeletons(unittest.TestCase):
     def setUp(self):
@@ -78,7 +79,7 @@ class TestRouterSkeletons(unittest.TestCase):
 
     def test_pins(self):
         # Initial state
-        self.assertEqual(self.router.pins, (1,3))      
+        self.assertEqual(self.router.pins, (1,3)) 
 
     def test_powerset(self):
         # Should return all subsets including empty set

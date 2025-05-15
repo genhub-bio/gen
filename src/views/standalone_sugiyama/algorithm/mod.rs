@@ -42,22 +42,7 @@ pub use p3_calculate_coordinates::{
     align_to_smallest_width_layout, calculate_relative_coords, create_layouts, VDir,
 };
 
-
-
-#[derive(Debug)]
-pub struct LayoutResult {
-    /// Coordinates for each node (node ID and position)
-    pub node_coordinates: Vec<(NodeIndex, (f64, f64))>,
-    
-    /// Coordinates for edges with dummy points (source-target nodes and path of positions)
-    pub edge_coordinates: Vec<(NodeIndex, NodeIndex), Vec<(f64,f64)>>,
-    
-    /// Width of the layout
-    pub width: f64,
-    
-    /// Height of the layout
-    pub height: f64,
-}
+type LayoutResult = (Vec<(usize, (f64, f64))>, f64, f64);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vertex {
@@ -155,7 +140,7 @@ fn init_graph(graph: &mut StableDiGraph<Vertex, Edge>) {
 fn build_layout(
     mut graph: StableDiGraph<Vertex, Edge>,
     config: &Config,
-) -> (Vec<(usize, (f64, f64))>, f64, f64) {
+) -> LayoutResult {
     info!(target: "layouting", "Start building layout");
     info!(target: "layouting", "Configuration is: {:?}", config);
 
@@ -186,11 +171,10 @@ fn build_layout(
     );
 
     let layout = execute_phase_3(&mut graph, layers);
-    debug!(target: "layouting", "Node coordinates: {:?}\nEdge coordinates: {:?}\nwidth: {}, height:{}",
-        layout.node_coordinates,
-        layout.edge_coordinates,
-        layout.width,
-        layout.height
+    debug!(target: "layouting", "Node coordinates: {:?}\nwidth: {}, height:{}", 
+        layout.0,
+        layout.1,
+        layout.2
     );
     layout
 }
@@ -284,59 +268,25 @@ fn execute_phase_3(
         current_rank_top_offset += max_height;
     }
 
-    let coordinates = x_coordinates
-        .iter()
-        .filter(|&(v, _)| !graph[*v].is_dummy)
-        // calculate y coordinate
-        .map(|&(v, x)| {
-            (
-                graph[v].id,
-                (x, *rank_to_y_offset.get(&graph[v].rank).unwrap()),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    // Collect edge to dummy path coordinate mappings
-    let mut edge_coordinates = Vec::new();
-
-    let dummy_coordinates: HashMap<_, _> = x_coordinates
-        .iter()
-        .filter(|&(v, _)| graph[*v].is_dummy)
-        .map(|&(v, x)| (v, (x, *rank_to_y_offset.get(&graph[v].rank).unwrap())))
-        .collect();
-
-    let regular_nodes = graph.node_indices()
-        .filter(|&n| !graph[n].is_dummy)
-        .collect::<Vec<_>>();
-
-    for &source in &regular_nodes {
-        // DFS to find paths to other regular nodes through dummy nodes
-        for mut neighbor in graph.neighbors_directed(source, petgraph::Direction::Outgoing) {
-            let mut dummy_path = Vec::new();
-            
-            // Follow path through dummy nodes
-            while graph[neighbor].is_dummy {
-                dummy_path.push(*dummy_coordinates.get(&neighbor).unwrap());
-                let next_nodes = graph.neighbors_directed(neighbor, petgraph::Direction::Outgoing)
-                    .collect::<Vec<_>>();
-                neighbor = next_nodes[0];
-            }
-            
-            // Since we exited the loop, we reached a regular node
-            if !dummy_path.is_empty() {
-                edge_coordinates.push(
-                    ((graph[source].id, graph[neighbor].id), dummy_path)
-                );
-            }
-        }
-    }
-
-    LayoutResult {
-        node_coordinates: coordinates,
-        edge_coordinates,
+    let mut v = x_coordinates.iter().collect::<Vec<_>>();
+    v.sort_by(|a, b| a.0.index().cmp(&b.0.index()));
+    // format to NodeIndex: (x, y), width, height
+    (
+        x_coordinates
+            .into_iter()
+            .filter(|(v, _)| !graph[*v].is_dummy)
+            // calculate y coordinate
+            .map(|(v, x)| {
+                (
+                    graph[v].id,
+                    (x, *rank_to_y_offset.get(&graph[v].rank).unwrap()),
+                )
+            })
+            .collect::<Vec<_>>(),
         width,
         height,
-    }
+    )
+    
 }
 
 pub fn slack(graph: &StableDiGraph<Vertex, Edge>, edge: EdgeIndex, minimum_length: i32) -> i32 {
@@ -344,58 +294,27 @@ pub fn slack(graph: &StableDiGraph<Vertex, Edge>, edge: EdgeIndex, minimum_lengt
     graph[head].rank - graph[tail].rank - minimum_length
 }
 
-#[allow(dead_code)]
-fn print_to_console(
-    dir: VDir,
-    graph: &StableDiGraph<Vertex, Edge>,
-    layers: &[Vec<NodeIndex>],
-    mut coordinates: HashMap<NodeIndex, isize>,
-    vertex_spacing: usize,
-) {
-    let min = *coordinates.values().min().unwrap();
-    let str_width = 4;
-    coordinates
-        .values_mut()
-        .for_each(|v| *v = str_width * (*v - min) / vertex_spacing as isize);
-    let width = *coordinates.values().max().unwrap() as usize;
-
-    for line in layers {
-        let mut v_line = vec!['-'; width + str_width as usize];
-        let mut a_line = vec![' '; width + str_width as usize];
-        for v in line {
-            let pos = *coordinates.get(v).unwrap() as usize;
-            if graph[*v].root != *v {
-                a_line[pos] = if dir == VDir::Up { 'v' } else { '^' };
-            }
-            for (i, c) in v.index().to_string().chars().enumerate() {
-                v_line[pos + i] = c;
-            }
-        }
-        match dir {
-            VDir::Up => {
-                println!("{}", v_line.into_iter().collect::<String>());
-                println!("{}", a_line.into_iter().collect::<String>());
-            }
-            VDir::Down => {
-                println!("{}", a_line.into_iter().collect::<String>());
-                println!("{}", v_line.into_iter().collect::<String>());
-            }
-        }
-    }
-    println!();
+/// Node data for the final layout graph.
+#[derive(Debug, Clone, Default)]
+pub struct LayoutNode {
+    pub x: i32,
+    pub y: i32,
+    pub original_id: Option<usize>,
 }
 
-/// Build a layout that preserves dummy nodes and uses integer coordinates.
-/// Modifies the graph in place and returns it, adding dummy nodes and setting the coordinates.
+/// Builds a new graph containing original and dummy nodes with their final layout attributes.
 ///
-pub fn build_integer_layout_with_dummies(
+/// This function performs the Sugiyama layout process, including dummy node insertion,
+/// and returns a new `StableDiGraph` where nodes contain their calculated `x`, `y` 
+/// coordinates and `original_id` for non-dummy nodes.
+/// Edges from the layout process (including those involving dummy nodes) are included.
+pub fn build_layout_graph(
     mut graph: StableDiGraph<Vertex, Edge>,
     config: &Config,
-) -> StableDiGraph<Vertex, Edge> {
-    info!(target: "layouting", "Start building layout (with dummies)");
+) -> StableDiGraph<LayoutNode, ()> { 
+    info!(target: "layouting", "Start building layout graph (integer coordinates, with dummies)");
     info!(target: "layouting", "Configuration is: {:?}", config);
 
-    // Initialize the graph
     init_graph(&mut graph);
 
     // Phase 1: Ranking
@@ -405,38 +324,67 @@ pub fn build_integer_layout_with_dummies(
         config.ranking_type,
     );
 
-    // Phase 2: Crossing reduction with dummy nodes
+    // Phase 2: Reduce crossings 
     let mut order = execute_phase_2(
         &mut graph,
         config.minimum_length as i32,
-        Some(1.0), // Use 1x1 dummy nodes
+        Some(config.dummy_size), 
         config.c_minimization,
         config.transpose,
     );
 
-    // Phase 3: Calculate coordinates
-    let mut layouts = create_layouts(&mut graph, &mut order);
+    // Phase 3: Calculate initial coordinates for all nodes, including dummies
+    // (The original implementation filters out dummies at this stage)
+    // This is a top-to-bottom layout, so:
+    // x = within-layer position 
+    // y = layer index (rank)
+    let mut layouts = create_layouts(&mut graph, &mut order); 
     align_to_smallest_width_layout(&mut layouts);
-    let x_coords = calculate_relative_coords(layouts);
+    let x_coords_float = calculate_relative_coords(layouts);
+    let min_x_float = x_coords_float
+        .iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap()
+        .1;
 
-    // Convert to integers and double the x-coordinates to create spacing of 1
-    let x_coords: HashMap<NodeIndex, i32> = x_coords
-        .into_iter()
-        .map(|(node, x)| (node, (x * 2.0).round() as i32))
-        .collect();
-
-    // Calculate y-coordinates based on rank
-    let mut rank_to_y_offset = HashMap::new();
-    for rank in 0..order.len() {
-        rank_to_y_offset.insert(rank as i32, rank as i32);
+    let mut x_coords_int = HashMap::new();
+    for (node_idx, x_f) in x_coords_float {
+        let normalized_x_f = x_f - min_x_float;
+        // Double to create space for integer rounding and ensure minimum separation
+        x_coords_int.insert(node_idx, (normalized_x_f * 2.0).round() as i32);
     }
+    
+    // Construct a new graph 
+    let layout_graph = graph.map(
+        |old_node_idx, old_node_data| {
+            // Node mapping: Create LayoutNode with calculated coordinates
+            let x = *x_coords_int.get(&old_node_idx).unwrap_or(&0); // Assuming coords exist
+            let y = old_node_data.rank;
+            LayoutNode {
+                x,
+                y,
+                original_id: if old_node_data.is_dummy { None } else { Some(old_node_data.id) },
+            }
+        },
+        |_old_edge_idx, _old_edge_data| {
+            // Edge mapping: New edges have no weight
+            ()
+        },
+    );
 
-    // Store coordinates in the graph vertices
-    for (node, x) in x_coords {
-        let y = rank_to_y_offset[&graph[node].rank];
-        graph[node].x = x;
-        graph[node].y = y;
-    }
+    info!(target: "layouting", "Finished building layout graph with {} nodes and {} edges", 
+          layout_graph.node_count(), layout_graph.edge_count());
 
-    graph
+    layout_graph
 }
+
+
+// The rectilinear routing algorithm was prototyped in Python,
+// we call it here via a Python bridge until we have a Rust implementation.
+#[cfg(feature = "python-bindings")]
+mod temporary_python_bridge;
+
+#[cfg(feature = "python-bindings")]
+pub use temporary_python_bridge::call_python_with_layout_graph;
+
+

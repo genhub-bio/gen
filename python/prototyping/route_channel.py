@@ -94,7 +94,9 @@ class Router:
     
     @property
     def finished(self):
-        return not self.next_pin() and len(self.occupied_tracks) == 0
+        return (not self.next_pin() 
+                and len(self.occupied_tracks) == 0 
+                and self.pins == (None, None))
 
     
     # Generic methods
@@ -179,6 +181,7 @@ class Router:
             # Store the orientation in the node attribute
             self.G.nodes[node]['ports'] = (north, south, east, west)
 
+    # TODO: drop this and perform the simplification in route_layer.py instead
     def _simplify(self):
         """
         Simplifies the graph by building a new graph, using the pre-calculated 
@@ -781,6 +784,7 @@ class Router:
         max_length = self.channel_length * 1.5
 
         while not self.finished:
+            print(f"Routing column {self.current_column}")
             x = self.current_column
             # 1) Connect the pins
             if x < self.channel_length:
