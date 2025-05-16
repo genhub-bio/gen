@@ -27,8 +27,11 @@ class Router:
 
         # Graph to contain the final routing and intermediate segments
         self.G = nx.Graph()
-        # note: we are using the presence or absence of a node to indicate a wire terminal,
-        # so you can't pre-add nodes for the terminals
+        # Node ID management
+        self.node_id_counter = 0
+        self.pos_to_id = {} # Maps (x,y) to integer node_id
+        # note: this code used to use the (x,y) tuple as the node identifier,
+        # but this gave interoperability issues and would be a pint to port to Rust later on.
 
     def reset(self, initial_channel_width=None, minimum_jog_length=None, steady_net_constant=None, T=None, B=None):
         # Use stored initial parameters if not overridden
@@ -48,6 +51,8 @@ class Router:
         nets = set(self.T).union(set(self.B)).difference({0})
         self.Y = dict((i, set()) for i in nets) 
         self.G = nx.Graph()
+        self.node_id_counter = 0
+        self.pos_to_id = {}
 
     def create_terminals(self, edges):
         pass
@@ -72,8 +77,23 @@ class Router:
     
     @property
     def vertical_wiring(self):
-        return [(min(y1, y2), max(y1, y2), net) for ((x1, y1), (x2, y2), net) in self.G.edges(data='net')
-                if x1 == x2 and x1 == self.current_column]
+        v_wires = []
+        for u_id, v_id, data in self.G.edges(data=True):
+            net = data.get('net')
+            if net is None: # Should not happen for routing segments
+                continue
+
+            u_pos = self.get_node_pos(u_id)
+            v_pos = self.get_node_pos(v_id)
+            if not u_pos or not v_pos: # Should not happen if graph is consistent
+                continue
+
+            x1, y1 = u_pos
+            x2, y2 = v_pos
+
+            if x1 == x2 and x1 == self.current_column:
+                v_wires.append((min(y1, y2), max(y1, y2), net))
+        return v_wires
 
     @property
     def pins(self):
@@ -87,8 +107,8 @@ class Router:
         top_net = self.T[x] if self.T[x] > 0 else None
         bottom_net = self.B[x] if self.B[x] > 0 else None
 
-        top = top_net if not self.G.has_node((x, y_t)) else None
-        bottom = bottom_net if not self.G.has_node((x, y_b)) else None
+        top = top_net if not self.has_node_at_pos(x, y_t) else None
+        bottom = bottom_net if not self.has_node_at_pos(x, y_b) else None
         
         return (top, bottom)
     
@@ -166,12 +186,16 @@ class Router:
     #     self.G.remove_node(old_node)
 
     def _get_node_orientation(self):
-        for node in self.G.nodes():
-            x, y = node
-            neighbors = self.G.neighbors(node)
+        for node_id in self.G.nodes():
+            pos = self.get_node_pos(node_id)
+            if not pos: continue # Should not happen
+            x, y = pos
+            neighbors = self.G.neighbors(node_id)
             north, south, east, west = False, False, False, False
-            for neighbor in neighbors:
-                nx, ny = neighbor
+            for neighbor_id in neighbors:
+                neighbor_pos = self.get_node_pos(neighbor_id)
+                if not neighbor_pos: continue
+                nx, ny = neighbor_pos
                 # Use Router's coordinate system (y increases upwards)
                 if ny > y: north = True
                 if ny < y: south = True
@@ -179,7 +203,7 @@ class Router:
                 if nx > x: east = True
                 if nx < x: west = True
             # Store the orientation in the node attribute
-            self.G.nodes[node]['ports'] = (north, south, east, west)
+            self.G.nodes[node_id]['ports'] = (north, south, east, west)
 
     # TODO: drop this and perform the simplification in route_layer.py instead
     def _simplify(self):
@@ -203,77 +227,109 @@ class Router:
         # 1. Identify and add all critical nodes (non-straight) using the 'ports' attribute
         critical_nodes = set()
         original_nodes = list(self.G.nodes()) # Still need a stable list to iterate over
-        for node in original_nodes:
+        for node_id in original_nodes:
             # Access the pre-calculated orientation from the node attribute
-            orientation = self.G.nodes[node].get('ports', (False, False, False, False)) 
+            orientation = self.G.nodes[node_id].get('ports', (False, False, False, False)) 
             
             if orientation not in [STRAIGHT_HORIZONTAL, STRAIGHT_VERTICAL]:
-                critical_nodes.add(node)
+                critical_nodes.add(node_id)
                 # Add critical node and copy its attributes (including 'ports')
-                simplified_G.add_node(node, **self.G.nodes[node]) 
+                simplified_G.add_node(node_id, **self.G.nodes[node_id]) 
         
         # Handle case where graph might be a single loop of straight segments
         if not critical_nodes and self.G.number_of_nodes() > 0:
-            start_node = original_nodes[0] 
-            critical_nodes.add(start_node)
-            simplified_G.add_node(start_node, **self.G.nodes[start_node])
+            start_node_id = original_nodes[0] 
+            critical_nodes.add(start_node_id)
+            simplified_G.add_node(start_node_id, **self.G.nodes[start_node_id])
 
         # 2. Iterate through critical nodes and trace segments using the 'ports' attribute
-        for start_node in critical_nodes:
-            for neighbor in list(self.G.neighbors(start_node)):
+        for start_node_id in critical_nodes:
+            for neighbor_id in list(self.G.neighbors(start_node_id)):
                 
-                if neighbor in critical_nodes:
+                if neighbor_id in critical_nodes:
                     # Direct connection
-                    segment_endpoints = tuple(sorted((start_node, neighbor)))
+                    segment_endpoints = tuple(sorted((start_node_id, neighbor_id)))
                     if segment_endpoints not in processed_segments:
-                        net_attr = self.G.edges[start_node, neighbor].get('net')
-                        if not simplified_G.has_edge(start_node, neighbor):
-                            simplified_G.add_edge(start_node, neighbor, net=net_attr)
+                        net_attr = self.G.edges[start_node_id, neighbor_id].get('net')
+                        if not simplified_G.has_edge(start_node_id, neighbor_id):
+                            simplified_G.add_edge(start_node_id, neighbor_id, net=net_attr)
                         processed_segments.add(segment_endpoints)
                 else:
                     # Start of a straight segment
-                    prev = start_node
-                    curr = neighbor
-                    segment_net = self.G.edges[prev, curr].get('net')
+                    prev_id = start_node_id
+                    curr_id = neighbor_id
+                    segment_net = self.G.edges[prev_id, curr_id].get('net')
                     
                     while True:
                         # Use stored 'ports' attribute
-                        curr_orientation = self.G.nodes[curr].get('ports', (False, False, False, False))
+                        curr_orientation = self.G.nodes[curr_id].get('ports', (False, False, False, False))
                         
                         if curr_orientation in [STRAIGHT_HORIZONTAL, STRAIGHT_VERTICAL]:
-                            neighbors = list(self.G.neighbors(curr)) 
-                            if len(neighbors) != 2: 
-                                end_node = curr
+                            neighbors_of_curr = list(self.G.neighbors(curr_id)) 
+                            if len(neighbors_of_curr) != 2: 
+                                end_node_id = curr_id
                                 break
-                            next_node = neighbors[0] if neighbors[1] == prev else neighbors[1]
+                            next_node_id = neighbors_of_curr[0] if neighbors_of_curr[1] == prev_id else neighbors_of_curr[1]
                             
-                            next_net = self.G.edges[curr, next_node].get('net')
+                            next_net = self.G.edges[curr_id, next_node_id].get('net')
                             if next_net != segment_net:
-                                end_node = curr 
+                                end_node_id = curr_id 
                                 break 
 
-                            prev = curr
-                            curr = next_node
-                            if curr in critical_nodes: 
-                                end_node = curr
+                            prev_id = curr_id
+                            curr_id = next_node_id
+                            if curr_id in critical_nodes: 
+                                end_node_id = curr_id
                                 break
                         else:
-                            end_node = curr 
+                            end_node_id = curr_id 
                             break
                     
                     # Add simplified edge
-                    if end_node in critical_nodes:
-                        segment_endpoints = tuple(sorted((start_node, end_node)))
+                    if end_node_id in critical_nodes:
+                        segment_endpoints = tuple(sorted((start_node_id, end_node_id)))
                         if segment_endpoints not in processed_segments:
-                             if not simplified_G.has_edge(start_node, end_node):
-                                simplified_G.add_edge(start_node, end_node, net=segment_net)
+                             if not simplified_G.has_edge(start_node_id, end_node_id):
+                                simplified_G.add_edge(start_node_id, end_node_id, net=segment_net)
                              processed_segments.add(segment_endpoints)
-                    elif end_node not in simplified_G:
-                        simplified_G.add_node(end_node)
+                    elif end_node_id not in simplified_G:
+                        simplified_G.add_node(end_node_id, **self.G.nodes[end_node_id])
 
         # Replace the old graph with the simplified one
         self.G = simplified_G
 
+    # Helper methods for node ID and coordinate management
+    def add_node_at_pos(self, x, y, **attrs):
+        """Add a node at specific coordinates, or return existing if present.
+        Coordinates are stored as 'pos' attribute.
+        Returns the integer node ID.
+        """
+        if (x,y) in self.pos_to_id:
+            node_id = self.pos_to_id[(x,y)]
+            return node_id
+        else:
+            node_id = self.node_id_counter
+            self.pos_to_id[(x,y)] = node_id
+            
+            attrs.update({'pos': (x,y)})
+            
+            self.G.add_node(node_id, **attrs)
+            self.node_id_counter += 1
+            return node_id
+
+    def get_node_id(self, x, y):
+        """Generate or retrieve a node ID from x,y coordinates"""
+        return self.pos_to_id.get((x, y))
+
+    def get_node_pos(self, node_id):
+        """Retrieve coordinates for a given node ID"""
+        if node_id is None or node_id not in self.G.nodes:
+            return None
+        return self.G.nodes[node_id].get('pos')
+
+    def has_node_at_pos(self, x, y):
+        """Check if a node exists at the given coordinates"""
+        return (x,y) in self.pos_to_id
 
     # Specialized methods
     # --------------------
@@ -351,7 +407,9 @@ class Router:
         # Ensure that y1 < y2:
         y1 = min(from_track, to_track)
         y2 = max(from_track, to_track)
-        self.G.add_edge((self.current_column, y1), (self.current_column, y2), net=net)
+        node1_id = self.add_node_at_pos(self.current_column, y1)
+        node2_id = self.add_node_at_pos(self.current_column, y2)
+        self.G.add_edge(node1_id, node2_id, net=net)
 
     def connect_pins(self):
         top_net = self.T[self.current_column]
@@ -559,7 +617,13 @@ class Router:
         # wire from a DIFFERENT net in this column.
         filtered_patterns = []
         existing_verticals = []  # tuples: (y_low, y_high, net)
-        for (x1, y1), (x2, y2), data in self.G.edges(data=True):
+        for u_id, v_id, data in self.G.edges(data=True):
+            u_pos = self.get_node_pos(u_id)
+            v_pos = self.get_node_pos(v_id)
+            if not u_pos or not v_pos: continue # Should not happen
+
+            x1, y1 = u_pos
+            x2, y2 = v_pos
             if x1 == x2 == self.current_column:
                 existing_verticals.append((min(y1, y2), max(y1, y2), data.get('net')))
 
@@ -717,30 +781,39 @@ class Router:
         # If the track x is selected, then the old tracks x, x+1, ... will be moved up to x+1, x+2, ...
         # Note: we are assuming that this function is only called when there is no space left on the channel
 
-        x = self.current_column
         mid_track = round(self.channel_width / 2) + 1 # +1 because tracks are indexed from 1 to channel_width
 
         # Find a position for the new track that is as close to the middle as possible,
         # and that is accessible from the pins without violating a vertical constraint.
-        if not self.vertical_wiring:
+        current_vertical_wires = self.vertical_wiring # Call property once
+        if not current_vertical_wires:
             min_start = 1
-            max_end = self.channel_width + 1
+            max_end = self.channel_width # Before widening, tracks go up to channel_width
         else:
-            min_start = min(self.vertical_wiring, key=lambda x: x[0])[0] # y1
-            max_end = max(self.vertical_wiring, key=lambda x: x[1])[1]# y2
+            min_start = min(current_vertical_wires, key=lambda item: item[0])[0] # y1
+            max_end = max(current_vertical_wires, key=lambda item: item[1])[1]   # y2
+        
+        new_track_candidate_bottom = min(min_start, mid_track)
+        new_track_candidate_top = max(max_end + 1, mid_track)
+
+
         if from_side == 'B':
             # Moving upwards from the bottom: the start of the first vertical wire, 
-            # or the middle, whichever comes first
-            new_track = min(min_start, mid_track)
+            # or the middle, whichever comes first. New track is inserted AT this position.
+            new_track = new_track_candidate_bottom
         elif from_side == 'T':
-            # Moving downwards from the top: the end of the last vertical wire,
-            # or the middle, whichever comes first
-            new_track = max(max_end + 1, mid_track)
-
-        elif from_side == None:
+            # Moving downwards from the top: the end of the last vertical wire + 1,
+            # or the middle, whichever comes first. New track is inserted AT this position.
+            new_track = new_track_candidate_top
+        elif from_side is None: # Changed from 'from_side == None' for style
             new_track = mid_track
         else:
             raise ValueError("Invalid side (only 'T', 'B', or None are allowed)")
+        
+        # Ensure new_track is within reasonable bounds (1 to channel_width + 1)
+        # If inserting at new_track, all tracks >= new_track shift up.
+        # new_track is 1-indexed.
+        new_track = max(1, min(new_track, self.channel_width + 1))
 
         self.channel_width = self.channel_width + 1
 
@@ -755,9 +828,29 @@ class Router:
                     Y_new[net].add(track)
         self.Y = Y_new
                 
-        # Update the graph by moving up any nodes that are now above the new track
-        # This information is stored in the label of the node, so a move operation becomes a rename operation
-        nx.relabel_nodes(self.G, lambda node: (node[0], node[1] + 1) if node[1] >= new_track else node, copy=False)
+        # Update the graph by moving up any nodes that are now at or above the new track's position.
+        # Also update the pos_to_id mapping.
+        updated_pos_to_id = {}
+        nodes_to_update = list(self.G.nodes()) # Iterate over a copy of node IDs
+
+        for node_id in nodes_to_update:
+            pos = self.get_node_pos(node_id)
+            if not pos: continue # Should not happen for existing nodes
+
+            x, y = pos
+            if y >= new_track:
+                new_y = y + 1
+                self.G.nodes[node_id]['pos'] = (x, new_y)
+                # Old coord mapping will be removed when rebuilding updated_pos_to_id
+            # else: node coordinates remain unchanged
+
+        # Rebuild pos_to_id from the updated graph node attributes
+        self.pos_to_id.clear()
+        for node_id, data in self.G.nodes(data=True):
+            if 'pos' in data:
+                 self.pos_to_id[data['pos']] = node_id
+            # else: # This case should ideally not happen if all nodes have pos
+            #    print(f"Warning: Node {node_id} has no 'pos' attribute during widen_channel.")
 
     def extend_nets(self):
         # Only extend nets that either are split or have a pin coming up
@@ -768,9 +861,9 @@ class Router:
             else:
                 # Update the graph for each track
                 for track in tracks:
-                    self.G.add_edge((self.current_column, track),
-                                    (self.current_column+1, track),
-                                    net=net)
+                    node1_id = self.add_node_at_pos(self.current_column, track)
+                    node2_id = self.add_node_at_pos(self.current_column + 1, track)
+                    self.G.add_edge(node1_id, node2_id, net=net)
                                     
         # Update the channel length if needed
         self.channel_length = max(self.channel_length, self.current_column+1)
@@ -784,7 +877,6 @@ class Router:
         max_length = self.channel_length * 1.5
 
         while not self.finished:
-            print(f"Routing column {self.current_column}")
             x = self.current_column
             # 1) Connect the pins
             if x < self.channel_length:
@@ -854,15 +946,51 @@ class Plotter:
         # Transform the graph from the router's coordinate system to the plotter's
         # - transposed (left-to-right instead of top-to-bottom)
         # - scaled (hscale, vscale)
-        self.G = nx.relabel_nodes(G, lambda xy: (xy[1] * hscale, xy[0] * vscale), copy=True)
+        self.plot_G = nx.Graph() 
+        self.hscale = hscale
+        self.vscale = vscale
+
+        node_id_to_plot_pos = {}
+
+        for node_id, data in G.nodes(data=True):
+            if 'pos' not in data:
+                # print(f"Warning: Router graph node {node_id} missing 'pos'. Skipping in Plotter.")
+                continue
+            x_router, y_router = data['pos']
+            
+            # Transpose and scale for plotter's coordinate system
+            # Router: (x increases right, y increases up)
+            # Plotter Display: (x increases right, y increases up on grid, but rendering reverses rows)
+            # Plotter node pos: (scaled_y_router, scaled_x_router) to match original intent
+            plot_node_pos = (y_router * self.hscale, x_router * self.vscale)
+            node_id_to_plot_pos[node_id] = plot_node_pos
+            
+            # Copy all attributes from router node to plotter node
+            self.plot_G.add_node(plot_node_pos, **data) 
+
+        for u_id, v_id, edge_data in G.edges(data=True):
+            if u_id in node_id_to_plot_pos and v_id in node_id_to_plot_pos:
+                plot_u_pos = node_id_to_plot_pos[u_id]
+                plot_v_pos = node_id_to_plot_pos[v_id]
+                self.plot_G.add_edge(plot_u_pos, plot_v_pos, **edge_data)
+            # else:
+                # print(f"Warning: Edge ({u_id}, {v_id}) skipped in Plotter due to missing node(s).")
+
         self.grid = self.initialize_grid()
 
     def initialize_grid(self):
         # Grid dimensions: graph bounding box
-        min_x = min([node[0] for node in self.G.nodes()] + [0,])
-        max_x = max([node[0] for node in self.G.nodes()])
-        min_y = min([node[1] for node in self.G.nodes()] + [0])
-        max_y = max([node[1] for node in self.G.nodes()])
+        if not self.plot_G.nodes(): # Handle empty graph
+            self.grid = [[]]
+            return self.grid
+            
+        all_plot_x_pos = [node[0] for node in self.plot_G.nodes()]
+        all_plot_y_pos = [node[1] for node in self.plot_G.nodes()]
+
+        min_x = min(all_plot_x_pos + [0]) if all_plot_x_pos else 0
+        max_x = max(all_plot_x_pos) if all_plot_x_pos else 0
+        min_y = min(all_plot_y_pos + [0]) if all_plot_y_pos else 0
+        max_y = max(all_plot_y_pos) if all_plot_y_pos else 0
 
         # Initialize with spaces
         grid_width = (max_x - min_x + 1)
@@ -874,17 +1002,19 @@ class Plotter:
     def render_text_graph(self):
         grid_height = len(self.grid)
         grid_width = len(self.grid[0]) if grid_height > 0 else 0
+        if grid_height == 0 or grid_width == 0: # Handle empty grid
+            return ""
 
         # Determine graph bounds for the grid
-        # Note: self.G might already be transposed from the original router graph
-        min_x = min((node[0] for node in self.G.nodes()), default=0)
-        max_x = max((node[0] for node in self.G.nodes()), default=0)
-        min_y = min((node[1] for node in self.G.nodes()), default=0)
-        # max_y is implicitly handled by grid_height = max_y - min_y + 1
+        all_plot_x_pos = [node[0] for node in self.plot_G.nodes()]
+        all_plot_y_pos = [node[1] for node in self.plot_G.nodes()]
+        
+        min_x = min(all_plot_x_pos, default=0) if all_plot_x_pos else 0
+        min_y = min(all_plot_y_pos, default=0) if all_plot_y_pos else 0
 
         # 1. Draw horizontal edges first
-        for u, v in self.G.edges():
-            # Graph coordinates
+        for u, v in self.plot_G.edges():
+            # Graph coordinates (these are plot_pos from self.plot_G)
             x1, y1 = u
             x2, y2 = v
 
@@ -905,7 +1035,7 @@ class Plotter:
                         self.grid[grid_y1][grid_x] = char # Use grid_y1
 
         # 2. Draw vertical edges (can overwrite horizontal)
-        for u, v in self.G.edges():
+        for u, v in self.plot_G.edges():
             # Graph coordinates
             x1, y1 = u
             x2, y2 = v
@@ -921,43 +1051,52 @@ class Plotter:
                          self.grid[grid_y][grid_x1] = '│' # Use grid_x1
 
         # 3. Draw nodes (intersections/corners/ends) - this overwrites ends of edges
-        for node in self.G.nodes():
+        for node in self.plot_G.nodes(): # node is (plot_x, plot_y)
             x, y = node
             grid_x, grid_y = x - min_x, y - min_y
 
              # Ensure node coordinates are within grid bounds
             if not (0 <= grid_y < grid_height and 0 <= grid_x < grid_width):
-                print(f"Warning: Node {node} (mapped to grid {grid_x, grid_y}) out of bounds")
+                print(f"Warning: Node {node} (mapped to grid {grid_x, grid_y}) out of bounds") # Node is plot_pos
                 continue
 
             # Retrieve pre-calculated orientation from node attribute
-            original_ports = self.G.nodes[node].get('ports', (False, False, False, False)) 
+            original_ports = self.plot_G.nodes[node].get('ports', (False, False, False, False)) 
 
             # Transpose the ports to match the plotter's coordinate system
-            # Original (N, S, E, W) maps to Plotter (E, W, N, S)
-            N, S, E, W = original_ports
-            plotter_orientation = (E, W, N, S) 
+            # Original Router ports (N, S, E, W) based on router's (x,y)
+            # Plotter node pos are (scaled_router_y, scaled_router_x)
+            # So, router's N/S (y-axis) corresponds to plotter's E/W (plot_G node_x component)
+            # And router's E/W (x-axis) corresponds to plotter's N/S (plot_G node_y component)
+            # Plotter display orientation (char selection) uses (N,S,E,W) relative to its grid display.
+            # The mapping given in prompt was: Original (N,S,E,W) -> Plotter (E,W,N,S)
+            # Let's stick to the prompt's transposition rule for BOX_CHARS lookup.
+            N_router, S_router, E_router, W_router = original_ports
+            plotter_orientation_for_char = (E_router, W_router, N_router, S_router) 
 
-            char = self.BOX_CHARS.get(plotter_orientation, '?')
+            char = self.BOX_CHARS.get(plotter_orientation_for_char, '?')
             self.grid[grid_y][grid_x] = char
 
         # 4. Prepare Net Labels for Boundaries
         left_labels = {}
         right_labels = {}
-        for u, v, data in self.G.edges(data=True):
+        # Determine max_x for the plot_G to check boundary conditions
+        plot_G_max_x = max(all_plot_x_pos) if all_plot_x_pos else 0
+        
+        for u_plot_pos, v_plot_pos, data in self.plot_G.edges(data=True):
             net = str(data.get('net', '?')) # Get net ID as string
-            ux, uy = u
-            vx, vy = v
+            ux_plot, uy_plot = u_plot_pos
+            vx_plot, vy_plot = v_plot_pos
 
             # Map graph y to grid y coordinate
-            grid_uy = uy - min_y
-            grid_vy = vy - min_y
+            grid_uy = uy_plot - min_y
+            grid_vy = vy_plot - min_y
 
-            # Check against graph boundaries (min_x, max_x)
-            if ux == min_x and 0 <= grid_uy < grid_height: left_labels[grid_uy] = net
-            if vx == min_x and 0 <= grid_vy < grid_height: left_labels[grid_vy] = net
-            if ux == max_x and 0 <= grid_uy < grid_height: right_labels[grid_uy] = net
-            if vx == max_x and 0 <= grid_vy < grid_height: right_labels[grid_vy] = net
+            # Check against graph boundaries (min_x, max_x) of the plot_G
+            if ux_plot == min_x and 0 <= grid_uy < grid_height: left_labels[grid_uy] = net
+            if vx_plot == min_x and 0 <= grid_vy < grid_height: left_labels[grid_vy] = net
+            if ux_plot == plot_G_max_x and 0 <= grid_uy < grid_height: right_labels[grid_uy] = net
+            if vx_plot == plot_G_max_x and 0 <= grid_vy < grid_height: right_labels[grid_vy] = net
 
         max_left_len = max(len(s) for s in left_labels.values()) if left_labels else 0
         max_right_len = max(len(s) for s in right_labels.values()) if right_labels else 0

@@ -59,7 +59,10 @@ class TestRouterSkeletons(unittest.TestCase):
         self.router.reset()
         self.assertEqual(self.router.vertical_wiring, [])
         # Add a vertical edge (manually)
-        self.router.G.add_edge((0, 1), (0, 2), net=1)
+        # self.router.G.add_edge((0, 1), (0, 2), net=1) # Old way
+        node_id1 = self.router.add_node_at_pos(0, 1)
+        node_id2 = self.router.add_node_at_pos(0, 2)
+        self.router.G.add_edge(node_id1, node_id2, net=1)
         self.assertEqual(self.router.vertical_wiring, [(1, 2, 1)]) # net, track, goal
         # Add a vertical wire
         self.router.reset()
@@ -79,7 +82,14 @@ class TestRouterSkeletons(unittest.TestCase):
 
     def test_pins(self):
         # Initial state
-        self.assertEqual(self.router.pins, (1,3)) 
+        self.assertEqual(self.router.pins, (1,3))
+        # Test with a connected pin
+        self.router.add_node_at_pos(0, self.router.channel_width + 1) # Simulate top pin connected
+        self.assertEqual(self.router.pins, (None,3))
+        self.router.reset()
+        self.router.add_node_at_pos(0, 0) # Simulate bottom pin connected
+        self.assertEqual(self.router.pins, (1,None))
+        self.router.reset() # Reset for other tests
 
     def test_powerset(self):
         # Should return all subsets including empty set
@@ -147,7 +157,11 @@ class TestRouterSkeletons(unittest.TestCase):
         self.router.current_column = 0
         # Net 1: next top at 3, next bottom at 2
         # Should be 'falling' (bottom pin is closer)
-        self.assertEqual(self.router.classify_net(1), 'falling')
+        # self.assertEqual(self.router.classify_net(1), 'falling') # Original assertion
+        # With steady_net_constant=1, next_top=3, next_bottom=2. next_bottom < next_top + const (2 < 3+1), next_top >= next_bottom + const (3 >= 2+1)
+        # This means it should be 'falling' as next_bottom is present and (next_top is None or 3 >= 2+1)
+        self.assertEqual(self.router.classify_net(1), 'falling') 
+
         # Move column to 1, now next top at 3, next bottom at 2
         #self.router.current_column = 1
         self.assertEqual(self.router.classify_net(1), 'falling')
@@ -179,13 +193,18 @@ class TestRouterSkeletons(unittest.TestCase):
         self.router.connect_pins()
         # Net 1 should occupy a track
         self.assertEqual(len(self.router.Y[1]), 1)
-        # There should be a vertical edge in the graph for net 1
-        found = any(
-            (edge[0][0] == 0 and edge[1][0] == 0 and (edge[0][1] == self.router.channel_width + 1 or edge[1][1] == self.router.channel_width + 1))
-            for edge in self.router.G.edges
-        )
-
-        self.assertTrue(found)
+        # Verify vertical wire to top boundary
+        top_boundary_y = self.router.channel_width + 1
+        found_top_wire = False
+        for u_id, v_id, data in self.router.G.edges(data=True):
+            if data.get('net') == 1:
+                u_pos = self.router.get_node_pos(u_id)
+                v_pos = self.router.get_node_pos(v_id)
+                if u_pos and v_pos and u_pos[0] == 0 and v_pos[0] == 0:
+                    if u_pos[1] == top_boundary_y or v_pos[1] == top_boundary_y:
+                        found_top_wire = True
+                        break
+        self.assertTrue(found_top_wire)
 
         # Case 2: Only bottom pin present, should assign to a free track and add vertical wire
         self.router.reset(T=[0], B=[2])
@@ -195,8 +214,9 @@ class TestRouterSkeletons(unittest.TestCase):
         self.router.connect_pins()
         self.assertEqual(len(self.router.Y[2]), 1)
         found = any(
-            (edge[0][0] == 0 and edge[1][0] == 0 and (edge[0][1] == 0 or edge[1][1] == 0))
-            for edge in self.router.G.edges
+            (self.router.get_node_pos(u)[0] == 0 and self.router.get_node_pos(v)[0] == 0 and 
+             (self.router.get_node_pos(u)[1] == 0 or self.router.get_node_pos(v)[1] == 0))
+            for u,v in self.router.G.edges
         )
         self.assertTrue(found)
 
@@ -218,9 +238,9 @@ class TestRouterSkeletons(unittest.TestCase):
         self.router.connect_pins()
         # Should have a vertical wire from 0 to channel_width+1
         found = any(
-            (edge[0][1] == 0 and edge[1][1] == self.router.channel_width + 1) or
-            (edge[1][1] == 0 and edge[0][1] == self.router.channel_width + 1)
-            for edge in self.router.G.edges
+            (self.router.get_node_pos(u)[1] == 0 and self.router.get_node_pos(v)[1] == self.router.channel_width + 1) or
+            (self.router.get_node_pos(v)[1] == 0 and self.router.get_node_pos(u)[1] == self.router.channel_width + 1)
+            for u,v in self.router.G.edges
         )
         self.assertTrue(found)
 
@@ -418,7 +438,11 @@ class TestRouterSkeletons(unittest.TestCase):
         self.router.reset(T=[0,0,1], B=[0,0,99])
         self.router.channel_width = 6
         self.router.Y = {1: set([1, 4])}
-        self.router.G.add_edge((0, 3), (0, 5), net=99)  # vertical wire at track 3
+        # self.router.G.add_edge((0, 3), (0, 5), net=99)  # vertical wire at track 3
+        # Add net attr for scout
+        node_v1 = self.router.add_node_at_pos(0,3, net=99)
+        node_v2 = self.router.add_node_at_pos(0,5, net=99)
+        self.router.G.add_edge(node_v1, node_v2, net=99)
         # Should stop at 2 (can't reach 4)
         result = self.router.scout(1, 1, 4)
         self.assertEqual(result, 2)
@@ -484,20 +508,24 @@ class TestRouterSkeletons(unittest.TestCase):
         self.router.channel_width = 4
         self.router.Y = {1: set([2, 3, 4])}
         # Add a node at (0, 3) and (0, 4) to test relabeling
-        self.router.G.add_node((0, 3))
-        self.router.G.add_node((0, 4))
+        node_at_0_3 = self.router.add_node_at_pos(0, 3) # y=3, at new_track (mid_track default is 3)
+        node_at_0_4 = self.router.add_node_at_pos(0, 4) # y=4, above new_track
+
         # Widen the channel
-        self.router.widen_channel()
+        self.router.widen_channel() # Default mid_track insertion: new_track will be round(4/2)+1 = 3
         # Channel width should increase by 1
         self.assertEqual(self.router.channel_width, 5)
         # Tracks at or above the new track (3) should be shifted up by 1
-        # (default mid_track is 3)
-        self.assertIn(5, self.router.Y[1])
-        self.assertIn(4, self.router.Y[1])
-        self.assertIn(2, self.router.Y[1])
-        # Node at (0, 3) should now be at (0, 4), (0, 4) at (0, 5)
-        self.assertIn((0, 4), self.router.G.nodes)
-        self.assertIn((0, 5), self.router.G.nodes)
+        # (new_track became 3)
+        self.assertIn(5, self.router.Y[1]) # Original 4 shifts to 5
+        self.assertIn(4, self.router.Y[1]) # Original 3 shifts to 4
+        self.assertIn(2, self.router.Y[1]) # Original 2 remains 2 (below new_track 3)
+        # Node originally at (0, 3) (which was new_track) should now be at (0, 4)
+        self.assertEqual(self.router.get_node_pos(node_at_0_3), (0, 4))
+        self.assertTrue(self.router.has_node_at_pos(0,4))
+        # Node originally at (0, 4) should now be at (0, 5)
+        self.assertEqual(self.router.get_node_pos(node_at_0_4), (0, 5))
+        self.assertTrue(self.router.has_node_at_pos(0,5))
         # Track below new track (2) should remain unchanged
         self.assertIn(2, self.router.Y[1])
 

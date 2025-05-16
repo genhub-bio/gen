@@ -91,7 +91,6 @@ def find_biclique(
             • Q : set of vertices used to determine maximality, initially Q = ∅.
     bicliques
         Output list that collects pairs ``(L', R')`` for every biclique found.
-        Modified in-place.
     """
 
     while P:
@@ -258,12 +257,13 @@ def make_pin_lists(L: List[Pin],
 
     return (L_out, R_out)
 
-def transform_graph(G: nx.Graph, 
-                    scale: Tuple[int, int]=(1,2 ), 
+def transform_graph(G: nx.Graph,
+                    scale: Tuple[int, int]=(1,2 ),
                     shift: Tuple[int, int]=(0,0)):
     """
     Transform a graph from the channel router's coordinate system (top-to-bottom)
-    to the left-to-right coordinates we use to display the graph.
+    to the left-to-right coordinates we use to display the graph. Optionally applies
+    a scaling and/or translation as well. Modifies the graph in-place.
     This encompasses:
     - transposing (left-to-right instead of top-to-bottom)
     - scaling (hscale, vscale)
@@ -271,22 +271,39 @@ def transform_graph(G: nx.Graph,
     """
     hscale, vscale = scale
     xshift, yshift = shift
-    return nx.relabel_nodes(G, lambda xy: (xy[1] * hscale + xshift, xy[0] * vscale + yshift), copy=True)
+
+    for node_id, data in G.nodes(data=True):
+        if 'pos' not in data:
+            print(f"Warning: Node {node_id} in transform_graph is missing 'pos' attribute and was not transformed.")
+            continue
+
+        x, y = data['pos'] # These are from channel_router's perspective
+
+        new_x = x * hscale + xshift
+        new_y = y * vscale + yshift
+        
+        G.nodes[node_id]['pos'] = (new_x, new_y)
+        
+    return G
 
 def plot_graph(G: nx.Graph):
+    # Refuse to plot graphs with nodes missing the 'pos' attribute
+    if not all('pos' in data for _node, data in G.nodes(data=True)):
+        raise ValueError("Warning: One or more nodes are missing the 'pos' attribute and were not plotted.")
+    
+    node_positions = {node: data['pos'] for node, data in G.nodes(data=True)}
     plt.figure(figsize=(5, 5))
-    node_positions = {node: node for node in G.nodes()}
     nx.draw(G, pos=node_positions, with_labels=True)
     plt.show()
 
 
 def assign_ports(G: nx.Graph):
     for node in G.nodes():
-        x, y = node
+        x, y = G.nodes[node]['pos']
         neighbors = G.neighbors(node)
         north, south, east, west = False, False, False, False
         for neighbor in neighbors:
-            nx, ny = neighbor
+            nx, ny = G.nodes[neighbor]['pos']
             # Use Router's coordinate system (y increases upwards)
             if ny > y: north = True
             if ny < y: south = True
@@ -296,113 +313,22 @@ def assign_ports(G: nx.Graph):
         # Store the orientation in the node attribute
         G.nodes[node]['ports'] = (north, south, east, west)
 
-def colinear(p1, p2, p3):
-    """
-    Tests if the points, given as 3 tuples (x, y), are collinear.
-    """
-    x1, y1 = p1
-    x2, y2 = p2
-    x3, y3 = p3
-    return (y2 - y1) * (x3 - x2) == (y3 - y2) * (x2 - x1)
 
-def simplify(G: nx.Graph):
-    """
-    Build a new graph by removing all degree-2 nodes that are colinear with their neighbors.
-    Assumes that each node has an (x,y) tuple in the 'pos' attribute.
-    """
-    if not G or G.number_of_edges() == 0:
-        return
-
-    simplified_G = nx.Graph()
-    processed_segments = set()
-
-    # 1. Identify and add all critical nodes (degree != 2 or not colinear with neighbors)
-    critical_nodes = set()
-    original_nodes = list(G.nodes())
-    for node in original_nodes:
-        neighbors = list(G.neighbors(node))
-        if len(neighbors) != 2:
-            critical_nodes.add(node)
-            simplified_G.add_node(node, **G.nodes[node])
-        else:
-            # Check if node is colinear with its two neighbors
-            p1 = G.nodes[neighbors[0]].get('pos')
-            p2 = G.nodes[node].get('pos')
-            p3 = G.nodes[neighbors[1]].get('pos')
-            if not (p1 and p2 and p3 and colinear(p1, p2, p3)):
-                critical_nodes.add(node)
-                simplified_G.add_node(node, **G.nodes[node])
-
-    # Handle case where graph might be a single loop of colinear segments
-    if not critical_nodes and G.number_of_nodes() > 0:
-        start_node = original_nodes[0]
-        critical_nodes.add(start_node)
-        simplified_G.add_node(start_node, **G.nodes[start_node])
-
-    # 2. Iterate through critical nodes and trace segments using true colinearity
-    for start_node in critical_nodes:
-        for neighbor in list(G.neighbors(start_node)):
-            if neighbor in critical_nodes:
-                segment_endpoints = tuple(sorted((start_node, neighbor)))
-                if segment_endpoints not in processed_segments:
-                    net_attr = G.edges[start_node, neighbor].get('net')
-                    if not simplified_G.has_edge(start_node, neighbor):
-                        simplified_G.add_edge(start_node, neighbor, net=net_attr)
-                    processed_segments.add(segment_endpoints)
-            else:
-                # Start of a colinear segment
-                prev = start_node
-                curr = neighbor
-                segment_net = G.edges[prev, curr].get('net')
-                path = [prev, curr]
-                while True:
-                    neighbors = list(G.neighbors(curr))
-                    # Remove the previous node from neighbors
-                    next_candidates = [n for n in neighbors if n != prev]
-                    if len(next_candidates) != 1:
-                        # Dead-end or branch, stop here
-                        break
-                    next_node = next_candidates[0]
-                    # Check net consistency
-                    next_net = G.edges[curr, next_node].get('net')
-                    if next_net != segment_net:
-                        break
-                    # Check colinearity
-                    p1 = G.nodes[prev].get('pos')
-                    p2 = G.nodes[curr].get('pos')
-                    p3 = G.nodes[next_node].get('pos')
-                    if not (p1 and p2 and p3 and colinear(p1, p2, p3)):
-                        break
-                    prev, curr = curr, next_node
-                    path.append(curr)
-                    if curr in critical_nodes:
-                        break
-
-                end_node = curr
-                segment_endpoints = tuple(sorted((start_node, end_node)))
-                if not simplified_G.has_node(end_node):
-                    simplified_G.add_node(end_node, **G.nodes[end_node])
-                if segment_endpoints not in processed_segments and start_node != end_node:
-                    if not simplified_G.has_edge(start_node, end_node):
-                        simplified_G.add_edge(start_node, end_node, net=segment_net)
-                    processed_segments.add(segment_endpoints)
-
-    return simplified_G
 
 def route_layer(U_pos: Dict[Any, Tuple[int, int]], 
                 V_pos: Dict[Any, Tuple[int, int]], 
-                E: Set[Tuple[Any, Any]]) -> nx.Graph:
+                E: List[Tuple[Any, Any]]) -> nx.Graph:
     """
     Build a rectilinear routing between two layers of the graph.
     A layer is defined as the bipartite subgraph between two sets of nodes that have
     been assigned consecutive ranks in the Sugiyama algorithm.
     Where appropriate, edges are routed over a common bus to save visual clutter.
     This does introduce a problem of ambiguity when routing edges over a common bus:
-    "do all nodes have the same neighbors, or just a subset?"
+    "do *all* nodes on this bus have the same neighbors, or do they share a subset?"
     We solve this problem by connecting nodes through distinct terminals in cases
-    where it would otherwise be ambiguous. We refer to the area between the nodes
-    and the terminals, and between the two sets of terminals as "channels"
-    of terminals as the "channel".
+    where it would otherwise be ambiguous. The area between the nodes and the terminals,
+     and the area between sets of terminals are called "channels" (so one layer
+    can have up to 3 channels".
     """
     U = set(U_pos.keys())
     V = set(V_pos.keys())
@@ -417,15 +343,14 @@ def route_layer(U_pos: Dict[Any, Tuple[int, int]],
     nets = make_nets(bicliques) 
 
     # For each node, we create one terminal per net that it is part of.
-    # Each terminal is defined by a position within its rank, and its net index.
+    # Each terminal is defined by a linear position within its rank, and its net index.
     terminals = make_terminals(nets, U_pos | V_pos) 
 
     layer_graph = nx.Graph()
-    # Add U nodes to the layer graph and set up a pin list
-    for u in U:
-        x, y = U_pos[u]
-        layer_graph.add_node(u, pos=(x,y))
-
+    # Add U and V nodes to the layer graph with their positions
+    for node, (x,y) in list(U_pos.items()) + list(V_pos.items()):
+        layer_graph.add_node(node, pos=(x,y))
+ 
     # First channel: U nodes to U terminals (as nodes)
     L_pins = [Pin(node, y) for node, (_x,y) in U_pos.items()]
     R_pins = [Pin(terminal.node, terminal.position) 
@@ -433,11 +358,14 @@ def route_layer(U_pos: Dict[Any, Tuple[int, int]],
                 if terminal.node in U]
 
     L_pin_list, R_pin_list = make_pin_lists(L_pins, R_pins)
-    channel_router = route_channel.Router(R_pin_list, L_pin_list)
-    channel_graph = channel_router.route()
-    channel_graph = transform_graph(channel_graph)
-    max_x = max(xy[0] for xy in channel_graph.nodes())
+    G1 = route_channel.Router(R_pin_list, L_pin_list).route()
 
+    # Track vertical extent of the first channel so we can offset the next
+    # (Note that we are operating in a top-to-bottom coordinate system here (TODO: fix this))
+    y_offset = 0
+    if G1.number_of_nodes() > 0:
+        y_offset = max(y for _n, (_x, y) in nx.get_node_attributes(G1, 'pos').items())
+    
     # Second channel: U terminals (as nets) to V terminals (as nets)
     L_pins = [Pin(terminal.net_index, terminal.position) 
                 for terminal in terminals 
@@ -447,97 +375,92 @@ def route_layer(U_pos: Dict[Any, Tuple[int, int]],
                 if terminal.node in V]
     
     L_pin_list, R_pin_list = make_pin_lists(L_pins, R_pins)
-    channel_router = route_channel.Router(R_pin_list, L_pin_list)
-    channel_graph2 = channel_router.route()
-    channel_graph2 = transform_graph(channel_graph2, shift=(max_x, 0))
+    G2 = route_channel.Router(R_pin_list, L_pin_list).route()
 
-    # Combine the two channel graphs
-    combined_graph = nx.compose(channel_graph, channel_graph2)
-    max_x = max(xy[0] for xy in combined_graph.nodes())
+    # Shift G2 vertically so it sits below the first channel
+    for node, data in G2.nodes(data=True):
+        if 'pos' in data:
+            x, y = data['pos']
+            G2.nodes[node]['pos'] = (x, y + y_offset)
+
+    # Update y_offset for the following stage
+    if G2.number_of_nodes() > 0:
+        y_offset = max(y for _n, (_x, y) in nx.get_node_attributes(G2, 'pos').items())
 
     # Third channel: V terminals (as nodes) to V nodes
-    L_pins = [Pin(terminal.node, terminal.position) 
-                for terminal in terminals 
+    L_pins = [Pin(terminal.node, terminal.position)
+                for terminal in terminals
                 if terminal.node in V]
     R_pins = [Pin(node, y) for node, (_x,y) in V_pos.items()]
 
     L_pin_list, R_pin_list = make_pin_lists(L_pins, R_pins)
-    channel_router = route_channel.Router(R_pin_list, L_pin_list)
-    channel_graph3 = channel_router.route()
-    channel_graph3 = transform_graph(channel_graph3, shift=(max_x, 0))
+    G3 = route_channel.Router(R_pin_list, L_pin_list).route()
 
-    # Combine and clean up the three channel graphs
-    combined_graph = nx.compose(combined_graph, channel_graph3)
-    plot_graph(combined_graph)
-    #assign_ports(combined_graph)
-    simplified_graph = simplify(combined_graph)
-    plot_graph(simplified_graph)
+    # Shift G3 below the previous channels using current y_offset
+    for node, data in G3.nodes(data=True):
+        if 'pos' in data:
+            x, y = data['pos']
+            G3.nodes[node]['pos'] = (x, y + y_offset)
 
-    return simplified_graph
+
+
+
+    pos_to_id: Dict[Tuple[int, int], int] = {layer_graph.nodes[n]['pos']: n for n in layer_graph.nodes() if 'pos' in layer_graph.nodes[n] and isinstance(layer_graph.nodes[n]['pos'], tuple)}
+
+    next_free_id = max(layer_graph.nodes) + 1
+
+    # Merge all channel graphs into layer_graph
+    for src_G in (G1, G2, G3):
+        # 1) Merge / reuse nodes based on their coordinates
+        for n, attrs in src_G.nodes(data=True):
+            pos = attrs.get('pos')
+            if pos is None:
+                continue  # skip nodes without positional information
+
+            if pos in pos_to_id:
+                node_id = pos_to_id[pos]
+            else:
+                # Assign next available integer identifier (auto_id_counter is always unique
+                # because we initialized it to max(existing_ids)+1 and only increment it here).
+                node_id = next_free_id
+                next_free_id += 1
+
+                layer_graph.add_node(node_id, **attrs)
+                pos_to_id[pos] = node_id
+
+        # 2) Add edges using the mapped node IDs
+        for u, v, e_attrs in src_G.edges(data=True):
+            pos_u = src_G.nodes[u].get('pos')
+            pos_v = src_G.nodes[v].get('pos')
+            if pos_u is None or pos_v is None:
+                continue
+            u_id = pos_to_id[pos_u]
+            v_id = pos_to_id[pos_v]
+            if layer_graph.has_edge(u_id, v_id):
+                layer_graph.edges[u_id, v_id].update(e_attrs)
+            else:
+                layer_graph.add_edge(u_id, v_id, **e_attrs)
+
+    # Recompute port orientation for the merged graph
+    assign_ports(layer_graph)
+
+    return layer_graph
 
 
 
 
 if __name__ == "__main__":
-    # Create an example graph with integer nodes and 'pos' attributes
-    # (x,y) coordinates. x=0 for left, x=1 for right.
-   
-    edges_int = [(1,3), (1,4), (2,3), (2,4), (2,5)]
-    node_pos = [(1, {'pos': (0, 0)}), (2, {'pos': (0, 1)}), 
-                (3, {'pos': (1, 0)}), (4, {'pos': (1, 1)}), (5, {'pos': (1, 2)})]
+    edges = [(1,3), (1,4), (2,3), (2,4), (2,5)]
+    node_pos = {1: (0, 0), 2: (0, 1), 
+                3: (1, 0), 4: (1, 1), 5: (1, 2)}
     
-    # Determine U and V sets from integer edges to assign y-coordinates
-    U, V = map(set, zip(*edges_int))
-    G_example = nx.Graph()
-    G_example.add_nodes_from(node_pos)
-    G_example.add_edges_from(edges_int)
+    U, V = map(set, zip(*edges))
+
+    G = route_layer(dict((k,v) for k,v in node_pos.items() if k in U),
+                    dict((k,v) for k,v in node_pos.items() if k in V),
+                    edges)
     
-    # Define U and V for the example graph
-    U_example, V_example = map(set, zip(*edges_int))
-
-    # Call the new function
-    layer_subgraph = route_layer(dict((n, attr['pos']) for n, attr in node_pos if n in U),
-                                 dict((n, attr['pos']) for n, attr in node_pos if n in V),
-                                 edges_int)
-    
-    print(layer_subgraph)
-    
-
-
-    
-# Tests:
-class TestMakePinList(unittest.TestCase):
-    def test_basic_case(self):
-        # Basic test case - verifies the core functionality works
-        L = [Pin("foo", 2), Pin("bar", 4)]
-        R = [Pin("baz", 1), Pin("qux", 3)]
-        result_L, result_R = make_pin_lists(L, R)
-        self.assertEqual(result_L, [0, 0, "foo", 0, "bar"])
-        self.assertEqual(result_R, [0, "baz", 0, "qux", 0])
-
-    def test_different_lengths(self):
-        # Tests the normalization feature - both lists get same length
-        L = [Pin("a", 1), Pin("b", 3)]
-        R = [Pin("x", 0), Pin("y", 2), Pin("z", 5)]
-        result_L, result_R = make_pin_lists(L, R)
-        self.assertEqual(result_L, [0, "a", 0, "b", 0, 0])
-        self.assertEqual(result_R, ["x", 0, "y", 0, 0, "z"])
-
-    def test_one_empty_list(self):
-        L = [Pin("a", 2)]
-        R = []
-        result_L, result_R = make_pin_lists(L, R)
-        self.assertEqual(result_L, [0, 0, "a"])
-        self.assertEqual(result_R, [0, 0, 0])
-
-    def test_both_lists_empty(self):
-        L = []
-        R = []
-        with self.assertRaises(AssertionError) as context:
-            make_pin_lists(L, R)
-        self.assertEqual(str(context.exception), "Both lists are empty")
-
-
+    plot_graph(G)    
 
     
 
