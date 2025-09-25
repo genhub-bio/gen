@@ -1,24 +1,20 @@
-use noodles::fasta;
-use rusqlite;
-use rusqlite::{types::Value as SQLValue, Connection};
 use std::str;
 
-use crate::fasta::FastaError;
-use crate::models::block_group_edge::NO_CHROMOSOME_INDEX;
-use crate::models::operations::{OperationFile, OperationInfo};
-use crate::models::{
+use gen_core::{HashId, PathBlock, Strand, NO_CHROMOSOME_INDEX};
+use gen_models::{
     block_group::{BlockGroup, PathChange},
     edge::Edge,
     file_types::FileTypes,
     node::Node,
-    operations::Operation,
-    path::PathBlock,
+    operations::{Operation, OperationFile, OperationInfo},
     sample::Sample,
     sequence::Sequence,
-    strand::Strand,
     traits::*,
 };
-use crate::{calculate_hash, operation_management};
+use noodles::fasta;
+use rusqlite::{self, types::Value as SQLValue, Connection};
+
+use crate::fasta::FastaError;
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_fasta(
@@ -33,14 +29,14 @@ pub fn update_with_fasta(
     fasta_file_path: &str,
     disable_reference_path_update: bool,
 ) -> Result<Operation, FastaError> {
-    let mut session = operation_management::start_operation(conn);
+    let mut session = gen_models::session_operations::start_operation(conn);
 
     let mut fasta_reader = fasta::io::reader::Builder.build_from_path(fasta_file_path)?;
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
-    let mut new_block_group_id = 0;
+    let mut found_bg_id = None;
     for block_group in block_groups {
         let new_bg_id = BlockGroup::get_or_create_sample_block_group(
             conn,
@@ -51,15 +47,17 @@ pub fn update_with_fasta(
         )?;
 
         if block_group.name == region_name {
-            new_block_group_id = new_bg_id;
+            found_bg_id = Some(new_bg_id);
         }
     }
 
-    if new_block_group_id == 0 {
-        panic!("No region found with name: {}", region_name);
-    }
+    let new_block_group_id = if let Some(x) = found_bg_id {
+        x
+    } else {
+        panic!("No region found with name: {region_name}");
+    };
 
-    let path = BlockGroup::get_current_path(conn, new_block_group_id);
+    let path = BlockGroup::get_current_path(conn, &new_block_group_id);
     let interval_tree = path.intervaltree(conn);
 
     // Assuming just one entry in the fasta file
@@ -78,7 +76,7 @@ pub fn update_with_fasta(
         let node_id = Node::create(
             conn,
             &seq.hash,
-            calculate_hash(&format!(
+            &HashId::convert_str(&format!(
                 "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
                 path_id = path.id,
                 ref_start = 0,
@@ -99,7 +97,7 @@ pub fn update_with_fasta(
         };
 
         let path_change = PathChange {
-            block_group_id: new_block_group_id,
+            block_group_id: new_block_group_id.clone(),
             path: path.clone(),
             path_accession: None,
             start: start_coordinate,
@@ -143,7 +141,7 @@ pub fn update_with_fasta(
     }
 
     let summary_str = format!("{change_count} sequences inserted");
-    let op = operation_management::end_operation(
+    let op = gen_models::session_operations::end_operation(
         conn,
         operation_conn,
         &mut session,
@@ -159,7 +157,7 @@ pub fn update_with_fasta(
     )
     .unwrap();
 
-    println!("Updated with fasta file: {}", fasta_file_path);
+    println!("Updated with fasta file: {fasta_file_path}");
 
     Ok(op)
 }
@@ -167,14 +165,16 @@ pub fn update_with_fasta(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use std::{collections::HashSet, path::PathBuf};
+
+    use gen_models::operations::setup_db;
+
     use super::*;
-    use crate::imports::fasta::import_fasta;
-    use crate::models::{metadata, operations::setup_db};
-    use crate::test_helpers::{
-        get_connection, get_operation_connection, get_sample_bg, setup_gen_dir,
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_connection, get_operation_connection, get_sample_bg, setup_gen_dir},
+        track_database,
     };
-    use std::collections::HashSet;
-    use std::path::PathBuf;
 
     #[test]
     fn test_update_with_fasta() {
@@ -188,10 +188,10 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -231,7 +231,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -244,10 +244,10 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let fasta_update_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -287,8 +287,8 @@ mod tests {
 
         let child_blockgroup = get_sample_bg(conn, &collection, "child sample").id;
         let other_blockgroup = get_sample_bg(conn, &collection, "other sample").id;
-        let child_path = BlockGroup::get_current_path(conn, child_blockgroup);
-        let other_path = BlockGroup::get_current_path(conn, other_blockgroup);
+        let child_path = BlockGroup::get_current_path(conn, &child_blockgroup);
+        let other_path = BlockGroup::get_current_path(conn, &other_blockgroup);
         assert_eq!(
             child_path.sequence(conn),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
@@ -311,10 +311,10 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let fasta_update_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/multiple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -355,7 +355,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -375,10 +375,10 @@ mod tests {
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -431,7 +431,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -451,10 +451,10 @@ mod tests {
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -507,7 +507,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -533,10 +533,10 @@ mod tests {
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -589,7 +589,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -609,10 +609,10 @@ mod tests {
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -665,7 +665,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -683,10 +683,10 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -739,7 +739,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }

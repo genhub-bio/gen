@@ -1,36 +1,48 @@
-use crate::graph::{GenGraph, GraphEdge, GraphNode};
-use crate::models::block_group_edge::BlockGroupEdge;
-use crate::models::edge::Edge;
-use crate::models::node::Node;
-use crate::models::sequence::Sequence;
-use crate::models::strand::Strand;
-use crate::models::strand::Strand::Forward;
-use crate::operation_management::{
-    load_changeset, load_changeset_dependencies, load_changeset_models, ChangesetModels,
-    DependencyModels,
+use std::collections::{HashMap, HashSet};
+
+use gen_core::{
+    is_end_node, is_start_node, is_terminal, HashId,
+    Strand::{self, Forward},
 };
-use crate::patch::OperationPatch;
+use gen_graph::{GenGraph, GraphEdge, GraphNode};
+use gen_models::{
+    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, edge::Edge,
+    errors::OperationError, node::Node, operations::Operation, sequence::Sequence,
+    session_operations::DependencyModels, traits::Query,
+};
 use html_escape;
 use itertools::Itertools;
-use petgraph::graphmap::DiGraphMap;
-use petgraph::Direction;
-use rusqlite::session::ChangesetIter;
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use petgraph::{graphmap::DiGraphMap, Direction};
+use rusqlite::Connection;
+
+use crate::patch::OperationPatch;
+
+pub fn get_change_graph_from_hash(
+    conn: &Connection,
+    hash: &HashId,
+) -> Result<HashMap<HashId, GenGraph>, OperationError> {
+    let operation =
+        Operation::get_by_id(conn, hash).ok_or(OperationError::NoOperation(format!("{hash}")))?;
+
+    let changeset = operation.get_changeset();
+    let dependencies = operation.get_changeset_dependencies();
+
+    Ok(get_change_graph(&changeset.changes, &dependencies))
+}
 
 pub fn get_change_graph(
     changes: &ChangesetModels,
     dependencies: &DependencyModels,
-) -> HashMap<i64, GenGraph> {
+) -> HashMap<HashId, GenGraph> {
     let start_node = Node::get_start_node();
     let end_node = Node::get_end_node();
-    let mut bges_by_bg: HashMap<i64, Vec<&BlockGroupEdge>> = HashMap::new();
-    let mut edges_by_id: HashMap<i64, &Edge> = HashMap::new();
-    let mut nodes_by_id: HashMap<i64, &Node> = HashMap::new();
+    let mut bges_by_bg: HashMap<HashId, Vec<&BlockGroupEdge>> = HashMap::new();
+    let mut edges_by_id: HashMap<HashId, &Edge> = HashMap::new();
+    let mut nodes_by_id: HashMap<HashId, &Node> = HashMap::new();
     nodes_by_id.insert(start_node.id, &start_node);
     nodes_by_id.insert(end_node.id, &end_node);
-    let mut sequences_by_hash: HashMap<&String, &Sequence> = HashMap::new();
-    let mut block_graphs: HashMap<i64, GenGraph> = HashMap::new();
+    let mut sequences_by_hash: HashMap<HashId, &Sequence> = HashMap::new();
+    let mut block_graphs: HashMap<HashId, GenGraph> = HashMap::new();
 
     for bge in changes.block_group_edges.iter() {
         bges_by_bg
@@ -49,15 +61,15 @@ pub fn get_change_graph(
         .iter()
         .chain(dependencies.sequences.iter())
     {
-        sequences_by_hash.insert(&seq.hash, seq);
+        sequences_by_hash.insert(seq.hash, seq);
     }
 
     for (bg_id, bg_edges) in bges_by_bg.iter() {
         // There are 2 graphs created here. The first graph is our normal graph of nodes
         // and edges. This graph is then used to make our second graph representing the spans
         // of each node (blocks).
-        let mut graph: DiGraphMap<i64, (i64, i64)> = DiGraphMap::new();
-        let mut block_graph: GenGraph = DiGraphMap::new();
+        let mut graph: DiGraphMap<HashId, (i64, i64)> = DiGraphMap::new();
+        let mut block_graph = GenGraph::new();
         block_graph.add_node(GraphNode {
             block_id: -1,
             node_id: start_node.id,
@@ -83,7 +95,7 @@ pub fn get_change_graph(
             // This is where we make the block graph. For this, we figure out the positions of
             // all incoming and outgoing edges from the node. Then we make blocks between those
             // positions.
-            if Node::is_terminal(node) {
+            if is_terminal(node) {
                 continue;
             }
             let in_ports = graph
@@ -133,7 +145,7 @@ pub fn get_change_graph(
                     *i,
                     *j,
                     vec![GraphEdge {
-                        edge_id: -1,
+                        edge_id: HashId::pad_str(1),
                         source_strand: Strand::Forward,
                         target_strand: Forward,
                         chromosome_index: 0,
@@ -144,7 +156,7 @@ pub fn get_change_graph(
         }
 
         for (src, dest, (fp, tp)) in graph.all_edges() {
-            if !(Node::is_end_node(src) && Node::is_start_node(dest)) {
+            if !(is_end_node(src) && is_start_node(dest)) {
                 let source_block = block_graph
                     .nodes()
                     .find(|node| node.node_id == src && node.sequence_end == *fp)
@@ -157,7 +169,7 @@ pub fn get_change_graph(
                     source_block,
                     dest_block,
                     vec![GraphEdge {
-                        edge_id: -1,
+                        edge_id: HashId::pad_str(1),
                         source_strand: Strand::Forward,
                         target_strand: Forward,
                         chromosome_index: 0,
@@ -166,43 +178,44 @@ pub fn get_change_graph(
                 );
             }
         }
-        block_graphs.insert(*bg_id, block_graph);
+        block_graphs.insert(bg_id.clone(), block_graph);
     }
     block_graphs
 }
 
-pub fn view_patches(patches: &[OperationPatch]) -> HashMap<String, HashMap<i64, String>> {
+pub fn view_patches(patches: &[OperationPatch]) -> HashMap<HashId, HashMap<HashId, String>> {
     // For each blockgroup in a patch, a .dot file is generated showing how the base sequence
     // has been updated.
-    let mut diagrams: HashMap<String, HashMap<i64, String>> = HashMap::new();
+    let mut diagrams: HashMap<HashId, HashMap<HashId, String>> = HashMap::new();
 
     for patch in patches {
         // The beginning work is loading the models from the patch as well as dependencies. Once
         // loaded, a graph is created of the added nodes and returned as a dot string
-        let mut bg_dots: HashMap<i64, String> = HashMap::new();
+        let mut bg_dots: HashMap<HashId, String> = HashMap::new();
 
         let op_info = &patch.operation;
-        let changeset = load_changeset(op_info);
-        let dependencies = load_changeset_dependencies(op_info);
+        let changeset = op_info.get_changeset();
+        let dependencies = op_info.get_changeset_dependencies();
 
-        let input: &mut dyn Read = &mut changeset.as_slice();
-        let mut iter = ChangesetIter::start_strm(&input).unwrap();
+        let block_graphs = get_change_graph(&changeset.changes, &dependencies);
 
-        let new_models = load_changeset_models(&mut iter);
-
-        let block_graphs = get_change_graph(&new_models, &dependencies);
-
-        let mut sequences_by_hash: HashMap<&String, &Sequence> = HashMap::new();
-        for seq in new_models
+        let mut sequences_by_hash: HashMap<HashId, &Sequence> = HashMap::new();
+        for seq in changeset
+            .changes
             .sequences
             .iter()
             .chain(dependencies.sequences.iter())
         {
-            sequences_by_hash.insert(&seq.hash, seq);
+            sequences_by_hash.insert(seq.hash, seq);
         }
-        let mut node_sequence_hashes: HashMap<i64, &String> = HashMap::new();
-        for node in new_models.nodes.iter().chain(dependencies.nodes.iter()) {
-            node_sequence_hashes.insert(node.id, &node.sequence_hash);
+        let mut node_sequence_hashes: HashMap<HashId, HashId> = HashMap::new();
+        for node in changeset
+            .changes
+            .nodes
+            .iter()
+            .chain(dependencies.nodes.iter())
+        {
+            node_sequence_hashes.insert(node.id, node.sequence_hash);
         }
 
         for (bg_id, block_graph) in block_graphs.iter() {
@@ -212,8 +225,8 @@ pub fn view_patches(patches: &[OperationPatch]) -> HashMap<String, HashMap<i64, 
                 let start = node.sequence_start;
                 let end = node.sequence_end;
                 let block_id = format!("{node_id}.{start}.{end}");
-                if Node::is_terminal(node.node_id) {
-                    let label = if Node::is_start_node(node.node_id) {
+                if is_terminal(node.node_id) {
+                    let label = if is_start_node(node.node_id) {
                         "start"
                     } else {
                         "end"
@@ -225,17 +238,17 @@ pub fn view_patches(patches: &[OperationPatch]) -> HashMap<String, HashMap<i64, 
                 }
 
                 let seq_hash = *node_sequence_hashes.get(&node.node_id).unwrap();
-                let seq = *sequences_by_hash.get(seq_hash).unwrap();
+                let seq = *sequences_by_hash.get(&seq_hash).unwrap();
                 let len = end - start;
 
                 let formatted_seq = if len > 7 {
                     format!(
                         "{s}...{e}",
                         s = seq.get_sequence(start, start + 3),
-                        e = seq.get_sequence(end - 2, end + 1)
+                        e = seq.get_sequence(end - 3, end)
                     )
                 } else {
-                    seq.get_sequence(start, end + 1)
+                    seq.get_sequence(start, end)
                 };
 
                 let coordinates = format!("{node_id}:{start}-{end}");
@@ -281,16 +294,8 @@ pub fn view_patches(patches: &[OperationPatch]) -> HashMap<String, HashMap<i64, 
                 } else {
                     "normal"
                 };
-                let headport = if Node::is_end_node(dest) {
-                    "w"
-                } else {
-                    "seq:w"
-                };
-                let tailport = if Node::is_start_node(src) {
-                    "e"
-                } else {
-                    "seq:e"
-                };
+                let headport = if is_end_node(dest) { "w" } else { "seq:w" };
+                let tailport = if is_start_node(src) { "e" } else { "seq:e" };
                 dot.push_str(&format!(
                     "\"{src}.{s_fp}.{s_tp}\" -> \"{dest}.{d_fp}.{d_tp}\" [arrowhead={arrow}, headport=\"{headport}\", tailport=\"{tailport}\", style=\"{style}\"]\n"
                 ));
@@ -299,7 +304,7 @@ pub fn view_patches(patches: &[OperationPatch]) -> HashMap<String, HashMap<i64, 
             dot.push('}');
             bg_dots.insert(*bg_id, dot);
         }
-        diagrams.insert(patch.operation.hash.clone(), bg_dots);
+        diagrams.insert(patch.operation.hash, bg_dots);
     }
     diagrams
 }

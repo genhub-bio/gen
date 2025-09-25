@@ -1,12 +1,13 @@
-use crate::commands::cli_context::CliContext;
-use crate::config::get_gen_dir;
-use clap::{Parser, Subcommand};
-use rusqlite::Connection;
 use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use gen_core::config::get_gen_dir;
+use rusqlite::Connection;
 
 pub mod cli_context;
 pub mod export;
 pub mod import;
+pub mod remote;
 pub mod update;
 
 #[derive(Subcommand)]
@@ -107,6 +108,9 @@ pub enum Commands {
         list: bool,
         #[arg(short, long, action)]
         merge: bool,
+        /// Set the remote for the current branch
+        #[arg(long)]
+        set_remote: Option<String>,
         /// The branch name
         #[clap(index = 1)]
         branch_name: Option<String>,
@@ -162,18 +166,23 @@ pub enum Commands {
         #[arg(short, long)]
         collection: Option<String>,
     },
-    /// Set the remote URL for this repo
-    #[command(arg_required_else_help(true))]
-    SetRemote {
-        /// The remote URL to set
-        #[arg(short, long)]
-        remote: String,
-    },
+    /// Manage remote repositories
+    #[command(subcommand)]
+    Remote(remote::RemoteCommand),
+
     /// Push the local repo to the remote
     #[command()]
-    Push {},
+    Push {
+        /// The remote to push to
+        #[arg(short, long)]
+        remote: Option<String>,
+    },
     #[command()]
-    Pull {},
+    Pull {
+        /// The remote to pull from
+        #[arg(short, long)]
+        remote: Option<String>,
+    },
     /// Convert annotation coordinates between two samples
     #[command(arg_required_else_help(true))]
     PropagateAnnotations {
@@ -318,8 +327,8 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-pub fn get_db_for_command(cli_context: &CliContext, operation_conn: &Connection) -> String {
-    let binding = cli_context.db.clone().unwrap_or_else(|| {
+pub fn get_db_for_command(db: Option<String>, operation_conn: &Connection) -> String {
+    let binding = db.clone().unwrap_or_else(|| {
         let mut stmt = operation_conn
             .prepare("select db_name from defaults where id = 1;")
             .unwrap();

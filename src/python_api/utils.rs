@@ -1,13 +1,15 @@
-use crate::config::get_gen_dir;
-use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyModule};
-use rusqlite::types::ValueRef;
-use rusqlite::Connection;
 use std::path::Path;
+
+use gen_core::config::get_gen_dir;
+use pyo3::{
+    prelude::*,
+    types::{PyBytes, PyModule},
+};
+use rusqlite::{types::ValueRef, Connection};
 
 /// Helper function to convert SQLite errors to Python exceptions
 pub fn sqlite_err_to_pyerr(err: rusqlite::Error) -> PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err(format!("SQLite error: {}", err))
+    pyo3::exceptions::PyRuntimeError::new_err(format!("SQLite error: {err}"))
 }
 
 /// Helper function to convert a Rust path to a Python pathlib.Path object

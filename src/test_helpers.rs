@@ -1,65 +1,67 @@
+use std::{fmt::Debug, fs, io::Write, ops::Add, path::PathBuf};
+
+use gen_core::{
+    config::{get_or_create_gen_dir, BASE_DIR},
+    errors::ConnectionError,
+    HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID,
+};
+use gen_graph::GenGraph;
+use gen_models::{
+    block_group::BlockGroup,
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    collection::Collection,
+    edge::Edge,
+    file_types::FileTypes,
+    migrations::{run_migrations, run_operation_migrations},
+    node::Node,
+    operations::{Operation, OperationFile, OperationInfo},
+    path::Path,
+    sample::Sample,
+    sequence::Sequence,
+    session_operations::{end_operation, start_operation},
+};
 use intervaltree::IntervalTree;
 use rusqlite::Connection;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::fs;
-use std::hash::Hash;
-use std::io::Write;
-use std::ops::Add;
-use std::path::PathBuf;
 use tempfile::tempdir;
 
-use crate::config::{get_or_create_gen_dir, BASE_DIR};
-use crate::graph::GenGraph;
-use crate::migrations::{run_migrations, run_operation_migrations};
-use crate::models::block_group::BlockGroup;
-use crate::models::block_group_edge::{BlockGroupEdge, BlockGroupEdgeData};
-use crate::models::collection::Collection;
-use crate::models::edge::Edge;
-use crate::models::file_types::FileTypes;
-use crate::models::node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID};
-use crate::models::operations::{Operation, OperationFile, OperationInfo};
-use crate::models::path::Path;
-use crate::models::sample::Sample;
-use crate::models::sequence::Sequence;
-use crate::models::strand::Strand;
-use crate::operation_management::{end_operation, start_operation};
-
-pub fn get_connection<'a>(db_path: impl Into<Option<&'a str>>) -> Connection {
+pub fn get_connection<'a>(
+    db_path: impl Into<Option<&'a str>>,
+) -> Result<Connection, ConnectionError> {
     let path: Option<&str> = db_path.into();
     let mut conn;
     if let Some(v) = path {
         if fs::metadata(v).is_ok() {
-            fs::remove_file(v).unwrap();
+            fs::remove_file(v).expect("Unable to delete existing file");
         }
-        conn = Connection::open(v).unwrap_or_else(|_| panic!("Error connecting to {}", v));
+        conn = Connection::open(v).map_err(ConnectionError::OpenFailed)?;
     } else {
-        conn = Connection::open_in_memory()
-            .unwrap_or_else(|_| panic!("Error opening in memory test db"));
+        conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
-    rusqlite::vtab::array::load_module(&conn).unwrap();
+    rusqlite::vtab::array::load_module(&conn)?;
     run_migrations(&mut conn);
-    conn
+    Ok(conn)
 }
 
-pub fn get_operation_connection<'a>(db_path: impl Into<Option<&'a str>>) -> Connection {
+pub fn get_operation_connection<'a>(
+    db_path: impl Into<Option<&'a str>>,
+) -> Result<Connection, ConnectionError> {
     let path: Option<&str> = db_path.into();
     let mut conn;
     if let Some(v) = path {
         if fs::metadata(v).is_ok() {
-            fs::remove_file(v).unwrap();
+            fs::remove_file(v).expect("Unable to delete existing file");
         }
-        conn = Connection::open(v).unwrap_or_else(|_| panic!("Error connecting to {}", v));
+        conn = Connection::open(v).map_err(ConnectionError::OpenFailed)?;
     } else {
-        conn = Connection::open_in_memory()
-            .unwrap_or_else(|_| panic!("Error opening in memory test db"));
+        conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
+    rusqlite::vtab::array::load_module(&conn)?;
     run_operation_migrations(&mut conn);
-    conn
+    Ok(conn)
 }
 
 pub fn setup_gen_dir() -> PathBuf {
-    let tmp_dir = tempdir().unwrap().into_path();
+    let tmp_dir = tempdir().unwrap().keep();
     {
         BASE_DIR.with(|v| {
             let mut writer = v.write().unwrap();
@@ -69,15 +71,15 @@ pub fn setup_gen_dir() -> PathBuf {
     get_or_create_gen_dir()
 }
 
-pub fn setup_block_group(conn: &Connection) -> (i64, Path) {
+pub fn setup_block_group(conn: &Connection) -> (HashId, Path) {
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
         .save(conn);
     let a_node_id = Node::create(
         conn,
-        a_seq.hash.as_str(),
-        format!("test-a-node.{}", a_seq.hash),
+        &a_seq.hash,
+        &HashId::convert_str(&format!("test-a-node.{}", a_seq.hash)),
     );
     let t_seq = Sequence::new()
         .sequence_type("DNA")
@@ -85,8 +87,8 @@ pub fn setup_block_group(conn: &Connection) -> (i64, Path) {
         .save(conn);
     let t_node_id = Node::create(
         conn,
-        t_seq.hash.as_str(),
-        format!("test-t-node.{}", a_seq.hash),
+        &t_seq.hash,
+        &HashId::convert_str(&format!("test-t-node.{}", a_seq.hash)),
     );
     let c_seq = Sequence::new()
         .sequence_type("DNA")
@@ -94,8 +96,8 @@ pub fn setup_block_group(conn: &Connection) -> (i64, Path) {
         .save(conn);
     let c_node_id = Node::create(
         conn,
-        c_seq.hash.as_str(),
-        format!("test-c-node.{}", a_seq.hash),
+        &c_seq.hash,
+        &HashId::convert_str(&format!("test-c-node.{}", a_seq.hash)),
     );
     let g_seq = Sequence::new()
         .sequence_type("DNA")
@@ -103,8 +105,8 @@ pub fn setup_block_group(conn: &Connection) -> (i64, Path) {
         .save(conn);
     let g_node_id = Node::create(
         conn,
-        g_seq.hash.as_str(),
-        format!("test-g-node.{}", a_seq.hash),
+        &g_seq.hash,
+        &HashId::convert_str(&format!("test-g-node.{}", a_seq.hash)),
     );
     let _collection = Collection::create(conn, "test");
     let block_group = BlockGroup::create(conn, "test", None, "chr1");
@@ -156,31 +158,31 @@ pub fn setup_block_group(conn: &Connection) -> (i64, Path) {
 
     let block_group_edges = vec![
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: edge0.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: edge1.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: edge2.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: edge3.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: edge4.id,
             chromosome_index: 0,
             phased: 0,
@@ -191,15 +193,16 @@ pub fn setup_block_group(conn: &Connection) -> (i64, Path) {
     let path = Path::create(
         conn,
         "chr1",
-        block_group.id,
+        &block_group.id,
         &[edge0.id, edge1.id, edge2.id, edge3.id, edge4.id],
     );
     (block_group.id, path)
 }
 
 pub fn save_graph(graph: &GenGraph, path: &str) {
-    use petgraph::dot::{Config, Dot};
     use std::fs::File;
+
+    use petgraph::dot::{Config, Dot};
     let mut file = File::create(path).unwrap();
     let _ = file.write_all(
         format!(
@@ -248,13 +251,13 @@ pub fn get_sample_bg<'a>(
     results.pop().unwrap()
 }
 
-pub fn create_operation<'a>(
+pub fn create_operation(
     conn: &Connection,
     op_conn: &Connection,
     file_path: &str,
     file_type: FileTypes,
     description: &str,
-    hash: impl Into<Option<&'a str>>,
+    hash: impl Into<Option<HashId>>,
 ) -> Operation {
     let mut session = start_operation(conn);
     end_operation(
@@ -272,8 +275,4 @@ pub fn create_operation<'a>(
         hash.into(),
     )
     .unwrap()
-}
-
-pub fn keys_match<T: Eq + Hash, U, V>(map1: &HashMap<T, U>, map2: &HashMap<T, V>) -> bool {
-    map1.len() == map2.len() && map1.keys().all(|k| map2.contains_key(k))
 }

@@ -1,0 +1,27 @@
+[package]
+name = "gen-core"
+description = "Core structs and representations for the gen sequence graph and version control system."
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/genhub-bio/gen"
+homepage = "https://genhub.bio"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+itertools = "0.14.0"
+capnp = { version = "0.21.5" }
+noodles = { version = "0.94.0", features = ["gff"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = {  version = "1.0.219", features = ["derive"] }
+thiserror = "1.0"
+sha2 = "0.10.9"
+hex = "0.4.3"
+rand = "0.9.2"
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+
+[build-dependencies]
+capnpc = { version = "0.21.4" }

@@ -1,22 +1,27 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::BufReader,
+    str,
+};
+
 use csv;
+use gen_core::{
+    is_terminal, HashId, NodeIntervalBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID,
+};
+use gen_models::{
+    block_group::BlockGroup,
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    edge::{Edge, EdgeData},
+    file_types::FileTypes,
+    node::Node,
+    operations::{OperationFile, OperationInfo},
+    sample::Sample,
+    sequence::Sequence,
+};
 use itertools::Itertools;
 use noodles::fasta;
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::BufReader;
-use std::str;
-
-use crate::models::block_group::{BlockGroup, NodeIntervalBlock};
-use crate::models::block_group_edge::{BlockGroupEdge, BlockGroupEdgeData};
-use crate::models::edge::{Edge, EdgeData};
-use crate::models::file_types::FileTypes;
-use crate::models::node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID};
-use crate::models::operations::{OperationFile, OperationInfo};
-use crate::models::sample::Sample;
-use crate::models::sequence::Sequence;
-use crate::models::strand::Strand;
-use crate::{calculate_hash, operation_management};
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_library(
@@ -31,14 +36,14 @@ pub fn update_with_library(
     parts_file_path: &str,
     library_file_path: &str,
 ) -> std::io::Result<()> {
-    let mut session = operation_management::start_operation(conn);
+    let mut session = gen_models::session_operations::start_operation(conn);
 
     let mut parts_reader = fasta::io::reader::Builder.build_from_path(parts_file_path)?;
 
     let _new_sample = Sample::create(conn, new_sample_name);
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
-    let mut new_block_group_id = 0;
+    let mut found_bg_id = None;
     for block_group in block_groups {
         let new_bg_id = BlockGroup::get_or_create_sample_block_group(
             conn,
@@ -49,14 +54,17 @@ pub fn update_with_library(
         )
         .unwrap();
         if block_group.name == region_name {
-            new_block_group_id = new_bg_id;
+            found_bg_id = Some(new_bg_id);
         }
     }
 
-    if new_block_group_id == 0 {
-        panic!("No region found with name: {}", region_name);
-    }
-    let path = BlockGroup::get_current_path(conn, new_block_group_id);
+    let new_block_group_id = if let Some(x) = found_bg_id {
+        x
+    } else {
+        panic!("No region found with name: {region_name}");
+    };
+
+    let path = BlockGroup::get_current_path(conn, &new_block_group_id);
 
     let mut sequence_hashes_by_name = HashMap::new();
     let mut sequence_lengths_by_hash = HashMap::new();
@@ -93,7 +101,7 @@ pub fn update_with_library(
                 let part_node_id = Node::create(
                     conn,
                     part_hash,
-                    calculate_hash(&format!(
+                    &HashId::convert_str(&format!(
                         "{path_id}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
                         path_id = path.id,
                         ref_start = 0,
@@ -175,7 +183,7 @@ pub fn update_with_library(
             };
             new_edges.insert(edge);
         }
-        if !Node::is_terminal(start_block.node_id) {
+        if !is_terminal(start_block.node_id) {
             healing_edges.insert(EdgeData {
                 source_node_id: start_block.node_id,
                 source_coordinate: node_start_coordinate,
@@ -201,7 +209,7 @@ pub fn update_with_library(
             };
             new_edges.insert(edge);
         }
-        if !Node::is_terminal(end_block.node_id) {
+        if !is_terminal(end_block.node_id) {
             healing_edges.insert(EdgeData {
                 source_node_id: end_block.node_id,
                 source_coordinate: node_end_coordinate,
@@ -233,22 +241,22 @@ pub fn update_with_library(
 
     path_changes_count *= end_parts.len();
 
-    let new_edge_ids = Edge::bulk_create(conn, &new_edges.iter().cloned().collect());
+    let new_edge_ids = Edge::bulk_create(conn, &new_edges.iter().cloned().collect::<Vec<_>>());
     let mut new_block_group_edges = new_edge_ids
         .iter()
         .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: path.block_group_id,
+            block_group_id: path.block_group_id.clone(),
             edge_id: *edge_id,
-            chromosome_index: *edge_id, // TODO: This is a hack, clean it up with phase layers
+            chromosome_index: edge_id.extract_digits(), // TODO: This is a hack, clean it up with phase layers
             phased: 0,
         })
         .collect::<Vec<_>>();
-    let new_edge_ids = Edge::bulk_create(conn, &healing_edges.iter().cloned().collect());
+    let new_edge_ids = Edge::bulk_create(conn, &healing_edges.iter().cloned().collect::<Vec<_>>());
     new_block_group_edges.extend(
         new_edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: path.block_group_id,
+                block_group_id: path.block_group_id.clone(),
                 edge_id: *edge_id,
                 chromosome_index: 0, // TODO: This is a hack, clean it up with phase layers
                 phased: 0,
@@ -258,7 +266,7 @@ pub fn update_with_library(
     BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
 
     let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
-    operation_management::end_operation(
+    gen_models::session_operations::end_operation(
         conn,
         operation_conn,
         &mut session,
@@ -274,27 +282,32 @@ pub fn update_with_library(
     )
     .unwrap();
 
-    println!("Updated with library file: {}", library_file_path);
+    println!("Updated with library file: {library_file_path}");
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::imports::fasta::import_fasta;
-    use crate::models::{block_group::BlockGroup, metadata, operations::setup_db};
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
     use std::path::PathBuf;
+
+    use gen_models::{block_group::BlockGroup, operations::setup_db};
+
+    use super::*;
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     #[test]
     fn makes_a_pool() {
         setup_gen_dir();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -327,7 +340,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -349,10 +362,10 @@ mod tests {
     fn one_column_of_parts() {
         setup_gen_dir();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -385,7 +398,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -401,10 +414,10 @@ mod tests {
     fn two_columns_of_same_parts() {
         setup_gen_dir();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -444,7 +457,7 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(
             all_sequences,
             expected_sequences
@@ -458,10 +471,10 @@ mod tests {
     fn one_column_of_parts_full_replacement() {
         setup_gen_dir();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -494,7 +507,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -510,10 +523,10 @@ mod tests {
     fn two_columns_of_same_parts_full_replacement() {
         setup_gen_dir();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -553,7 +566,7 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(
             all_sequences,
             expected_sequences

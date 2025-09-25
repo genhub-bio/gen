@@ -1,0 +1,1281 @@
+use std::{collections::HashSet, convert::TryInto, fs, io::Read, path::PathBuf, str};
+
+use gen_core::{is_terminal, traits::Capnp, HashId, Strand};
+use itertools::Itertools;
+use rusqlite::{
+    session::{ChangesetItem, ChangesetIter},
+    types::FromSql,
+    Connection,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    block_group::BlockGroup,
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    collection::Collection,
+    edge::{Edge, EdgeData},
+    errors::ChangesetError,
+    gen_models_capnp::{changeset_models, database_changeset},
+    node::Node,
+    operations::Operation,
+    path::Path,
+    path_edge::PathEdge,
+    sample::Sample,
+    sequence::{NewSequence, Sequence},
+    session_operations::DependencyModels,
+    traits::Query,
+};
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct DatabaseChangeset {
+    pub db_path: String,
+    pub changes: ChangesetModels,
+}
+
+impl<'a> Capnp<'a> for DatabaseChangeset {
+    type Builder = database_changeset::Builder<'a>;
+    type Reader = database_changeset::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        builder.set_db_path(&self.db_path);
+        let mut changeset_builder = builder.reborrow().init_changes();
+        self.changes.write_capnp(&mut changeset_builder);
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        let db_path = reader.get_db_path().unwrap().to_string().unwrap();
+        let changeset_reader = reader.get_changes().unwrap();
+        let changes = ChangesetModels::read_capnp(changeset_reader);
+        DatabaseChangeset { db_path, changes }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct ChangesetModels {
+    pub collections: Vec<crate::collection::Collection>,
+    pub samples: Vec<crate::sample::Sample>,
+    pub sequences: Vec<Sequence>,
+    pub block_groups: Vec<BlockGroup>,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub block_group_edges: Vec<crate::block_group_edge::BlockGroupEdge>,
+    pub paths: Vec<Path>,
+    pub path_edges: Vec<PathEdge>,
+    pub accessions: Vec<Accession>,
+    pub accession_edges: Vec<AccessionEdge>,
+    pub accession_paths: Vec<AccessionPath>,
+}
+
+impl<'a> Capnp<'a> for ChangesetModels {
+    type Builder = changeset_models::Builder<'a>;
+    type Reader = changeset_models::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        // Write collections
+        let mut collections_builder = builder
+            .reborrow()
+            .init_collections(self.collections.len() as u32);
+        for (i, collection) in self.collections.iter().enumerate() {
+            let mut collection_builder = collections_builder.reborrow().get(i as u32);
+            collection.write_capnp(&mut collection_builder);
+        }
+
+        // Write samples
+        let mut samples_builder = builder.reborrow().init_samples(self.samples.len() as u32);
+        for (i, sample) in self.samples.iter().enumerate() {
+            let mut sample_builder = samples_builder.reborrow().get(i as u32);
+            sample.write_capnp(&mut sample_builder);
+        }
+
+        // Write sequences
+        let mut sequences_builder = builder
+            .reborrow()
+            .init_sequences(self.sequences.len() as u32);
+        for (i, sequence) in self.sequences.iter().enumerate() {
+            let mut sequence_builder = sequences_builder.reborrow().get(i as u32);
+            sequence.write_capnp(&mut sequence_builder);
+        }
+
+        // Write block groups
+        let mut block_groups_builder = builder
+            .reborrow()
+            .init_block_groups(self.block_groups.len() as u32);
+        for (i, block_group) in self.block_groups.iter().enumerate() {
+            let mut block_group_builder = block_groups_builder.reborrow().get(i as u32);
+            block_group.write_capnp(&mut block_group_builder);
+        }
+
+        // Write nodes
+        let mut nodes_builder = builder.reborrow().init_nodes(self.nodes.len() as u32);
+        for (i, node) in self.nodes.iter().enumerate() {
+            let mut node_builder = nodes_builder.reborrow().get(i as u32);
+            node.write_capnp(&mut node_builder);
+        }
+
+        // Write edges
+        let mut edges_builder = builder.reborrow().init_edges(self.edges.len() as u32);
+        for (i, edge) in self.edges.iter().enumerate() {
+            let mut edge_builder = edges_builder.reborrow().get(i as u32);
+            edge.write_capnp(&mut edge_builder);
+        }
+
+        // Write block group edges
+        let mut block_group_edges_builder = builder
+            .reborrow()
+            .init_block_group_edges(self.block_group_edges.len() as u32);
+        for (i, block_group_edge) in self.block_group_edges.iter().enumerate() {
+            let mut block_group_edge_builder = block_group_edges_builder.reborrow().get(i as u32);
+            block_group_edge.write_capnp(&mut block_group_edge_builder);
+        }
+
+        // Write paths
+        let mut paths_builder = builder.reborrow().init_paths(self.paths.len() as u32);
+        for (i, path) in self.paths.iter().enumerate() {
+            let mut path_builder = paths_builder.reborrow().get(i as u32);
+            path.write_capnp(&mut path_builder);
+        }
+
+        // Write path edges
+        let mut path_edges_builder = builder
+            .reborrow()
+            .init_path_edges(self.path_edges.len() as u32);
+        for (i, path_edge) in self.path_edges.iter().enumerate() {
+            let mut path_edge_builder = path_edges_builder.reborrow().get(i as u32);
+            path_edge.write_capnp(&mut path_edge_builder);
+        }
+
+        // Write accessions
+        let mut accessions_builder = builder
+            .reborrow()
+            .init_accessions(self.accessions.len() as u32);
+        for (i, accession) in self.accessions.iter().enumerate() {
+            let mut accession_builder = accessions_builder.reborrow().get(i as u32);
+            accession.write_capnp(&mut accession_builder);
+        }
+
+        // Write accession edges
+        let mut accession_edges_builder = builder
+            .reborrow()
+            .init_accession_edges(self.accession_edges.len() as u32);
+        for (i, accession_edge) in self.accession_edges.iter().enumerate() {
+            let mut accession_edge_builder = accession_edges_builder.reborrow().get(i as u32);
+            accession_edge.write_capnp(&mut accession_edge_builder);
+        }
+
+        // Write accession paths
+        let mut accession_paths_builder = builder
+            .reborrow()
+            .init_accession_paths(self.accession_paths.len() as u32);
+        for (i, accession_path) in self.accession_paths.iter().enumerate() {
+            let mut accession_path_builder = accession_paths_builder.reborrow().get(i as u32);
+            accession_path.write_capnp(&mut accession_path_builder);
+        }
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        // Read collections
+        let collections_reader = reader.get_collections().unwrap();
+        let mut collections = Vec::new();
+        for collection_reader in collections_reader.iter() {
+            collections.push(crate::collection::Collection::read_capnp(collection_reader));
+        }
+
+        // Read samples
+        let samples_reader = reader.get_samples().unwrap();
+        let mut samples = Vec::new();
+        for sample_reader in samples_reader.iter() {
+            samples.push(crate::sample::Sample::read_capnp(sample_reader));
+        }
+
+        // Read sequences
+        let sequences_reader = reader.get_sequences().unwrap();
+        let mut sequences = Vec::new();
+        for sequence_reader in sequences_reader.iter() {
+            sequences.push(Sequence::read_capnp(sequence_reader));
+        }
+
+        // Read block groups
+        let block_groups_reader = reader.get_block_groups().unwrap();
+        let mut block_groups = Vec::new();
+        for block_group_reader in block_groups_reader.iter() {
+            block_groups.push(BlockGroup::read_capnp(block_group_reader));
+        }
+
+        // Read nodes
+        let nodes_reader = reader.get_nodes().unwrap();
+        let mut nodes = Vec::new();
+        for node_reader in nodes_reader.iter() {
+            nodes.push(Node::read_capnp(node_reader));
+        }
+
+        // Read edges
+        let edges_reader = reader.get_edges().unwrap();
+        let mut edges = Vec::new();
+        for edge_reader in edges_reader.iter() {
+            edges.push(Edge::read_capnp(edge_reader));
+        }
+
+        // Read block group edges
+        let block_group_edges_reader = reader.get_block_group_edges().unwrap();
+        let mut block_group_edges = Vec::new();
+        for block_group_edge_reader in block_group_edges_reader.iter() {
+            block_group_edges.push(crate::block_group_edge::BlockGroupEdge::read_capnp(
+                block_group_edge_reader,
+            ));
+        }
+
+        // Read paths
+        let paths_reader = reader.get_paths().unwrap();
+        let mut paths = Vec::new();
+        for path_reader in paths_reader.iter() {
+            paths.push(Path::read_capnp(path_reader));
+        }
+
+        // Read path edges
+        let path_edges_reader = reader.get_path_edges().unwrap();
+        let mut path_edges = Vec::new();
+        for path_edge_reader in path_edges_reader.iter() {
+            path_edges.push(PathEdge::read_capnp(path_edge_reader));
+        }
+
+        // Read accessions
+        let accessions_reader = reader.get_accessions().unwrap();
+        let mut accessions = Vec::new();
+        for accession_reader in accessions_reader.iter() {
+            accessions.push(Accession::read_capnp(accession_reader));
+        }
+
+        // Read accession edges
+        let accession_edges_reader = reader.get_accession_edges().unwrap();
+        let mut accession_edges = Vec::new();
+        for accession_edge_reader in accession_edges_reader.iter() {
+            accession_edges.push(AccessionEdge::read_capnp(accession_edge_reader));
+        }
+
+        // Read accession paths
+        let accession_paths_reader = reader.get_accession_paths().unwrap();
+        let mut accession_paths = Vec::new();
+        for accession_path_reader in accession_paths_reader.iter() {
+            accession_paths.push(AccessionPath::read_capnp(accession_path_reader));
+        }
+
+        ChangesetModels {
+            collections,
+            samples,
+            sequences,
+            block_groups,
+            nodes,
+            edges,
+            block_group_edges,
+            paths,
+            path_edges,
+            accessions,
+            accession_edges,
+            accession_paths,
+        }
+    }
+}
+
+// Helper functions for parsing changeset items
+pub fn parse_string(item: &ChangesetItem, col: usize) -> String {
+    str::from_utf8(item.new_value(col).unwrap().as_bytes().unwrap())
+        .unwrap()
+        .to_string()
+}
+
+pub fn parse_maybe_string(item: &ChangesetItem, col: usize) -> Option<String> {
+    item.new_value(col)
+        .unwrap()
+        .as_bytes_or_null()
+        .unwrap()
+        .map(|v| str::from_utf8(v).unwrap().to_string())
+}
+
+pub fn parse_blob(item: &ChangesetItem, col: usize) -> [u8; 32] {
+    let bytes = item.new_value(col).unwrap().as_bytes().unwrap();
+
+    bytes.try_into().expect("blob must be exactly 32 bytes")
+}
+
+pub fn parse_maybe_blob(item: &ChangesetItem, col: usize) -> Option<[u8; 32]> {
+    item.new_value(col)
+        .unwrap()
+        .as_bytes_or_null()
+        .unwrap()
+        .map(|v| v.try_into().expect("blob must be exactly 32 bytes"))
+}
+
+pub fn parse_hashid(item: &ChangesetItem, col: usize) -> HashId {
+    HashId(parse_blob(item, col))
+}
+
+pub fn parse_maybe_hashid(item: &ChangesetItem, col: usize) -> Option<HashId> {
+    parse_maybe_blob(item, col).map(HashId)
+}
+
+pub fn parse_number(item: &ChangesetItem, col: usize) -> i64 {
+    item.new_value(col).unwrap().as_i64().unwrap()
+}
+
+pub fn parse_maybe_number(item: &ChangesetItem, col: usize) -> Option<i64> {
+    item.new_value(col).unwrap().as_i64_or_null().unwrap()
+}
+
+pub fn process_changesetiter(
+    conn: &Connection,
+    mut changes: &[u8],
+) -> (ChangesetModels, DependencyModels) {
+    use fallible_streaming_iterator::FallibleStreamingIterator;
+    use gen_core::is_terminal;
+    use itertools::Itertools;
+
+    use crate::{
+        accession::{Accession, AccessionEdge},
+        block_group::BlockGroup,
+        edge::Edge,
+        node::Node,
+        path::Path,
+        sequence::Sequence,
+        traits::Query,
+    };
+
+    // Initialize collections for changeset models
+    let mut created_block_groups = vec![];
+    let mut created_edges = vec![];
+    let mut created_nodes = vec![];
+    let mut created_sequences = vec![];
+    let mut created_bg_edges = vec![];
+    let mut created_samples = vec![];
+    let mut created_collections = vec![];
+    let mut created_paths = vec![];
+    let mut created_path_edges = vec![];
+    let mut created_accessions = vec![];
+    let mut created_accession_edges = vec![];
+    let mut created_accession_paths = vec![];
+
+    // Initialize collections for dependency tracking
+    let mut previous_collections = HashSet::new();
+    let mut previous_samples = HashSet::new();
+    let mut previous_block_groups = HashSet::new();
+    let mut previous_edges = HashSet::new();
+    let mut previous_paths = HashSet::new();
+    let mut previous_accessions = HashSet::new();
+    let mut previous_nodes = HashSet::new();
+    let mut previous_sequences = HashSet::new();
+    let mut previous_accession_edges = HashSet::new();
+    let mut created_block_groups_set = HashSet::new();
+    let mut created_paths_set = HashSet::new();
+    let mut created_accessions_set = HashSet::new();
+    let mut created_edges_set = HashSet::new();
+    let mut created_accession_edges_set = HashSet::new();
+    let mut created_nodes_set = HashSet::new();
+    let mut created_sequences_set = HashSet::new();
+    let mut created_samples_set: HashSet<String> = HashSet::new();
+    let mut created_collections_set: HashSet<String> = HashSet::new();
+
+    let input: &mut dyn Read = &mut changes;
+    let mut iter = ChangesetIter::start_strm(&input).unwrap();
+
+    while let Some(item) = iter.next().unwrap() {
+        let op = item.op().unwrap();
+        // info on indirect changes: https://www.sqlite.org/draft/session/sqlite3session_indirect.html
+        if !op.indirect() {
+            let table = op.table_name();
+            let pk_column = item
+                .pk()
+                .unwrap()
+                .iter()
+                .find_position(|item| **item == 1)
+                .unwrap()
+                .0;
+            match table {
+                "sequences" => {
+                    let hash = parse_hashid(item, pk_column);
+                    let sequence = Sequence::new()
+                        .sequence_type(&parse_string(item, 1))
+                        .sequence(&parse_string(item, 2))
+                        .name(&parse_string(item, 3))
+                        .file_path(&parse_string(item, 4))
+                        .length(parse_number(item, 5))
+                        .build();
+                    assert_eq!(hash, sequence.hash);
+                    created_sequences.push(sequence);
+                    created_sequences_set.insert(hash);
+                }
+                "block_groups" => {
+                    let bg_pk = HashId(parse_blob(item, pk_column));
+                    let collection = parse_string(item, 1);
+                    let sample_name = parse_maybe_string(item, 2);
+                    let name = parse_string(item, 3);
+                    let created_on = parse_number(item, 4);
+
+                    created_block_groups.push(BlockGroup {
+                        id: bg_pk,
+                        collection_name: collection.clone(),
+                        sample_name: sample_name.clone(),
+                        name,
+                        created_on,
+                    });
+
+                    created_block_groups_set.insert(bg_pk);
+                    if !created_collections_set.contains(&collection) {
+                        previous_collections.insert(collection);
+                    }
+                    if let Some(sample_name) = sample_name {
+                        if !created_samples_set.contains(&sample_name) {
+                            previous_samples.insert(sample_name);
+                        }
+                    }
+                }
+                "nodes" => {
+                    let node_id = parse_hashid(item, pk_column);
+                    let sequence_hash = parse_hashid(item, 1);
+
+                    created_nodes.push(Node {
+                        id: node_id,
+                        sequence_hash,
+                    });
+
+                    created_nodes_set.insert(node_id);
+                    if !created_sequences_set.contains(&sequence_hash) {
+                        previous_sequences.insert(sequence_hash);
+                    }
+                }
+                "edges" => {
+                    let edge_id = HashId(parse_blob(item, pk_column));
+                    let source_node_id = parse_hashid(item, 1);
+                    let target_node_id = parse_hashid(item, 4);
+
+                    created_edges.push(Edge {
+                        id: edge_id,
+                        source_node_id,
+                        source_coordinate: parse_number(item, 2),
+                        source_strand: Strand::column_result(item.new_value(3).unwrap()).unwrap(),
+                        target_node_id,
+                        target_coordinate: parse_number(item, 5),
+                        target_strand: Strand::column_result(item.new_value(6).unwrap()).unwrap(),
+                    });
+
+                    created_edges_set.insert(edge_id);
+                    let nodes = Node::query_by_ids(conn, &[source_node_id, target_node_id]);
+                    for node in nodes.iter() {
+                        if !created_nodes_set.contains(&node.id) && !is_terminal(node.id) {
+                            previous_sequences.insert(node.sequence_hash);
+                            previous_nodes.insert(node.id);
+                        }
+                    }
+                }
+                "block_group_edges" => {
+                    let bg_id = HashId(parse_blob(item, 1));
+                    let edge_id = HashId(parse_blob(item, 2));
+
+                    created_bg_edges.push(BlockGroupEdge {
+                        id: HashId(parse_blob(item, pk_column)),
+                        block_group_id: bg_id,
+                        edge_id,
+                        chromosome_index: parse_number(item, 3),
+                        phased: parse_number(item, 4),
+                        created_on: parse_number(item, 5),
+                    });
+
+                    if !created_edges_set.contains(&edge_id) {
+                        previous_edges.insert(edge_id);
+                    }
+                    if !created_block_groups_set.contains(&bg_id) {
+                        previous_block_groups.insert(bg_id);
+                    }
+                }
+                "samples" => {
+                    let name = parse_string(item, pk_column);
+                    created_samples.push(Sample { name: name.clone() });
+                    created_samples_set.insert(name);
+                }
+                "collections" => {
+                    let name = parse_string(item, pk_column);
+                    created_collections.push(Collection { name: name.clone() });
+                    created_collections_set.insert(name);
+                }
+                "paths" => {
+                    let path_id = HashId(parse_blob(item, pk_column));
+                    let bg_id = HashId(parse_blob(item, 1));
+
+                    created_paths.push(Path {
+                        id: path_id,
+                        block_group_id: bg_id,
+                        name: parse_string(item, 2),
+                        created_on: parse_number(item, 3),
+                    });
+
+                    created_paths_set.insert(path_id);
+                    if !created_block_groups_set.contains(&bg_id) {
+                        previous_block_groups.insert(bg_id);
+                    }
+                }
+                "path_edges" => {
+                    let path_id = HashId(parse_blob(item, 1));
+                    let edge_id = HashId(parse_blob(item, 2));
+
+                    created_path_edges.push(PathEdge {
+                        id: HashId(parse_blob(item, pk_column)),
+                        path_id,
+                        edge_id,
+                        index_in_path: parse_number(item, 3),
+                    });
+
+                    if !created_paths_set.contains(&path_id) {
+                        previous_paths.insert(path_id);
+                    }
+                    if !created_edges_set.contains(&edge_id) {
+                        previous_edges.insert(edge_id);
+                    }
+                }
+                "accessions" => {
+                    let accession_id = HashId(parse_blob(item, pk_column));
+                    let path_id = HashId(parse_blob(item, 2));
+                    let parent_accession_id = parse_maybe_hashid(item, 3);
+
+                    created_accessions.push(Accession {
+                        id: accession_id,
+                        name: parse_string(item, 1),
+                        path_id,
+                        parent_accession_id,
+                    });
+
+                    created_accessions_set.insert(accession_id);
+                    if !created_paths_set.contains(&path_id) {
+                        previous_paths.insert(path_id);
+                    }
+                    if let Some(id) = parent_accession_id {
+                        if !created_accessions_set.contains(&id) {
+                            previous_accessions.insert(id);
+                        }
+                    }
+                }
+                "accession_edges" => {
+                    let edge_id = parse_hashid(item, pk_column);
+                    let source_node_id = parse_hashid(item, 1);
+                    let target_node_id = parse_hashid(item, 4);
+
+                    created_accession_edges.push(AccessionEdge {
+                        id: edge_id,
+                        source_node_id,
+                        source_coordinate: parse_number(item, 2),
+                        source_strand: Strand::column_result(item.new_value(3).unwrap()).unwrap(),
+                        target_node_id,
+                        target_coordinate: parse_number(item, 5),
+                        target_strand: Strand::column_result(item.new_value(6).unwrap()).unwrap(),
+                        chromosome_index: parse_number(item, 7),
+                    });
+
+                    created_accession_edges_set.insert(edge_id);
+                    let nodes = Node::query_by_ids(conn, &[source_node_id, target_node_id]);
+                    if !created_nodes_set.contains(&source_node_id) {
+                        previous_sequences.insert(nodes[0].sequence_hash);
+                    }
+                    if source_node_id != target_node_id
+                        && !created_nodes_set.contains(&target_node_id)
+                    {
+                        previous_sequences.insert(nodes[1].sequence_hash);
+                    }
+                }
+                "accession_paths" => {
+                    let accession_id = parse_hashid(item, 1);
+                    let edge_id = parse_hashid(item, 3);
+
+                    created_accession_paths.push(AccessionPath {
+                        id: parse_hashid(item, pk_column),
+                        accession_id,
+                        index_in_path: parse_number(item, 2),
+                        edge_id,
+                    });
+
+                    if !created_accessions_set.contains(&accession_id) {
+                        previous_accessions.insert(accession_id);
+                    }
+                    if !created_accession_edges_set.contains(&edge_id) {
+                        previous_accession_edges.insert(edge_id);
+                    }
+                }
+                t => {
+                    println!("unhandled table {t}")
+                }
+            }
+        }
+    }
+
+    // Process additional dependencies for edges
+    let existing_edges = Edge::query_by_ids(
+        conn,
+        &previous_edges.clone().into_iter().collect::<Vec<_>>(),
+    );
+    let mut new_nodes = vec![];
+    for edge in existing_edges.iter() {
+        if !previous_nodes.contains(&edge.source_node_id) && !is_terminal(edge.source_node_id) {
+            previous_nodes.insert(edge.source_node_id);
+            new_nodes.push(edge.source_node_id);
+        }
+        if !previous_nodes.contains(&edge.target_node_id) && !is_terminal(edge.target_node_id) {
+            previous_nodes.insert(edge.target_node_id);
+            new_nodes.push(edge.target_node_id);
+        }
+    }
+    for node in Node::query_by_ids(conn, &new_nodes) {
+        previous_sequences.insert(node.sequence_hash);
+    }
+
+    let changeset_models = ChangesetModels {
+        sequences: created_sequences,
+        block_groups: created_block_groups,
+        nodes: created_nodes,
+        edges: created_edges,
+        block_group_edges: created_bg_edges,
+        samples: created_samples,
+        collections: created_collections,
+        paths: created_paths,
+        path_edges: created_path_edges,
+        accessions: created_accessions,
+        accession_edges: created_accession_edges,
+        accession_paths: created_accession_paths,
+    };
+
+    let dependency_models = DependencyModels {
+        collections: Collection::query_by_ids(conn, &previous_collections),
+        samples: Sample::query_by_ids(conn, &previous_samples),
+        sequences: Sequence::query_by_ids(conn, &previous_sequences),
+        block_group: BlockGroup::query_by_ids(conn, &previous_block_groups),
+        nodes: Node::query_by_ids(conn, &previous_nodes),
+        edges: Edge::query_by_ids(conn, &previous_edges),
+        paths: Path::query_by_ids(conn, &previous_paths),
+        accessions: Accession::query_by_ids(conn, &previous_accessions),
+        accession_edges: AccessionEdge::query_by_ids(conn, &previous_accession_edges),
+    };
+
+    (changeset_models, dependency_models)
+}
+
+pub fn apply_changeset(
+    conn: &Connection,
+    changeset: &ChangesetModels,
+    dependencies: &DependencyModels,
+) -> Result<(), ChangesetError> {
+    for collection in dependencies.collections.iter() {
+        Collection::create(conn, &collection.name);
+    }
+
+    for sample in dependencies.samples.iter() {
+        Sample::get_or_create(conn, &sample.name);
+    }
+
+    for sequence in dependencies.sequences.iter() {
+        NewSequence::from(sequence).save(conn);
+    }
+    for node in dependencies.nodes.iter() {
+        if !is_terminal(node.id) {
+            assert!(Sequence::get_by_id(conn, &node.sequence_hash).is_some());
+        }
+    }
+
+    for bg in dependencies.block_group.iter() {
+        let sample_name = bg.sample_name.as_ref().map(|v| v as &str);
+        BlockGroup::create(conn, &bg.collection_name, sample_name, &bg.name);
+    }
+
+    for node in dependencies.nodes.iter() {
+        Node::create(conn, &node.sequence_hash, &node.id);
+    }
+
+    Edge::bulk_create(
+        conn,
+        &dependencies
+            .edges
+            .iter()
+            .map(EdgeData::from)
+            .collect::<Vec<_>>(),
+    );
+
+    for path in dependencies.paths.iter() {
+        Path::create(conn, &path.name, &path.block_group_id, &[]);
+    }
+
+    AccessionEdge::bulk_create(
+        conn,
+        &dependencies
+            .accession_edges
+            .iter()
+            .map(AccessionEdgeData::from)
+            .collect::<Vec<AccessionEdgeData>>(),
+    );
+
+    for accession in dependencies.accessions.iter() {
+        Accession::get_or_create(
+            conn,
+            &accession.name,
+            &accession.path_id,
+            accession.parent_accession_id.as_ref(),
+        );
+    }
+
+    for collection in &changeset.collections {
+        Collection::create(conn, &collection.name);
+    }
+    for sample in &changeset.samples {
+        Sample::get_or_create(conn, &sample.name);
+    }
+    for sequence in &changeset.sequences {
+        NewSequence::from(sequence).save(conn);
+    }
+    for bg in &changeset.block_groups {
+        BlockGroup::create(
+            conn,
+            &bg.collection_name,
+            bg.sample_name.as_deref(),
+            &bg.name,
+        );
+    }
+
+    for node in &changeset.nodes {
+        Node::create(conn, &node.sequence_hash, &node.id);
+    }
+
+    Edge::bulk_create(
+        conn,
+        &changeset
+            .edges
+            .iter()
+            .map(EdgeData::from)
+            .collect::<Vec<_>>(),
+    );
+    BlockGroupEdge::bulk_create(
+        conn,
+        &changeset
+            .block_group_edges
+            .iter()
+            .map(BlockGroupEdgeData::from)
+            .collect::<Vec<BlockGroupEdgeData>>(),
+    );
+
+    for path in &changeset.paths {
+        Path::create(conn, &path.name, &path.block_group_id, &[]);
+        let edges = changeset
+            .path_edges
+            .iter()
+            .filter(|edge| edge.path_id == path.id)
+            .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
+            .map(|path_edge| path_edge.edge_id);
+        PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
+    }
+
+    AccessionEdge::bulk_create(
+        conn,
+        &changeset
+            .accession_edges
+            .iter()
+            .map(AccessionEdgeData::from)
+            .collect::<Vec<_>>(),
+    );
+
+    for accession in &changeset.accessions {
+        Accession::get_or_create(
+            conn,
+            &accession.name,
+            &accession.path_id,
+            accession.parent_accession_id.as_ref(),
+        );
+        let edges = changeset
+            .accession_paths
+            .iter()
+            .filter(|ap| ap.accession_id == accession.id)
+            .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
+            .map(|ap| ap.edge_id);
+        AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>());
+    }
+    Ok(())
+}
+
+pub fn revert_changeset(
+    conn: &Connection,
+    changeset: &ChangesetModels,
+) -> Result<(), ChangesetError> {
+    AccessionPath::delete_by_ids(
+        conn,
+        &changeset
+            .accession_paths
+            .iter()
+            .map(|obj| obj.id)
+            .collect::<Vec<_>>(),
+    );
+    // TODO: edges can be made by other operations in other dbs earlier and reused, so we likely want to allow FK failures delete for deletions
+    AccessionEdge::delete_by_ids(
+        conn,
+        &changeset
+            .accession_edges
+            .iter()
+            .map(|pe| pe.id)
+            .collect::<Vec<_>>(),
+    );
+    Accession::delete_by_ids(
+        conn,
+        &changeset
+            .accessions
+            .iter()
+            .map(|obj| obj.id)
+            .collect::<Vec<_>>(),
+    );
+    PathEdge::delete_by_ids(
+        conn,
+        &changeset
+            .path_edges
+            .iter()
+            .map(|pe| pe.id)
+            .collect::<Vec<_>>(),
+    );
+    Path::delete_by_ids(
+        conn,
+        &changeset.paths.iter().map(|p| p.id).collect::<Vec<_>>(),
+    );
+
+    BlockGroupEdge::delete_by_ids(
+        conn,
+        &changeset
+            .block_group_edges
+            .iter()
+            .map(|obj| obj.id)
+            .collect::<Vec<_>>(),
+    );
+    Edge::delete_by_ids(
+        conn,
+        &changeset.edges.iter().map(|obj| obj.id).collect::<Vec<_>>(),
+    );
+
+    BlockGroup::delete_by_ids(
+        conn,
+        &changeset
+            .block_groups
+            .iter()
+            .map(|obj| obj.id)
+            .collect::<Vec<_>>(),
+    );
+
+    Node::delete_by_ids(
+        conn,
+        &changeset.nodes.iter().map(|obj| obj.id).collect::<Vec<_>>(),
+    );
+    Collection::delete_by_ids(
+        conn,
+        &changeset
+            .collections
+            .iter()
+            .map(|obj| obj.name.clone())
+            .collect::<Vec<_>>(),
+    );
+    Sample::delete_by_ids(
+        conn,
+        &changeset
+            .samples
+            .iter()
+            .map(|obj| obj.name.clone())
+            .collect::<Vec<_>>(),
+    );
+    Sequence::delete_by_ids(
+        conn,
+        &changeset
+            .sequences
+            .iter()
+            .map(|obj| obj.hash)
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
+pub fn get_changeset_from_path(path: PathBuf) -> DatabaseChangeset {
+    use capnp::serialize_packed;
+
+    let file = fs::File::open(path).unwrap();
+    let mut reader = std::io::BufReader::new(file);
+
+    let message_reader =
+        serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new()).unwrap();
+    let root = message_reader
+        .get_root::<database_changeset::Reader>()
+        .unwrap();
+    DatabaseChangeset::read_capnp(root)
+}
+
+pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
+    use capnp::serialize_packed;
+
+    let file = fs::File::open(path).unwrap();
+    let mut reader = std::io::BufReader::new(file);
+    let message_reader =
+        serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new()).unwrap();
+    let root = message_reader
+        .get_root::<crate::gen_models_capnp::dependency_models::Reader>()
+        .unwrap();
+    DependencyModels::read_capnp(root)
+}
+
+pub fn write_changeset(
+    operation: &Operation,
+    changes: DatabaseChangeset,
+    dependencies: &DependencyModels,
+) {
+    use capnp::{message::Builder, serialize_packed};
+
+    let change_path = operation.get_changeset_path();
+    let dependency_path = operation.get_changeset_dependencies_path();
+
+    // Write dependencies using capnp
+    let mut dependency_file = fs::File::create_new(&dependency_path)
+        .unwrap_or_else(|_| panic!("Unable to open {dependency_path:?}"));
+    let mut message = Builder::new_default();
+    let mut dep_root = message.init_root();
+    dependencies.write_capnp(&mut dep_root);
+    serialize_packed::write_message(&mut dependency_file, &message).unwrap();
+
+    // Write changes using capnp
+    let mut file = fs::File::create_new(&change_path)
+        .unwrap_or_else(|_| panic!("Unable to open {change_path:?}"));
+    let mut message = Builder::new_default();
+    let mut change_root = message.init_root();
+    changes.write_capnp(&mut change_root);
+    serialize_packed::write_message(&mut file, &message).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::{
+        file_types::FileTypes,
+        operations::{setup_db, OperationFile, OperationInfo},
+        session_operations::{end_operation, start_operation},
+        test_helpers::{
+            get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
+        },
+        traits::Query,
+    };
+
+    #[test]
+    fn test_database_changeset_capnp_serialization() {
+        use capnp::message::TypedBuilder;
+        use gen_core::Strand;
+
+        let changeset_models = ChangesetModels {
+            collections: vec![crate::collection::Collection {
+                name: "test_collection".to_string(),
+            }],
+            samples: vec![crate::sample::Sample {
+                name: "test_sample".to_string(),
+            }],
+            sequences: vec![NewSequence::new()
+                .sequence("ATCG")
+                .sequence_type("DNA")
+                .name("test_seq")
+                .build()],
+            block_groups: vec![BlockGroup {
+                id: HashId::pad_str(1),
+                collection_name: "test_collection".to_string(),
+                sample_name: Some("test_sample".to_string()),
+                name: "test_bg".to_string(),
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            }],
+            nodes: vec![
+                Node {
+                    id: HashId::convert_str("node_hash"),
+                    sequence_hash: HashId::convert_str("test_hash"),
+                },
+                Node {
+                    id: HashId::convert_str("node_hash_2"),
+                    sequence_hash: HashId::convert_str("test_hash_2"),
+                },
+            ],
+            edges: vec![Edge {
+                id: HashId::pad_str(1),
+                source_node_id: HashId::convert_str("1"),
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: HashId::convert_str("2"),
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+            }],
+            block_group_edges: vec![crate::block_group_edge::BlockGroupEdge {
+                id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
+                edge_id: HashId::pad_str(1),
+                chromosome_index: 0,
+                phased: 0,
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            }],
+            paths: vec![Path {
+                id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
+                name: "test_path".to_string(),
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            }],
+            path_edges: vec![PathEdge {
+                id: HashId::pad_str(1),
+                path_id: HashId::pad_str(1),
+                index_in_path: 0,
+                edge_id: HashId::pad_str(1),
+            }],
+            accessions: vec![Accession {
+                id: HashId::pad_str(1),
+                name: "test_accession".to_string(),
+                path_id: HashId::pad_str(1),
+                parent_accession_id: None,
+            }],
+            accession_edges: vec![AccessionEdge {
+                id: HashId::pad_str(1),
+                source_node_id: HashId::convert_str("1"),
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: HashId::convert_str("2"),
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+                chromosome_index: 0,
+            }],
+            accession_paths: vec![AccessionPath {
+                id: HashId::pad_str(1),
+                accession_id: HashId::pad_str(1),
+                index_in_path: 0,
+                edge_id: HashId::pad_str(1),
+            }],
+        };
+
+        let changeset = DatabaseChangeset {
+            db_path: "/path/to/db".to_string(),
+            changes: changeset_models,
+        };
+
+        let mut message = TypedBuilder::<database_changeset::Owned>::new_default();
+        let mut root = message.init_root();
+        changeset.write_capnp(&mut root);
+
+        let deserialized = DatabaseChangeset::read_capnp(root.into_reader());
+        assert_eq!(changeset, deserialized);
+    }
+
+    #[test]
+    fn test_changeset_models_capnp_serialization() {
+        use capnp::message::TypedBuilder;
+        use gen_core::Strand;
+
+        let changeset_models = ChangesetModels {
+            collections: vec![crate::collection::Collection {
+                name: "test_collection".to_string(),
+            }],
+            samples: vec![crate::sample::Sample {
+                name: "test_sample".to_string(),
+            }],
+            sequences: vec![NewSequence::new()
+                .sequence("ATCG")
+                .sequence_type("DNA")
+                .name("test_seq")
+                .build()],
+            block_groups: vec![BlockGroup {
+                id: HashId::pad_str(1),
+                collection_name: "test_collection".to_string(),
+                sample_name: Some("test_sample".to_string()),
+                name: "test_bg".to_string(),
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            }],
+            nodes: vec![
+                Node {
+                    id: HashId::convert_str("node_hash"),
+                    sequence_hash: HashId::convert_str("test_hash"),
+                },
+                Node {
+                    id: HashId::convert_str("node_hash_2"),
+                    sequence_hash: HashId::convert_str("test_hash_2"),
+                },
+            ],
+            edges: vec![Edge {
+                id: HashId::pad_str(1),
+                source_node_id: HashId::convert_str("1"),
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: HashId::convert_str("2"),
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+            }],
+            block_group_edges: vec![crate::block_group_edge::BlockGroupEdge {
+                id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
+                edge_id: HashId::pad_str(1),
+                chromosome_index: 0,
+                phased: 0,
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            }],
+            paths: vec![Path {
+                id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
+                name: "test_path".to_string(),
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            }],
+            path_edges: vec![PathEdge {
+                id: HashId::pad_str(1),
+                path_id: HashId::pad_str(1),
+                index_in_path: 0,
+                edge_id: HashId::pad_str(1),
+            }],
+            accessions: vec![Accession {
+                id: HashId::pad_str(1),
+                name: "test_accession".to_string(),
+                path_id: HashId::pad_str(1),
+                parent_accession_id: None,
+            }],
+            accession_edges: vec![AccessionEdge {
+                id: HashId::pad_str(1),
+                source_node_id: HashId::convert_str("1"),
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: HashId::convert_str("2"),
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+                chromosome_index: 0,
+            }],
+            accession_paths: vec![AccessionPath {
+                id: HashId::pad_str(1),
+                accession_id: HashId::pad_str(1),
+                index_in_path: 0,
+                edge_id: HashId::pad_str(1),
+            }],
+        };
+
+        let mut message = TypedBuilder::<changeset_models::Owned>::new_default();
+        let mut root = message.init_root();
+        changeset_models.write_capnp(&mut root);
+
+        let deserialized = ChangesetModels::read_capnp(root.into_reader());
+
+        assert_eq!(changeset_models, deserialized);
+    }
+
+    #[cfg(test)]
+    mod changeset_dependencies {
+        use super::*;
+
+        #[test]
+        fn test_tracks_nodes_and_sequences_from_previous_block_group_edges() {
+            setup_gen_dir();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+
+            let db_uuid = crate::metadata::get_db_uuid(conn);
+            crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")
+                .unwrap();
+
+            let (bg_id, _path_id) = setup_block_group(conn);
+            let old_edges = BlockGroupEdge::edges_for_block_group(conn, &bg_id);
+
+            let mut session = start_operation(conn);
+            // make a blockgroup with an edge from our parent blockgroup
+            let _ = Sample::create(conn, "new").unwrap();
+            let new_bg = BlockGroup::create(conn, "test", Some("new"), "new-bg");
+            let shared_edge = old_edges[0].edge.clone();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: new_bg.id,
+                    edge_id: shared_edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let operation = end_operation(
+                conn,
+                op_conn,
+                &mut session,
+                &OperationInfo {
+                    files: vec![],
+                    description: "test".to_string(),
+                },
+                "test",
+                None,
+            )
+            .unwrap();
+
+            let dependencies = operation.get_changeset_dependencies();
+            assert_eq!(dependencies.nodes[0].id, shared_edge.target_node_id);
+            assert_eq!(dependencies.nodes.len(), 1);
+            let nodes = Node::query_by_ids(conn, &[shared_edge.target_node_id]);
+            assert_eq!(dependencies.sequences[0].hash, nodes[0].sequence_hash);
+            assert_eq!(dependencies.sequences.len(), 1);
+        }
+
+        #[test]
+        fn test_records_patch_dependencies() {
+            setup_gen_dir();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+
+            let db_uuid = crate::metadata::get_db_uuid(conn);
+            crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")
+                .unwrap();
+
+            // create some stuff before we attach to our main session that will be required as extra information
+            let (bg_id, _path_id) = setup_block_group(conn);
+            let dep_bg = BlockGroup::get_by_id(conn, &bg_id);
+
+            let existing_seq = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("AAAATTTT")
+                .save(conn);
+            let existing_node_id =
+                Node::create(conn, &existing_seq.hash, &HashId::convert_str("1"));
+
+            let mut session = start_operation(conn);
+
+            let random_seq = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("ATCG")
+                .save(conn);
+            let random_node_id = Node::create(conn, &random_seq.hash, &HashId::convert_str("2"));
+
+            let new_edge = Edge::create(
+                conn,
+                random_node_id,
+                0,
+                Strand::Forward,
+                existing_node_id,
+                0,
+                Strand::Forward,
+            );
+            let block_group_edge = BlockGroupEdgeData {
+                block_group_id: bg_id,
+                edge_id: new_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            };
+            BlockGroupEdge::bulk_create(conn, &[block_group_edge]);
+            let operation = end_operation(
+                conn,
+                op_conn,
+                &mut session,
+                &OperationInfo {
+                    files: vec![OperationFile {
+                        file_path: "test".to_string(),
+                        file_type: FileTypes::Fasta,
+                    }],
+                    description: "test".to_string(),
+                },
+                "test",
+                None,
+            )
+            .unwrap();
+
+            let dependencies = operation.get_changeset_dependencies();
+            assert_eq!(dependencies.sequences.len(), 1);
+            assert_eq!(
+                dependencies.block_group[0].collection_name,
+                dep_bg.collection_name
+            );
+            assert_eq!(dependencies.block_group[0].name, dep_bg.name);
+            assert_eq!(dependencies.block_group[0].sample_name, dep_bg.sample_name);
+        }
+    }
+}

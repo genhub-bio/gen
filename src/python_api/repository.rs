@@ -1,19 +1,17 @@
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use std::{path::PathBuf, sync::Mutex};
+
+use gen_core::config::get_or_create_gen_dir;
+use gen_models::{block_group::BlockGroup, traits::Query};
+use pyo3::{prelude::*, types::PyModule};
 use rusqlite::Connection;
-use std::path::PathBuf;
-use std::sync::Mutex;
 
-use crate::config::get_or_create_gen_dir;
-use crate::get_connection;
-use crate::models::block_group::BlockGroup;
-use crate::models::traits::Query;
-use crate::views::block_layout::BaseLayout;
-
-use super::block_group::PyBlockGroup;
-use super::factory::Factory;
-use super::layouts::PyBaseLayout;
-use super::utils::{path_to_py_path, py_query, sqlite_err_to_pyerr};
+use super::{
+    block_group::PyBlockGroup,
+    factory::Factory,
+    layouts::PyBaseLayout,
+    utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
+};
+use crate::{get_connection, views::block_layout::BaseLayout};
 
 /// The main entry point for the gen Python module.
 ///
@@ -39,7 +37,7 @@ impl PyRepository {
     {
         let mut conn_guard = self.conn.lock().unwrap();
         if conn_guard.is_none() {
-            *conn_guard = Some(get_connection(self.db_path.to_str().unwrap()));
+            *conn_guard = Some(get_connection(self.db_path.to_str().unwrap()).unwrap());
         }
 
         op(conn_guard.as_ref().unwrap())
@@ -98,7 +96,7 @@ impl PyRepository {
     ///
     /// Returns:
     ///     A PyBlockGroup instance representing the requested BlockGroup
-    fn get_block_group_by_id(&self, id: i64) -> PyResult<PyBlockGroup> {
+    fn get_block_group_by_id(&self, id: &str) -> PyResult<PyBlockGroup> {
         self.with_connection(|conn| {
             let block_group = BlockGroup::get_by_id(conn, id);
 
@@ -162,7 +160,7 @@ impl PyRepository {
             match PyModule::import(py, "rustworkx") {
                 Ok(_) => {
                     // rustworkx is available, proceed with the conversion
-                    self.with_connection(|conn| self.factory.to_rustworkx(conn, block_group.id))
+                    self.with_connection(|conn| self.factory.to_rustworkx(conn, &block_group.id))
                 }
                 Err(_) => {
                     // rustworkx is not available, return a helpful error message
@@ -182,7 +180,7 @@ impl PyRepository {
     /// Returns:
     ///     A Python dictionary containing the graph representation
     fn block_group_to_dict(&self, block_group: &PyBlockGroup) -> PyResult<PyObject> {
-        self.with_connection(|conn| self.factory.to_dict(conn, block_group.id))
+        self.with_connection(|conn| self.factory.to_dict(conn, &block_group.id))
     }
 
     /// Converts a BlockGroup to a NetworkX graph representation
@@ -201,7 +199,7 @@ impl PyRepository {
             match PyModule::import(py, "networkx") {
                 Ok(_) => {
                     // networkx is available, proceed with the conversion
-                    self.with_connection(|conn| self.factory.to_networkx(conn, block_group.id))
+                    self.with_connection(|conn| self.factory.to_networkx(conn, &block_group.id))
                 }
                 Err(_) => {
                     // networkx is not available, return a helpful error message
@@ -254,7 +252,7 @@ impl PyRepository {
     ///     A PyBaseLayout instance
     fn create_base_layout(&self, block_group: &PyBlockGroup) -> PyResult<PyBaseLayout> {
         self.with_connection(|conn| {
-            let graph = BlockGroup::get_graph(conn, block_group.id);
+            let graph = BlockGroup::get_graph(conn, &block_group.id);
             let block_layout = BaseLayout::new(&graph);
 
             Ok(PyBaseLayout {
@@ -266,10 +264,9 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
-    use crate::python_api::repository::PyRepository;
-    use crate::test_helpers::setup_gen_dir;
-    use pyo3::prelude::*;
-    use pyo3::py_run;
+    use pyo3::{prelude::*, py_run};
+
+    use crate::{python_api::repository::PyRepository, test_helpers::setup_gen_dir};
 
     #[test]
     fn test_repository_creation() {

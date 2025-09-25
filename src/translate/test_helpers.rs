@@ -1,15 +1,16 @@
-use crate::calculate_hash;
-use crate::models::block_group::BlockGroup;
-use crate::models::block_group_edge::{BlockGroupEdge, BlockGroupEdgeData};
-use crate::models::collection::Collection;
-use crate::models::edge::Edge;
-use crate::models::node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID};
-use crate::models::path::Path;
-use crate::models::sequence::Sequence;
-use crate::models::strand::Strand;
+use gen_core::{HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_models::{
+    block_group::BlockGroup,
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    collection::Collection,
+    edge::Edge,
+    node::Node,
+    path::Path,
+    sequence::Sequence,
+};
 use rusqlite::Connection;
 
-pub fn get_simple_sequence(conn: &Connection) -> i64 {
+pub fn get_simple_sequence(conn: &Connection) -> HashId {
     let collection = Collection::create(conn, "test");
     let seq1 = Sequence::new()
         .sequence_type("DNA")
@@ -22,7 +23,7 @@ pub fn get_simple_sequence(conn: &Connection) -> i64 {
     let node1 = Node::create(
         conn,
         &seq1.hash,
-        calculate_hash(&format!(
+        &HashId::convert_str(&format!(
             "{collection}.m123:{hash}",
             collection = collection.name,
             hash = seq1.hash
@@ -31,7 +32,7 @@ pub fn get_simple_sequence(conn: &Connection) -> i64 {
     let node2 = Node::create(
         conn,
         &seq2.hash,
-        calculate_hash(&format!(
+        &HashId::convert_str(&format!(
             "{collection}.m123:{hash}",
             collection = collection.name,
             hash = seq2.hash
@@ -69,19 +70,19 @@ pub fn get_simple_sequence(conn: &Connection) -> i64 {
 
     let new_block_group_edges = vec![
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: edge_into.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: middle_edge.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id,
+            block_group_id: block_group.id.clone(),
             edge_id: edge_out_of.id,
             chromosome_index: 0,
             phased: 0,
@@ -92,7 +93,7 @@ pub fn get_simple_sequence(conn: &Connection) -> i64 {
     Path::create(
         conn,
         "m123",
-        block_group.id,
+        &block_group.id,
         &[edge_into.id, middle_edge.id, edge_out_of.id],
     );
     block_group.id

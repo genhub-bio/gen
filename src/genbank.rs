@@ -1,10 +1,14 @@
-use crate::normalize_string;
-use crate::operation_management::OperationError;
+use std::{
+    fmt,
+    str::{self, FromStr},
+};
+
 use gb_io::seq::{Location, Seq};
+use gen_models::errors::OperationError;
 use regex::{Error as RegexError, Regex};
-use std::fmt;
-use std::str::{self, FromStr};
 use thiserror::Error;
+
+use crate::normalize_string;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum GenBankError {
@@ -193,10 +197,12 @@ pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
+
     use gb_io::reader;
     use noodles::fasta;
-    use std::path::PathBuf;
+
+    use super::*;
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

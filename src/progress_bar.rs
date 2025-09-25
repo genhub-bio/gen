@@ -1,5 +1,6 @@
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::time::Duration;
+
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub fn get_handler() -> MultiProgress {
     let p = MultiProgress::new();

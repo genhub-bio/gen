@@ -1,0 +1,22 @@
+[package]
+name = "gen-python"
+description = "Python API for the gen sequence graph and version control system."
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/genhub-bio/gen"
+homepage = "https://genhub.bio"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "gen_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+gen = { path = ".." }
+gen-core = { path = "../gen-core" }
+gen-models = { path = "../gen-models" }
+
+[dependencies.pyo3]
+version = "0.25.1"
+features = ["extension-module"]

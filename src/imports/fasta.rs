@@ -1,30 +1,32 @@
-use crate::calculate_hash;
-use crate::fasta::FastaError;
-use crate::models::file_types::FileTypes;
-use crate::models::operations::{OperationFile, OperationInfo};
-use crate::models::sample::Sample;
-use crate::models::{
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader},
+    path::PathBuf,
+    str,
+};
+
+use flate2::read::GzDecoder;
+use gen_core::{HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     edge::Edge,
-    node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID},
-    operations::Operation,
+    file_types::FileTypes,
+    node::Node,
+    operations::{Operation, OperationFile, OperationInfo},
     path::Path,
+    sample::Sample,
     sequence::Sequence,
-    strand::Strand,
+    session_operations::{end_operation, start_operation},
 };
-use crate::operation_management::{end_operation, start_operation};
-use crate::progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar};
-use flate2::read::GzDecoder;
-use noodles::bgzf;
-use noodles::fasta;
-use rusqlite;
-use rusqlite::Connection;
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
-use std::str;
+use noodles::{bgzf, fasta};
+use rusqlite::{self, Connection};
+
+use crate::{
+    fasta::FastaError,
+    progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
+};
 
 pub fn import_fasta<'a>(
     fasta: &String,
@@ -87,7 +89,7 @@ pub fn import_fasta<'a>(
         let node_id = Node::create(
             conn,
             &seq.hash,
-            calculate_hash(&format!(
+            &HashId::convert_str(&format!(
                 "{collection}.{name}:{hash}",
                 collection = collection.name,
                 hash = seq.hash
@@ -115,13 +117,13 @@ pub fn import_fasta<'a>(
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: edge_into.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: edge_out_of.id,
                 chromosome_index: 0,
                 phased: 0,
@@ -129,7 +131,12 @@ pub fn import_fasta<'a>(
         ];
 
         BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-        let path = Path::create(conn, &name, block_group.id, &[edge_into.id, edge_out_of.id]);
+        let path = Path::create(
+            conn,
+            &name,
+            &block_group.id,
+            &[edge_into.id, edge_out_of.id],
+        );
         summary.entry(path.name).or_insert(sequence_length);
         bar.inc(1);
     }
@@ -162,42 +169,44 @@ pub fn import_fasta<'a>(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use std::{collections::HashSet, path::PathBuf};
+
+    use gen_models::{errors::OperationError, operations::setup_db, traits::*};
+
     use super::*;
-    use crate::models::metadata;
-    use crate::models::operations::setup_db;
-    use crate::models::traits::*;
-    use crate::operation_management::OperationError;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
-    use std::collections::HashSet;
-    use std::path::PathBuf;
+    use crate::{
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     #[test]
     fn test_add_fasta() {
         setup_gen_dir();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = get_connection(None);
-        let db_uuid = metadata::get_db_uuid(&conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection("t.db").unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         import_fasta(
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            &conn,
+            conn,
             op_conn,
         )
         .unwrap();
+        let block_group_id = BlockGroup::get_id("test", None, "m123");
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, 1, false),
+            BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
-        let path = Path::get(&conn, 1);
+        let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(&conn),
+            path.sequence(conn),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
@@ -207,22 +216,23 @@ mod tests {
         setup_gen_dir();
         let fasta_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/gzipped.fa.gz");
-        let conn = get_connection(None);
-        let db_uuid = metadata::get_db_uuid(&conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         import_fasta(
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            &conn,
+            conn,
             op_conn,
         )
         .unwrap();
+        let block_group_id = BlockGroup::get_id("test", None, "m123");
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, 1, false),
+            BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
     }
@@ -232,22 +242,23 @@ mod tests {
         setup_gen_dir();
         let fasta_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz");
-        let conn = get_connection(None);
-        let db_uuid = metadata::get_db_uuid(&conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         import_fasta(
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            &conn,
+            conn,
             op_conn,
         )
         .unwrap();
+        let block_group_id = BlockGroup::get_id("test", None, "m123");
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, 1, false),
+            BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
     }
@@ -257,10 +268,10 @@ mod tests {
         setup_gen_dir();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         import_fasta(
             &fasta_path.to_str().unwrap().to_string(),
@@ -271,12 +282,13 @@ mod tests {
             op_conn,
         )
         .unwrap();
+        let block_group_id = BlockGroup::get_id("test", Some("new-sample"), "m123");
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, 1, false),
+            BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
-        let path = Path::get(conn, 1);
+        let path = Path::all(conn)[0].clone();
         assert_eq!(
             path.sequence(conn),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
@@ -292,28 +304,29 @@ mod tests {
         setup_gen_dir();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = get_connection(None);
-        let db_uuid = metadata::get_db_uuid(&conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         import_fasta(
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             true,
-            &conn,
+            conn,
             op_conn,
         )
         .unwrap();
+        let block_group_id = BlockGroup::get_id("test", None, "m123");
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, 1, false),
+            BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
-        let path = Path::get(&conn, 1);
+        let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(&conn),
+            path.sequence(conn),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
@@ -323,10 +336,10 @@ mod tests {
         setup_gen_dir();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 

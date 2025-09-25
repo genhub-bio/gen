@@ -1,24 +1,27 @@
-use std::io::{Read, Write};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{BufReader, Read, Write},
+    path::Path,
+    rc::Rc,
+};
 
-use crate::models::block_group::BlockGroup;
-use crate::models::block_group_edge::{BlockGroupEdge, BlockGroupEdgeData};
-use crate::models::edge::{Edge, EdgeData};
-use crate::models::file_types::FileTypes;
-use crate::models::node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID};
-use crate::models::operations::{OperationFile, OperationInfo};
-use crate::models::sample::Sample;
-use crate::models::sequence::Sequence;
-use crate::models::strand::Strand;
-use crate::models::traits::*;
-use crate::{operation_management, read_lines};
+use gen_core::{HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_models::{
+    block_group::BlockGroup,
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    edge::{Edge, EdgeData},
+    file_types::FileTypes,
+    node::Node,
+    operations::{OperationFile, OperationInfo},
+    sample::Sample,
+    sequence::Sequence,
+    traits::*,
+};
 use regex::Regex;
-use rusqlite::types::Value;
-use rusqlite::{params, Connection};
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
-use std::rc::Rc;
+use rusqlite::{params, types::Value, Connection};
+
+use crate::read_lines;
 
 #[derive(Debug, serde::Deserialize)]
 struct CSVRow {
@@ -75,20 +78,20 @@ pub fn update_with_gaf<'a, P>(
 {
     // Given a gaf, this will incorporate the alignment into the specified graph, creating new nodes.
 
-    let mut session = operation_management::start_operation(conn);
+    let mut session = gen_models::session_operations::start_operation(conn);
 
     let parent_sample = parent_sample.into();
     let sample_name = sample_name
         .into()
         .map(|name| Sample::get_or_create_child(conn, collection_name, name, parent_sample).name);
 
-    let mut node_lengths: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut node_lengths: HashMap<String, (HashId, i64)> = HashMap::new();
 
-    let mut get_node_info = |node_id: &str| -> (i64, i64) {
+    let mut get_node_info = |node_id: &str| -> (HashId, i64) {
         *node_lengths.entry(node_id.to_string()).or_insert_with(|| {
             let node_info : Vec<&str> = node_id.rsplitn(2, '.').collect();
             let node_id = *node_info.last().unwrap();
-            let id = node_id.parse::<i64>().unwrap();
+            let id = HashId::try_from(node_id).unwrap();
             let mut stmt = conn.prepare_cached("select s.length from nodes n left join sequences s on (s.hash = n.sequence_hash) where n.id = ?1;").unwrap();
             let res = stmt.query_row([id], |row| row.get(0)).unwrap();
             (id, res)
@@ -159,7 +162,7 @@ pub fn update_with_gaf<'a, P>(
         );
     }
 
-    let mut gaf_changes: HashMap<String, HashMap<String, (i64, Strand, i64)>> = HashMap::new();
+    let mut gaf_changes: HashMap<String, HashMap<String, (HashId, Strand, i64)>> = HashMap::new();
 
     if let Ok(lines) = read_lines(&gaf_path) {
         for line in lines.map_while(Result::ok) {
@@ -187,7 +190,7 @@ pub fn update_with_gaf<'a, P>(
                 let query_id = id_re["query_id"].to_string();
                 if change_spec.contains_key(&query_id) {
                     let mut strand: Option<Strand> = None;
-                    let mut node_id: Option<i64> = None;
+                    let mut node_id: Option<_> = None;
                     let query_key;
                     if query.ends_with("left") {
                         query_key = "left";
@@ -247,17 +250,20 @@ pub fn update_with_gaf<'a, P>(
             let seq_node = Node::create(
                 conn,
                 &sequence.hash,
-                format!(
+                &HashId::convert_str(&format!(
                     "{left_node_info:?}->{hash}->{right_node_info:?}",
-                    left_node_info = path_changes
-                        .get("left")
-                        .unwrap_or(&(-1, Strand::Unknown, -1)),
+                    left_node_info = path_changes.get("left").unwrap_or(&(
+                        HashId::convert_str(""),
+                        Strand::Unknown,
+                        -1
+                    )),
                     hash = sequence.hash,
-                    right_node_info =
-                        path_changes
-                            .get("right")
-                            .unwrap_or(&(-1, Strand::Unknown, -1)),
-                ),
+                    right_node_info = path_changes.get("right").unwrap_or(&(
+                        HashId::convert_str(""),
+                        Strand::Unknown,
+                        -1
+                    )),
+                )),
             );
 
             let mut new_edges = vec![];
@@ -341,7 +347,7 @@ pub fn update_with_gaf<'a, P>(
                 let new_block_group_edges = edge_ids
                     .iter()
                     .map(|edge_id| BlockGroupEdgeData {
-                        block_group_id: bg.id,
+                        block_group_id: bg.id.clone(),
                         edge_id: *edge_id,
                         chromosome_index: 0,
                         phased: 0,
@@ -352,7 +358,7 @@ pub fn update_with_gaf<'a, P>(
         }
     }
 
-    operation_management::end_operation(
+    gen_models::session_operations::end_operation(
         conn,
         op_conn,
         &mut session,
@@ -371,15 +377,18 @@ pub fn update_with_gaf<'a, P>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::graph::{GraphEdge, GraphNode};
-    use crate::imports::gfa::import_gfa;
-    use crate::models::metadata;
-    use crate::models::operations::setup_db;
-    use crate::models::traits::Query;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
-    use petgraph::Direction;
     use std::path::PathBuf;
+
+    use gen_graph::{GraphEdge, GraphNode};
+    use gen_models::{operations::setup_db, traits::Query};
+    use petgraph::Direction;
+
+    use super::*;
+    use crate::{
+        imports::gfa::import_gfa,
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     mod test_transform {
         use super::*;
@@ -446,10 +455,10 @@ mod tests {
     #[test]
     fn test_insertion_from_gaf() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = &metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -470,12 +479,12 @@ mod tests {
         let insert_node = insert_node.first().unwrap();
         let left_node_id = graph
             .nodes()
-            .filter(|node| node.node_id == 138)
+            .filter(|node| node.node_id == HashId::convert_str("138"))
             .collect::<Vec<GraphNode>>();
         let left_node = left_node_id.first().unwrap();
         let right_node_id = graph
             .nodes()
-            .filter(|node| node.node_id == 140)
+            .filter(|node| node.node_id == HashId::convert_str("140"))
             .collect::<Vec<GraphNode>>();
         let right_node = right_node_id.first().unwrap();
 
@@ -509,10 +518,10 @@ mod tests {
     #[test]
     fn test_insertion_from_gaf_extremes() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = &metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -529,7 +538,7 @@ mod tests {
         let insert_node_id = query.first().unwrap().id;
         let start_node_id = graph
             .nodes()
-            .filter(|node| node.node_id == 3)
+            .filter(|node| node.node_id == HashId::convert_str("3"))
             .collect::<Vec<GraphNode>>();
 
         let incoming_edges: Vec<(GraphNode, GraphNode, &Vec<GraphEdge>)> = graph
@@ -543,7 +552,7 @@ mod tests {
         let insert_node_id = query.first().unwrap().id;
         let end_node_id = graph
             .nodes()
-            .filter(|node| node.node_id == 1001)
+            .filter(|node| node.node_id == HashId::convert_str("1001"))
             .collect::<Vec<GraphNode>>();
 
         let edges: Vec<(GraphNode, GraphNode, &Vec<GraphEdge>)> = graph

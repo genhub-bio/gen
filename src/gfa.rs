@@ -1,12 +1,15 @@
-use crate::models::strand::Strand;
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
+
 use convert_case::{Case, Casing};
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use gen_core::{HashId, Strand};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct Segment {
     pub sequence: String,
-    pub node_id: i64,
+    pub node_id: HashId,
     pub sequence_start: i64,
     pub sequence_end: i64,
     pub strand: Strand,
@@ -53,7 +56,7 @@ pub fn path_line(path: &Path) -> String {
         .segment_ids
         .iter()
         .zip(path.node_strands.iter())
-        .map(|(segment_id, node_strand)| format!("{}{}", segment_id, node_strand))
+        .map(|(segment_id, node_strand)| format!("{segment_id}{node_strand}"))
         .collect::<Vec<String>>()
         .join(",");
     format!("P\t{}\t{}\t*\n", path.name.to_case(Case::Train), segments)

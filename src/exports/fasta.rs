@@ -1,11 +1,8 @@
-use noodles::fasta;
-use rusqlite;
-use rusqlite::Connection;
-use std::fs::File;
-use std::path::PathBuf;
+use std::{fs::File, path::PathBuf};
 
-use crate::models::block_group::BlockGroup;
-use crate::models::sample::Sample;
+use gen_models::{block_group::BlockGroup, sample::Sample};
+use noodles::fasta;
+use rusqlite::{self, Connection};
 
 pub fn export_fasta(
     conn: &Connection,
@@ -19,7 +16,7 @@ pub fn export_fasta(
     let mut writer = fasta::io::Writer::new(file);
 
     for block_group in block_groups {
-        let path = BlockGroup::get_current_path(conn, block_group.id);
+        let path = BlockGroup::get_current_path(conn, &block_group.id);
 
         let definition = fasta::record::Definition::new(block_group.name, None);
         let sequence = fasta::record::Sequence::from(path.sequence(conn).into_bytes());
@@ -34,25 +31,29 @@ pub fn export_fasta(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
-    use crate::imports::fasta::import_fasta;
-    use crate::models::{metadata, operations::setup_db};
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
-    use crate::updates::fasta::update_with_fasta;
+    use std::{io, path::PathBuf, str};
+
+    use gen_models::operations::setup_db;
     use noodles::fasta;
-    use std::path::PathBuf;
-    use std::{io, str};
     use tempfile;
+
+    use super::*;
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+        updates::fasta::update_with_fasta,
+    };
 
     #[test]
     fn test_import_then_export() {
         setup_gen_dir();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -65,7 +66,7 @@ mod tests {
             op_conn,
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().into_path();
+        let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
         export_fasta(conn, &collection, None, &filename);
 
@@ -99,10 +100,10 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -128,7 +129,7 @@ mod tests {
             false,
         );
 
-        let tmp_dir = tempfile::tempdir().unwrap().into_path();
+        let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
         export_fasta(conn, &collection, Some("child sample"), &filename);
 

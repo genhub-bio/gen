@@ -1,13 +1,12 @@
-use crate::models::block_group::BlockGroup;
-use crate::models::path::{Annotation, Path};
-use crate::models::sample::Sample;
-use noodles::core::Position;
-use noodles::gff;
+use std::{collections::HashMap, fs::File, io, io::BufReader};
+
+use gen_models::{
+    block_group::BlockGroup,
+    path::{Annotation, Path},
+    sample::Sample,
+};
+use noodles::{core::Position, gff};
 use rusqlite::Connection;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io;
-use std::io::BufReader;
 
 pub fn propagate_gff(
     conn: &Connection,
@@ -28,11 +27,11 @@ pub fn propagate_gff(
     let target_block_groups = Sample::get_block_groups(conn, collection_name, Some(to_sample_name));
     let source_paths_by_bg_name = source_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, bg.id)))
+        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
         .collect::<HashMap<String, Path>>();
     let target_paths_by_bg_name = target_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, bg.id)))
+        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
         .collect::<HashMap<String, Path>>();
 
     let mut path_mappings_by_bg_name = HashMap::new();
@@ -93,14 +92,18 @@ pub fn propagate_gff(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
-    use crate::imports::fasta::import_fasta;
-    use crate::models::metadata;
-    use crate::models::operations::setup_db;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
-    use crate::updates::fasta::update_with_fasta;
     use std::path::PathBuf;
+
+    use gen_models::operations::setup_db;
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+        updates::fasta::update_with_fasta,
+    };
 
     #[test]
     fn test_simple_propagate() {
@@ -111,23 +114,23 @@ mod tests {
         fasta_update_path.push("fixtures/aa.fa");
         let mut gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gff_path.push("fixtures/simple.gff");
-        let conn = get_connection(None);
-        let db_uuid = metadata::get_db_uuid(&conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         import_fasta(
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            &conn,
+            conn,
             op_conn,
         )
         .unwrap();
 
         let _ = update_with_fasta(
-            &conn,
+            conn,
             op_conn,
             "test",
             None,
@@ -143,7 +146,7 @@ mod tests {
         let mut output_path = PathBuf::from(temp_dir.path());
         output_path.push("output.gff");
         let _ = propagate_gff(
-            &conn,
+            conn,
             "test",
             None,
             "child sample",

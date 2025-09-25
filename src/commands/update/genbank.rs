@@ -1,13 +1,16 @@
-use crate::commands::cli_context::CliContext;
-use crate::commands::{get_db_for_command, get_default_collection};
-use crate::config::get_operation_connection;
-use crate::get_connection;
-use crate::models::file_types::FileTypes;
-use crate::models::metadata;
-use crate::models::operations::{setup_db, OperationFile, OperationInfo};
-use crate::updates::genbank::update_with_genbank;
-use clap::Args;
 use std::fs::File;
+
+use clap::Args;
+use gen_models::{
+    file_types::FileTypes,
+    operations::{setup_db, OperationFile, OperationInfo},
+};
+
+use crate::{
+    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
+    get_connection, get_operation_connection,
+    updates::genbank::update_with_genbank,
+};
 
 /// Update with a GenBank file
 #[derive(Debug, Args)]
@@ -26,13 +29,12 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) {
     println!("Update with GenBank called");
 
-    let operation_conn = get_operation_connection(None);
-    let db = get_db_for_command(cli_context, &operation_conn);
-    let conn = get_connection(&db);
-    let db_uuid = metadata::get_db_uuid(&conn);
+    let operation_conn = get_operation_connection(None).unwrap();
+    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
+    let conn = get_connection(&db).unwrap();
 
     // initialize the selected database if needed.
-    setup_db(&operation_conn, &db_uuid);
+    setup_db(&operation_conn);
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
