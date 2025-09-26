@@ -39,3 +39,4 @@ python/gen/*.so
 
 # Cap'n proto generated files
 **/generated/*capnp.rs
+**/.kiro/specs/*
