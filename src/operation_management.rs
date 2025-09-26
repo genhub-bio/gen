@@ -610,7 +610,7 @@ fn generate_file_manifest(
     if let Some(remote_op_conn) = remote_op_conn {
         let remote_ops = Operation::query(
             remote_op_conn,
-            "select * from operation;",
+            "SELECT * FROM operations;",
             rusqlite::params![],
         );
         for remote_op in remote_ops {
@@ -624,7 +624,7 @@ fn generate_file_manifest(
 
     let local_ops = Operation::query(
         local_op_conn,
-        "select * from operation;",
+        "SELECT * FROM operations;",
         rusqlite::params![],
     );
     let mut local_filenames = HashSet::new();
@@ -839,11 +839,11 @@ fn send_manifest_to_remote(
         return Err(RemoteOperationError::FileTransferError(
             "manifest".to_string(),
             "local".to_string(),
-            format!("{} - {}", remote_url, status),
+            format!("{remote_url} - {status}"),
         ));
     }
 
-    println!("Manifest sent successfully to {}", remote_url);
+    println!("Manifest sent successfully to {remote_url}");
     Ok(response.json()?)
 }
 
@@ -1154,7 +1154,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1184,7 +1184,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1234,7 +1234,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1264,7 +1264,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1432,7 +1432,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1470,7 +1470,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1503,7 +1503,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1532,7 +1532,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1563,7 +1563,7 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count = Operation::query(
             operation_conn,
-            "select * from operation",
+            "select * from operations",
             rusqlite::params!(),
         )
         .len();
@@ -1894,17 +1894,21 @@ mod tests {
             &mut get_real_connection(remote_op_db_path.to_str().unwrap()).unwrap();
 
         let local_operation_hashes: HashSet<HashId> = HashSet::from_iter(
-            Operation::query(operation_conn, "SELECT * FROM operation;", params![])
+            Operation::query(operation_conn, "SELECT * FROM operations;", params![])
                 .iter()
                 .map(|op| op.hash)
                 .collect::<Vec<_>>(),
         );
 
         let remote_operation_hashes = HashSet::from_iter(
-            Operation::query(remote_operation_conn, "SELECT * FROM operation;", params![])
-                .iter()
-                .map(|op| op.hash)
-                .collect::<Vec<_>>(),
+            Operation::query(
+                remote_operation_conn,
+                "SELECT * FROM operations;",
+                params![],
+            )
+            .iter()
+            .map(|op| op.hash)
+            .collect::<Vec<_>>(),
         );
 
         assert_eq!(remote_operation_hashes, local_operation_hashes);

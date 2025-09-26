@@ -114,8 +114,8 @@ mod tests {
         assert_eq!(AccessionPath::table_name(), "accession_paths");
 
         // Test operation models
-        assert_eq!(Operation::table_name(), "operation");
-        assert_eq!(FileAddition::table_name(), "file_addition");
+        assert_eq!(Operation::table_name(), "operations");
+        assert_eq!(FileAddition::table_name(), "file_additions");
         assert_eq!(OperationSummary::table_name(), "operation_summaries");
         assert_eq!(Branch::table_name(), "branches");
 

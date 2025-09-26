@@ -92,7 +92,7 @@ impl<'de> serde::Deserialize<'de> for HashId {
 impl fmt::Display for HashId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in &self.0 {
-            write!(f, "{:02x}", byte)?;
+            write!(f, "{byte:02x}")?;
         }
         Ok(())
     }
@@ -195,7 +195,7 @@ impl From<uuid::Uuid> for HashId {
 impl HashId {
     pub fn pad_str<T: ToString>(input: T) -> Self {
         let s = input.to_string();
-        let hex = format!("{:0>64}", s); // pad to 64 hex chars
+        let hex = format!("{s:0>64}"); // pad to 64 hex chars
         let bytes = hex::decode(hex).expect("invalid hex string");
         HashId(bytes.try_into().expect("not 32 bytes"))
     }
@@ -217,7 +217,7 @@ impl HashId {
 
     // this is a hack for the library code, which we have a hack for chromosome_index to be the edge_id
     pub fn extract_digits(&self) -> i64 {
-        let hex = format!("{}", self);
+        let hex = format!("{self}");
         let digits: String = hex
             .chars()
             .map(|c| {

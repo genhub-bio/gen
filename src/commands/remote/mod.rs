@@ -44,11 +44,11 @@ pub fn handle_remote_command(
     match command {
         RemoteCommand::Add { name, url } => match Remote::create(conn, name, url) {
             Ok(_) => {
-                println!("Remote '{}' added successfully", name);
+                println!("Remote '{name}' added successfully");
                 Ok(())
             }
             Err(remote_err) => {
-                eprintln!("Error: {}", remote_err);
+                eprintln!("Error: {remote_err}");
                 Err(remote_err.into())
             }
         },
@@ -72,17 +72,17 @@ pub fn handle_remote_command(
                 && default_remote == *name
                 && let Err(err) = Defaults::set_default_remote_compat(conn, None)
             {
-                eprintln!("Warning: Failed to clear default remote: {}", err);
+                eprintln!("Warning: Failed to clear default remote: {err}");
             }
 
             // Delete the remote (this will set branch remote associations to null via foreign key constraint)
             match Remote::delete(conn, name) {
                 Ok(_) => {
-                    println!("Remote '{}' removed successfully", name);
+                    println!("Remote '{name}' removed successfully");
                     Ok(())
                 }
                 Err(remote_err) => {
-                    eprintln!("Error: {}", remote_err);
+                    eprintln!("Error: {remote_err}");
                     Err(remote_err.into())
                 }
             }
@@ -91,11 +91,11 @@ pub fn handle_remote_command(
         RemoteCommand::SetDefault { name } => {
             match Defaults::set_default_remote(conn, Some(name)) {
                 Ok(_) => {
-                    println!("Default remote set to '{}'", name);
+                    println!("Default remote set to '{name}'");
                     Ok(())
                 }
                 Err(remote_err) => {
-                    eprintln!("Error: {}", remote_err);
+                    eprintln!("Error: {remote_err}");
                     Err(remote_err.into())
                 }
             }
@@ -103,7 +103,7 @@ pub fn handle_remote_command(
 
         RemoteCommand::GetDefault => match Defaults::get_default_remote(conn) {
             Some(remote_name) => {
-                println!("Default remote: {}", remote_name);
+                println!("Default remote: {remote_name}");
                 Ok(())
             }
             None => {
@@ -135,7 +135,7 @@ pub fn handle_remote_command(
                     ),
                 }
             };
-            println!("Logging in to remote: {}", fqdn);
+            println!("Logging in to remote: {fqdn}");
             let state = utils::generate_state().expect("Unable to generate random nonce.");
             let (local_addr, handle, rx) = server::start_callback_server(state.clone())
                 .expect("Unable to start callback server.");
@@ -151,12 +151,12 @@ pub fn handle_remote_command(
                 .send()?;
             if let Some(location) = res.headers().get("location") {
                 let redirect_url = location.to_str()?;
-                println!("Redirecting to: {}", redirect_url);
+                println!("Redirecting to: {redirect_url}");
 
                 // Open in default browser
                 webbrowser::open(redirect_url)?;
             } else {
-                println!("No redirect URL found. Response: {:?}", res);
+                println!("No redirect URL found. Response: {res:?}");
             }
             // Wait for the callback handler to complete
             handle.join().unwrap();
