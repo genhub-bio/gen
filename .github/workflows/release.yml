@@ -52,12 +52,12 @@ jobs:
         sudo apt install gcc-aarch64-linux-gnu
     - name: Build
       run: |
-        cargo build --release
-        cargo build --release --target aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\"
+        RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target x86_64-unknown-linux-gnu
+        RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\"
     - name: upload-binary
       run: |
         find -name gen
-        zip -j gen.linux-x86_64.zip target/release/gen
+        zip -j gen.linux-x86_64.zip target/x86_64-unknown-linux-gnu/release/gen
         zip -j gen.linux-arm64.zip target/aarch64-unknown-linux-gnu/release/gen
         gh release upload nightly gen.linux-x86_64.zip --clobber
         gh release upload nightly gen.linux-arm64.zip --clobber
