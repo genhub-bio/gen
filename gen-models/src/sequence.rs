@@ -5,7 +5,7 @@ use gen_core::{HashId, traits::Capnp};
 use noodles::{
     bgzf::{self, gzi},
     core::Region,
-    fasta::{self, fai, indexed_reader::Builder as IndexBuilder},
+    fasta::{self, fai, io::indexed_reader::Builder as IndexBuilder},
 };
 use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
@@ -230,7 +230,7 @@ impl<'a> NewSequence<'a> {
 fn fasta_index(path: &str) -> Option<fai::Index> {
     let index_path = format!("{path}.fai");
     if fs::metadata(&index_path).is_ok() {
-        return Some(fai::read(&index_path).unwrap());
+        return Some(fai::fs::read(&index_path).unwrap());
     }
     None
 }
@@ -239,7 +239,7 @@ fn fasta_index(path: &str) -> Option<fai::Index> {
 fn fasta_gzi_index(path: &str) -> Option<gzi::Index> {
     let index_path = format!("{path}.gzi");
     if fs::metadata(&index_path).is_ok() {
-        return Some(gzi::read(&index_path).unwrap());
+        return Some(gzi::fs::read(&index_path).unwrap());
     }
     None
 }
@@ -266,7 +266,7 @@ pub fn cached_sequence(file_path: &str, name: &str, start: usize, end: usize) ->
     if let Some(index) = fasta_index(file_path) {
         let builder = IndexBuilder::default().set_index(index);
         if let Some(gzi_index) = fasta_gzi_index(file_path) {
-            let bgzf_reader = bgzf::indexed_reader::Builder::default()
+            let bgzf_reader = bgzf::io::indexed_reader::Builder::default()
                 .set_index(gzi_index)
                 .build_from_path(file_path)
                 .unwrap();
