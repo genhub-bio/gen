@@ -4,6 +4,7 @@ use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, PathChange},
     edge::Edge,
+    errors::QueryError,
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -29,14 +30,72 @@ pub fn update_with_fasta(
     fasta_file_path: &str,
     disable_reference_path_update: bool,
 ) -> Result<Operation, FastaError> {
-    let mut session = gen_models::session_operations::start_operation(conn);
-
     let mut fasta_reader = fasta::io::reader::Builder.build_from_path(fasta_file_path)?;
 
+    let mut sequences = vec![];
+
+    for result in fasta_reader.records() {
+        let record = result?;
+        let sequence = str::from_utf8(record.sequence().as_ref())
+            .unwrap()
+            .to_string();
+        sequences.push(sequence);
+    }
+
+    let mut session = gen_models::session_operations::start_operation(conn);
+
+    // TODO: Handle error cases.  Do we need a way to roll back an operation that was started?
+    let change_count = update_with_sequences(
+        conn,
+        collection_name,
+        parent_sample_name,
+        new_sample_name,
+        region_name,
+        start_coordinate,
+        end_coordinate,
+        sequences,
+        disable_reference_path_update,
+    )
+    .unwrap();
+
+    let summary_str = format!("{change_count} sequences inserted");
+    let op = gen_models::session_operations::end_operation(
+        conn,
+        operation_conn,
+        &mut session,
+        &OperationInfo {
+            files: vec![OperationFile {
+                file_path: fasta_file_path.to_string(),
+                file_type: FileTypes::Fasta,
+            }],
+            description: "fasta_update".to_string(),
+        },
+        &summary_str,
+        None,
+    )
+    .unwrap();
+
+    println!("Updated with fasta file: {fasta_file_path}");
+
+    Ok(op)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_with_sequences(
+    conn: &Connection,
+    collection_name: &str,
+    parent_sample_name: Option<&str>,
+    new_sample_name: &str,
+    region_name: &str,
+    start_coordinate: i64,
+    end_coordinate: i64,
+    sequences: Vec<String>,
+    disable_reference_path_update: bool,
+) -> Result<i64, QueryError> {
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
-    let mut found_bg_id = None;
+    let mut found_block_group_id = None;
     for block_group in block_groups {
         let new_bg_id = BlockGroup::get_or_create_sample_block_group(
             conn,
@@ -47,11 +106,11 @@ pub fn update_with_fasta(
         )?;
 
         if block_group.name == region_name {
-            found_bg_id = Some(new_bg_id);
+            found_block_group_id = Some(new_bg_id);
         }
     }
 
-    let new_block_group_id = if let Some(x) = found_bg_id {
+    let new_block_group_id = if let Some(x) = found_block_group_id {
         x
     } else {
         panic!("No region found with name: {region_name}");
@@ -63,15 +122,11 @@ pub fn update_with_fasta(
     // Assuming just one entry in the fasta file
     let mut first_node = None;
     let mut change_count = 0;
-    for (index, result) in fasta_reader.records().enumerate() {
-        let record = result?;
 
-        let sequence = str::from_utf8(record.sequence().as_ref())
-            .unwrap()
-            .to_string();
+    for (index, sequence) in sequences.iter().enumerate() {
         let seq = Sequence::new()
             .sequence_type("DNA")
-            .sequence(&sequence)
+            .sequence(sequence)
             .save(conn);
         let node_id = Node::create(
             conn,
@@ -88,7 +143,7 @@ pub fn update_with_fasta(
         let path_block = PathBlock {
             id: -1,
             node_id,
-            block_sequence: sequence,
+            block_sequence: sequence.to_string(),
             sequence_start: 0,
             sequence_end: seq.length,
             path_start: start_coordinate,
@@ -140,26 +195,7 @@ pub fn update_with_fasta(
         }
     }
 
-    let summary_str = format!("{change_count} sequences inserted");
-    let op = gen_models::session_operations::end_operation(
-        conn,
-        operation_conn,
-        &mut session,
-        &OperationInfo {
-            files: vec![OperationFile {
-                file_path: fasta_file_path.to_string(),
-                file_type: FileTypes::Fasta,
-            }],
-            description: "fasta_update".to_string(),
-        },
-        &summary_str,
-        None,
-    )
-    .unwrap();
-
-    println!("Updated with fasta file: {fasta_file_path}");
-
-    Ok(op)
+    Ok(change_count)
 }
 
 #[cfg(test)]

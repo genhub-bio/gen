@@ -33,74 +33,135 @@ pub fn import_library<'a>(
     library_file_path: &str,
     region_name: &str,
 ) -> std::io::Result<()> {
-    let mut session = session_operations::start_operation(conn);
-
-    if !Collection::exists(conn, collection_name) {
-        Collection::create(conn, collection_name);
-    }
-
-    let sample = sample.into();
-    if let Some(sample_name) = sample {
-        Sample::get_or_create(conn, sample_name);
-    }
-    let new_block_group = BlockGroup::create(conn, collection_name, sample, region_name);
-
     let mut parts_reader = fasta::io::reader::Builder.build_from_path(parts_file_path)?;
 
-    let mut sequence_hashes_by_name = HashMap::new();
-    let mut sequence_lengths_by_hash = HashMap::new();
+    let mut parts = HashMap::new();
+
     for result in parts_reader.records() {
         let record = result?;
         let sequence = str::from_utf8(record.sequence().as_ref())
             .unwrap()
             .to_string();
         let name = String::from_utf8(record.name().to_vec()).unwrap();
-        let seq = Sequence::new()
-            .sequence_type("DNA")
-            .sequence(&sequence)
-            .save(conn);
-
-        if sequence_hashes_by_name.contains_key(&name) {
-            panic!("Duplicate sequence name: {name}");
-        }
-        sequence_hashes_by_name.insert(name, seq.hash);
-        sequence_lengths_by_hash.insert(seq.hash, seq.length);
+        parts.insert(name, sequence);
     }
 
     let library_file = File::open(library_file_path)?;
     let library_reader = BufReader::new(library_file);
 
-    let mut parts_by_index = HashMap::new();
+    let mut part_names_by_index: HashMap<_, Vec<_>> = HashMap::new();
     let mut library_csv_reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(library_reader);
-    let mut max_index = 0;
-    let mut sequence_lengths_by_node_id = HashMap::new();
     for result in library_csv_reader.records() {
         let record = result?;
         for (index, part) in record.iter().enumerate() {
             if !part.is_empty() {
-                let part_hash = sequence_hashes_by_name.get(part).unwrap();
-                let seq_length = sequence_lengths_by_hash.get(part_hash).unwrap();
-                let part_node_id = Node::create(
-                    conn,
-                    part_hash,
-                    &HashId::convert_str(&format!(
-                        "{region_name}:{part}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
-                        ref_start = 0,
-                        ref_end = seq_length,
-                        sequence_hash = part_hash
-                    )),
-                );
-                sequence_lengths_by_node_id.insert(part_node_id, *seq_length);
-
-                parts_by_index
-                    .entry(index)
+                part_names_by_index
+                    .entry(index as i64)
                     .or_insert(vec![])
-                    .push(part_node_id);
-                if index >= max_index {
-                    max_index = index + 1;
-                }
+                    .push(part.into());
+            }
+        }
+    }
+
+    let mut session = session_operations::start_operation(conn);
+
+    let result = import_design(
+        conn,
+        collection_name,
+        sample.into(),
+        &parts,
+        &part_names_by_index,
+        region_name,
+    );
+    if result.is_ok() {
+        // TODO: Handle error cases.  Do we need a way to roll back an operation that was started?
+
+        println!("Imported library file {library_file_path} and parts file {parts_file_path}");
+
+        let path_changes_count = result.unwrap();
+
+        let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
+        session_operations::end_operation(
+            conn,
+            operation_conn,
+            &mut session,
+            &OperationInfo {
+                files: vec![OperationFile {
+                    file_path: library_file_path.to_string(),
+                    file_type: FileTypes::CSV,
+                }],
+                description: "library_csv_import".to_string(),
+            },
+            &summary_str,
+            None,
+        )
+        .unwrap();
+    }
+
+    Ok(())
+}
+
+pub fn import_design(
+    conn: &Connection,
+    collection_name: &str,
+    sample: Option<&str>,
+    part_sequences_by_name: &HashMap<String, String>,
+    library: &HashMap<i64, Vec<String>>,
+    region_name: &str,
+) -> Result<i64, std::io::Error> {
+    if !Collection::exists(conn, collection_name) {
+        Collection::create(conn, collection_name);
+    }
+
+    if let Some(sample_name) = sample {
+        Sample::get_or_create(conn, sample_name);
+    }
+
+    let new_block_group = BlockGroup::create(conn, collection_name, sample, region_name);
+
+    let mut sequence_hashes_by_name: HashMap<String, HashId> = HashMap::new();
+    let mut sequence_lengths_by_hash = HashMap::new();
+    for (part_name, part_sequence) in part_sequences_by_name.iter() {
+        let seq = Sequence::new()
+            .sequence_type("DNA")
+            .sequence(part_sequence)
+            .save(conn);
+
+        if sequence_hashes_by_name.contains_key::<String>(&part_name.into()) {
+            panic!("Duplicate sequence name: {part_name}");
+        }
+        sequence_hashes_by_name.insert(part_name.to_string(), seq.hash);
+        sequence_lengths_by_hash.insert(seq.hash, seq.length);
+    }
+
+    let mut parts_by_index = HashMap::new();
+    let mut max_index = 0;
+    let mut sequence_lengths_by_node_id = HashMap::new();
+
+    for (index, part_names) in library.iter() {
+        for part_name in part_names {
+            let part_hash = sequence_hashes_by_name.get::<String>(part_name).unwrap();
+            let seq_length = sequence_lengths_by_hash.get(part_hash).unwrap();
+            let part_node_id = Node::create(
+                conn,
+                part_hash,
+                &HashId::convert_str(&format!(
+                    "{region_name}:{part_name}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
+                    ref_start = 0,
+                    ref_end = seq_length,
+                    sequence_hash = part_hash
+                )),
+            );
+            sequence_lengths_by_node_id.insert(part_node_id, *seq_length);
+
+            parts_by_index
+                .entry(index)
+                .or_insert(vec![])
+                .push(part_node_id);
+            if *index >= max_index {
+                max_index = index + 1;
             }
         }
     }
@@ -159,7 +220,8 @@ pub fn import_library<'a>(
 
     path_changes_count *= end_parts.len();
 
-    let new_edge_ids = Edge::bulk_create(conn, &new_edges.iter().cloned().collect::<Vec<_>>());
+    let new_edge_ids =
+        Edge::bulk_create(conn, &new_edges.iter().cloned().collect::<Vec<EdgeData>>());
 
     let new_block_group_edges = new_edge_ids
         .iter()
@@ -200,26 +262,7 @@ pub fn import_library<'a>(
         &path_edge_ids,
     );
 
-    let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
-    session_operations::end_operation(
-        conn,
-        operation_conn,
-        &mut session,
-        &OperationInfo {
-            files: vec![OperationFile {
-                file_path: library_file_path.to_string(),
-                file_type: FileTypes::CSV,
-            }],
-            description: "library_csv_import".to_string(),
-        },
-        &summary_str,
-        None,
-    )
-    .unwrap();
-
-    println!("Imported library file {library_file_path} and parts file {parts_file_path}");
-
-    Ok(())
+    Ok(path_changes_count as i64)
 }
 
 #[cfg(test)]
