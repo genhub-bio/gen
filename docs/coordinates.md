@@ -32,7 +32,7 @@ Therefore, if we named the `CAAGA` insertion as `insertion-2`, the name `inserti
 Mutability
 ----------
 
-Changes made in this manner will mutate the graph for a given sample, thus operations will not be communitive. For 
+Changes made in this manner will mutate the graph for a given sample, thus operations will not be commutative. For 
 instance, if we have sequence `ATCG` and insert `AA` at position 2 to make it `ATAACG`, a subsequent insertion at
 position 3 will not reference the `G` in `ATCG`, but the `A` in `ATA`. For a given set of changes (such as a single
 vcf file), the coordinate scheme will be consistent. For instance, if the previous 2 changes were in the same update

@@ -76,31 +76,11 @@ install a linker. For macOS to Linux this can be done as follows:
 The executable will be placed in ./target/x86_64-unknown-linux-gnu/release/
 
 ## Usage
-Gen is a command line tool with multiple subcommands that each have their own flags and arguments. The currently
-available commands are listed below and described in more detail [here](docs/commands.md) or built-in help pages (`gen
-[COMMAND] --help`).
 
-```
-Usage: gen [OPTIONS] [COMMAND]
+Please look at the [command documentation page](docs/commands/README.md) for more details on how to run gen on the command line.
 
-Commands:
-  import      Import a new sequence collection
-  update      Update a sequence collection with new data
-  init        Initialize a gen repository
-  branch      Manage and create branches
-  checkout    Migrate a database to a given operation
-  reset       
-  operations  View operations carried out against a database
-  apply       
-  export      Export a sequence collection
-  defaults    Set a default database and collection to use
-  help        Print this message or the help of the given subcommand(s)
 
-Options:
-  -d, --db <DB>  The path to the database you wish to utilize
-  -h, --help     Print help
-  -V, --version  Print version
-```
+## Example workflows
 Typical workflows are illustrated in these example workflows:
 
 - [Mapping reads to the human genome, taking into account all known variants](examples/human_variation_aware_alignment/Analysis.ipynb)

@@ -1,3 +1,5 @@
+Gen offers commands similar to git for managing changes and branches.  Below are descriptions of each.
+
 # Defaults
 
 This controls default choices for the `gen` command line
@@ -31,12 +33,6 @@ This will revert a branch to a given operation id and detach operations made ben
 done when work after a given point is no longer desired and you wish to start at a fresh point in the branch.
 
 To reset the database to a given operation, run the command `gen --db db_name.db reset operation_id`.
-
-# Operations
-
-Operations are changes that have been made to the database. Commands such as `import` and `update` create a new operation.
-To see all operations, `gen --db db_name.db operations` will list operations. The operation the database currently is on
-will be prefixed with a `>`.
 
 # Patches
 
