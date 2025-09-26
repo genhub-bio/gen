@@ -2,7 +2,7 @@ use std::fmt::*;
 
 use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
-use rusqlite::{params, Connection, Result as SQLResult, Row};
+use rusqlite::{Connection, Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{block_group::BlockGroup, gen_models_capnp::sample, traits::*};
@@ -109,7 +109,11 @@ impl Sample {
                     params!(collection_name, parent),
                 )
             } else {
-                BlockGroup::query(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null;", params!(collection_name))
+                BlockGroup::query(
+                    conn,
+                    "select * from block_groups where collection_name = ?1 AND sample_name is null;",
+                    params!(collection_name),
+                )
             };
             for bg in bgs.iter() {
                 BlockGroup::get_or_create_sample_block_group(

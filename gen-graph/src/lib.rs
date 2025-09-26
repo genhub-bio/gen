@@ -7,19 +7,19 @@ use std::{
 };
 
 use gen_core::{
-    is_end_node, is_start_node, is_terminal, HashId, NodeIntervalBlock, PathBlock, Strand,
-    NO_CHROMOSOME_INDEX, PATH_START_NODE_ID,
+    HashId, NO_CHROMOSOME_INDEX, NodeIntervalBlock, PATH_START_NODE_ID, PathBlock, Strand,
+    is_end_node, is_start_node, is_terminal,
 };
 use interavl::IntervalTree as IT2;
 use intervaltree::IntervalTree;
 use petgraph::{
+    Direction,
     graphmap::DiGraphMap,
     prelude::EdgeRef,
     visit::{
         Dfs, GraphRef, IntoEdgeReferences, IntoEdges, IntoNeighbors, IntoNeighborsDirected,
         NodeCount, Reversed,
     },
-    Direction,
 };
 use serde::{Deserialize, Serialize};
 

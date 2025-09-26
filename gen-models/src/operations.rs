@@ -1,14 +1,14 @@
 use std::{convert::TryInto, path::PathBuf, string::ToString};
 
-use gen_core::{config::get_changeset_path, traits::Capnp, HashId};
-use gen_graph::{all_simple_paths, OperationGraph};
-use petgraph::{graphmap::UnGraphMap, Direction};
-use rusqlite::{params, params_from_iter, types::Value, Connection, Result as SQLResult, Row};
+use gen_core::{HashId, config::get_changeset_path, traits::Capnp};
+use gen_graph::{OperationGraph, all_simple_paths};
+use petgraph::{Direction, graphmap::UnGraphMap};
+use rusqlite::{Connection, Result as SQLResult, Row, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     changesets::{
-        get_changeset_dependencies_from_path, get_changeset_from_path, DatabaseChangeset,
+        DatabaseChangeset, get_changeset_dependencies_from_path, get_changeset_from_path,
     },
     errors::{BranchError, RemoteError},
     file_types::FileTypes,
@@ -315,8 +315,7 @@ impl Query for OperationSummary {
 
 impl OperationSummary {
     pub fn create(conn: &Connection, operation_hash: &HashId, summary: &str) -> OperationSummary {
-        let query =
-            "INSERT INTO operation_summary (operation_hash, summary) VALUES (?1, ?2) RETURNING (id)";
+        let query = "INSERT INTO operation_summary (operation_hash, summary) VALUES (?1, ?2) RETURNING (id)";
         let mut stmt = conn.prepare(query).unwrap();
         let mut rows = stmt
             .query_map(params![operation_hash, summary], |row| {
@@ -574,12 +573,12 @@ impl Branch {
     }
 
     pub fn delete(conn: &Connection, branch_id: i64) -> Result<(), BranchError> {
-        if let Some(current_branch) = OperationState::get_current_branch(conn) {
-            if current_branch == branch_id {
-                return Err(BranchError::CannotDelete(
-                    "Unable to delete the branch that is currently active.".to_string(),
-                ));
-            }
+        if let Some(current_branch) = OperationState::get_current_branch(conn)
+            && current_branch == branch_id
+        {
+            return Err(BranchError::CannotDelete(
+                "Unable to delete the branch that is currently active.".to_string(),
+            ));
         }
         conn.execute("delete from branch where id = ?1", (branch_id,))?;
         Ok(())

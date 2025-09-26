@@ -1,5 +1,5 @@
 use gen_core::traits::Capnp;
-use rusqlite::{params_from_iter, Connection, Row};
+use rusqlite::{Connection, Row, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use crate::{block_group::BlockGroup, gen_models_capnp::collection, traits::*};

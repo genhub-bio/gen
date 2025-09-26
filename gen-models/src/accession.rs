@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
-use gen_core::{calculate_hash, traits::Capnp, HashId, Strand};
+use gen_core::{HashId, Strand, calculate_hash, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{params, Connection, Result as SQLResult, Row};
+use rusqlite::{Connection, Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -387,7 +387,10 @@ impl AccessionEdge {
                 params.push(Box::new(edge.chromosome_index));
                 rows.push("(?, ?, ?, ?, ?, ?, ?, ?)");
             }
-            let sql = format!("INSERT INTO accession_edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand, chromosome_index) VALUES {};", rows.join(","));
+            let sql = format!(
+                "INSERT INTO accession_edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand, chromosome_index) VALUES {};",
+                rows.join(",")
+            );
             conn.execute(&sql, rusqlite::params_from_iter(params))
                 .unwrap();
         }

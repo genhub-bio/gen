@@ -3,7 +3,7 @@ use std::fs::File;
 use clap::Args;
 use gen_models::{
     file_types::FileTypes,
-    operations::{setup_db, OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, setup_db},
 };
 
 use crate::{

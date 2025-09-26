@@ -1,9 +1,9 @@
 #![allow(warnings)]
 use std::{collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, str};
 
-use gb_io::{self, seq::Location, QualifierKey};
+use gb_io::{self, QualifierKey, seq::Location};
 use gen_core::{is_terminal, path::PathBlock};
-use gen_graph::{all_simple_paths, GenGraph, GraphEdge, GraphNode};
+use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{block_group::BlockGroup, node::Node, sample::Sample};
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};
@@ -163,129 +163,123 @@ pub fn export_genbank(
             // we evaluate all edges from our node, and if the connection point is not the expected
             // next node of the path, it's a bubble and a change we incorporate.
             for (_source_node, target_node, _edges) in graph.edges(*current_node) {
-                if let Some(next_node) = node_it.peek() {
-                    if &&target_node != next_node {
-                        // To trace out the bubble, we do a simple DFS until we are back in our path,
-                        // as genbank can't support graphs we assume there is simple engineering
-                        // here with only 1 alternative path
-                        let mut sub_path = vec![];
-                        let mut dfs = Dfs::new(&graph, target_node);
-                        let mut reentry_node = None;
-                        while let Some(nx) = dfs.next(&graph) {
-                            if path_node_set.contains(&nx) {
-                                reentry_node = Some(nx);
-                                break;
-                            }
-                            sub_path.push(nx)
+                if let Some(next_node) = node_it.peek()
+                    && &&target_node != next_node
+                {
+                    // To trace out the bubble, we do a simple DFS until we are back in our path,
+                    // as genbank can't support graphs we assume there is simple engineering
+                    // here with only 1 alternative path
+                    let mut sub_path = vec![];
+                    let mut dfs = Dfs::new(&graph, target_node);
+                    let mut reentry_node = None;
+                    while let Some(nx) = dfs.next(&graph) {
+                        if path_node_set.contains(&nx) {
+                            reentry_node = Some(nx);
+                            break;
                         }
+                        sub_path.push(nx)
+                    }
 
-                        let mut sequence = String::new();
-                        for sub_node in sub_path.iter() {
-                            let seqs = Node::get_sequences_by_node_ids(conn, &[sub_node.node_id]);
-                            let seq = &seqs[&sub_node.node_id];
-                            sequence.push_str(
-                                &seq.get_sequence(sub_node.sequence_start, sub_node.sequence_end),
+                    let mut sequence = String::new();
+                    for sub_node in sub_path.iter() {
+                        let seqs = Node::get_sequences_by_node_ids(conn, &[sub_node.node_id]);
+                        let seq = &seqs[&sub_node.node_id];
+                        sequence.push_str(
+                            &seq.get_sequence(sub_node.sequence_start, sub_node.sequence_end),
+                        );
+                    }
+                    let mut qualifiers = vec![];
+
+                    let upos = (position + offset) as usize;
+                    let mut location = None;
+
+                    // we did an insertion/replacement
+                    if target_node.node_id != current_node.node_id {
+                        // to distinguish between a replacement and an insertion, we look at the
+                        // next node after our target node. If it is the same as our next_node, it's
+                        // an insertion. Otherwise, it's a replacement. The 2 events look like this:
+                        // A is current_node, B/A is next_node, C is target_node
+                        // Insertion:
+                        //        A
+                        //        | \
+                        //        |  C
+                        //        | /
+                        //        A
+                        // Replacement:
+                        //        A
+                        //       / \
+                        //      B   C
+                        //       \ /
+                        //        A
+                        if let Some(entry_node) = reentry_node {
+                            location = Some(
+                                seq.range_to_location(upos as i64, (upos + sequence.len()) as i64),
                             );
-                        }
-                        let mut qualifiers = vec![];
-
-                        let upos = (position + offset) as usize;
-                        let mut location = None;
-
-                        // we did an insertion/replacement
-                        if target_node.node_id != current_node.node_id {
-                            // to distinguish between a replacement and an insertion, we look at the
-                            // next node after our target node. If it is the same as our next_node, it's
-                            // an insertion. Otherwise, it's a replacement. The 2 events look like this:
-                            // A is current_node, B/A is next_node, C is target_node
-                            // Insertion:
-                            //        A
-                            //        | \
-                            //        |  C
-                            //        | /
-                            //        A
-                            // Replacement:
-                            //        A
-                            //       / \
-                            //      B   C
-                            //       \ /
-                            //        A
-                            if let Some(entry_node) = reentry_node {
-                                location = Some(seq.range_to_location(
-                                    upos as i64,
-                                    (upos + sequence.len()) as i64,
+                            if entry_node == **next_node {
+                                offset += sequence.len() as i64;
+                                seq.seq
+                                    .splice(upos..upos, sequence.into_bytes())
+                                    .collect::<Vec<_>>();
+                                qualifiers.push((
+                                    QualifierKey::from("note"),
+                                    Some("Geneious type: Editing History Insertion".to_string()),
                                 ));
-                                if entry_node == **next_node {
-                                    offset += sequence.len() as i64;
-                                    seq.seq
-                                        .splice(upos..upos, sequence.into_bytes())
-                                        .collect::<Vec<_>>();
-                                    qualifiers.push((
-                                        QualifierKey::from("note"),
-                                        Some(
-                                            "Geneious type: Editing History Insertion".to_string(),
-                                        ),
-                                    ));
-                                    qualifiers.push((QualifierKey::from("Original_Bases"), None));
-                                } else {
-                                    let end_pos = upos + next_node.length() as usize;
-                                    offset += sequence.len() as i64 - next_node.length();
-                                    let original_bases = seq
-                                        .seq
-                                        .splice(upos..end_pos, sequence.into_bytes())
-                                        .collect::<Vec<u8>>();
-                                    qualifiers.push((
-                                        QualifierKey::from("note"),
-                                        Some(
-                                            "Geneious type: Editing History Replacement"
-                                                .to_string(),
-                                        ),
-                                    ));
-                                    qualifiers.push((
-                                        QualifierKey::from("Original_Bases"),
-                                        Some(str::from_utf8(&original_bases).unwrap().to_string()),
-                                    ));
-                                }
+                                qualifiers.push((QualifierKey::from("Original_Bases"), None));
                             } else {
-                                panic!("unsupported. Maybe insert at end of sequence?");
+                                let end_pos = upos + next_node.length() as usize;
+                                offset += sequence.len() as i64 - next_node.length();
+                                let original_bases = seq
+                                    .seq
+                                    .splice(upos..end_pos, sequence.into_bytes())
+                                    .collect::<Vec<u8>>();
+                                qualifiers.push((
+                                    QualifierKey::from("note"),
+                                    Some("Geneious type: Editing History Replacement".to_string()),
+                                ));
+                                qualifiers.push((
+                                    QualifierKey::from("Original_Bases"),
+                                    Some(str::from_utf8(&original_bases).unwrap().to_string()),
+                                ));
                             }
-                        } else if target_node.node_id == current_node.node_id
-                            && target_node.sequence_start != current_node.sequence_end
-                        {
-                            // if we're not contiguous, it's a deletion
-                            offset -= next_node.length();
-                            let original_bases = seq
-                                .seq
-                                .splice(
-                                    upos..upos + next_node.length() as usize,
-                                    sequence.into_bytes(),
-                                )
-                                .collect::<Vec<_>>();
-                            // range_to_location always returns a Location::Join, whereas we want location::between. However, since this method
-                            // handles circles/linear/etc. we use it to find the location and then convert it to a between.
-                            let (ls, le) = seq
-                                .range_to_location(upos as i64, (upos + 1) as i64)
-                                .find_bounds()
-                                .unwrap();
-                            location = Some(Location::Between(ls - 1, le - 1));
-                            qualifiers.push((
-                                QualifierKey::from("note"),
-                                Some("Geneious type: Editing History Deletion".to_string()),
-                            ));
-                            qualifiers.push((
-                                QualifierKey::from("Original_Bases"),
-                                Some(str::from_utf8(&original_bases).unwrap().to_string()),
-                            ));
-                        }
-                        if let Some(l) = location {
-                            seq.features.push(gb_io::seq::Feature {
-                                kind: gb_io::seq::FeatureKind::from("misc_feature"),
-                                location: l,
-                                qualifiers,
-                            });
                         } else {
-                            println!("We are unable to determine the type of edit being exported.");
+                            panic!("unsupported. Maybe insert at end of sequence?");
                         }
+                    } else if target_node.node_id == current_node.node_id
+                        && target_node.sequence_start != current_node.sequence_end
+                    {
+                        // if we're not contiguous, it's a deletion
+                        offset -= next_node.length();
+                        let original_bases = seq
+                            .seq
+                            .splice(
+                                upos..upos + next_node.length() as usize,
+                                sequence.into_bytes(),
+                            )
+                            .collect::<Vec<_>>();
+                        // range_to_location always returns a Location::Join, whereas we want location::between. However, since this method
+                        // handles circles/linear/etc. we use it to find the location and then convert it to a between.
+                        let (ls, le) = seq
+                            .range_to_location(upos as i64, (upos + 1) as i64)
+                            .find_bounds()
+                            .unwrap();
+                        location = Some(Location::Between(ls - 1, le - 1));
+                        qualifiers.push((
+                            QualifierKey::from("note"),
+                            Some("Geneious type: Editing History Deletion".to_string()),
+                        ));
+                        qualifiers.push((
+                            QualifierKey::from("Original_Bases"),
+                            Some(str::from_utf8(&original_bases).unwrap().to_string()),
+                        ));
+                    }
+                    if let Some(l) = location {
+                        seq.features.push(gb_io::seq::Feature {
+                            kind: gb_io::seq::FeatureKind::from("misc_feature"),
+                            location: l,
+                            qualifiers,
+                        });
+                    } else {
+                        println!("We are unable to determine the type of edit being exported.");
                     }
                 }
             }
@@ -301,11 +295,11 @@ mod tests {
     use std::{io, io::BufReader, path::PathBuf, str};
 
     use gb_io::reader;
-    use gen_core::{strand::Strand::Forward, HashId};
+    use gen_core::{HashId, strand::Strand::Forward};
     use gen_models::{
         file_types::FileTypes,
         metadata,
-        operations::{setup_db, OperationFile, OperationInfo},
+        operations::{OperationFile, OperationInfo, setup_db},
     };
     use tempfile;
 
@@ -326,22 +320,21 @@ mod tests {
         let mut a_features = vec![];
         for feature in a[0].features.iter() {
             for (k, v) in feature.qualifiers.iter() {
-                if k == "note" {
-                    if let Some(v) = v {
-                        if v.starts_with("Geneious type: Editing") {
-                            let original_bases = &feature
-                                .qualifiers
-                                .iter()
-                                .filter(|(k, _v)| k == "Original_Bases")
-                                .map(|(_k, v)| v.clone())
-                                .collect::<Option<String>>();
-                            a_features.push((
-                                feature.location.find_bounds().unwrap(),
-                                original_bases.clone(),
-                                v.clone(),
-                            ))
-                        }
-                    }
+                if k == "note"
+                    && let Some(v) = v
+                    && v.starts_with("Geneious type: Editing")
+                {
+                    let original_bases = &feature
+                        .qualifiers
+                        .iter()
+                        .filter(|(k, _v)| k == "Original_Bases")
+                        .map(|(_k, v)| v.clone())
+                        .collect::<Option<String>>();
+                    a_features.push((
+                        feature.location.find_bounds().unwrap(),
+                        original_bases.clone(),
+                        v.clone(),
+                    ))
                 }
             }
         }
@@ -349,22 +342,21 @@ mod tests {
         let mut b_features = vec![];
         for feature in b[0].features.iter() {
             for (k, v) in feature.qualifiers.iter() {
-                if k == "note" {
-                    if let Some(v) = v {
-                        if v.starts_with("Geneious type: Editing") {
-                            let original_bases = &feature
-                                .qualifiers
-                                .iter()
-                                .filter(|(k, _v)| k == "Original_Bases")
-                                .map(|(_k, v)| v.clone())
-                                .collect::<Option<String>>();
-                            b_features.push((
-                                feature.location.find_bounds().unwrap(),
-                                original_bases.clone(),
-                                v.clone(),
-                            ))
-                        }
-                    }
+                if k == "note"
+                    && let Some(v) = v
+                    && v.starts_with("Geneious type: Editing")
+                {
+                    let original_bases = &feature
+                        .qualifiers
+                        .iter()
+                        .filter(|(k, _v)| k == "Original_Bases")
+                        .map(|(_k, v)| v.clone())
+                        .collect::<Option<String>>();
+                    b_features.push((
+                        feature.location.find_bounds().unwrap(),
+                        original_bases.clone(),
+                        v.clone(),
+                    ))
                 }
             }
         }

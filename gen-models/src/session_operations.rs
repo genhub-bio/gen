@@ -1,14 +1,14 @@
 use std::str;
 
-use gen_core::{traits::Capnp, HashId};
-use rusqlite::{session, Connection};
+use gen_core::{HashId, traits::Capnp};
+use rusqlite::{Connection, session};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     accession::{Accession, AccessionEdge},
     block_group::BlockGroup,
-    changesets::{process_changesetiter, write_changeset, DatabaseChangeset},
+    changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
     collection::Collection,
     edge::Edge,
     errors::OperationError,
@@ -310,11 +310,13 @@ mod tests {
             samples: vec![Sample {
                 name: "test_sample".to_string(),
             }],
-            sequences: vec![NewSequence::new()
-                .sequence_type("DNA")
-                .sequence("ATCG")
-                .name("test_seq")
-                .build()],
+            sequences: vec![
+                NewSequence::new()
+                    .sequence_type("DNA")
+                    .sequence("ATCG")
+                    .name("test_seq")
+                    .build(),
+            ],
             block_group: vec![BlockGroup {
                 id: HashId::pad_str(1),
                 collection_name: "test_collection".to_string(),

@@ -7,7 +7,7 @@ use std::{
 
 use itertools::Itertools;
 
-use super::{temp_graph::TempGraph, EdgeData, LayoutError, NodeData};
+use super::{EdgeData, LayoutError, NodeData, temp_graph::TempGraph};
 
 #[derive(Clone, Debug)]
 struct JogScore {
@@ -254,12 +254,12 @@ impl Router {
                 let u_position = graph_builder.get_node_position(*u_id);
                 let v_position = graph_builder.get_node_position(*v_id);
 
-                if let Some((x1, y1)) = u_position {
-                    if let Some((x2, y2)) = v_position {
-                        if x1 == x2 && x1 == self.current_column {
-                            vertical_wires.push((cmp::min(y1, y2), cmp::max(y1, y2), *net));
-                        }
-                    }
+                if let Some((x1, y1)) = u_position
+                    && let Some((x2, y2)) = v_position
+                    && x1 == x2
+                    && x1 == self.current_column
+                {
+                    vertical_wires.push((cmp::min(y1, y2), cmp::max(y1, y2), *net));
                 }
             }
         }
@@ -359,16 +359,12 @@ impl Router {
 
         // If there is overlap, only keep the shortest vertical wire,
         // the other pin will be connected when the channel is widened.
-        if bottom_net != 0
+        if let (Some(bottom_track), Some(top_track)) = (bottom_track, top_track)
+            && bottom_net != 0
             && !bottom_connected
-            && bottom_track.is_some()
             && top_net != 0
             && !top_connected
-            && top_track.is_some()
         {
-            let bottom_track = bottom_track.unwrap();
-            let top_track = top_track.unwrap();
-
             // Check if the same net is connecting top and bottom
             if top_net == bottom_net {
                 // Same net (T[i] == B[i] != 0): Allow overlap
@@ -417,14 +413,18 @@ impl Router {
                     }
                 }
             }
-        } else if bottom_net != 0 && !bottom_connected && bottom_track.is_some() {
-            let bottom_track = bottom_track.unwrap();
+        } else if let Some(bottom_track) = bottom_track
+            && bottom_net != 0
+            && !bottom_connected
+        {
             if let Some(entry) = tracks_by_net.get_mut(&bottom_net) {
                 entry.insert(bottom_track);
             };
             self.add_vertical_wire(bottom_net, 0, bottom_track, graph_builder);
-        } else if top_net != 0 && !top_connected && top_track.is_some() {
-            let top_track = top_track.unwrap();
+        } else if let Some(top_track) = top_track
+            && top_net != 0
+            && !top_connected
+        {
             if let Some(entry) = tracks_by_net.get_mut(&top_net) {
                 entry.insert(top_track);
             };
@@ -708,12 +708,12 @@ impl Router {
             let u_pos = graph_builder.get_node_position(*u_id);
             let v_pos = graph_builder.get_node_position(*v_id);
 
-            if let Some((x1, y1)) = u_pos {
-                if let Some((x2, y2)) = v_pos {
-                    if x1 == x2 && x2 == self.current_column {
-                        existing_verticals.push((cmp::min(y1, y2), cmp::max(y1, y2), net));
-                    }
-                }
+            if let Some((x1, y1)) = u_pos
+                && let Some((x2, y2)) = v_pos
+                && x1 == x2
+                && x2 == self.current_column
+            {
+                existing_verticals.push((cmp::min(y1, y2), cmp::max(y1, y2), net));
             }
         }
 
@@ -841,10 +841,11 @@ impl Router {
                 }
 
                 // If the horizontal layer is occupied we can jump over it but not land there
-                if let Some(net_tracks) = net_tracks {
-                    if occupied_tracks.iter().contains(&i) && !net_tracks.contains(&i) {
-                        continue;
-                    }
+                if let Some(net_tracks) = net_tracks
+                    && occupied_tracks.iter().contains(&i)
+                    && !net_tracks.contains(&i)
+                {
+                    continue;
                 }
 
                 // If we made it this far, we can record the index of this iteration in the marker variable
@@ -1445,15 +1446,13 @@ mod tests {
             if *edge_net == 1 {
                 let u_pos = test_graph_builder.get_node_position(*u_id);
                 let v_pos = test_graph_builder.get_node_position(*v_id);
-                if let Some(u_pos) = u_pos {
-                    if let Some(v_pos) = v_pos {
-                        if u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == top_boundary_y
-                            || v_pos.1 == top_boundary_y
-                        {
-                            found_top_wire = true;
-                            break;
-                        }
-                    }
+                if let Some(u_pos) = u_pos
+                    && let Some(v_pos) = v_pos
+                    && (u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == top_boundary_y
+                        || v_pos.1 == top_boundary_y)
+                {
+                    found_top_wire = true;
+                    break;
                 }
             }
         }
@@ -1481,13 +1480,12 @@ mod tests {
         for (u_id, v_id) in &test_graph_builder.edges {
             let u_pos = test_graph_builder.get_node_position(*u_id);
             let v_pos = test_graph_builder.get_node_position(*v_id);
-            if let Some(u_pos) = u_pos {
-                if let Some(v_pos) = v_pos {
-                    if u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == 0 || v_pos.1 == 0 {
-                        found = true;
-                        break;
-                    }
-                }
+            if let Some(u_pos) = u_pos
+                && let Some(v_pos) = v_pos
+                && (u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == 0 || v_pos.1 == 0)
+            {
+                found = true;
+                break;
             }
         }
         assert!(found);
@@ -1530,15 +1528,13 @@ mod tests {
         for (u_id, v_id) in &test_graph_builder.edges {
             let u_pos = test_graph_builder.get_node_position(*u_id);
             let v_pos = test_graph_builder.get_node_position(*v_id);
-            if let Some(u_pos) = u_pos {
-                if let Some(v_pos) = v_pos {
-                    if u_pos.1 == 0 && v_pos.1 == test_router.channel_width + 1
-                        || v_pos.1 == 0 && u_pos.1 == test_router.channel_width + 1
-                    {
-                        found = true;
-                        break;
-                    }
-                }
+            if let Some(u_pos) = u_pos
+                && let Some(v_pos) = v_pos
+                && (u_pos.1 == 0 && v_pos.1 == test_router.channel_width + 1
+                    || v_pos.1 == 0 && u_pos.1 == test_router.channel_width + 1)
+            {
+                found = true;
+                break;
             }
         }
         assert!(found);

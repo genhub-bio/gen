@@ -1,6 +1,6 @@
 use std::str;
 
-use gen_core::{HashId, PathBlock, Strand, NO_CHROMOSOME_INDEX};
+use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, PathChange},
     edge::Edge,
@@ -12,7 +12,7 @@ use gen_models::{
     traits::*,
 };
 use noodles::fasta;
-use rusqlite::{self, types::Value as SQLValue, Connection};
+use rusqlite::{self, Connection, types::Value as SQLValue};
 
 use crate::fasta::FastaError;
 
@@ -97,7 +97,7 @@ pub fn update_with_fasta(
         };
 
         let path_change = PathChange {
-            block_group_id: new_block_group_id.clone(),
+            block_group_id: new_block_group_id,
             path: path.clone(),
             path_accession: None,
             start: start_coordinate,
@@ -116,28 +116,26 @@ pub fn update_with_fasta(
         change_count += 1;
     }
 
-    if !disable_reference_path_update {
-        if let Some(node_id) = first_node {
-            let edge_to_new_node = Edge::query(
-                conn,
-                "select * from edges where target_node_id = ?1",
-                rusqlite::params!(SQLValue::from(node_id)),
-            )[0]
-            .clone();
-            let edge_from_new_node = Edge::query(
-                conn,
-                "select * from edges where source_node_id = ?1",
-                rusqlite::params!(SQLValue::from(node_id)),
-            )[0]
-            .clone();
-            path.new_path_with(
-                conn,
-                start_coordinate,
-                end_coordinate,
-                &edge_to_new_node,
-                &edge_from_new_node,
-            );
-        }
+    if !disable_reference_path_update && let Some(node_id) = first_node {
+        let edge_to_new_node = Edge::query(
+            conn,
+            "select * from edges where target_node_id = ?1",
+            rusqlite::params!(SQLValue::from(node_id)),
+        )[0]
+        .clone();
+        let edge_from_new_node = Edge::query(
+            conn,
+            "select * from edges where source_node_id = ?1",
+            rusqlite::params!(SQLValue::from(node_id)),
+        )[0]
+        .clone();
+        path.new_path_with(
+            conn,
+            start_coordinate,
+            end_coordinate,
+            &edge_to_new_node,
+            &edge_from_new_node,
+        );
     }
 
     let summary_str = format!("{change_count} sequences inserted");

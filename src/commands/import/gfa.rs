@@ -6,7 +6,7 @@ use gen_models::{errors::OperationError, operations::setup_db};
 use crate::{
     commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
     get_connection, get_operation_connection,
-    imports::gfa::{import_gfa, GFAImportError},
+    imports::gfa::{GFAImportError, import_gfa},
 };
 
 /// Import a GFA file

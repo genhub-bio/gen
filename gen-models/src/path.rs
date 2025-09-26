@@ -2,14 +2,14 @@ use core::ops::Range as RustRange;
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     calculate_hash,
     range::{Range, RangeMapping},
     traits::Capnp,
-    HashId, NodeIntervalBlock, PathBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID,
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -91,11 +91,7 @@ pub fn revcomp(seq: &str) -> String {
                     // AT
                     rc ^ 21
                 };
-                if is_upper {
-                    v
-                } else {
-                    v.to_ascii_lowercase()
-                }
+                if is_upper { v } else { v.to_ascii_lowercase() }
             })
             .collect(),
     )
@@ -845,7 +841,7 @@ mod tests {
         let block_group_edges1 = edge_ids1
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: (*edge_id).clone(),
                 chromosome_index: 0,
                 phased: 0,
@@ -884,7 +880,7 @@ mod tests {
         let block_group_edges2 = edge_ids2
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: (*edge_id).clone(),
                 chromosome_index: 0,
                 phased: 0,
@@ -979,7 +975,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1066,7 +1062,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1160,7 +1156,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1279,7 +1275,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1362,7 +1358,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1424,7 +1420,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1461,7 +1457,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1521,7 +1517,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1568,7 +1564,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1636,7 +1632,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1674,7 +1670,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1753,7 +1749,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1791,7 +1787,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1869,7 +1865,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1893,7 +1889,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1987,7 +1983,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2025,7 +2021,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2119,7 +2115,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2157,7 +2153,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2250,7 +2246,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2274,7 +2270,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2347,7 +2343,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2412,7 +2408,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2450,7 +2446,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2515,7 +2511,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2562,7 +2558,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2633,7 +2629,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2671,7 +2667,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2751,7 +2747,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2789,7 +2785,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2883,7 +2879,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -2921,7 +2917,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3015,7 +3011,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3039,7 +3035,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3119,7 +3115,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3158,7 +3154,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3192,7 +3188,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3237,7 +3233,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3321,13 +3317,13 @@ mod tests {
 
         let block_group_edges = vec![
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge1.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge2.id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3380,7 +3376,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3433,7 +3429,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3467,7 +3463,7 @@ mod tests {
         );
 
         let block_group_edges = vec![BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge1.id,
             chromosome_index: 0,
             phased: 0,
@@ -3524,7 +3520,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -3676,7 +3672,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *edge_id,
                 chromosome_index: 0,
                 phased: 0,

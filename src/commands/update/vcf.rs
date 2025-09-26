@@ -4,7 +4,7 @@ use gen_models::{errors::OperationError, operations::setup_db};
 use crate::{
     commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
     get_connection, get_operation_connection,
-    updates::vcf::{update_with_vcf, VcfError},
+    updates::vcf::{VcfError, update_with_vcf},
 };
 
 /// Update with a VCF file
@@ -54,10 +54,12 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         cmd.coordinate_frame.as_deref(),
     ) {
         Ok(_) => {
-	    conn.execute("END TRANSACTION;", []).unwrap();
-	    operation_conn.execute("END TRANSACTION;", []).unwrap();
-	},
-        Err(VcfError::OperationError(OperationError::NoChanges)) => println!("No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."),
+            conn.execute("END TRANSACTION;", []).unwrap();
+            operation_conn.execute("END TRANSACTION;", []).unwrap();
+        }
+        Err(VcfError::OperationError(OperationError::NoChanges)) => println!(
+            "No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."
+        ),
         Err(e) => panic!("Error updating with vcf: {e}"),
     }
 }

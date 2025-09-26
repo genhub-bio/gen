@@ -5,7 +5,7 @@ use std::{
     str,
 };
 
-use gen_core::{config::get_gen_dir, errors::ConnectionError, traits::Capnp, HashId};
+use gen_core::{HashId, config::get_gen_dir, errors::ConnectionError, traits::Capnp};
 use gen_models::{
     changesets::{apply_changeset, revert_changeset},
     errors::{ChangesetError, OperationError, RemoteError},
@@ -20,7 +20,7 @@ use gen_models::{
 };
 use itertools::Itertools;
 use petgraph::Direction;
-use reqwest::blocking::{multipart, Client};
+use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Connection, Error as SQLError};
 use tempfile::tempdir;
 use thiserror::Error;
@@ -186,7 +186,7 @@ pub fn apply(
             return Err(OperationError::ChangesetError(e));
         }
     }
-    let full_op_hash = operation.hash.clone();
+    let full_op_hash = operation.hash;
     match end_operation(
         conn,
         operation_conn,
@@ -266,7 +266,7 @@ pub fn move_to(
 ) -> Result<(), MoveError> {
     let current_op_hash = OperationState::get_operation(operation_conn)
         .ok_or(OperationError::NoOperation("No operation set".to_string()))?;
-    let op_hash = operation.hash.clone();
+    let op_hash = operation.hash;
     if current_op_hash == op_hash {
         return Ok(());
     }
@@ -439,16 +439,16 @@ pub fn parse_patch_operations(
             results.extend(
                 branch_operations[start_pos..end_pos + 1]
                     .iter()
-                    .map(|op| op.hash.clone()),
+                    .map(|op| op.hash),
             );
         } else {
             let hash = if operation.starts_with("HEAD") {
                 if operation.contains("~") {
                     let mut it = operation.rsplit("~");
                     let count = it.next().unwrap().parse::<usize>().unwrap();
-                    branch_operations[head_pos - count].hash.clone()
+                    branch_operations[head_pos - count].hash
                 } else {
-                    branch_operations[head_pos].hash.clone()
+                    branch_operations[head_pos].hash
                 }
             } else {
                 let mut iter = branch_operations
@@ -460,7 +460,7 @@ pub fn parse_patch_operations(
                 if iter.next().is_some() {
                     panic!("Hash {operation:?} is ambiguous.");
                 }
-                branch_operations[pos].hash.clone()
+                branch_operations[pos].hash
             };
             results.push(hash);
         }
@@ -857,7 +857,7 @@ mod tests {
         edge::Edge,
         file_types::FileTypes,
         node::Node,
-        operations::{setup_db, Branch, Operation, OperationState},
+        operations::{Branch, Operation, OperationState, setup_db},
         sample::Sample,
     };
     use rusqlite::params;
@@ -1062,7 +1062,7 @@ mod tests {
                         op_3 = &format!("{}", op_3.hash)[..6]
                     )
                 ),
-                vec![op_2.hash.clone(), op_3.hash]
+                vec![op_2.hash, op_3.hash]
             );
 
             assert_eq!(
@@ -1410,7 +1410,7 @@ mod tests {
         let fasta_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let vcf_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let vcf2_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple2.vcf");
-        let conn = &mut get_connection("t2.db").unwrap();
+        let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
         setup_db(operation_conn);
         track_database(conn, operation_conn).unwrap();
@@ -1694,14 +1694,18 @@ mod tests {
                 .iter()
                 .map(|op| op.hash)
                 .collect::<Vec<_>>(),
-            vec![op_1.hash, op_2.hash, op_3.hash, op_4.hash, op_5.hash, op_10.hash]
+            vec![
+                op_1.hash, op_2.hash, op_3.hash, op_4.hash, op_5.hash, op_10.hash
+            ]
         );
         assert_eq!(
             Branch::get_operations(operation_conn, branch_b.id)
                 .iter()
                 .map(|op| op.hash)
                 .collect::<Vec<_>>(),
-            vec![op_1.hash, op_2.hash, op_3.hash, op_4.hash, op_5.hash, op_9.hash]
+            vec![
+                op_1.hash, op_2.hash, op_3.hash, op_4.hash, op_5.hash, op_9.hash
+            ]
         );
         reset(Some(conn), operation_conn, &HashId::convert_str("op-2")).unwrap();
         assert_eq!(
@@ -1723,7 +1727,9 @@ mod tests {
                 .iter()
                 .map(|op| op.hash)
                 .collect::<Vec<_>>(),
-            vec![op_1.hash, op_2.hash, op_3.hash, op_4.hash, op_5.hash, op_9.hash]
+            vec![
+                op_1.hash, op_2.hash, op_3.hash, op_4.hash, op_5.hash, op_9.hash
+            ]
         );
     }
 

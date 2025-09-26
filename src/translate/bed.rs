@@ -4,13 +4,13 @@ use std::{
     io::{Error, Read, Write},
 };
 
-use gen_core::{is_terminal, HashId, Strand};
-use gen_graph::{connect_all_boundary_edges, project_path, GraphNode};
+use gen_core::{HashId, Strand, is_terminal};
+use gen_graph::{GraphNode, connect_all_boundary_edges, project_path};
 use gen_models::{block_group::BlockGroup, sample::Sample};
 use interavl::IntervalTree;
 use noodles::{
     bed,
-    bed::feature::record_buf::{other_fields::Value, OtherFields},
+    bed::feature::record_buf::{OtherFields, other_fields::Value},
     core::Position,
 };
 use rusqlite::Connection;

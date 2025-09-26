@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gen::{
+use r#gen::{
     commands::{get_db_for_command, get_default_collection},
     exports::fasta::export_fasta as gen_export_fasta,
     fasta::FastaError,

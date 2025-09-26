@@ -1,13 +1,13 @@
 use std::{collections::HashMap, fs, str, sync};
 
 use cached::proc_macro::cached;
-use gen_core::{traits::Capnp, HashId};
+use gen_core::{HashId, traits::Capnp};
 use noodles::{
     bgzf::{self, gzi},
     core::Region,
     fasta::{self, fai, indexed_reader::Builder as IndexBuilder},
 };
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

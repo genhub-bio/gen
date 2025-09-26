@@ -11,7 +11,7 @@ use super::{
     layouts::PyBaseLayout,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
-use crate::{get_connection, views::block_layout::BaseLayout};
+use crate::{core::HashId, get_connection, views::block_layout::BaseLayout};
 
 /// The main entry point for the gen Python module.
 ///
@@ -96,7 +96,7 @@ impl PyRepository {
     ///
     /// Returns:
     ///     A PyBlockGroup instance representing the requested BlockGroup
-    fn get_block_group_by_id(&self, id: &str) -> PyResult<PyBlockGroup> {
+    fn get_block_group_by_id(&self, id: &HashId) -> PyResult<PyBlockGroup> {
         self.with_connection(|conn| {
             let block_group = BlockGroup::get_by_id(conn, id);
 
@@ -165,7 +165,7 @@ impl PyRepository {
                 Err(_) => {
                     // rustworkx is not available, return a helpful error message
                     Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
-                        "The 'rustworkx' module is not installed. Please install it using 'pip install rustworkx' to use this functionality."
+                        "The 'rustworkx' module is not installed. Please install it using 'pip install rustworkx' to use this functionality.",
                     ))
                 }
             }
@@ -204,7 +204,7 @@ impl PyRepository {
                 Err(_) => {
                     // networkx is not available, return a helpful error message
                     Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
-                        "The 'networkx' module is not installed. Please install it using 'pip install networkx' to use this functionality."
+                        "The 'networkx' module is not installed. Please install it using 'pip install networkx' to use this functionality.",
                     ))
                 }
             }

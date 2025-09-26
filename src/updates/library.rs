@@ -7,7 +7,7 @@ use std::{
 
 use csv;
 use gen_core::{
-    is_terminal, HashId, NodeIntervalBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal,
 };
 use gen_models::{
     block_group::BlockGroup,
@@ -79,7 +79,7 @@ pub fn update_with_library(
             .sequence(&sequence)
             .save(conn);
 
-        sequence_hashes_by_name.insert(name, seq.hash.clone());
+        sequence_hashes_by_name.insert(name, seq.hash);
         sequence_lengths_by_hash.insert(seq.hash, seq.length);
     }
 
@@ -245,7 +245,7 @@ pub fn update_with_library(
     let mut new_block_group_edges = new_edge_ids
         .iter()
         .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: path.block_group_id.clone(),
+            block_group_id: path.block_group_id,
             edge_id: *edge_id,
             chromosome_index: edge_id.extract_digits(), // TODO: This is a hack, clean it up with phase layers
             phased: 0,
@@ -256,7 +256,7 @@ pub fn update_with_library(
         new_edge_ids
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: path.block_group_id.clone(),
+                block_group_id: path.block_group_id,
                 edge_id: *edge_id,
                 chromosome_index: 0, // TODO: This is a hack, clean it up with phase layers
                 phased: 0,

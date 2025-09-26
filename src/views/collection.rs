@@ -13,7 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, StatefulWidget, Wrap},
 };
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::config::get_theme_color;
@@ -405,7 +405,7 @@ impl CollectionExplorer {
         // Reference block groups
         for (id, name) in &self.data.reference_block_groups {
             items.push(ExplorerItem::BlockGroup {
-                id: id.clone(),
+                id: *id,
                 name: name.clone(),
             });
         }
@@ -427,14 +427,14 @@ impl CollectionExplorer {
                 expanded: state.is_sample_expanded(sample),
             });
 
-            if state.is_sample_expanded(sample) {
-                if let Some(block_groups) = self.data.sample_block_groups.get(sample) {
-                    for (id, name) in block_groups {
-                        items.push(ExplorerItem::BlockGroup {
-                            id: id.clone(),
-                            name: name.clone(),
-                        });
-                    }
+            if state.is_sample_expanded(sample)
+                && let Some(block_groups) = self.data.sample_block_groups.get(sample)
+            {
+                for (id, name) in block_groups {
+                    items.push(ExplorerItem::BlockGroup {
+                        id: *id,
+                        name: name.clone(),
+                    });
                 }
             }
         }
@@ -635,12 +635,16 @@ mod tests {
         // (C) Collection samples
         // We expect SampleAlpha and SampleBeta
         assert_eq!(explorer_data.collection_samples.len(), 2);
-        assert!(explorer_data
-            .collection_samples
-            .contains(&"SampleAlpha".to_string()));
-        assert!(explorer_data
-            .collection_samples
-            .contains(&"SampleBeta".to_string()));
+        assert!(
+            explorer_data
+                .collection_samples
+                .contains(&"SampleAlpha".to_string())
+        );
+        assert!(
+            explorer_data
+                .collection_samples
+                .contains(&"SampleBeta".to_string())
+        );
 
         // (D) Sample block groups
         // "SampleAlpha"

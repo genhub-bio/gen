@@ -1,8 +1,8 @@
 use std::{collections::HashMap, rc::Rc};
 
-use gen_core::{calculate_hash, traits::Capnp, HashId};
+use gen_core::{HashId, calculate_hash, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{self, params, types::Value, Connection, Row};
+use rusqlite::{self, Connection, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*};

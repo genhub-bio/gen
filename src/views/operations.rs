@@ -3,7 +3,7 @@ use std::{backtrace::Backtrace, collections::HashMap, io, rc::Rc};
 use crossterm::{
     event::{self, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_core::HashId;
 use gen_graph::{GenGraph, GraphNode};
@@ -14,14 +14,14 @@ use gen_models::{
 };
 use itertools::Itertools;
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     prelude::{Color, Style, Text},
     style::Modifier,
     widgets::{Block, Borders, Paragraph, Row, Table},
-    Terminal,
 };
-use rusqlite::{params, types::Value, Connection};
+use rusqlite::{Connection, params, types::Value};
 use tui_textarea::TextArea;
 
 use crate::views::{
@@ -72,7 +72,7 @@ pub fn view_operations(
         params![Rc::new(
             operations
                 .iter()
-                .map(|x| Value::from(x.hash.clone()))
+                .map(|x| Value::from(x.hash))
                 .collect::<Vec<Value>>()
         )],
     );
@@ -264,163 +264,161 @@ pub fn view_operations(
             f.render_widget(status_bar, status_bar_area);
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let event::Event::Key(key) = event::read()? {
-                if key.modifiers == KeyModifiers::CONTROL
-                    && (key.code == KeyCode::Up || key.code == KeyCode::Down)
-                {
-                    if key.code == KeyCode::Down {
-                        focus_index += 1;
-                        if focus_index >= focus_rotation.len() {
-                            focus_index = 0;
-                        }
-                        panel_focus = focus_rotation[focus_index];
-                    } else {
-                        if focus_index > 0 {
-                            focus_index -= 1;
-                        } else {
-                            focus_index = focus_rotation.len() - 1;
-                        }
-                        panel_focus = focus_rotation[focus_index];
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let event::Event::Key(key) = event::read()?
+        {
+            if key.modifiers == KeyModifiers::CONTROL
+                && (key.code == KeyCode::Up || key.code == KeyCode::Down)
+            {
+                if key.code == KeyCode::Down {
+                    focus_index += 1;
+                    if focus_index >= focus_rotation.len() {
+                        focus_index = 0;
                     }
-                } else if panel_focus == "message_editor" {
-                    if key.code == KeyCode::Esc {
-                        view_message_panel = false;
-                        if let Some((p, _)) = focus_rotation
+                    panel_focus = focus_rotation[focus_index];
+                } else {
+                    if focus_index > 0 {
+                        focus_index -= 1;
+                    } else {
+                        focus_index = focus_rotation.len() - 1;
+                    }
+                    panel_focus = focus_rotation[focus_index];
+                }
+            } else if panel_focus == "message_editor" {
+                if key.code == KeyCode::Esc {
+                    view_message_panel = false;
+                    if let Some((p, _)) = focus_rotation
+                        .iter()
+                        .find_position(|s| **s == "message_editor")
+                    {
+                        focus_rotation.remove(p);
+                    }
+                    if focus_index >= focus_rotation.len() {
+                        focus_index = 0;
+                    }
+                    panel_focus = focus_rotation[focus_index];
+                } else if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+                    let new_summary = textarea.lines().iter().join("\n");
+                    let _ = OperationSummary::set_message(
+                        op_conn,
+                        operation_summaries[selected].summary.id,
+                        &new_summary,
+                    );
+                    operation_summaries[selected].summary.summary = new_summary;
+                } else {
+                    textarea.input(key);
+                }
+            } else if panel_focus == "graph_view" {
+                if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+                    view_graph = false;
+                    if let Some((p, _)) =
+                        focus_rotation.iter().find_position(|s| **s == "graph_view")
+                    {
+                        focus_rotation.remove(p);
+                    }
+                    if focus_index >= focus_rotation.len() {
+                        focus_index = 0;
+                    }
+                    panel_focus = focus_rotation[focus_index];
+                } else if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+                    if key.code == KeyCode::BackTab {
+                        if selected_blockgroup_graph == 0 {
+                            selected_blockgroup_graph = blockgroup_graphs.len() - 1;
+                        } else {
+                            selected_blockgroup_graph -= 1;
+                        }
+                    } else {
+                        selected_blockgroup_graph += 1;
+                        if selected_blockgroup_graph >= blockgroup_graphs.len() {
+                            selected_blockgroup_graph = 0;
+                        }
+                    }
+                    graph_viewer = Viewer::new(
+                        &blockgroup_graphs[selected_blockgroup_graph].2,
+                        conn,
+                        PlotParameters::default(),
+                    );
+                } else {
+                    graph_viewer.handle_input(key);
+                }
+            } else {
+                let code = key.code;
+                match code {
+                    KeyCode::Esc | KeyCode::Char('q') => break,
+                    KeyCode::Up => {
+                        if selected > 0 {
+                            selected = selected.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if selected < operations.len() - 1 {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Char('e') => {
+                        textarea = TextArea::from_iter(
+                            operation_summaries[selected].summary.summary.split("\n"),
+                        );
+                        view_message_panel = true;
+                        focus_index = if let Some((i, _)) = focus_rotation
                             .iter()
                             .find_position(|s| **s == "message_editor")
                         {
-                            focus_rotation.remove(p);
-                        }
-                        if focus_index >= focus_rotation.len() {
-                            focus_index = 0;
-                        }
+                            i
+                        } else {
+                            focus_rotation.push("message_editor");
+                            focus_rotation.len() - 1
+                        };
                         panel_focus = focus_rotation[focus_index];
-                    } else if key.code == KeyCode::Char('s')
-                        && key.modifiers == KeyModifiers::CONTROL
-                    {
-                        let new_summary = textarea.lines().iter().join("\n");
-                        let _ = OperationSummary::set_message(
-                            op_conn,
-                            operation_summaries[selected].summary.id,
-                            &new_summary,
-                        );
-                        operation_summaries[selected].summary.summary = new_summary;
-                    } else {
-                        textarea.input(key);
                     }
-                } else if panel_focus == "graph_view" {
-                    if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
-                        view_graph = false;
-                        if let Some((p, _)) =
+                    KeyCode::Char('v') => {
+                        view_graph = true;
+                        focus_index = if let Some((i, _)) =
                             focus_rotation.iter().find_position(|s| **s == "graph_view")
                         {
-                            focus_rotation.remove(p);
-                        }
-                        if focus_index >= focus_rotation.len() {
-                            focus_index = 0;
-                        }
-                        panel_focus = focus_rotation[focus_index];
-                    } else if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-                        if key.code == KeyCode::BackTab {
-                            if selected_blockgroup_graph == 0 {
-                                selected_blockgroup_graph = blockgroup_graphs.len() - 1;
-                            } else {
-                                selected_blockgroup_graph -= 1;
-                            }
+                            i
                         } else {
-                            selected_blockgroup_graph += 1;
-                            if selected_blockgroup_graph >= blockgroup_graphs.len() {
-                                selected_blockgroup_graph = 0;
-                            }
-                        }
-                        graph_viewer = Viewer::new(
-                            &blockgroup_graphs[selected_blockgroup_graph].2,
+                            focus_rotation.push("graph_view");
+                            focus_rotation.len() - 1
+                        };
+                        panel_focus = focus_rotation[focus_index];
+                        let hash = &operation_summaries[selected].operation.hash;
+                        let graphs = get_change_graph_from_hash(op_conn, hash).unwrap();
+                        blockgroup_graphs.clear();
+                        let bg_info = BlockGroup::query_by_ids(
                             conn,
-                            PlotParameters::default(),
+                            &graphs.keys().cloned().collect::<Vec<_>>(),
                         );
-                    } else {
-                        graph_viewer.handle_input(key);
-                    }
-                } else {
-                    let code = key.code;
-                    match code {
-                        KeyCode::Esc | KeyCode::Char('q') => break,
-                        KeyCode::Up => {
-                            if selected > 0 {
-                                selected = selected.saturating_sub(1);
-                            }
+                        let bg_map: HashMap<HashId, &BlockGroup> =
+                            HashMap::from_iter(bg_info.iter().map(|k| (k.id, k)));
+                        for (i, v) in graphs {
+                            blockgroup_graphs.push((
+                                i,
+                                format!(
+                                    "{collection} {sample} {name}",
+                                    collection = bg_map[&i].collection_name.clone(),
+                                    sample = bg_map[&i]
+                                        .sample_name
+                                        .clone()
+                                        .unwrap_or("Reference".to_string()),
+                                    name = bg_map[&i].name.clone()
+                                ),
+                                v,
+                            ));
                         }
-                        KeyCode::Down => {
-                            if selected < operations.len() - 1 {
-                                selected += 1;
-                            }
-                        }
-                        KeyCode::Enter | KeyCode::Char('e') => {
-                            textarea = TextArea::from_iter(
-                                operation_summaries[selected].summary.summary.split("\n"),
-                            );
-                            view_message_panel = true;
-                            focus_index = if let Some((i, _)) = focus_rotation
-                                .iter()
-                                .find_position(|s| **s == "message_editor")
-                            {
-                                i
-                            } else {
-                                focus_rotation.push("message_editor");
-                                focus_rotation.len() - 1
-                            };
-                            panel_focus = focus_rotation[focus_index];
-                        }
-                        KeyCode::Char('v') => {
-                            view_graph = true;
-                            focus_index = if let Some((i, _)) =
-                                focus_rotation.iter().find_position(|s| **s == "graph_view")
-                            {
-                                i
-                            } else {
-                                focus_rotation.push("graph_view");
-                                focus_rotation.len() - 1
-                            };
-                            panel_focus = focus_rotation[focus_index];
-                            let hash = &operation_summaries[selected].operation.hash;
-                            let graphs = get_change_graph_from_hash(op_conn, hash).unwrap();
-                            blockgroup_graphs.clear();
-                            let bg_info = BlockGroup::query_by_ids(
+                        selected_blockgroup_graph = 0;
+                        if blockgroup_graphs.is_empty() {
+                            graph_viewer =
+                                Viewer::new(&empty_graph, conn, PlotParameters::default());
+                        } else {
+                            graph_viewer = Viewer::new(
+                                &blockgroup_graphs[selected_blockgroup_graph].2,
                                 conn,
-                                &graphs.keys().cloned().collect::<Vec<_>>(),
+                                PlotParameters::default(),
                             );
-                            let bg_map: HashMap<HashId, &BlockGroup> =
-                                HashMap::from_iter(bg_info.iter().map(|k| (k.id, k)));
-                            for (i, v) in graphs {
-                                blockgroup_graphs.push((
-                                    i,
-                                    format!(
-                                        "{collection} {sample} {name}",
-                                        collection = bg_map[&i].collection_name.clone(),
-                                        sample = bg_map[&i]
-                                            .sample_name
-                                            .clone()
-                                            .unwrap_or("Reference".to_string()),
-                                        name = bg_map[&i].name.clone()
-                                    ),
-                                    v,
-                                ));
-                            }
-                            selected_blockgroup_graph = 0;
-                            if blockgroup_graphs.is_empty() {
-                                graph_viewer =
-                                    Viewer::new(&empty_graph, conn, PlotParameters::default());
-                            } else {
-                                graph_viewer = Viewer::new(
-                                    &blockgroup_graphs[selected_blockgroup_graph].2,
-                                    conn,
-                                    PlotParameters::default(),
-                                );
-                            }
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
         }

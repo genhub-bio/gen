@@ -1,19 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use gen_core::{is_end_node, is_start_node, is_terminal, HashId, PATH_START_NODE_ID};
-use gen_graph::{project_path, GenGraph, GraphNode};
+use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node, is_terminal};
+use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_models::{node::Node, path::Path, sequence::Sequence};
 use log::{info, warn};
-use petgraph::{graphmap::DiGraphMap, Direction};
+use petgraph::{Direction, graphmap::DiGraphMap};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
     text::Span,
     widgets::{
-        canvas::{Canvas, Line, Points},
         Block, Widget,
+        canvas::{Canvas, Line, Points},
     },
 };
 use rusqlite::Connection;
@@ -281,12 +281,12 @@ impl<'a> Viewer<'a> {
         );
 
         // If we're being asked to view an empty graph, show the splash screen
-        if block_graph.node_count() == 1 {
-            if let Some(node) = block_graph.nodes().next() {
-                if node.node_id == PATH_START_NODE_ID && node.block_id == -1 {
-                    new_viewer.state.show_splash_screen = true;
-                }
-            }
+        if block_graph.node_count() == 1
+            && let Some(node) = block_graph.nodes().next()
+            && node.node_id == PATH_START_NODE_ID
+            && node.block_id == -1
+        {
+            new_viewer.state.show_splash_screen = true;
         }
         new_viewer
     }
@@ -363,7 +363,7 @@ impl<'a> Viewer<'a> {
                 return Err(format!(
                     "Path {name} is not translatable to current graph.",
                     name = &path.name
-                ))
+                ));
             }
             1 => {
                 _ = highlight_graph.add_node(path_nodes[0]);
@@ -433,10 +433,10 @@ impl<'a> Viewer<'a> {
 
     /// Unselect the currently selected block if it's not visible in the viewport.
     pub fn unselect_if_not_visible(&mut self) {
-        if let Some(selected_block) = self.state.selected_block {
-            if !self.is_block_visible(selected_block) {
-                self.state.selected_block = None;
-            }
+        if let Some(selected_block) = self.state.selected_block
+            && !self.is_block_visible(selected_block)
+        {
+            self.state.selected_block = None;
         }
     }
 
@@ -546,7 +546,7 @@ impl<'a> Viewer<'a> {
             return label::NODE.to_string().to_string();
         }
 
-        let label = if let Some(sequence) = self.node_sequences.get(&block.node_id) {
+        if let Some(sequence) = self.node_sequences.get(&block.node_id) {
             inner_truncation(
                 sequence
                     .get_sequence(block.sequence_start, block.sequence_end)
@@ -558,9 +558,7 @@ impl<'a> Viewer<'a> {
             // do show a placeholder of the correct length.
             let seq_len = (block.sequence_end - block.sequence_start).unsigned_abs() as u32;
             "?".repeat(max_width.min(seq_len) as usize)
-        };
-
-        label
+        }
     }
 
     /// Print a block label at the given position.
@@ -1252,18 +1250,16 @@ impl<'a> Viewer<'a> {
                 self.state.world = self.compute_bounding_box();
 
                 // Adjust viewport to maintain terminal coordinates of selected block
-                if let Some((old_x, old_y)) = terminal_coords {
-                    if let Some(block) = self.state.selected_block {
-                        if let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
-                        {
-                            let new_center_x = (start + end) / 2.0;
-                            let new_center_y = *y;
+                if let Some((old_x, old_y)) = terminal_coords
+                    && let Some(block) = self.state.selected_block
+                    && let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
+                {
+                    let new_center_x = (start + end) / 2.0;
+                    let new_center_y = *y;
 
-                            // Calculate new offsets to maintain terminal coordinates
-                            self.state.offset_x = (new_center_x - old_x).round() as i32;
-                            self.state.offset_y = (new_center_y - old_y).round() as i32;
-                        }
-                    }
+                    // Calculate new offsets to maintain terminal coordinates
+                    self.state.offset_x = (new_center_x - old_x).round() as i32;
+                    self.state.offset_y = (new_center_y - old_y).round() as i32;
                 }
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
@@ -1286,18 +1282,16 @@ impl<'a> Viewer<'a> {
                 self.state.world = self.compute_bounding_box();
 
                 // Adjust viewport to maintain terminal coordinates of selected block
-                if let Some((old_x, old_y)) = terminal_coords {
-                    if let Some(block) = self.state.selected_block {
-                        if let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
-                        {
-                            let new_center_x = (start + end) / 2.0;
-                            let new_center_y = *y;
+                if let Some((old_x, old_y)) = terminal_coords
+                    && let Some(block) = self.state.selected_block
+                    && let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
+                {
+                    let new_center_x = (start + end) / 2.0;
+                    let new_center_y = *y;
 
-                            // Calculate new offsets to maintain terminal coordinates
-                            self.state.offset_x = (new_center_x - old_x).round() as i32;
-                            self.state.offset_y = (new_center_y - old_y).round() as i32;
-                        }
-                    }
+                    // Calculate new offsets to maintain terminal coordinates
+                    self.state.offset_x = (new_center_x - old_x).round() as i32;
+                    self.state.offset_y = (new_center_y - old_y).round() as i32;
                 }
             }
             KeyCode::Char('s') | KeyCode::Char('S') => {

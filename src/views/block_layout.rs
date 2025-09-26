@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use gen_core::is_terminal;
-use gen_graph::{find_articulation_points, GenGraph, GraphEdge, GraphNode};
+use gen_graph::{GenGraph, GraphEdge, GraphNode, find_articulation_points};
 use gen_models::node::Node;
 use log::{debug, info, warn};
 use petgraph::{
-    algo::toposort, graph::NodeIndex, graphmap::GraphMap, stable_graph::StableDiGraph, Directed,
+    Directed, algo::toposort, graph::NodeIndex, graphmap::GraphMap, stable_graph::StableDiGraph,
 };
 use rust_sugiyama::configure::Config;
 
@@ -72,7 +72,6 @@ impl Partition {
                 panic!("Graph is not a DAG");
             })
             .into_iter()
-            .map(|n| n)
             .collect::<Vec<_>>();
 
         // Create the partition subgraphs
@@ -563,7 +562,9 @@ impl ScaledLayout {
 
         // We don't need to stretch the layout if the requested label width is too small
         if parameters.label_width < 5 {
-            warn!("Requested label width is too small to shrink the labels, falling back to view without sequences.");
+            warn!(
+                "Requested label width is too small to shrink the labels, falling back to view without sequences."
+            );
             self.labels = working_layout
                 .iter()
                 .map(|(node, (x, y))| {
@@ -575,10 +576,10 @@ impl ScaledLayout {
                 .collect();
         } else {
             // To stretch, we first sort the layout by x-coordinate so that we can group the blocks by rank
-            working_layout.sort_by(|a, b| a.1 .0.cmp(&b.1 .0));
+            working_layout.sort_by(|a, b| a.1.0.cmp(&b.1.0));
 
             // Loop over the sorted layout and group the blocks by rank by keeping track of the x-coordinate
-            let mut current_x = working_layout[0].1 .0;
+            let mut current_x = working_layout[0].1.0;
             let mut current_layer: Vec<(GraphNode, i64, i64)> = Vec::new(); // node, label_width, y-coordinate
 
             // Initial values:
@@ -672,7 +673,7 @@ impl ScaledLayout {
 
 #[cfg(test)]
 mod tests {
-    use gen_core::{strand::Strand, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
+    use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, strand::Strand};
     use gen_graph::{GraphEdge, GraphNode};
     use itertools::Itertools;
     use petgraph::graphmap::DiGraphMap;

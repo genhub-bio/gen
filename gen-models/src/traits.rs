@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use itertools::Itertools;
-use rusqlite::{params, types::Value, Connection, Params, Result, Row};
+use rusqlite::{Connection, Params, Result, Row, params, types::Value};
 
 pub trait Query {
     type Model;

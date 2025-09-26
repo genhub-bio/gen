@@ -11,13 +11,13 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use gen::{
+use r#gen::{
     annotations::gff::propagate_gff,
-    commands::{cli_context::CliContext, remote::handle_remote_command, Cli, Commands},
+    commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
     config,
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection,
-    graph_operators::{derive_chunks, get_path, make_stitch},
+    graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
     operation_management,
     operation_management::{parse_patch_operations, push},
     patch, track_database, translate,
@@ -31,15 +31,14 @@ use gen_models::{
     file_types::FileTypes,
     metadata,
     operations::{
-        setup_db, Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, setup_db,
     },
     sample::Sample,
     traits::Query,
 };
 use itertools::Itertools;
 use noodles::core::Region;
-use r#gen::graph_operators::GraphOperationError;
-use rusqlite::{params, types::Value, Connection};
+use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
 fn get_default_collection(conn: &Connection) -> String {
@@ -133,13 +132,13 @@ fn main() {
             println!("Gen repository initialized.");
         }
         Some(Commands::Import(cmd)) => {
-            gen::commands::import::execute(&cli_context, cmd);
+            r#gen::commands::import::execute(&cli_context, cmd);
         }
         Some(Commands::Update(cmd)) => {
-            gen::commands::update::execute(&cli_context, cmd);
+            r#gen::commands::update::execute(&cli_context, cmd);
         }
         Some(Commands::Export(cmd)) => {
-            gen::commands::export::execute(&cli_context, cmd);
+            r#gen::commands::export::execute(&cli_context, cmd);
         }
         Some(Commands::Remote(cmd)) => match handle_remote_command(&operation_conn, &cmd) {
             Ok(_) => {}
@@ -572,18 +571,29 @@ fn main() {
             let name = &name
                 .clone()
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
-            let parsed_graph_name = if region.is_some() {
-                let parsed_region = region.as_ref().unwrap().parse::<Region>().unwrap();
-                parsed_region.name().to_string()
-            } else {
-                graph.clone().unwrap()
-            };
             let block_groups = Sample::get_block_groups(&conn, name, sample.as_deref());
             let formatted_sample_name = if sample.is_some() {
                 format!("sample {}", sample.clone().unwrap())
             } else {
                 "default sample".to_string()
             };
+            let (parsed_graph_name, start_coordinate, mut end_coordinate) =
+                if let Some(region) = region {
+                    let parsed_region = region.parse::<Region>().unwrap();
+                    let interval = parsed_region.interval();
+                    (
+                        parsed_region.name().to_string(),
+                        interval.start().unwrap().get() as i64,
+                        interval.end().unwrap().get() as i64,
+                    )
+                } else {
+                    (
+                        graph.clone().unwrap(),
+                        start.unwrap_or_default(),
+                        end.unwrap_or(-1),
+                    )
+                };
+
             let block_group = block_groups
                 .iter()
                 .find(|bg| bg.name == parsed_graph_name)
@@ -592,16 +602,8 @@ fn main() {
                 });
             let path = BlockGroup::get_current_path(&conn, &block_group.id);
             let sequence = path.sequence(&conn);
-            let start_coordinate;
-            let mut end_coordinate;
-            if region.is_some() {
-                let parsed_region = region.as_ref().unwrap().parse::<Region>().unwrap();
-                let interval = parsed_region.interval();
-                start_coordinate = interval.start().unwrap().get() as i64;
-                end_coordinate = interval.end().unwrap().get() as i64;
-            } else {
-                start_coordinate = start.unwrap_or(0);
-                end_coordinate = end.unwrap_or(sequence.len() as i64);
+            if end_coordinate == -1 {
+                end_coordinate = sequence.len() as i64;
             }
             println!(
                 "{}",

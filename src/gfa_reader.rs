@@ -24,7 +24,7 @@
 
 use std::{
     fs::File,
-    io::{prelude::*, BufReader},
+    io::{BufReader, prelude::*},
     path::Path as file_path,
 };
 
@@ -541,11 +541,7 @@ pub fn fill_segments(graph: &mut Gfa<u32, (), ()>) {
 ///
 /// Only needed for Jumps
 fn parse_dumb(s: &str) -> i64 {
-    if s == "*" {
-        -1
-    } else {
-        s.parse().unwrap()
-    }
+    if s == "*" { -1 } else { s.parse().unwrap() }
 }
 
 #[derive(Debug, Clone)]

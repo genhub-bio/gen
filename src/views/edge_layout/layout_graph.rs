@@ -4,12 +4,12 @@ use itertools::Itertools;
 use petgraph::stable_graph::StableGraph;
 
 use super::{
+    EdgeData, LayoutError, NodeData,
     layout_layer::layout_layer,
     process_graph::{
         assign_glyph_idx, assign_ports, compress_graph, preprocess_graph, simplify_graph,
     },
     temp_graph::TempGraph,
-    EdgeData, LayoutError, NodeData,
 };
 
 pub fn layout_graph(
@@ -158,10 +158,10 @@ pub fn layout_graph(
         }
 
         for edge_index in layer_graph.edge_indices() {
-            if let Some((source, target)) = layer_graph.edge_adjacencies(edge_index) {
-                if let Some(edge_data) = layer_graph.get_edge(edge_index) {
-                    combined_graph.add_edge(edge_index, source, target, edge_data.clone())?;
-                }
+            if let Some((source, target)) = layer_graph.edge_adjacencies(edge_index)
+                && let Some(edge_data) = layer_graph.get_edge(edge_index)
+            {
+                combined_graph.add_edge(edge_index, source, target, edge_data.clone())?;
             }
         }
 

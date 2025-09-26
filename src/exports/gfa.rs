@@ -5,8 +5,8 @@ use std::{
     path::PathBuf,
 };
 
-use gen_core::{is_terminal, strand::Strand, HashId};
-use gen_graph::{project_path, GenGraph};
+use gen_core::{HashId, is_terminal, strand::Strand};
+use gen_graph::{GenGraph, project_path};
 use gen_models::{
     block_group::BlockGroup, block_group_edge::BlockGroupEdge, collection::Collection, edge::Edge,
     path::Path, sample::Sample,
@@ -14,7 +14,7 @@ use gen_models::{
 use itertools::Itertools;
 use rusqlite::Connection;
 
-use crate::gfa::{path_line, write_links, write_segments, Link, Path as GFAPath, Segment};
+use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments};
 
 pub fn export_gfa(
     conn: &Connection,
@@ -278,7 +278,7 @@ fn write_paths(writer: &mut BufWriter<File>, path_links: HashMap<String, Vec<(St
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use gen_core::{path::PathBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
     use gen_models::{
         block_group::{BlockGroup, PathChange},
         block_group_edge::BlockGroupEdgeData,
@@ -380,31 +380,31 @@ mod tests {
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge1.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge2.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge3.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge4.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge5.id,
                 chromosome_index: 0,
                 phased: 0,
@@ -609,7 +609,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 7,

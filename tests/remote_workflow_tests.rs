@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod remote_workflow_integration_tests {
-    use gen_models::operations::{setup_db, Branch, Defaults, Remote};
     use r#gen::{
-        commands::remote::{handle_remote_command, RemoteCommand},
+        commands::remote::{RemoteCommand, handle_remote_command},
         operation_management::push,
         test_helpers::{get_operation_connection, setup_gen_dir},
     };
+    use gen_models::operations::{Branch, Defaults, Remote, setup_db};
 
     /// Test remote deletion with branch associations (should set to null)
     #[test]

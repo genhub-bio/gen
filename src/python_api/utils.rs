@@ -5,7 +5,7 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyModule},
 };
-use rusqlite::{types::ValueRef, Connection};
+use rusqlite::{Connection, types::ValueRef};
 
 /// Helper function to convert SQLite errors to Python exceptions
 pub fn sqlite_err_to_pyerr(err: rusqlite::Error) -> PyErr {
@@ -60,9 +60,9 @@ pub fn get_gen_dir_py(py: Python) -> PyResult<PyObject> {
         Some(dir) => {
             let path = Path::new(&dir);
             path_to_py_path(py, path)
-        },
+        }
         None => Err(pyo3::exceptions::PyFileNotFoundError::new_err(
-            "No .gen directory found. Run 'gen init' in the project root directory to initialize gen."
-        ))
+            "No .gen directory found. Run 'gen init' in the project root directory to initialize gen.",
+        )),
     }
 }

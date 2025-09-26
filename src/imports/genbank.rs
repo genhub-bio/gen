@@ -1,7 +1,7 @@
 use std::{io::Read, str};
 
 use gb_io::reader;
-use gen_core::{HashId, PathBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -17,7 +17,7 @@ use gen_models::{
 use rusqlite::Connection;
 
 use crate::{
-    genbank::{process_sequence, EditType, GenBankError},
+    genbank::{EditType, GenBankError, process_sequence},
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
 
@@ -92,13 +92,13 @@ where
                     conn,
                     &[
                         BlockGroupEdgeData {
-                            block_group_id: block_group.id.clone(),
+                            block_group_id: block_group.id,
                             edge_id: edge_into.id,
                             chromosome_index: 0,
                             phased: 0,
                         },
                         BlockGroupEdgeData {
-                            block_group_id: block_group.id.clone(),
+                            block_group_id: block_group.id,
                             edge_id: edge_out_of.id,
                             chromosome_index: 0,
                             phased: 0,
@@ -135,7 +135,7 @@ where
                                 )),
                             );
                             PathChange {
-                                block_group_id: block_group.id.clone(),
+                                block_group_id: block_group.id,
                                 path: path.clone(),
                                 path_accession: None,
                                 start,
@@ -156,7 +156,7 @@ where
                             }
                         }
                         EditType::Deletion => PathChange {
-                            block_group_id: block_group.id.clone(),
+                            block_group_id: block_group.id,
                             path: path.clone(),
                             path_accession: None,
                             start,
@@ -213,7 +213,7 @@ mod tests {
 
     use gen_models::{
         file_types::FileTypes,
-        operations::{setup_db, OperationFile},
+        operations::{OperationFile, setup_db},
         traits::Query,
     };
     use noodles::fasta;

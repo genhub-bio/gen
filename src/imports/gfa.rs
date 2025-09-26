@@ -1,8 +1,8 @@
 use std::{collections::HashMap, path::Path as FilePath};
 
 use gen_core::{
-    is_end_node, is_start_node, HashId, Strand, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID,
-    PATH_START_NODE_ID,
+    HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node,
+    is_start_node,
 };
 use gen_graph::{GraphEdge, GraphNode};
 use gen_models::{
@@ -301,7 +301,7 @@ pub fn import_gfa<'a>(
             &path_edge_ids
                 .iter()
                 .map(|id| BlockGroupEdgeData {
-                    block_group_id: block_group.id.clone(),
+                    block_group_id: block_group.id,
                     edge_id: *id,
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
@@ -410,7 +410,7 @@ pub fn import_gfa<'a>(
         &new_edge_ids
             .iter()
             .map(|id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: *id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -460,7 +460,7 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use gen_models::{operations::setup_db, traits::*};
-    use rusqlite::types::Value as SQLValue;
+    use rusqlite::params;
 
     use super::*;
     use crate::{
@@ -484,10 +484,7 @@ mod tests {
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
-            rusqlite::params!(
-                SQLValue::from(block_group_id.clone()),
-                SQLValue::from("m123".to_string()),
-            ),
+            params![block_group_id, "m123"],
         )[0]
         .clone();
 
@@ -554,10 +551,7 @@ mod tests {
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
-            rusqlite::params!(
-                SQLValue::from(block_group_id.clone()),
-                SQLValue::from("291344".to_string()),
-            ),
+            params![block_group_id, "291344"],
         )[0]
         .clone();
 
@@ -584,10 +578,7 @@ mod tests {
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
-            rusqlite::params!(
-                SQLValue::from(block_group_id.clone()),
-                SQLValue::from("124".to_string()),
-            ),
+            params![block_group_id, "124"],
         )[0]
         .clone();
 
@@ -617,10 +608,7 @@ mod tests {
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
-            rusqlite::params!(
-                SQLValue::from(block_group_id.clone()),
-                SQLValue::from("BBa_J23100".to_string()),
-            ),
+            params![block_group_id, "BBa_J23100"],
         )[0]
         .clone();
 
@@ -723,10 +711,7 @@ mod tests {
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
-            rusqlite::params!(
-                SQLValue::from(block_group_id.clone()),
-                SQLValue::from("124".to_string()),
-            ),
+            params![block_group_id, "124"],
         )[0]
         .clone();
 

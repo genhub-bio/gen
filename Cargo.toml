@@ -2,7 +2,7 @@
 name = "gen"
 description = "A sequence graph and version control system."
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/ginkgobioworks/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
@@ -22,7 +22,7 @@ members = ["gen-core", "gen-models", "gen-graph", "gen-python"]
 
 [features]
 benchmark = []
-python-bindings = ["pyo3", "pyo3-macros", "rustworkx-core"]
+python-bindings = ["pyo3", "pyo3-macros", "rustworkx-core", "gen-core/python-bindings"]
 extension-module = ["pyo3/extension-module"]
 default = ["models", "cli"]
 models = []

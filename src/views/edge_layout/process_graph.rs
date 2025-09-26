@@ -6,7 +6,7 @@ use std::{
 use itertools::Itertools;
 use petgraph::stable_graph::StableGraph;
 
-use super::{temp_graph::TempGraph, EdgeData, LayoutError, NodeData};
+use super::{EdgeData, LayoutError, NodeData, temp_graph::TempGraph};
 
 pub fn preprocess_graph(graph: &mut TempGraph) {
     // Normalizes the coordinates so that the minimum coordinate is 0.
@@ -181,17 +181,17 @@ pub fn simplify_graph(graph: &mut TempGraph) -> Result<(), LayoutError> {
                 }
 
                 // Add simplified edge
-                if let Some(end_node_id) = end_node_id {
-                    if critical_nodes.contains(&end_node_id) {
-                        let segment_endpoints = if *start_node_id < end_node_id {
-                            (*start_node_id, end_node_id)
-                        } else {
-                            (end_node_id, *start_node_id)
-                        };
+                if let Some(end_node_id) = end_node_id
+                    && critical_nodes.contains(&end_node_id)
+                {
+                    let segment_endpoints = if *start_node_id < end_node_id {
+                        (*start_node_id, end_node_id)
+                    } else {
+                        (end_node_id, *start_node_id)
+                    };
 
-                        processed_segments.insert(segment_endpoints);
-                        new_edges.insert(segment_endpoints);
-                    }
+                    processed_segments.insert(segment_endpoints);
+                    new_edges.insert(segment_endpoints);
                 }
             }
         }
@@ -274,7 +274,7 @@ pub fn compress_graph(
             Ordering::Less => {
                 return Err(LayoutError::InvalidCoordinateNumber(
                     coordinates.len() as i64
-                ))
+                ));
             }
             Ordering::Greater => {
                 let mut dynamic_spacing = (0..coordinates.len())

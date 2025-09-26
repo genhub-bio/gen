@@ -15,6 +15,8 @@ pub mod traits;
 
 pub use generated::gen_core_capnp;
 pub use path::PathBlock;
+#[cfg(feature = "python-bindings")]
+use pyo3::pyclass;
 pub use strand::Strand;
 
 pub static NO_CHROMOSOME_INDEX: i64 = -1;
@@ -41,6 +43,7 @@ pub fn is_end_node(node_id: HashId) -> bool {
     node_id == PATH_END_NODE_ID
 }
 
+#[cfg_attr(feature = "python-bindings", pyclass)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HashId(pub [u8; 32]);
 
@@ -283,14 +286,23 @@ mod tests {
                 .try_into()
                 .unwrap();
             assert!(hash.starts_with("a826"));
-            assert!(hash
-                .starts_with("a82639b6f8c3a6e536d8cc562c3b86ff4b012c84ab230c1e5be649aa9ad26d21"));
+            assert!(
+                hash.starts_with(
+                    "a82639b6f8c3a6e536d8cc562c3b86ff4b012c84ab230c1e5be649aa9ad26d21"
+                )
+            );
             assert!(!hash.starts_with("b826"));
-            assert!(!hash
-                .starts_with("a82639b6f8c3a6e536d8cc562c3b86ff4b012c84ab230c1e5be649aa9ad26d210"));
+            assert!(
+                !hash.starts_with(
+                    "a82639b6f8c3a6e536d8cc562c3b86ff4b012c84ab230c1e5be649aa9ad26d210"
+                )
+            );
             assert!(!hash.starts_with(""));
-            assert!(!hash
-                .starts_with("a82639b6f8c3a6e536d8cc562c3b86ff4b012c84ab230c1e5be649aa9ad26d219"));
+            assert!(
+                !hash.starts_with(
+                    "a82639b6f8c3a6e536d8cc562c3b86ff4b012c84ab230c1e5be649aa9ad26d219"
+                )
+            );
         }
     }
 }

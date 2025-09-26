@@ -93,16 +93,16 @@ pub fn track_database(
                         return Ok(());
                     }
                 } else {
-                    return Err(core::errors::ConnectionError::DatabaseTracking(
-                format!("Database conflict: Database '{}' (UUID: {}) is registered at path '{}', which does not match the database found at {}",
-                    path_db.name, path_db.db_uuid, path_db.path, db_path)
-            ));
+                    return Err(core::errors::ConnectionError::DatabaseTracking(format!(
+                        "Database conflict: Database '{}' (UUID: {}) is registered at path '{}', which does not match the database found at {}",
+                        path_db.name, path_db.db_uuid, path_db.path, db_path
+                    )));
                 }
             } else if let Some(uuid_db) = exist_by_uuid {
-                return Err(core::errors::ConnectionError::DatabaseTracking(
-                format!("Database conflict: Database '{}' (UUID: {}) is registered at path '{}', but was accessed from {}. Was this file moved?",
-                    uuid_db.name, uuid_db.db_uuid, uuid_db.path, db_path)
-            ));
+                return Err(core::errors::ConnectionError::DatabaseTracking(format!(
+                    "Database conflict: Database '{}' (UUID: {}) is registered at path '{}', but was accessed from {}. Was this file moved?",
+                    uuid_db.name, uuid_db.db_uuid, uuid_db.path, db_path
+                )));
             }
 
             let db_name = relative_path

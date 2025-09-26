@@ -1,5 +1,5 @@
 use gen_core::traits::Capnp;
-use rusqlite::{params, Connection, Result as SQLResult, Row};
+use rusqlite::{Connection, Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{gen_models_capnp::gen_database, traits::*};
@@ -101,7 +101,11 @@ impl GenDatabase {
             Ok(new) => Ok(new),
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
                 if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    match GenDatabase::get(conn, "select * from gen_databases where db_uuid = ?1 AND name = ?2 AND path = ?3", params![db_uuid, name, path]) {
+                    match GenDatabase::get(
+                        conn,
+                        "select * from gen_databases where db_uuid = ?1 AND name = ?2 AND path = ?3",
+                        params![db_uuid, name, path],
+                    ) {
                         Ok(result) => Ok(result),
                         Err(e) => Err(e),
                     }

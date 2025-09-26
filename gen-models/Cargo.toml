@@ -2,7 +2,7 @@
 name = "gen-models"
 description = "Models for the gen sequence graph and version control system."
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"

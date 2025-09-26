@@ -328,7 +328,7 @@ pub struct Cli {
 }
 
 pub fn get_db_for_command(db: Option<String>, operation_conn: &Connection) -> String {
-    let binding = db.clone().unwrap_or_else(|| {
+    db.clone().unwrap_or_else(|| {
         let mut stmt = operation_conn
             .prepare("select db_name from defaults where id = 1;")
             .unwrap();
@@ -343,8 +343,7 @@ pub fn get_db_for_command(db: Option<String>, operation_conn: &Connection) -> St
                 panic!("No .gen directory found. Please run 'gen init' first.")
             }
         })
-    });
-    binding
+    })
 }
 
 pub fn get_default_collection(conn: &Connection) -> String {

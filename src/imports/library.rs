@@ -5,7 +5,7 @@ use std::{
     str,
 };
 
-use gen_core::{HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -63,7 +63,7 @@ pub fn import_library<'a>(
         if sequence_hashes_by_name.contains_key(&name) {
             panic!("Duplicate sequence name: {name}");
         }
-        sequence_hashes_by_name.insert(name, seq.hash.clone());
+        sequence_hashes_by_name.insert(name, seq.hash);
         sequence_lengths_by_hash.insert(seq.hash, seq.length);
     }
 
@@ -86,11 +86,11 @@ pub fn import_library<'a>(
                     conn,
                     part_hash,
                     &HashId::convert_str(&format!(
-			"{region_name}:{part}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
-			ref_start = 0,
-			ref_end = seq_length,
-			sequence_hash = part_hash
-		    )),
+                        "{region_name}:{part}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
+                        ref_start = 0,
+                        ref_end = seq_length,
+                        sequence_hash = part_hash
+                    )),
                 );
                 sequence_lengths_by_node_id.insert(part_node_id, *seq_length);
 
@@ -164,7 +164,7 @@ pub fn import_library<'a>(
     let new_block_group_edges = new_edge_ids
         .iter()
         .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: new_block_group.id.clone(),
+            block_group_id: new_block_group.id,
             edge_id: *edge_id,
             chromosome_index: edge_id.extract_digits(), // TODO: This is a hack, clean it up with phase layers
             phased: 0,

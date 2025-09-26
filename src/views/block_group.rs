@@ -6,7 +6,7 @@ use std::{
 use crossterm::{
     event::{self, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
@@ -18,7 +18,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
 };
-use rusqlite::{params, types::Value as SQLValue, Connection};
+use rusqlite::{Connection, params};
 
 use crate::{
     config::get_theme_color,
@@ -106,11 +106,18 @@ pub fn view_block_group(
     if let Some(name) = name {
         // Get the block group for two cases: with and without a sample
         let block_group = if let Some(ref sample_name) = sample_name {
-            BlockGroup::get(conn, "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3", 
-                            params![collection_name, sample_name, name])
+            BlockGroup::get(
+                conn,
+                "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+                params![collection_name, sample_name, name],
+            )
         } else {
             // modified version:
-            BlockGroup::get(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2", params![collection_name, name])
+            BlockGroup::get(
+                conn,
+                "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
+                params![collection_name, name],
+            )
         };
 
         if block_group.is_err() {
@@ -176,7 +183,7 @@ pub fn view_block_group(
         // Trigger reload if selection changed to a new block group
         if explorer_state.selected_block_group_id != last_selected_block_group_id {
             is_loading = true;
-            last_selected_block_group_id = explorer_state.selected_block_group_id.clone();
+            last_selected_block_group_id = explorer_state.selected_block_group_id;
         }
 
         // Draw the UI
@@ -361,127 +368,123 @@ pub fn view_block_group(
         })?;
 
         // After drawing, update the viewer if needed
-        if is_loading {
-            if let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
-                // Create a new graph for the selected block group
-                block_graph = BlockGroup::get_graph(conn, new_block_group_id);
-                // Update the viewer
-                viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
-                viewer.state.selected_block = None;
-                is_loading = false;
-            }
+        if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
+            // Create a new graph for the selected block group
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            // Update the viewer
+            viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
+            viewer.state.selected_block = None;
+            is_loading = false;
         }
 
         // Handle input
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
-        if crossterm::event::poll(timeout)? {
-            if let event::Event::Key(key) = event::read()? {
-                if viewer.state.show_splash_screen {
-                    viewer.state.show_splash_screen = false;
-                }
-                if key.kind == KeyEventKind::Press {
-                    // Global handlers
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Tab => {
-                            // Tab - cycle forwards
-                            focus_zone = match focus_zone {
-                                FocusZone::Canvas => {
-                                    if show_panel {
-                                        FocusZone::Panel
-                                    } else {
-                                        FocusZone::Sidebar
-                                    }
-                                }
-                                FocusZone::Sidebar => FocusZone::Canvas,
-                                FocusZone::Panel => FocusZone::Sidebar,
-                            }
-                        }
-                        KeyCode::BackTab => {
-                            // Shift+Tab - cycle backwards
-                            focus_zone = match focus_zone {
-                                FocusZone::Canvas => FocusZone::Sidebar,
-                                FocusZone::Sidebar => {
-                                    if show_panel {
-                                        FocusZone::Panel
-                                    } else {
-                                        FocusZone::Canvas
-                                    }
-                                }
-                                FocusZone::Panel => FocusZone::Canvas,
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    // Focus-specific handlers
-                    match focus_zone {
-                        FocusZone::Canvas => match key.code {
-                            KeyCode::Enter => {
-                                if viewer.state.selected_block.is_some() {
-                                    show_panel = true;
-                                    focus_zone = FocusZone::Panel;
-                                    tui_layout_change = true;
-                                }
-                            }
-                            KeyCode::Esc => {
-                                if !show_panel {
-                                    focus_zone = FocusZone::Sidebar;
-                                    viewer.state.selected_block = None;
-                                }
-                            }
-                            KeyCode::Char('p') => {
-                                // TODO: make current path highlighted by default, and boundary edges indicated as dashed lines
-                                // Toggle current path highlighting
-                                if viewer.has_highlight(Color::Red) {
-                                    viewer.clear_highlight(Color::Red);
-                                } else if let Some(ref bg_id) =
-                                    explorer_state.selected_block_group_id
-                                {
-                                    // BlockGroup::get_current_path will panic if there's no path,
-                                    // so we roll our own query here. (todo: have get_current_path return an Option)
-                                    let current_path = <Path as Query>::get(
-                                        conn,
-                                        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
-                                        rusqlite::params!(SQLValue::from(bg_id.clone())),
-                                    );
-                                    match current_path {
-                                        Ok(path) => {
-                                            if let Err(err) = viewer
-                                                .show_path(&path, get_theme_color("error").unwrap())
-                                            {
-                                                // todo: pop up a message in the panel
-                                                warn!("{err}");
-                                            }
-                                        }
-                                        Err(err) => {
-                                            warn!("No path found for block group {bg_id}: {err}");
-                                        }
-                                    }
+        if crossterm::event::poll(timeout)?
+            && let event::Event::Key(key) = event::read()?
+        {
+            if viewer.state.show_splash_screen {
+                viewer.state.show_splash_screen = false;
+            }
+            if key.kind == KeyEventKind::Press {
+                // Global handlers
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Tab => {
+                        // Tab - cycle forwards
+                        focus_zone = match focus_zone {
+                            FocusZone::Canvas => {
+                                if show_panel {
+                                    FocusZone::Panel
                                 } else {
-                                    warn!("No block group selected");
+                                    FocusZone::Sidebar
                                 }
                             }
-                            _ => {
-                                viewer.handle_input(key);
+                            FocusZone::Sidebar => FocusZone::Canvas,
+                            FocusZone::Panel => FocusZone::Sidebar,
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        // Shift+Tab - cycle backwards
+                        focus_zone = match focus_zone {
+                            FocusZone::Canvas => FocusZone::Sidebar,
+                            FocusZone::Sidebar => {
+                                if show_panel {
+                                    FocusZone::Panel
+                                } else {
+                                    FocusZone::Canvas
+                                }
                             }
-                        },
-                        FocusZone::Panel => {
-                            if key.code == KeyCode::Esc {
-                                show_panel = false;
-                                focus_zone = FocusZone::Canvas;
+                            FocusZone::Panel => FocusZone::Canvas,
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Focus-specific handlers
+                match focus_zone {
+                    FocusZone::Canvas => match key.code {
+                        KeyCode::Enter => {
+                            if viewer.state.selected_block.is_some() {
+                                show_panel = true;
+                                focus_zone = FocusZone::Panel;
                                 tui_layout_change = true;
                             }
                         }
-                        FocusZone::Sidebar => {
-                            explorer.handle_input(&mut explorer_state, key);
-                            // Check if focus change was requested by the explorer
-                            if let Some(requested_zone) = explorer_state.focus_change_requested {
-                                focus_zone = requested_zone;
-                                explorer_state.focus_change_requested = None;
+                        KeyCode::Esc => {
+                            if !show_panel {
+                                focus_zone = FocusZone::Sidebar;
+                                viewer.state.selected_block = None;
                             }
+                        }
+                        KeyCode::Char('p') => {
+                            // TODO: make current path highlighted by default, and boundary edges indicated as dashed lines
+                            // Toggle current path highlighting
+                            if viewer.has_highlight(Color::Red) {
+                                viewer.clear_highlight(Color::Red);
+                            } else if let Some(ref bg_id) = explorer_state.selected_block_group_id {
+                                // BlockGroup::get_current_path will panic if there's no path,
+                                // so we roll our own query here. (todo: have get_current_path return an Option)
+                                let current_path = <Path as Query>::get(
+                                    conn,
+                                    "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
+                                    params![bg_id],
+                                );
+                                match current_path {
+                                    Ok(path) => {
+                                        if let Err(err) = viewer
+                                            .show_path(&path, get_theme_color("error").unwrap())
+                                        {
+                                            // todo: pop up a message in the panel
+                                            warn!("{err}");
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!("No path found for block group {bg_id}: {err}");
+                                    }
+                                }
+                            } else {
+                                warn!("No block group selected");
+                            }
+                        }
+                        _ => {
+                            viewer.handle_input(key);
+                        }
+                    },
+                    FocusZone::Panel => {
+                        if key.code == KeyCode::Esc {
+                            show_panel = false;
+                            focus_zone = FocusZone::Canvas;
+                            tui_layout_change = true;
+                        }
+                    }
+                    FocusZone::Sidebar => {
+                        explorer.handle_input(&mut explorer_state, key);
+                        // Check if focus change was requested by the explorer
+                        if let Some(requested_zone) = explorer_state.focus_change_requested {
+                            focus_zone = requested_zone;
+                            explorer_state.focus_change_requested = None;
                         }
                     }
                 }

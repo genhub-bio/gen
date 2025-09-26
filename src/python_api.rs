@@ -1,4 +1,4 @@
-use pyo3::{prelude::*, types::PyModule, Bound};
+use pyo3::{Bound, prelude::*, types::PyModule};
 
 // Define modules for Python API components
 pub mod block_group;
@@ -21,7 +21,7 @@ use crate::python_api::{
 /// Remember to also add them to the __init__.py file
 /// to expose them to the user.
 #[pymodule]
-pub fn gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_gen_dir_py, m)?)?;
 
     m.add_class::<PyRepository>()?;

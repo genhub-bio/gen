@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map};
 
 use petgraph::stable_graph::StableGraph;
 

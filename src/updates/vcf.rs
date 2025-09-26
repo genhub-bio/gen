@@ -20,19 +20,19 @@ use gen_models::{
 use noodles::{
     vcf,
     vcf::variant::{
+        Record,
         record::{
+            AlternateBases,
             info::field::Value as InfoValue,
             samples::{
-                series::{value::genotype::Phasing, Value},
                 Sample as NoodlesSample,
+                series::{Value, value::genotype::Phasing},
             },
-            AlternateBases,
         },
-        Record,
     },
 };
 use regex::{self, Regex};
-use rusqlite::{self, types::Value as SQLValue, Connection};
+use rusqlite::{self, Connection, types::Value as SQLValue};
 use thiserror::Error;
 
 use crate::{
@@ -68,7 +68,7 @@ impl<'a> BlockGroupCache<'_> {
         };
         let block_group_lookup = block_group_cache.cache.get(&block_group_key);
         if let Some(block_group_id) = block_group_lookup {
-            Ok(block_group_id.clone())
+            Ok(*block_group_id)
         } else {
             let new_block_group_id = BlockGroup::get_or_create_sample_block_group(
                 block_group_cache.conn,
@@ -79,9 +79,7 @@ impl<'a> BlockGroupCache<'_> {
             );
 
             let result = new_block_group_id?;
-            block_group_cache
-                .cache
-                .insert(block_group_key, result.clone());
+            block_group_cache.cache.insert(block_group_key, result);
             Ok(result)
         }
     }
@@ -327,7 +325,10 @@ pub fn update_with_vcf<'a>(
                             .or_insert(sample_path.length(conn));
 
                         if ref_start > *path_length {
-                            return Err(VcfError::InvalidRecord(format!("Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.", sample_path.name)));
+                            return Err(VcfError::InvalidRecord(format!(
+                                "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
+                                sample_path.name
+                            )));
                         }
                         vcf_entries.push(VcfEntry {
                             ids: allele_accession,
@@ -429,17 +430,20 @@ pub fn update_with_vcf<'a>(
                                             l
                                         } else {
                                             let l = sample_path.sequence(conn).len();
-                                            path_lengths.insert(sample_path.id.clone(), l as i64);
+                                            path_lengths.insert(sample_path.id, l as i64);
                                             &path_lengths[&sample_path.id]
                                         };
 
                                     if ref_start > *path_length {
-                                        return Err(VcfError::InvalidRecord(format!("Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.", sample_path.name)));
+                                        return Err(VcfError::InvalidRecord(format!(
+                                            "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
+                                            sample_path.name
+                                        )));
                                     }
 
                                     vcf_entries.push(VcfEntry {
                                         ids: allele_accession,
-                                        block_group_id: sample_bg_id.clone(),
+                                        block_group_id: sample_bg_id,
                                         ref_start,
                                         path: sample_path.clone(),
                                         sample_name: sample_name.clone(),

@@ -1,4 +1,4 @@
-use gen_core::{traits::Capnp, HashId};
+use gen_core::{HashId, traits::Capnp};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -1,15 +1,15 @@
 use std::io::{Read, Write};
 
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use gen_core::{errors::ConnectionError, traits::Capnp, HashId};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+use gen_core::{HashId, errors::ConnectionError, traits::Capnp};
 use gen_models::{
-    changesets::{apply_changeset, DatabaseChangeset},
+    changesets::{DatabaseChangeset, apply_changeset},
     errors::{ChangesetError, OperationError},
     operations::{FileAddition, Operation, OperationFile, OperationInfo, OperationSummary},
-    session_operations::{end_operation, start_operation, DependencyModels},
+    session_operations::{DependencyModels, end_operation, start_operation},
     traits::Query,
 };
-use rusqlite::{params, types::Value, Connection, Error as SQLError};
+use rusqlite::{Connection, Error as SQLError, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -138,7 +138,7 @@ where
             summary: OperationSummary::get(
                 op_conn,
                 "select * from operation_summary where operation_hash = ?1",
-                params![Value::from(operation.hash.clone())],
+                params![Value::from(operation.hash)],
             )
             .unwrap(),
             dependencies: operation.get_changeset_dependencies(),
@@ -242,7 +242,7 @@ mod tests {
 
     use gen_models::{
         block_group::BlockGroup,
-        operations::{setup_db, Branch, OperationState},
+        operations::{Branch, OperationState, setup_db},
     };
 
     use super::*;
@@ -414,11 +414,7 @@ mod tests {
 
         // Test Cap'n Proto serialization/deserialization
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(
-            operation_conn,
-            &[op_1.hash.clone(), op_2.hash.clone()],
-            &mut write_stream,
-        );
+        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream);
         let loaded_patches = load_patches(&write_stream[..]);
 
         // Verify we got the same patches back

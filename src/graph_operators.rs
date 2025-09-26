@@ -1,7 +1,7 @@
 use core::ops::Range;
 use std::collections::{HashMap, HashSet};
 
-use gen_core::{is_end_node, is_start_node, HashId, Strand};
+use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -173,20 +173,20 @@ pub fn derive_chunks(
         for edge in &current_path_edges {
             let new_source_node_id = new_node_ids_by_old.get(&edge.source_node_id);
             let new_target_node_id = new_node_ids_by_old.get(&edge.target_node_id);
-            if let Some(new_source_node_id) = new_source_node_id {
-                if let Some(new_target_node_id) = new_target_node_id {
-                    let key = &(
-                        *new_source_node_id,
-                        edge.source_coordinate,
-                        edge.source_strand,
-                        *new_target_node_id,
-                        edge.target_coordinate,
-                        edge.target_strand,
-                    );
-                    let child_edge_id = child_edge_ids_by_key.get(key);
-                    if let Some(child_edge_id) = child_edge_id {
-                        new_path_edge_ids.push(*child_edge_id);
-                    }
+            if let Some(new_source_node_id) = new_source_node_id
+                && let Some(new_target_node_id) = new_target_node_id
+            {
+                let key = &(
+                    *new_source_node_id,
+                    edge.source_coordinate,
+                    edge.source_strand,
+                    *new_target_node_id,
+                    edge.target_coordinate,
+                    edge.target_strand,
+                );
+                let child_edge_id = child_edge_ids_by_key.get(key);
+                if let Some(child_edge_id) = child_edge_id {
+                    new_path_edge_ids.push(*child_edge_id);
                 }
             }
         }
@@ -371,7 +371,7 @@ pub fn make_stitch(
     let mut bg_edges = edges_to_reuse
         .iter()
         .map(|edge| BlockGroupEdgeData {
-            block_group_id: child_block_group.id.clone(),
+            block_group_id: child_block_group.id,
             edge_id: edge.edge.id,
             chromosome_index: edge.chromosome_index,
             phased: edge.phased,
@@ -443,14 +443,14 @@ pub fn make_stitch(
     for created_edge in created_edges {
         if path_edge_id_set.contains(&created_edge.id) {
             bg_edges.push(BlockGroupEdgeData {
-                block_group_id: child_block_group.id.clone(),
+                block_group_id: child_block_group.id,
                 edge_id: created_edge.id,
                 chromosome_index: 0,
                 phased: 0,
             });
         } else {
             bg_edges.push(BlockGroupEdgeData {
-                block_group_id: child_block_group.id.clone(),
+                block_group_id: child_block_group.id,
                 edge_id: created_edge.id,
                 chromosome_index: chromosome_index_counter,
                 phased: 0,
@@ -488,7 +488,7 @@ pub fn make_stitch(
         &summary_str,
         None,
     )
-    .map_err(|e| GraphOperationError::OperationError(e))
+    .map_err(GraphOperationError::OperationError)
 }
 
 #[cfg(test)]
@@ -588,7 +588,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, edge_id)| BlockGroupEdgeData {
-                block_group_id: block_group1_id.clone(),
+                block_group_id: block_group1_id,
                 edge_id: *edge_id,
                 chromosome_index: if i < 2 { 1 } else { 0 },
                 phased: 0,

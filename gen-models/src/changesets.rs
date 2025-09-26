@@ -1,11 +1,11 @@
 use std::{collections::HashSet, convert::TryInto, fs, io::Read, path::PathBuf, str};
 
-use gen_core::{is_terminal, traits::Capnp, HashId, Strand};
+use gen_core::{HashId, Strand, is_terminal, traits::Capnp};
 use itertools::Itertools;
 use rusqlite::{
+    Connection,
     session::{ChangesetItem, ChangesetIter},
     types::FromSql,
-    Connection,
 };
 use serde::{Deserialize, Serialize};
 
@@ -422,10 +422,10 @@ pub fn process_changesetiter(
                     if !created_collections_set.contains(&collection) {
                         previous_collections.insert(collection);
                     }
-                    if let Some(sample_name) = sample_name {
-                        if !created_samples_set.contains(&sample_name) {
-                            previous_samples.insert(sample_name);
-                        }
+                    if let Some(sample_name) = sample_name
+                        && !created_samples_set.contains(&sample_name)
+                    {
+                        previous_samples.insert(sample_name);
                     }
                 }
                 "nodes" => {
@@ -546,10 +546,10 @@ pub fn process_changesetiter(
                     if !created_paths_set.contains(&path_id) {
                         previous_paths.insert(path_id);
                     }
-                    if let Some(id) = parent_accession_id {
-                        if !created_accessions_set.contains(&id) {
-                            previous_accessions.insert(id);
-                        }
+                    if let Some(id) = parent_accession_id
+                        && !created_accessions_set.contains(&id)
+                    {
+                        previous_accessions.insert(id);
                     }
                 }
                 "accession_edges" => {
@@ -949,7 +949,7 @@ mod tests {
     use super::*;
     use crate::{
         file_types::FileTypes,
-        operations::{setup_db, OperationFile, OperationInfo},
+        operations::{OperationFile, OperationInfo, setup_db},
         session_operations::{end_operation, start_operation},
         test_helpers::{
             get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
@@ -969,11 +969,13 @@ mod tests {
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
             }],
-            sequences: vec![NewSequence::new()
-                .sequence("ATCG")
-                .sequence_type("DNA")
-                .name("test_seq")
-                .build()],
+            sequences: vec![
+                NewSequence::new()
+                    .sequence("ATCG")
+                    .sequence_type("DNA")
+                    .name("test_seq")
+                    .build(),
+            ],
             block_groups: vec![BlockGroup {
                 id: HashId::pad_str(1),
                 collection_name: "test_collection".to_string(),
@@ -1069,11 +1071,13 @@ mod tests {
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
             }],
-            sequences: vec![NewSequence::new()
-                .sequence("ATCG")
-                .sequence_type("DNA")
-                .name("test_seq")
-                .build()],
+            sequences: vec![
+                NewSequence::new()
+                    .sequence("ATCG")
+                    .sequence_type("DNA")
+                    .name("test_seq")
+                    .build(),
+            ],
             block_groups: vec![BlockGroup {
                 id: HashId::pad_str(1),
                 collection_name: "test_collection".to_string(),

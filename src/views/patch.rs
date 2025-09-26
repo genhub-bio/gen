@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{
-    is_end_node, is_start_node, is_terminal, HashId,
+    HashId,
     Strand::{self, Forward},
+    is_end_node, is_start_node, is_terminal,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{
@@ -12,7 +13,7 @@ use gen_models::{
 };
 use html_escape;
 use itertools::Itertools;
-use petgraph::{graphmap::DiGraphMap, Direction};
+use petgraph::{Direction, graphmap::DiGraphMap};
 use rusqlite::Connection;
 
 use crate::patch::OperationPatch;
@@ -178,7 +179,7 @@ pub fn get_change_graph(
                 );
             }
         }
-        block_graphs.insert(bg_id.clone(), block_graph);
+        block_graphs.insert(*bg_id, block_graph);
     }
     block_graphs
 }

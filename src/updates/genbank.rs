@@ -1,7 +1,7 @@
 use std::{io::Read, str};
 
 use gb_io::reader;
-use gen_core::{HashId, PathBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -15,9 +15,9 @@ use gen_models::{
     traits::Query,
 };
 use itertools::Itertools;
-use rusqlite::{params, types::Value, Connection};
+use rusqlite::{Connection, params, types::Value};
 
-use crate::genbank::{process_sequence, EditType, GenBankError};
+use crate::genbank::{EditType, GenBankError, process_sequence};
 
 pub fn update_with_genbank<'a, R>(
     conn: &Connection,
@@ -57,28 +57,37 @@ where
                     )),
                 );
 
-                let block_group = if let Ok(bg) = BlockGroup::get(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2", params![Value::from(collection.name.clone()), Value::from(locus.name.clone())]) {
+                let block_group = if let Ok(bg) = BlockGroup::get(
+                    conn,
+                    "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
+                    params![
+                        Value::from(collection.name.clone()),
+                        Value::from(locus.name.clone())
+                    ],
+                ) {
                     bg
-                }
-                     else {
-                        if !create_missing {
-                            return Err(GenBankError::LookupError(format!("No block group named {contig} exists. Try importing first or pass --create-missing.", contig=&locus.name)));
-                        }
-                        BlockGroup::create(conn, &collection.name, None, &locus.name)
-                    };
+                } else {
+                    if !create_missing {
+                        return Err(GenBankError::LookupError(format!(
+                            "No block group named {contig} exists. Try importing first or pass --create-missing.",
+                            contig = &locus.name
+                        )));
+                    }
+                    BlockGroup::create(conn, &collection.name, None, &locus.name)
+                };
                 let paths = Path::query(
                     conn,
                     "select * from paths where block_group_id = ?1 AND name = ?2",
-                    params![
-                        Value::from(block_group.id.clone()),
-                        Value::from(locus.name.clone())
-                    ],
+                    params![Value::from(block_group.id), Value::from(locus.name.clone())],
                 );
                 let path = if let Some(first) = paths.first() {
                     first.clone()
                 } else {
                     if !create_missing {
-                        return Err(GenBankError::LookupError(format!("No path named {contig} exists. Try importing first or pass --create-missing.", contig=&locus.name)));
+                        return Err(GenBankError::LookupError(format!(
+                            "No path named {contig} exists. Try importing first or pass --create-missing.",
+                            contig = &locus.name
+                        )));
                     }
                     let edge_into = Edge::create(
                         conn,
@@ -102,13 +111,13 @@ where
                         conn,
                         &[
                             BlockGroupEdgeData {
-                                block_group_id: block_group.id.clone(),
+                                block_group_id: block_group.id,
                                 edge_id: edge_into.id,
                                 chromosome_index: 0,
                                 phased: 0,
                             },
                             BlockGroupEdgeData {
-                                block_group_id: block_group.id.clone(),
+                                block_group_id: block_group.id,
                                 edge_id: edge_out_of.id,
                                 chromosome_index: 0,
                                 phased: 0,
@@ -145,7 +154,7 @@ where
                                 )),
                             );
                             PathChange {
-                                block_group_id: block_group.id.clone(),
+                                block_group_id: block_group.id,
                                 path: path.clone(),
                                 path_accession: None,
                                 start,
@@ -166,7 +175,7 @@ where
                             }
                         }
                         EditType::Deletion => PathChange {
-                            block_group_id: block_group.id.clone(),
+                            block_group_id: block_group.id,
                             path: path.clone(),
                             path_accession: None,
                             start,
@@ -217,7 +226,7 @@ mod tests {
 
     use gen_models::{
         file_types::FileTypes,
-        operations::{setup_db, OperationFile},
+        operations::{OperationFile, setup_db},
     };
     use noodles::fasta;
 

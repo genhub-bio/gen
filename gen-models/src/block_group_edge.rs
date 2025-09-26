@@ -1,7 +1,7 @@
 use std::{collections::HashMap, rc::Rc};
 
-use gen_core::{calculate_hash, traits::Capnp, HashId};
-use rusqlite::{self, params, types::Value, Connection, Row};
+use gen_core::{HashId, calculate_hash, traits::Capnp};
+use rusqlite::{self, Connection, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{

@@ -135,55 +135,55 @@ pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
 
     for feature in seq.features.iter() {
         for (key, value) in feature.qualifiers.iter() {
-            if key == "note" {
-                if let Some(v) = value {
-                    let geneious_mod = geneious_edit.captures(v);
-                    if let Some(edit) = geneious_mod {
-                        let (mut start, mut end) = feature
-                            .location
-                            .find_bounds()
-                            .map_err(|_| GenBankError::LocationError("Ambiguous Bounds"))?;
-                        match &edit["edit_type"] {
-                            "Insertion" => {
-                                // If there is an insertion, it means that the WT is missing
-                                // this sequence, so we actually treat it as a deletion
-                                locus.changes.push(GenBankEdit {
-                                    start,
-                                    end,
-                                    old_sequence: "".to_string(),
-                                    new_sequence: final_sequence[start as usize..end as usize]
-                                        .to_string(),
-                                    edit_type: EditType::Insertion,
-                                });
+            if key == "note"
+                && let Some(v) = value
+            {
+                let geneious_mod = geneious_edit.captures(v);
+                if let Some(edit) = geneious_mod {
+                    let (mut start, mut end) = feature
+                        .location
+                        .find_bounds()
+                        .map_err(|_| GenBankError::LocationError("Ambiguous Bounds"))?;
+                    match &edit["edit_type"] {
+                        "Insertion" => {
+                            // If there is an insertion, it means that the WT is missing
+                            // this sequence, so we actually treat it as a deletion
+                            locus.changes.push(GenBankEdit {
+                                start,
+                                end,
+                                old_sequence: "".to_string(),
+                                new_sequence: final_sequence[start as usize..end as usize]
+                                    .to_string(),
+                                edit_type: EditType::Insertion,
+                            });
+                        }
+                        "Deletion" | "Replacement" => {
+                            // If there is a deletion, it means that found sequence is missing
+                            // this sequence, so we treat it as an insertion
+                            let deleted_seq = normalize_string(
+                                &feature
+                                    .qualifiers
+                                    .iter()
+                                    .filter(|(k, _v)| k == "Original_Bases")
+                                    .map(|(_k, v)| v.clone())
+                                    .collect::<Option<String>>()
+                                    .expect("Deleted sequence is not annotated."),
+                            );
+                            if matches!(feature.location, Location::Between(_, _)) {
+                                start += 1;
+                                end -= 1;
                             }
-                            "Deletion" | "Replacement" => {
-                                // If there is a deletion, it means that found sequence is missing
-                                // this sequence, so we treat it as an insertion
-                                let deleted_seq = normalize_string(
-                                    &feature
-                                        .qualifiers
-                                        .iter()
-                                        .filter(|(k, _v)| k == "Original_Bases")
-                                        .map(|(_k, v)| v.clone())
-                                        .collect::<Option<String>>()
-                                        .expect("Deleted sequence is not annotated."),
-                                );
-                                if matches!(feature.location, Location::Between(_, _)) {
-                                    start += 1;
-                                    end -= 1;
-                                }
-                                locus.changes.push(GenBankEdit {
-                                    start,
-                                    end,
-                                    old_sequence: deleted_seq,
-                                    new_sequence: final_sequence[start as usize..end as usize]
-                                        .to_string(),
-                                    edit_type: EditType::from_str(&edit["edit_type"])?,
-                                });
-                            }
-                            t => {
-                                println!("Unknown edit type {t}.")
-                            }
+                            locus.changes.push(GenBankEdit {
+                                start,
+                                end,
+                                old_sequence: deleted_seq,
+                                new_sequence: final_sequence[start as usize..end as usize]
+                                    .to_string(),
+                                edit_type: EditType::from_str(&edit["edit_type"])?,
+                            });
+                        }
+                        t => {
+                            println!("Unknown edit type {t}.")
                         }
                     }
                 }

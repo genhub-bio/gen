@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 
-use super::{layout_channel::Router, temp_graph::TempGraph, EdgeData, LayoutError, NodeData};
+use super::{EdgeData, LayoutError, NodeData, layout_channel::Router, temp_graph::TempGraph};
 
 #[derive(Clone, Debug)]
 struct Terminal {
@@ -274,10 +274,7 @@ fn place_terminals(node_position: i64, last_position: Option<i64>, num_terminals
     // it returns the next available position.
     let mut result = vec![];
 
-    let mut last_pos = 0;
-    if last_position.is_some() {
-        last_pos = last_position.unwrap();
-    }
+    let mut last_pos = last_position.unwrap_or_default();
 
     for i in 0..num_terminals {
         let attempt_position = node_position
@@ -286,7 +283,7 @@ fn place_terminals(node_position: i64, last_position: Option<i64>, num_terminals
             attempt_position >= 0,
             "Attempted to place terminal at negative position: {attempt_position}"
         );
-        if last_position.is_none() || last_pos < attempt_position {
+        if last_pos < attempt_position {
             result.push(attempt_position);
         } else {
             result.push(last_pos + 1);

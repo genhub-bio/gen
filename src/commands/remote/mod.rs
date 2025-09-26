@@ -68,12 +68,11 @@ pub fn handle_remote_command(
 
         RemoteCommand::Remove { name } => {
             // Check if this is the default remote and clear it if so
-            if let Some(default_remote) = Defaults::get_default_remote(conn) {
-                if default_remote == *name {
-                    if let Err(err) = Defaults::set_default_remote_compat(conn, None) {
-                        eprintln!("Warning: Failed to clear default remote: {}", err);
-                    }
-                }
+            if let Some(default_remote) = Defaults::get_default_remote(conn)
+                && default_remote == *name
+                && let Err(err) = Defaults::set_default_remote_compat(conn, None)
+            {
+                eprintln!("Warning: Failed to clear default remote: {}", err);
             }
 
             // Delete the remote (this will set branch remote associations to null via foreign key constraint)

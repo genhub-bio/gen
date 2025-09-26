@@ -1,9 +1,9 @@
 use std::{fmt::Debug, fs, ops::Add, path::PathBuf};
 
 use gen_core::{
-    config::{get_or_create_gen_dir, BASE_DIR},
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand,
+    config::{BASE_DIR, get_or_create_gen_dir},
     errors::ConnectionError,
-    HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID,
 };
 use intervaltree::IntervalTree;
 use rusqlite::Connection;
@@ -141,31 +141,31 @@ pub fn setup_block_group(conn: &Connection) -> (HashId, Path) {
 
     let block_group_edges = vec![
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge0.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge1.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge2.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge3.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge4.id,
             chromosome_index: 0,
             phased: 0,

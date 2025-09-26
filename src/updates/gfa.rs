@@ -3,7 +3,7 @@ use std::{
     io,
 };
 
-use gen_core::{is_terminal, HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
@@ -86,8 +86,7 @@ pub fn update_with_gfa(
             .join("");
         for existing_path in existing_paths.iter() {
             if existing_path.sequence(conn) == path_sequence {
-                existing_path_ids_by_new_path_name
-                    .insert(path.name.clone(), existing_path.id.clone());
+                existing_path_ids_by_new_path_name.insert(path.name.clone(), existing_path.id);
             }
         }
     }
@@ -114,8 +113,7 @@ pub fn update_with_gfa(
             .join("");
         for existing_path in existing_paths.iter() {
             if existing_path.sequence(conn) == walk_sequence {
-                existing_path_ids_by_new_path_name
-                    .insert(walk_name.clone(), existing_path.id.clone());
+                existing_path_ids_by_new_path_name.insert(walk_name.clone(), existing_path.id);
             }
         }
     }
@@ -432,7 +430,7 @@ fn create_new_path_from_existing(
         });
     }
 
-    let block_group_id = existing_path.block_group_id.clone();
+    let block_group_id = existing_path.block_group_id;
     let new_edge_ids = Edge::bulk_create(
         conn,
         &new_path_edges
@@ -453,7 +451,7 @@ fn create_new_path_from_existing(
         .iter()
         .enumerate()
         .map(|(i, edge_id)| BlockGroupEdgeData {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             edge_id: *edge_id,
             chromosome_index: all_edges[i].chromosome_index,
             phased: all_edges[i].phased,

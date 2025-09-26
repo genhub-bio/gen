@@ -5,15 +5,15 @@ use std::{
 };
 
 use gen_core::{
-    calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp, HashId,
-    NodeIntervalBlock, PathBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
+    calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp,
 };
 use gen_graph::{
-    all_intermediate_edges, all_reachable_nodes, all_simple_paths, flatten_to_interval_tree,
-    GenGraph, GraphNode,
+    GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
+    flatten_to_interval_tree,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{params, types::Value as SQLValue, Connection, Row};
+use rusqlite::{Connection, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -287,10 +287,10 @@ impl BlockGroup {
         parent_sample: Option<&str>,
     ) -> Result<HashId, QueryError> {
         let binding = BlockGroup::query(
-	    conn,
+            conn,
             "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-            params![collection_name, sample_name, group_name]
-	);
+            params![collection_name, sample_name, group_name],
+        );
         let initial_query_result = binding.first();
 
         if let Some(block_group) = initial_query_result {
@@ -300,16 +300,16 @@ impl BlockGroup {
         let block_groups = if let Some(parent_sample_name) = parent_sample {
             // use the base reference group if it exists
             BlockGroup::query(
-		conn,
-		"select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-		params![collection_name, parent_sample_name, group_name],
-	    )
+                conn,
+                "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+                params![collection_name, parent_sample_name, group_name],
+            )
         } else {
             BlockGroup::query(
-		conn,
+                conn,
                 "select * from block_groups where collection_name = ?1 AND sample_name IS null AND name = ?2",
                 params![collection_name, group_name],
-	    )
+            )
         };
 
         if let Some(parent_block_group) = block_groups.first() {
@@ -594,7 +594,9 @@ impl BlockGroup {
                 params![accession_name, path.id],
             ) {
                 Ok(_) => {
-                    println!("accession already exists, consider a better matching algorithm to determine if this is an error.");
+                    println!(
+                        "accession already exists, consider a better matching algorithm to determine if this is an error."
+                    );
                 }
                 Err(_) => {
                     let acc_edges = AccessionEdge::bulk_create(
@@ -669,7 +671,11 @@ impl BlockGroup {
         // changes at the extremes, it's not ok for the change to start beyond the current
         // boundaries.
         if is_start_node(start_block.node_id) && change.start < start_block.end {
-            return Err(ChangeError::OutOfBounds(format!("Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).", pos=change.start, path_pos=start_block.end)));
+            return Err(ChangeError::OutOfBounds(format!(
+                "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
+                pos = change.start,
+                path_pos = start_block.end
+            )));
         }
 
         let end_blocks: Vec<&NodeIntervalBlock> =
@@ -678,7 +684,11 @@ impl BlockGroup {
         let end_block = end_blocks[0];
 
         if is_end_node(end_block.node_id) && change.end > end_block.start {
-            return Err(ChangeError::OutOfBounds(format!("Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).", pos=change.end, path_pos=end_block.start)));
+            return Err(ChangeError::OutOfBounds(format!(
+                "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
+                pos = change.end,
+                path_pos = end_block.start
+            )));
         }
 
         let mut new_edges = vec![];

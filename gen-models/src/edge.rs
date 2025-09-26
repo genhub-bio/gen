@@ -4,20 +4,20 @@ use std::{
 };
 
 use gen_core::{
-    calculate_hash, is_end_node, is_start_node, traits::Capnp, HashId, Strand, PATH_END_NODE_ID,
-    PATH_START_NODE_ID,
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash, is_end_node,
+    is_start_node, traits::Capnp,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     block_group_edge::AugmentedEdge,
     gen_models_capnp::edge,
     node::Node,
-    sequence::{cached_sequence, Sequence},
+    sequence::{Sequence, cached_sequence},
     traits::*,
 };
 
@@ -201,7 +201,9 @@ impl Edge {
         target_coordinate: i64,
         target_strand: Strand,
     ) -> Edge {
-        let hash = HashId(calculate_hash(&format!("{source_node_id}:{source_coordinate}:{source_strand}:{target_node_id}:{target_coordinate}:{target_strand}")));
+        let hash = HashId(calculate_hash(&format!(
+            "{source_node_id}:{source_coordinate}:{source_strand}:{target_node_id}:{target_coordinate}:{target_strand}"
+        )));
         let query = "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
         let mut stmt = conn.prepare(query).unwrap();
         match stmt.execute(params![
@@ -259,7 +261,10 @@ impl Edge {
                 params.push(Box::new(edge.target_strand));
                 rows.push("(?, ?, ?, ?, ?, ?, ?)");
             }
-            let sql = format!("INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {};", rows.join(","));
+            let sql = format!(
+                "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {};",
+                rows.join(",")
+            );
             conn.execute(&sql, rusqlite::params_from_iter(params))
                 .unwrap();
         }
@@ -439,34 +444,34 @@ impl Edge {
             };
             let target_id = blocks_by_start.get(&target_key);
 
-            if let Some(source_id_value) = source_id {
-                if let Some(target_id_value) = target_id {
-                    let source_node = GraphNode {
-                        block_id: *source_id_value,
-                        node_id: edge.source_node_id,
-                        sequence_start: block_coordinates[source_id_value].0,
-                        sequence_end: block_coordinates[source_id_value].1,
-                    };
-                    let target_node = GraphNode {
-                        block_id: *target_id_value,
-                        node_id: edge.target_node_id,
-                        sequence_start: block_coordinates[target_id_value].0,
-                        sequence_end: block_coordinates[target_id_value].1,
-                    };
-                    let graph_edge = GraphEdge {
-                        edge_id: edge.id,
-                        source_strand: edge.source_strand,
-                        target_strand: edge.target_strand,
-                        chromosome_index: augmented_edge.chromosome_index,
-                        phased: augmented_edge.phased,
-                    };
-                    if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
-                        existing_edges.push(graph_edge);
-                    } else {
-                        graph.add_edge(source_node, target_node, vec![graph_edge]);
-                    }
-                    edges_by_node_pair.insert((*source_id_value, *target_id_value), edge.clone());
+            if let Some(source_id_value) = source_id
+                && let Some(target_id_value) = target_id
+            {
+                let source_node = GraphNode {
+                    block_id: *source_id_value,
+                    node_id: edge.source_node_id,
+                    sequence_start: block_coordinates[source_id_value].0,
+                    sequence_end: block_coordinates[source_id_value].1,
+                };
+                let target_node = GraphNode {
+                    block_id: *target_id_value,
+                    node_id: edge.target_node_id,
+                    sequence_start: block_coordinates[target_id_value].0,
+                    sequence_end: block_coordinates[target_id_value].1,
+                };
+                let graph_edge = GraphEdge {
+                    edge_id: edge.id,
+                    source_strand: edge.source_strand,
+                    target_strand: edge.target_strand,
+                    chromosome_index: augmented_edge.chromosome_index,
+                    phased: augmented_edge.phased,
+                };
+                if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
+                    existing_edges.push(graph_edge);
+                } else {
+                    graph.add_edge(source_node, target_node, vec![graph_edge]);
                 }
+                edges_by_node_pair.insert((*source_id_value, *target_id_value), edge.clone());
             }
         }
 

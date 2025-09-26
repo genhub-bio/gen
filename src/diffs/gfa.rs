@@ -5,12 +5,12 @@ use std::{
     path::PathBuf,
 };
 
-use gen_core::{range::Range, NodeIntervalBlock};
+use gen_core::{NodeIntervalBlock, range::Range};
 use gen_models::{block_group::BlockGroup, path::Path, sample::Sample};
 use itertools::Itertools;
 use rusqlite::Connection;
 
-use crate::gfa::{path_line, write_links, write_segments, Link, Path as GFAPath, Segment};
+use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments};
 
 pub fn gfa_sample_diff(
     conn: &Connection,
@@ -240,7 +240,7 @@ fn path_from_segments(sample_name: Option<&str>, path: &Path, segments: &[Segmen
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use gen_core::{HashId, Strand, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID};
+    use gen_core::{HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -263,7 +263,7 @@ mod tests {
     fn test_gfa_diff() {
         // Sets up a basic graph and then exports it to a GFA file
         setup_gen_dir();
-        let conn = &get_connection("gfa.db").unwrap();
+        let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
         setup_db(op_conn);
         track_database(conn, op_conn).unwrap();
@@ -356,7 +356,7 @@ mod tests {
         let child_block_group_edges = child_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: child_block_group.id.clone(),
+                block_group_id: child_block_group.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -421,7 +421,7 @@ mod tests {
         let grandchild_block_group_edges = grandchild_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: grandchild_block_group.id.clone(),
+                block_group_id: grandchild_block_group.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -543,7 +543,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -634,7 +634,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -727,7 +727,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -783,7 +783,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group2.id.clone(),
+                block_group_id: block_group2.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -877,7 +877,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -933,7 +933,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group2.id.clone(),
+                block_group_id: block_group2.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -1012,7 +1012,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1054,7 +1054,7 @@ mod tests {
         let child_block_group_edges = child_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: child_block_group.id.clone(),
+                block_group_id: child_block_group.id,
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -1119,7 +1119,7 @@ mod tests {
         let grandchild_block_group_edges = grandchild_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: grandchild_block_group.id.clone(),
+                block_group_id: grandchild_block_group.id,
                 edge_id,
                 chromosome_index: 0,
                 phased: 0,

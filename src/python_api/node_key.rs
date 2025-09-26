@@ -1,12 +1,14 @@
 use pyo3::prelude::*;
 
+use crate::core::HashId;
+
 /// A Python-friendly representation of a graph node key
 /// Used to ensure consistent hashing when used as dictionary keys in Python
 #[pyclass] // pyclass includes  #[derive(IntoPyObject)]
 #[derive(Clone, Copy)]
 pub struct PyNodeKey {
     #[pyo3(get)]
-    pub node_id: i64,
+    pub node_id: HashId,
     #[pyo3(get)]
     pub sequence_start: i64,
     #[pyo3(get)]
@@ -16,7 +18,7 @@ pub struct PyNodeKey {
 #[pymethods]
 impl PyNodeKey {
     #[new]
-    pub fn new(node_id: i64, sequence_start: i64, sequence_end: i64) -> Self {
+    pub fn new(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Self {
         PyNodeKey {
             node_id,
             sequence_start,
@@ -33,7 +35,10 @@ impl PyNodeKey {
 
     fn __hash__(&self) -> PyResult<isize> {
         // Combine all fields for a consistent hash value
-        let mut hash = self.node_id as isize;
+        let mut hash: isize = 0;
+        for &b in &self.node_id.0 {
+            hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+        }
         hash = hash
             .wrapping_mul(31)
             .wrapping_add(self.sequence_start as isize);

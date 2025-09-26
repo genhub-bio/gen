@@ -1,4 +1,4 @@
-use gen_core::{HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -70,19 +70,19 @@ pub fn get_simple_sequence(conn: &Connection) -> HashId {
 
     let new_block_group_edges = vec![
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge_into.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: middle_edge.id,
             chromosome_index: 0,
             phased: 0,
         },
         BlockGroupEdgeData {
-            block_group_id: block_group.id.clone(),
+            block_group_id: block_group.id,
             edge_id: edge_out_of.id,
             chromosome_index: 0,
             phased: 0,

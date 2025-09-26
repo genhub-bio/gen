@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use gen_core::{calculate_hash, traits::Capnp, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
-use rusqlite::{params, Connection, Row};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, calculate_hash, traits::Capnp};
+use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{gen_models_capnp::node, sequence::Sequence, traits::*};

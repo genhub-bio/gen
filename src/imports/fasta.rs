@@ -6,7 +6,7 @@ use std::{
 };
 
 use flate2::read::GzDecoder;
-use gen_core::{HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -117,13 +117,13 @@ pub fn import_fasta<'a>(
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge_into.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id.clone(),
+                block_group_id: block_group.id,
                 edge_id: edge_out_of.id,
                 chromosome_index: 0,
                 phased: 0,
@@ -184,7 +184,7 @@ mod tests {
         setup_gen_dir();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection("t.db").unwrap();
+        let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
         setup_db(op_conn);
         track_database(conn, op_conn).unwrap();
