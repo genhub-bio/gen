@@ -17,6 +17,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Install Dependencies
+      run: apt-get update && apt-get install capnproto
     - name: Generate code coverage
       run: cargo llvm-cov --workspace --html
     - uses: actions/upload-artifact@v4
