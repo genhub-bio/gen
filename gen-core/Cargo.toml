@@ -14,7 +14,7 @@ python-bindings = ["pyo3", "pyo3-macros"]
 [dependencies]
 itertools = "0.14.0"
 capnp = { version = "0.21.5" }
-noodles = { version = "0.94.0", features = ["gff"] }
+noodles = { version = "0.101.0", features = ["gff"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = {  version = "1.0.219", features = ["derive"] }
 thiserror = "1.0"
