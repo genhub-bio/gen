@@ -36,10 +36,10 @@ where
 
     for result in gff_reader.record_bufs() {
         let record = result?;
-        let ref_name = record.reference_sequence_name();
+        let ref_name = record.reference_sequence_name().to_string();
         let start = record.start().get() as i64;
         let end = record.end().get() as i64;
-        if let Some(bg) = sample_bgs.get(ref_name) {
+        if let Some(bg) = sample_bgs.get(&ref_name) {
             let projection = paths.entry(bg.id).or_insert_with(|| {
                 let path = BlockGroup::get_current_path(conn, &bg.id);
                 let mut graph = BlockGroup::get_graph(conn, &bg.id);
@@ -67,7 +67,7 @@ where
                 let overlap_end = min(end, overlap.end) as usize;
 
                 let updated_record_builder =
-                    gff::RecordBuf::builder()
+                    gff::feature::RecordBuf::builder()
                         .set_reference_sequence_name(format!("{nid}", nid = node.node_id))
                         .set_source(record.source().to_string())
                         .set_type(record.ty().to_string())

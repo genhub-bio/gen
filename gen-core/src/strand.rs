@@ -1,6 +1,6 @@
 use std::fmt;
 
-use noodles::gff::record::Strand as GFFStrand;
+use noodles::gff::feature::record::Strand as GFFStrand;
 use rusqlite::{
     ToSql,
     types::{FromSql, FromSqlResult, ToSqlOutput, Value, ValueRef},

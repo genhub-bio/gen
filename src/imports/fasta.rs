@@ -45,7 +45,7 @@ pub fn import_fasta<'a>(
 
     let reader_stream: Box<dyn BufRead> = match path.extension().and_then(|ext| ext.to_str()) {
         Some("gz") => Box::new(BufReader::new(GzDecoder::new(file))),
-        Some("bgz") => Box::new(bgzf::Reader::new(file)),
+        Some("bgz") => Box::new(bgzf::io::Reader::new(file)),
         _ => Box::new(BufReader::new(file)),
     };
     let mut reader = fasta::io::reader::Builder.build_from_reader(reader_stream)?;
