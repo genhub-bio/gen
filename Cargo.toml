@@ -71,7 +71,7 @@ pyo3 = { version = "0.25.1", optional = true }
 pyo3-macros = { version = "0.25.1", optional = true }
 rustworkx-core = { version = "0.16.0", optional = true }
 webbrowser = "1.0.5"
-reqwest = { version = "0.12.23", features = ["blocking", "json", "multipart", "stream"] }
+reqwest = { version = "0.12.23", default-features = false,features = ["blocking", "json", "multipart", "stream", "rustls-tls"] }
 rand = "0.9.2"
 base64 = "0.22.1"
 getrandom = "0.3.3"
