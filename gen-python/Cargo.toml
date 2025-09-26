@@ -13,6 +13,7 @@ name = "gen_python"
 crate-type = ["cdylib"]
 
 [dependencies]
+flate2 = "1.1.0"
 gen = { path = ".." }
 gen-core = { path = "../gen-core" }
 gen-models = { path = "../gen-models" }

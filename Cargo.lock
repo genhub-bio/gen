@@ -1420,6 +1420,7 @@ dependencies = [
 name = "gen-python"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "gen",
  "gen-core",
  "gen-models",
