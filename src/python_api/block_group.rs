@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 #[derive(Clone)]
 pub struct PyBlockGroup {
     #[pyo3(get)]
-    pub id: i64,
+    pub id: String,
     #[pyo3(get)]
     pub collection_name: String,
     #[pyo3(get)]
@@ -18,7 +18,7 @@ pub struct PyBlockGroup {
 impl PyBlockGroup {
     #[new]
     pub fn new(
-        id: i64,
+        id: String,
         collection_name: String,
         name: String,
         sample_name: Option<String>,
@@ -40,7 +40,7 @@ impl PyBlockGroup {
 
     fn __hash__(&self) -> PyResult<isize> {
         // Combine all fields for a more comprehensive hash
-        let mut hash = self.id as isize;
+        let mut hash = self.id.len() as isize;
         hash = hash
             .wrapping_mul(31)
             .wrapping_add(self.collection_name.len() as isize);

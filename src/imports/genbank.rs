@@ -1,21 +1,25 @@
-use crate::calculate_hash;
-use crate::genbank::{process_sequence, EditType, GenBankError};
-use crate::models::block_group::{BlockGroup, PathChange};
-use crate::models::block_group_edge::{BlockGroupEdge, BlockGroupEdgeData};
-use crate::models::collection::Collection;
-use crate::models::edge::Edge;
-use crate::models::node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID};
-use crate::models::operations::{Operation, OperationInfo};
-use crate::models::path::{Path, PathBlock};
-use crate::models::sample::Sample;
-use crate::models::sequence::Sequence;
-use crate::models::strand::Strand;
-use crate::operation_management::{end_operation, start_operation};
-use crate::progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar};
+use std::{io::Read, str};
+
 use gb_io::reader;
+use gen_core::{HashId, PathBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_models::{
+    block_group::{BlockGroup, PathChange},
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    collection::Collection,
+    edge::Edge,
+    node::Node,
+    operations::{Operation, OperationInfo},
+    path::Path,
+    sample::Sample,
+    sequence::Sequence,
+    session_operations::{end_operation, start_operation},
+};
 use rusqlite::Connection;
-use std::io::Read;
-use std::str;
+
+use crate::{
+    genbank::{process_sequence, EditType, GenBankError},
+    progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
+};
 
 pub fn import_genbank<'a, R>(
     conn: &Connection,
@@ -57,7 +61,7 @@ where
                 let wt_node_id = Node::create(
                     conn,
                     &sequence.hash,
-                    calculate_hash(&format!(
+                    &HashId::convert_str(&format!(
                         "{collection}.{contig}:{hash}",
                         collection = &collection.name,
                         contig = &locus.name,
@@ -88,13 +92,13 @@ where
                     conn,
                     &[
                         BlockGroupEdgeData {
-                            block_group_id: block_group.id,
+                            block_group_id: block_group.id.clone(),
                             edge_id: edge_into.id,
                             chromosome_index: 0,
                             phased: 0,
                         },
                         BlockGroupEdgeData {
-                            block_group_id: block_group.id,
+                            block_group_id: block_group.id.clone(),
                             edge_id: edge_out_of.id,
                             chromosome_index: 0,
                             phased: 0,
@@ -104,7 +108,7 @@ where
                 let path = Path::create(
                     conn,
                     &locus.name,
-                    block_group.id,
+                    &block_group.id,
                     &[edge_into.id, edge_out_of.id],
                 );
 
@@ -124,14 +128,14 @@ where
                             let change_node = Node::create(
                                 conn,
                                 &change_seq.hash,
-                                calculate_hash(&format!(
+                                &HashId::convert_str(&format!(
                                     "{parent_hash}:{start}-{end}->{new_hash}",
                                     parent_hash = &sequence.hash,
                                     new_hash = &change_seq.hash,
                                 )),
                             );
                             PathChange {
-                                block_group_id: block_group.id,
+                                block_group_id: block_group.id.clone(),
                                 path: path.clone(),
                                 path_accession: None,
                                 start,
@@ -152,7 +156,7 @@ where
                             }
                         }
                         EditType::Deletion => PathChange {
-                            block_group_id: block_group.id,
+                            block_group_id: block_group.id.clone(),
                             path: path.clone(),
                             path_accession: None,
                             start,
@@ -176,7 +180,7 @@ where
                     BlockGroup::insert_change(conn, &change, &tree).unwrap();
                 }
             }
-            Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {}", e))),
+            Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
         }
         bar.inc(1);
     }
@@ -205,16 +209,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::models::file_types::FileTypes;
-    use crate::models::metadata;
-    use crate::models::operations::{setup_db, OperationFile};
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
+    use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
+
+    use gen_models::{
+        file_types::FileTypes,
+        operations::{setup_db, OperationFile},
+        traits::Query,
+    };
     use noodles::fasta;
-    use std::collections::HashSet;
-    use std::fs::File;
-    use std::io::BufReader;
-    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -229,10 +237,11 @@ mod tests {
     #[test]
     fn test_error_on_invalid_file() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         assert_eq!(
             import_genbank(
                 conn,
@@ -258,10 +267,11 @@ mod tests {
     #[test]
     fn test_records_operation() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
@@ -281,7 +291,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Operation::get_by_hash(op_conn, &operation.hash).unwrap(),
+            Operation::get_by_id(op_conn, &operation.hash).unwrap(),
             operation
         );
     }
@@ -289,10 +299,11 @@ mod tests {
     #[test]
     fn test_creates_sample() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
@@ -319,16 +330,17 @@ mod tests {
     #[cfg(test)]
     mod geneious_genbanks {
         use super::*;
-        use crate::normalize_string;
+        use crate::{normalize_string, track_database};
 
         #[test]
         fn test_parses_insertion() {
             setup_gen_dir();
             // this file has an insertion from 1426-2220
-            let conn = &get_connection(None);
-            let db_uuid = metadata::get_db_uuid(conn);
-            let op_conn = &get_operation_connection(None);
-            setup_db(op_conn, &db_uuid);
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
@@ -348,7 +360,8 @@ mod tests {
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let seqs = BlockGroup::get_all_sequences(conn, 1, false);
+            let block_group_id = BlockGroup::get_id("", None, "insertion");
+            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -362,10 +375,11 @@ mod tests {
         fn test_parses_deletion() {
             setup_gen_dir();
             // this file has a deletion from 765-766
-            let conn = &get_connection(None);
-            let db_uuid = metadata::get_db_uuid(conn);
-            let op_conn = &get_operation_connection(None);
-            setup_db(op_conn, &db_uuid);
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/deletion.gb");
             let file = File::open(&path).unwrap();
@@ -398,7 +412,8 @@ mod tests {
         GCTGAACGGTCTGGTTATAGGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTAC
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
-            let seqs = BlockGroup::get_all_sequences(conn, 1, false);
+            let block_group_id = BlockGroup::get_id("", None, "deletion");
+            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -416,10 +431,11 @@ mod tests {
         #[test]
         fn test_parses_deletion_and_insertion() {
             setup_gen_dir();
-            let conn = &get_connection(None);
-            let db_uuid = metadata::get_db_uuid(conn);
-            let op_conn = &get_operation_connection(None);
-            setup_db(op_conn, &db_uuid);
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
             let file = File::open(&path).unwrap();
@@ -453,7 +469,11 @@ mod tests {
              GGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTACGATGCCATTGGGAT
              ATATCAACGGTGGTATATCCAGTGATTTTTTTCTC",
             );
-            let seqs = BlockGroup::get_all_sequences(conn, 1, false);
+            let seqs = BlockGroup::get_all_sequences(
+                conn,
+                &BlockGroup::get_id("", None, "deletion_and_insertion"),
+                false,
+            );
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -473,10 +493,11 @@ mod tests {
             setup_gen_dir();
             // replacing a sequence ends up with the same result as doing a compound delete + insert
             // in the above test.
-            let conn = &get_connection(None);
-            let db_uuid = metadata::get_db_uuid(conn);
-            let op_conn = &get_operation_connection(None);
-            setup_db(op_conn, &db_uuid);
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/substitution.gb");
             let file = File::open(&path).unwrap();
@@ -510,7 +531,11 @@ mod tests {
              GGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTACGATGCCATTGGGAT
              ATATCAACGGTGGTATATCCAGTGATTTTTTTCTC",
             );
-            let seqs = BlockGroup::get_all_sequences(conn, 1, false);
+            let seqs = BlockGroup::get_all_sequences(
+                conn,
+                &BlockGroup::get_id("", None, "substitution"),
+                false,
+            );
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -528,10 +553,11 @@ mod tests {
         #[test]
         fn test_parses_multiple_changes() {
             setup_gen_dir();
-            let conn = &get_connection(None);
-            let db_uuid = metadata::get_db_uuid(conn);
-            let op_conn = &get_operation_connection(None);
-            setup_db(op_conn, &db_uuid);
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
             let file = File::open(&path).unwrap();
@@ -552,10 +578,14 @@ mod tests {
             // there would be 4! sequences so we just check we have the fully changed and unchanged sequence
             let f = reader::parse_file(&path).unwrap();
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let sequences: HashSet<String> = BlockGroup::get_all_sequences(conn, 1, false)
-                .iter()
-                .map(|s| s.to_lowercase())
-                .collect();
+            let sequences: HashSet<String> = BlockGroup::get_all_sequences(
+                conn,
+                &BlockGroup::get_id("", None, "insertion"),
+                false,
+            )
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
             let unchanged_seq = get_unmodified_sequence();
             assert!(sequences.contains(&mod_seq));
             assert!(sequences.contains(&unchanged_seq));

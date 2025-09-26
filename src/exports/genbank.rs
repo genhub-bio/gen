@@ -1,23 +1,13 @@
 #![allow(warnings)]
-use crate::graph::{all_simple_paths, GenGraph, GraphEdge, GraphNode};
-use crate::models::block_group::BlockGroup;
-use crate::models::node::Node;
-use crate::models::path::PathBlock;
-use crate::models::sample::Sample;
-use gb_io;
-use gb_io::seq::Location;
-use gb_io::QualifierKey;
+use std::{collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, str};
+
+use gb_io::{self, seq::Location, QualifierKey};
+use gen_core::{is_terminal, path::PathBlock};
+use gen_graph::{all_simple_paths, GenGraph, GraphEdge, GraphNode};
+use gen_models::{block_group::BlockGroup, node::Node, sample::Sample};
 use itertools::Itertools;
-use petgraph::prelude::DiGraphMap;
-use petgraph::visit::Dfs;
-use rusqlite;
-use rusqlite::Connection;
-use std::collections::HashSet;
-use std::fs::File;
-use std::hash::Hash;
-use std::iter::zip;
-use std::path::PathBuf;
-use std::str;
+use petgraph::{prelude::DiGraphMap, visit::Dfs};
+use rusqlite::{self, Connection};
 
 fn merge_nodes(nodes: &[GraphNode]) -> Vec<GraphNode> {
     // This is purposefully not sorted, as the input may be a path of nodes from a path where
@@ -57,7 +47,7 @@ fn get_path_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode>
         }
     }
 
-    let mut path_graph: GenGraph = DiGraphMap::new();
+    let mut path_graph = GenGraph::new();
     for node in graph.nodes() {
         if path_nodes.contains(&node.node_id) {
             path_graph.add_node(node);
@@ -147,18 +137,18 @@ pub fn export_genbank(
     let mut writer = gb_io::writer::SeqWriter::new(file);
 
     for block_group in block_groups.iter() {
-        let path = BlockGroup::get_current_path(conn, block_group.id);
+        let path = BlockGroup::get_current_path(conn, &block_group.id);
         let path_blocks = path
             .blocks(conn)
             .into_iter()
-            .filter(|block| !Node::is_terminal(block.node_id))
+            .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
         seq.seq = path.sequence(conn).into_bytes();
 
         // Identify the node traversal corresponding to our path.
-        let graph = BlockGroup::get_graph(conn, block_group.id);
+        let graph = BlockGroup::get_graph(conn, &block_group.id);
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();
@@ -308,18 +298,23 @@ pub fn export_genbank(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
-    use crate::imports::genbank::import_genbank;
-    use crate::models::file_types::FileTypes;
-    use crate::models::operations::{OperationFile, OperationInfo};
-    use crate::models::strand::Strand::Forward;
-    use crate::models::{metadata, operations::setup_db};
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
+    use std::{io, io::BufReader, path::PathBuf, str};
+
     use gb_io::reader;
-    use std::io::BufReader;
-    use std::path::PathBuf;
-    use std::{io, str};
+    use gen_core::{strand::Strand::Forward, HashId};
+    use gen_models::{
+        file_types::FileTypes,
+        metadata,
+        operations::{setup_db, OperationFile, OperationInfo},
+    };
     use tempfile;
+
+    use super::*;
+    use crate::{
+        imports::genbank::import_genbank,
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     fn compare_genbanks(a: &PathBuf, b: &PathBuf) {
         let a = reader::parse_file(a).unwrap();
@@ -379,10 +374,12 @@ mod tests {
     #[test]
     fn test_import_then_export_insertion() {
         setup_gen_dir();
-        let conn = &get_connection(None);
+        let conn = &get_connection(None).unwrap();
         let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
@@ -401,7 +398,7 @@ mod tests {
             },
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().into_path();
+        let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
         export_genbank(conn, "", None, &filename);
         compare_genbanks(&path, &filename);
@@ -410,10 +407,12 @@ mod tests {
     #[test]
     fn test_import_then_export_replacement() {
         setup_gen_dir();
-        let conn = &get_connection(None);
+        let conn = &get_connection(None).unwrap();
         let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
         let file = File::open(&path).unwrap();
@@ -432,7 +431,7 @@ mod tests {
             },
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().into_path();
+        let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
         export_genbank(conn, "", None, &filename);
         compare_genbanks(&path, &filename);
@@ -441,10 +440,12 @@ mod tests {
     #[test]
     fn test_import_then_export_multiple_operations() {
         setup_gen_dir();
-        let conn = &get_connection(None);
+        let conn = &get_connection(None).unwrap();
         let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
         let file = File::open(&path).unwrap();
@@ -463,7 +464,7 @@ mod tests {
             },
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().into_path();
+        let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
         export_genbank(conn, "", None, &filename);
         compare_genbanks(&path, &filename);
@@ -471,22 +472,22 @@ mod tests {
 
     #[test]
     fn test_get_path_graph() {
-        let mut graph = DiGraphMap::new();
+        let mut graph = GenGraph::new();
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -497,18 +498,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 20,
+                node_id: HashId::convert_str("20"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -519,18 +520,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 20,
                 sequence_end: 30,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -541,18 +542,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 30,
+                node_id: HashId::convert_str("30"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -562,18 +563,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 30,
+                node_id: HashId::convert_str("30"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -583,18 +584,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 20,
                 sequence_end: 30,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -605,18 +606,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 sequence_start: 20,
                 sequence_end: 30,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 20,
+                node_id: HashId::convert_str("20"),
                 sequence_start: 30,
                 sequence_end: 40,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -626,18 +627,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 20,
+                node_id: HashId::convert_str("20"),
                 sequence_start: 30,
                 sequence_end: 40,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 20,
+                node_id: HashId::convert_str("20"),
                 sequence_start: 40,
                 sequence_end: 60,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -647,18 +648,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: -1,
-                node_id: 20,
+                node_id: HashId::convert_str("20"),
                 sequence_start: 30,
                 sequence_end: 40,
             },
             GraphNode {
                 block_id: -1,
-                node_id: 40,
+                node_id: HashId::convert_str("40"),
                 sequence_start: 40,
                 sequence_end: 60,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -668,7 +669,7 @@ mod tests {
         let path_blocks = vec![
             PathBlock {
                 id: 0,
-                node_id: 10,
+                node_id: HashId::convert_str("10"),
                 block_sequence: String::new(),
                 sequence_start: 0,
                 sequence_end: 30,
@@ -678,7 +679,7 @@ mod tests {
             },
             PathBlock {
                 id: 0,
-                node_id: 20,
+                node_id: HashId::convert_str("20"),
                 block_sequence: String::new(),
                 sequence_start: 30,
                 sequence_end: 60,
@@ -692,31 +693,31 @@ mod tests {
             vec![
                 GraphNode {
                     block_id: -1,
-                    node_id: 10,
+                    node_id: HashId::convert_str("10"),
                     sequence_start: 0,
                     sequence_end: 10
                 },
                 GraphNode {
                     block_id: -1,
-                    node_id: 10,
+                    node_id: HashId::convert_str("10"),
                     sequence_start: 10,
                     sequence_end: 20
                 },
                 GraphNode {
                     block_id: -1,
-                    node_id: 10,
+                    node_id: HashId::convert_str("10"),
                     sequence_start: 20,
                     sequence_end: 30
                 },
                 GraphNode {
                     block_id: -1,
-                    node_id: 20,
+                    node_id: HashId::convert_str("20"),
                     sequence_start: 30,
                     sequence_end: 40
                 },
                 GraphNode {
                     block_id: -1,
-                    node_id: 20,
+                    node_id: HashId::convert_str("20"),
                     sequence_start: 40,
                     sequence_end: 60
                 }
@@ -726,22 +727,22 @@ mod tests {
 
     #[test]
     fn test_get_path_graph_single_path_block() {
-        let mut graph = DiGraphMap::new();
+        let mut graph = GenGraph::new();
         graph.add_edge(
             GraphNode {
                 block_id: 0,
-                node_id: 3,
+                node_id: HashId::convert_str("3"),
                 sequence_start: 0,
                 sequence_end: 1425,
             },
             GraphNode {
                 block_id: 0,
-                node_id: 3,
+                node_id: HashId::convert_str("3"),
                 sequence_start: 2220,
                 sequence_end: 8302,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -751,18 +752,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: 0,
-                node_id: 3,
+                node_id: HashId::convert_str("3"),
                 sequence_start: 0,
                 sequence_end: 1425,
             },
             GraphNode {
                 block_id: 0,
-                node_id: 3,
+                node_id: HashId::convert_str("3"),
                 sequence_start: 1425,
                 sequence_end: 2220,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -772,18 +773,18 @@ mod tests {
         graph.add_edge(
             GraphNode {
                 block_id: 0,
-                node_id: 3,
+                node_id: HashId::convert_str("3"),
                 sequence_start: 1425,
                 sequence_end: 2220,
             },
             GraphNode {
                 block_id: 0,
-                node_id: 3,
+                node_id: HashId::convert_str("3"),
                 sequence_start: 2220,
                 sequence_end: 8302,
             },
             vec![GraphEdge {
-                edge_id: 1,
+                edge_id: HashId::pad_str(1),
                 chromosome_index: 0,
                 phased: 0,
                 source_strand: Forward,
@@ -792,7 +793,7 @@ mod tests {
         );
         let path_blocks = vec![PathBlock {
             id: 0,
-            node_id: 3,
+            node_id: HashId::convert_str("3"),
             block_sequence: String::new(),
             sequence_start: 0,
             sequence_end: 8302,
@@ -805,19 +806,19 @@ mod tests {
             vec![
                 GraphNode {
                     block_id: 0,
-                    node_id: 3,
+                    node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 1425
                 },
                 GraphNode {
                     block_id: 0,
-                    node_id: 3,
+                    node_id: HashId::convert_str("3"),
                     sequence_start: 1425,
                     sequence_end: 2220
                 },
                 GraphNode {
                     block_id: 0,
-                    node_id: 3,
+                    node_id: HashId::convert_str("3"),
                     sequence_start: 2220,
                     sequence_end: 8302
                 }

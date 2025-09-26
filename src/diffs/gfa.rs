@@ -1,17 +1,16 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::{BufWriter, Write},
+    path::PathBuf,
+};
+
+use gen_core::{range::Range, NodeIntervalBlock};
+use gen_models::{block_group::BlockGroup, path::Path, sample::Sample};
 use itertools::Itertools;
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
 
 use crate::gfa::{path_line, write_links, write_segments, Link, Path as GFAPath, Segment};
-use crate::models::{
-    block_group::{BlockGroup, NodeIntervalBlock},
-    path::Path,
-    sample::Sample,
-};
-use crate::range::Range;
 
 pub fn gfa_sample_diff(
     conn: &Connection,
@@ -47,11 +46,11 @@ pub fn gfa_sample_diff(
 
     let source_paths_by_name = source_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, bg.id)))
+        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
         .collect::<HashMap<String, Path>>();
     let target_paths_by_name = target_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, bg.id)))
+        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
         .collect::<HashMap<String, Path>>();
 
     let mut segments = HashSet::new();
@@ -241,32 +240,33 @@ fn path_from_segments(sample_name: Option<&str>, path: &Path, segments: &[Segmen
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
-
-    use crate::imports::gfa::import_gfa;
-    use crate::models::{
+    use gen_core::{HashId, Strand, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID};
+    use gen_models::{
         block_group::BlockGroup,
-        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData, NO_CHROMOSOME_INDEX},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         edge::Edge,
-        metadata,
-        node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID},
+        node::Node,
+        operations::setup_db,
         sequence::Sequence,
-        strand::Strand,
     };
-
-    use crate::models::operations::setup_db;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        imports::gfa::import_gfa,
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     #[test]
     fn test_gfa_diff() {
         // Sets up a basic graph and then exports it to a GFA file
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection("gfa.db").unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
@@ -279,8 +279,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, None);
-        let node2_id = Node::create(conn, &sequence2.hash, None);
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
 
         let edge1 = Edge::create(
             conn,
@@ -322,7 +322,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
         // Set up child
         let _child_sample = Sample::get_or_create_child(conn, collection_name, "child", None);
@@ -330,7 +330,7 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCC")
             .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, None);
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
         let edge4 = Edge::create(
             conn,
             node1_id,
@@ -356,14 +356,14 @@ mod tests {
         let child_block_group_edges = child_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: child_block_group.id,
+                block_group_id: child_block_group.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
             })
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
-        let original_child_path = BlockGroup::get_current_path(conn, child_block_group.id);
+        let original_child_path = BlockGroup::get_current_path(conn, &child_block_group.id);
         let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge4, &edge5);
 
         let temp_dir = tempdir().unwrap();
@@ -376,7 +376,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, new_child_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false);
 
         // We've replaced the middle AAAA with CCCC, so expect that as the child sequence
         assert_eq!(
@@ -394,7 +394,7 @@ mod tests {
             .sequence_type("DNA")
             .sequence("GGGG")
             .save(conn);
-        let node4_id = Node::create(conn, &sequence4.hash, None);
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
         let edge6 = Edge::create(
             conn,
             node2_id,
@@ -421,7 +421,7 @@ mod tests {
         let grandchild_block_group_edges = grandchild_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: grandchild_block_group.id,
+                block_group_id: grandchild_block_group.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -429,19 +429,18 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
-            BlockGroup::get_current_path(conn, grandchild_block_group.id);
+            BlockGroup::get_current_path(conn, &grandchild_block_group.id);
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 10, 14, &edge6, &edge7);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
         gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("grandchild"));
 
         let _ = import_gfa(&gfa_path, "test collection 3", None, conn, op_conn);
-
         let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
 
         // We've replaced the middle AAAA with CCCC and the middle TTTT with GGGG, so four possible sequences
         assert_eq!(
@@ -472,7 +471,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
 
         assert_eq!(
             all_grandchild_sequences,
@@ -487,10 +486,10 @@ mod tests {
     fn test_gfa_diff_against_nothing() {
         // Confirm diff of a sample against nothing is just the sample
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
@@ -509,8 +508,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, None);
-        let node2_id = Node::create(conn, &sequence2.hash, None);
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
 
         let edge1 = Edge::create(
             conn,
@@ -544,7 +543,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -552,7 +551,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "test path", block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "test path", &block_group.id, &edge_ids);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("diff-against-nothing.gfa");
@@ -563,7 +562,7 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, new_block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
 
         assert_eq!(
             all_sequences,
@@ -578,10 +577,10 @@ mod tests {
     fn test_self_diff() {
         // Confirm diff of a sample to itself just results in a graph that's a single path
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
@@ -600,8 +599,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, None);
-        let node2_id = Node::create(conn, &sequence2.hash, None);
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
 
         let edge1 = Edge::create(
             conn,
@@ -635,7 +634,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -643,7 +642,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "test path", block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "test path", &block_group.id, &edge_ids);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("self-diff.gfa");
@@ -660,7 +659,7 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, new_block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
 
         assert_eq!(
             all_sequences,
@@ -675,10 +674,10 @@ mod tests {
     fn test_gfa_diff_unrelated_paths() {
         // Confirm diff of a sample to totally unrelated sample produces two separate paths
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
@@ -693,8 +692,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, None);
-        let node2_id = Node::create(conn, &sequence2.hash, None);
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
 
         let edge1 = Edge::create(
             conn,
@@ -728,7 +727,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -736,7 +735,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
         let _sample2 = Sample::get_or_create(conn, "sample2");
         let block_group2 =
@@ -749,8 +748,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
             .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, None);
-        let node4_id = Node::create(conn, &sequence4.hash, None);
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
 
         let edge4 = Edge::create(
             conn,
@@ -784,7 +783,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group2.id,
+                block_group_id: block_group2.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -792,7 +791,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path2 = Path::create(conn, "parent", block_group2.id, &edge_ids);
+        let _path2 = Path::create(conn, "parent", &block_group2.id, &edge_ids);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
@@ -809,7 +808,7 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, new_block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
 
         assert_eq!(
             all_sequences,
@@ -825,10 +824,10 @@ mod tests {
         // Confirm diff of two paths that are in the same block group but don't share any nodes
         // results in two disjoint sequences
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
@@ -843,8 +842,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, None);
-        let node2_id = Node::create(conn, &sequence2.hash, None);
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
 
         let edge1 = Edge::create(
             conn,
@@ -878,7 +877,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -886,7 +885,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
         let _sample2 = Sample::get_or_create(conn, "sample2");
         let block_group2 =
@@ -899,8 +898,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
             .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, None);
-        let node4_id = Node::create(conn, &sequence4.hash, None);
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
 
         let edge4 = Edge::create(
             conn,
@@ -934,7 +933,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group2.id,
+                block_group_id: block_group2.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -942,7 +941,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path2 = Path::create(conn, "parent", block_group2.id, &edge_ids);
+        let _path2 = Path::create(conn, "parent", &block_group2.id, &edge_ids);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
@@ -959,7 +958,7 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, new_block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
 
         assert_eq!(
             all_sequences,
@@ -976,10 +975,10 @@ mod tests {
         // partially overlaps the child's replacement, and confirm diffs between all pairs from
         // (original, child, grandchild)
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
@@ -988,7 +987,7 @@ mod tests {
             .sequence_type("DNA")
             .sequence("AAAAAAAAAAAAAAAA")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, None);
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
 
         let edge1 = Edge::create(
             conn,
@@ -1013,7 +1012,7 @@ mod tests {
         let block_group_edges = edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1021,7 +1020,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", block_group.id, &[edge1.id, edge2.id]);
+        let _path1 = Path::create(conn, "parent", &block_group.id, &[edge1.id, edge2.id]);
 
         // Set up child
         let _child_sample = Sample::get_or_create_child(conn, collection_name, "child", None);
@@ -1029,7 +1028,7 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCC")
             .save(conn);
-        let node2_id = Node::create(conn, &sequence2.hash, None);
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
         let edge3 = Edge::create(
             conn,
             node1_id,
@@ -1055,14 +1054,14 @@ mod tests {
         let child_block_group_edges = child_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: child_block_group.id,
+                block_group_id: child_block_group.id.clone(),
                 edge_id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
             })
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
-        let original_child_path = BlockGroup::get_current_path(conn, child_block_group.id);
+        let original_child_path = BlockGroup::get_current_path(conn, &child_block_group.id);
         let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge3, &edge4);
 
         let temp_dir = tempdir().unwrap();
@@ -1075,7 +1074,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, new_child_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false);
 
         // We've replaced [2, 6) of AAAA with CCCC
         assert_eq!(
@@ -1093,7 +1092,7 @@ mod tests {
             .sequence_type("DNA")
             .sequence("GGGG")
             .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, None);
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -1120,7 +1119,7 @@ mod tests {
         let grandchild_block_group_edges = grandchild_edge_ids
             .iter()
             .map(|&edge_id| BlockGroupEdgeData {
-                block_group_id: grandchild_block_group.id,
+                block_group_id: grandchild_block_group.id.clone(),
                 edge_id,
                 chromosome_index: 0,
                 phased: 0,
@@ -1128,7 +1127,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
-            BlockGroup::get_current_path(conn, grandchild_block_group.id);
+            BlockGroup::get_current_path(conn, &grandchild_block_group.id);
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 4, 10, &edge5, &edge6);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
@@ -1140,7 +1139,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
 
         // Original is AAAAAAAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA
@@ -1168,7 +1167,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
 
         // Child is      AACCCCAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA

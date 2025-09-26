@@ -1,6 +1,6 @@
-use crate::models::QueryError;
-use crate::operation_management::OperationError;
 use std::io::Error as IOError;
+
+use gen_models::errors::{OperationError, QueryError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

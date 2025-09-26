@@ -1,16 +1,19 @@
-use crate::graph::{connect_all_boundary_edges, project_path, GraphNode};
-use crate::models::block_group::BlockGroup;
-use crate::models::node::Node;
-use crate::models::sample::Sample;
-use crate::models::strand::Strand;
+use std::{
+    cmp::{max, min},
+    collections::HashMap,
+    io::{Error, Read, Write},
+};
+
+use gen_core::{is_terminal, HashId, Strand};
+use gen_graph::{connect_all_boundary_edges, project_path, GraphNode};
+use gen_models::{block_group::BlockGroup, sample::Sample};
 use interavl::IntervalTree;
-use noodles::bed;
-use noodles::bed::feature::record_buf::{other_fields::Value, OtherFields};
-use noodles::core::Position;
+use noodles::{
+    bed,
+    bed::feature::record_buf::{other_fields::Value, OtherFields},
+    core::Position,
+};
 use rusqlite::Connection;
-use std::cmp::{max, min};
-use std::collections::HashMap;
-use std::io::{Error, Read, Write};
 
 pub fn translate_bed<'a, R, W>(
     conn: &Connection,
@@ -34,7 +37,7 @@ where
             .map(|bg| (bg.name.clone(), bg))
             .collect::<Vec<(String, &BlockGroup)>>(),
     );
-    let mut paths: HashMap<i64, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
+    let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
 
     while bed_reader.read_record(&mut record)? != 0 {
         let ref_name = record.reference_sequence_name().to_string();
@@ -43,13 +46,13 @@ where
         let end = record.feature_end().unwrap().unwrap().get() as i64;
         if let Some(bg) = sample_bgs.get(&ref_name) {
             let projection = paths.entry(bg.id).or_insert_with(|| {
-                let path = BlockGroup::get_current_path(conn, bg.id);
-                let mut graph = BlockGroup::get_graph(conn, bg.id);
+                let path = BlockGroup::get_current_path(conn, &bg.id);
+                let mut graph = BlockGroup::get_graph(conn, &bg.id);
                 connect_all_boundary_edges(&mut graph);
                 let mut tree = IntervalTree::default();
                 let mut position: i64 = 0;
                 for (node, strand) in project_path(&graph, &path.blocks(conn)) {
-                    if !Node::is_terminal(node.node_id) {
+                    if !is_terminal(node.node_id) {
                         let end_position = position + node.length();
                         tree.insert(position..end_position, (node, strand));
                         position = end_position;
@@ -79,22 +82,24 @@ where
 #[cfg(test)]
 mod tests {
 
-    use crate::models::metadata;
-    use crate::models::operations::setup_db;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
-    use crate::translate::bed::translate_bed;
-    use crate::translate::test_helpers::get_simple_sequence;
-    use crate::updates::vcf::update_with_vcf;
-    use std::fs::File;
-    use std::path::PathBuf;
+    use std::{fs::File, path::PathBuf};
+
+    use gen_models::operations::setup_db;
+
+    use crate::{
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+        translate::{bed::translate_bed, test_helpers::get_simple_sequence},
+        updates::vcf::update_with_vcf,
+    };
 
     #[test]
     fn translates_coordinates_to_nodes() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let bed_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/beds/simple.bed");
@@ -126,13 +131,13 @@ mod tests {
         assert_eq!(
             results,
             "\
-        3\t1\t3\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
-        3\t3\t4\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
-        3\t4\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
-        3\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n\
-        3\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n\
-        3\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n\
-        4\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n"
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t1\t3\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t3\t4\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t4\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n\
+        086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n"
         );
 
         // The None sample has no variants, so should be a simple mapping and covers the split node
@@ -149,11 +154,11 @@ mod tests {
         assert_eq!(
             results,
             "\
-        3\t1\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
-        3\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n\
-        3\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n\
-        3\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n\
-        4\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n"
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t1\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n\
+        0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n\
+        086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n"
         );
     }
 }

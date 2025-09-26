@@ -1,42 +1,46 @@
 #![allow(warnings)]
-use clap::{Parser, Subcommand};
 use core::ops::Range;
-use gen::commands::{Cli, Commands};
-use gen::config;
-use gen::config::{get_gen_dir, get_operation_connection};
-use rusqlite::params;
-
-use gen::annotations::gff::propagate_gff;
-use gen::commands::cli_context::CliContext;
-use gen::diffs::gfa::gfa_sample_diff;
-use gen::get_connection;
-use gen::graph_operators::{derive_chunks, get_path, make_stitch};
-use gen::models::block_group::BlockGroup;
-use gen::models::file_types::FileTypes;
-use gen::models::metadata;
-use gen::models::operations::{
-    setup_db, Branch, Operation, OperationFile, OperationInfo, OperationState,
+use std::{
+    fmt::Debug,
+    fs::File,
+    io,
+    io::{BufReader, Write},
+    ops::Deref,
+    path::{Path, PathBuf},
+    str,
 };
-use gen::models::sample::Sample;
-use gen::models::traits::Query;
-use gen::operation_management;
-use gen::operation_management::{parse_patch_operations, push, OperationError};
-use gen::patch;
-use gen::translate;
-use gen::updates::gaf::transform_csv_to_fasta;
-use gen::views::block_group::view_block_group;
-use gen::views::operations::view_operations;
-use gen::views::patch::view_patches;
 
+use clap::{Parser, Subcommand};
+use gen::{
+    annotations::gff::propagate_gff,
+    commands::{cli_context::CliContext, remote::handle_remote_command, Cli, Commands},
+    config,
+    diffs::gfa::gfa_sample_diff,
+    get_connection, get_operation_connection,
+    graph_operators::{derive_chunks, get_path, make_stitch},
+    operation_management,
+    operation_management::{parse_patch_operations, push},
+    patch, track_database, translate,
+    updates::gaf::transform_csv_to_fasta,
+    views::{block_group::view_block_group, operations::view_operations, patch::view_patches},
+};
+use gen_core::config::{get_gen_dir, get_or_create_gen_dir};
+use gen_models::{
+    block_group::BlockGroup,
+    errors::{OperationError, RemoteError},
+    file_types::FileTypes,
+    metadata,
+    operations::{
+        setup_db, Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
+    },
+    sample::Sample,
+    traits::Query,
+};
 use itertools::Itertools;
 use noodles::core::Region;
-use rusqlite::{types::Value, Connection};
-use std::fmt::Debug;
-use std::fs::File;
-use std::io::{BufReader, Write};
-use std::ops::Deref;
-use std::path::{Path, PathBuf};
-use std::{io, str};
+use r#gen::graph_operators::GraphOperationError;
+use rusqlite::{params, types::Value, Connection};
+use sha2::digest::typenum::Gr;
 
 fn get_default_collection(conn: &Connection) -> String {
     let mut stmt = conn
@@ -55,12 +59,12 @@ fn main() {
 
     // commands not requiring a db connection are handled here
     if let Some(Commands::Init {}) = &cli.command {
-        config::get_or_create_gen_dir();
+        get_or_create_gen_dir();
         println!("Gen repository initialized.");
         return;
     }
 
-    let operation_conn = get_operation_connection(None);
+    let operation_conn = get_operation_connection(None).unwrap();
     if let Some(Commands::Defaults {
         database,
         collection,
@@ -81,13 +85,6 @@ fn main() {
                 .unwrap();
             println!("Default collection set to {name}");
         }
-        return;
-    }
-    if let Some(Commands::SetRemote { remote }) = &cli.command {
-        operation_conn
-            .execute("update defaults set remote_url=?1 where id = 1", (remote,))
-            .unwrap();
-        println!("Remote URL set to {remote}");
         return;
     }
 
@@ -119,15 +116,20 @@ fn main() {
         })
     });
     let db = binding.as_str();
-    let conn = get_connection(db);
+    let conn = get_connection(db).unwrap();
     let db_uuid = metadata::get_db_uuid(&conn);
 
-    // initialize the selected database if needed.
-    setup_db(&operation_conn, &db_uuid);
+    match track_database(&conn, &operation_conn) {
+        Ok(_) => {}
+        Err(err) => {
+            panic!("Error tracking database: {err}");
+        }
+    };
+    setup_db(&operation_conn);
 
     match cli.command {
         Some(Commands::Init {}) => {
-            config::get_or_create_gen_dir();
+            get_or_create_gen_dir();
             println!("Gen repository initialized.");
         }
         Some(Commands::Import(cmd)) => {
@@ -139,6 +141,14 @@ fn main() {
         Some(Commands::Export(cmd)) => {
             gen::commands::export::execute(&cli_context, cmd);
         }
+        Some(Commands::Remote(cmd)) => match handle_remote_command(&operation_conn, &cmd) {
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("Remote command failed: {err}");
+                std::process::exit(1);
+            }
+        },
+
         Some(Commands::View {
             graph,
             sample,
@@ -205,19 +215,18 @@ fn main() {
             interactive,
             branch,
         }) => {
-            let current_op = OperationState::get_operation(&operation_conn, &db_uuid);
+            let current_op = OperationState::get_operation(&operation_conn);
             if let Some(current_op) = current_op {
                 let branch_name = branch.clone().unwrap_or_else(|| {
-                    let current_branch_id =
-                        OperationState::get_current_branch(&operation_conn, &db_uuid)
-                            .expect("No current branch is set.");
+                    let current_branch_id = OperationState::get_current_branch(&operation_conn)
+                        .expect("No current branch is set.");
                     Branch::get_by_id(&operation_conn, current_branch_id)
                         .unwrap_or_else(|| panic!("No branch with id {current_branch_id}"))
                         .name
                 });
                 let operations = Branch::get_operations(
                     &operation_conn,
-                    Branch::get_by_name(&operation_conn, &db_uuid, &branch_name)
+                    Branch::get_by_name(&operation_conn, &branch_name)
                         .unwrap_or_else(|| panic!("No branch named {branch_name}."))
                         .id,
                 );
@@ -253,29 +262,29 @@ fn main() {
             checkout,
             list,
             merge,
+            set_remote,
             branch_name,
         }) => {
             if create {
-                Branch::create(
+                Branch::get_or_create(
                     &operation_conn,
-                    &db_uuid,
                     &branch_name
                         .clone()
                         .expect("Must provide a branch name to create."),
                 );
             } else if delete {
-                Branch::delete(
+                let branch = Branch::get_by_name(
                     &operation_conn,
-                    &db_uuid,
                     &branch_name
                         .clone()
                         .expect("Must provide a branch name to delete."),
-                );
+                )
+                .unwrap_or_else(|| panic!("Unable to find branch {branch_name:?}."));
+                Branch::delete(&operation_conn, branch.id);
             } else if checkout {
                 operation_management::checkout(
-                    &conn,
+                    None,
                     &operation_conn,
-                    &db_uuid,
                     &Some(
                         branch_name
                             .clone()
@@ -285,19 +294,16 @@ fn main() {
                     None,
                 );
             } else if list {
-                let current_branch = OperationState::get_current_branch(&operation_conn, &db_uuid);
+                let current_branch = OperationState::get_current_branch(&operation_conn);
                 let mut indicator = "";
                 println!(
-                    "{indicator:<3}{col1:<30}   {col2:<20}",
+                    "{indicator:<3}{col1:<30}   {col2:<20}   {col3:<15}",
                     col1 = "Name",
                     col2 = "Operation",
+                    col3 = "Remote",
                 );
-                for branch in Branch::query(
-                    &operation_conn,
-                    "select * from branch where db_uuid = ?1",
-                    params![Value::from(db_uuid.to_string())],
-                )
-                .iter()
+                for branch in
+                    Branch::query(&operation_conn, "select * from branch", params![]).iter()
                 {
                     if let Some(current_branch_id) = current_branch {
                         if current_branch_id == branch.id {
@@ -306,111 +312,130 @@ fn main() {
                             indicator = "";
                         }
                     }
+                    let remote_display = branch
+                        .remote_name
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string());
                     println!(
-                        "{indicator:<3}{col1:<30}   {col2:<20}",
+                        "{indicator:<3}{col1:<30}   {col2:<20}   {col3:<15}",
                         col1 = branch.name,
                         col2 = branch
                             .current_operation_hash
-                            .clone()
-                            .unwrap_or(String::new())
+                            .map(|h| format!("{h}"))
+                            .unwrap_or_default(),
+                        col3 = remote_display
                     );
                 }
             } else if merge {
                 let branch_name = branch_name.clone().expect("Branch name must be provided.");
-                let other_branch = Branch::get_by_name(&operation_conn, &db_uuid, &branch_name)
+                let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
                     .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
-                let current_branch = OperationState::get_current_branch(&operation_conn, &db_uuid)
+                let current_branch = OperationState::get_current_branch(&operation_conn)
                     .expect("Unable to find current branch.");
-                conn.execute("BEGIN TRANSACTION", []).unwrap();
-                operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
                 match operation_management::merge(
-                    &conn,
+                    None,
                     &operation_conn,
-                    &db_uuid,
                     current_branch,
                     other_branch.id,
                     None,
                 ) {
                     Ok(_) => println!("Merge successful"),
                     Err(_) => {
-                        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
                         panic!("Merge failed.");
                     }
                 }
-                conn.execute("END TRANSACTION", []).unwrap();
-                operation_conn.execute("END TRANSACTION", []).unwrap();
+            } else if let Some(remote_name) = set_remote {
+                // Handle setting remote for current branch
+                let current_branch_id = OperationState::get_current_branch(&operation_conn)
+                    .expect("No current branch is checked out.");
+
+                let remote_to_set = if remote_name.is_empty() || remote_name == "null" {
+                    None
+                } else {
+                    Some(remote_name.as_str())
+                };
+
+                // Use the validated method for setting remote
+                match Branch::set_remote_validated(
+                    &operation_conn,
+                    current_branch_id,
+                    remote_to_set,
+                ) {
+                    Ok(_) => {
+                        if remote_to_set.is_some() {
+                            println!("Remote '{remote_name}' associated with current branch");
+                        } else {
+                            println!("Remote association cleared for current branch");
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("Error: {err}");
+                        std::process::exit(1);
+                    }
+                }
             } else {
                 println!("No options selected.");
             }
         }
         Some(Commands::Merge { branch_name }) => {
             let branch_name = branch_name.clone().expect("Branch name must be provided.");
-            let other_branch = Branch::get_by_name(&operation_conn, &db_uuid, &branch_name)
+            let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
                 .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
-            let current_branch = OperationState::get_current_branch(&operation_conn, &db_uuid)
+            let current_branch = OperationState::get_current_branch(&operation_conn)
                 .expect("Unable to find current branch.");
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
             match operation_management::merge(
-                &conn,
+                None,
                 &operation_conn,
-                &db_uuid,
                 current_branch,
                 other_branch.id,
                 None,
             ) {
                 Ok(_) => println!("Merge successful"),
                 Err(details) => {
-                    conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                    operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
                     panic!("Merge failed: {details}");
                 }
             }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
         }
         Some(Commands::Apply { hash }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            match operation_management::apply(&conn, &operation_conn, &hash, None) {
+            let operation = match Operation::search_hash(&operation_conn, &hash) {
+                Ok(op) => op,
+                Err(e) => {
+                    panic!("Unable to find operation by hash {hash}");
+                }
+            };
+            match operation_management::apply(None, &operation_conn, &operation.hash, None) {
                 Ok(_) => println!("Operation applied"),
                 Err(_) => {
-                    conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-                    operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
                     panic!("Apply failed.");
                 }
             }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
         }
         Some(Commands::Checkout { branch, hash }) => {
             if let Some(name) = branch.clone() {
-                if Branch::get_by_name(&operation_conn, &db_uuid, &name).is_none() {
-                    Branch::create(&operation_conn, &db_uuid, &name);
+                if Branch::get_by_name(&operation_conn, &name).is_none() {
+                    Branch::get_or_create(&operation_conn, &name);
                     println!("Created branch {name}");
                 }
                 println!("Checking out branch {name}");
-                operation_management::checkout(&conn, &operation_conn, &db_uuid, &Some(name), None);
+                operation_management::checkout(None, &operation_conn, &Some(name), None);
             } else if let Some(hash_name) = hash.clone() {
                 // if the hash is a branch, check it out
-                if Branch::get_by_name(&operation_conn, &db_uuid, &hash_name).is_some() {
+                if Branch::get_by_name(&operation_conn, &hash_name).is_some() {
                     println!("Checking out branch {hash_name}");
-                    operation_management::checkout(
-                        &conn,
-                        &operation_conn,
-                        &db_uuid,
-                        &Some(hash_name),
-                        None,
-                    );
+                    operation_management::checkout(None, &operation_conn, &Some(hash_name), None);
                 } else {
+                    let operation = match Operation::search_hash(&operation_conn, &hash_name) {
+                        Ok(op) => op,
+                        Err(err) => {
+                            panic!("Unable to find hash {hash_name}.")
+                        }
+                    };
                     println!("Checking out operation {hash_name}");
                     operation_management::checkout(
-                        &conn,
+                        None,
                         &operation_conn,
-                        &db_uuid,
                         &None,
-                        Some(hash_name),
+                        Some(operation.hash),
                     );
                 }
             } else {
@@ -418,7 +443,13 @@ fn main() {
             }
         }
         Some(Commands::Reset { hash }) => {
-            operation_management::reset(&conn, &operation_conn, &db_uuid, &hash);
+            let operation = match Operation::search_hash(&operation_conn, &hash) {
+                Ok(op) => op,
+                Err(err) => {
+                    panic!("Unable to find hash {hash}.")
+                }
+            };
+            operation_management::reset(None, &operation_conn, &operation.hash);
         }
         Some(Commands::PatchCreate {
             name,
@@ -426,12 +457,11 @@ fn main() {
             branch,
         }) => {
             let branch = if let Some(branch_name) = branch {
-                Branch::get_by_name(&operation_conn, &db_uuid, &branch_name)
+                Branch::get_by_name(&operation_conn, &branch_name)
                     .unwrap_or_else(|| panic!("No branch with name {branch_name} found."))
             } else {
-                let current_branch_id =
-                    OperationState::get_current_branch(&operation_conn, &db_uuid)
-                        .expect("No current branch is checked out.");
+                let current_branch_id = OperationState::get_current_branch(&operation_conn)
+                    .expect("No current branch is checked out.");
                 Branch::get_by_id(&operation_conn, current_branch_id).unwrap()
             };
             let branch_ops = Branch::get_operations(&operation_conn, branch.id);
@@ -446,7 +476,8 @@ fn main() {
         Some(Commands::PatchApply { patch }) => {
             let mut f = File::open(patch).unwrap();
             let patches = patch::load_patches(&mut f);
-            patch::apply_patches(&conn, &operation_conn, &patches);
+            patch::apply_patches(None, &operation_conn, &patches)
+                .unwrap_or_else(|op| panic!("Failed to apply patch: {op:?}"));
         }
         Some(Commands::PatchView { prefix, patch }) => {
             let patch_path = Path::new(&patch);
@@ -477,14 +508,14 @@ fn main() {
         None => {}
         // these will never be handled by this method as we search for them earlier.
         Some(Commands::Init {}) => {
-            config::get_or_create_gen_dir();
+            get_or_create_gen_dir();
             println!("Gen repository initialized.");
         }
         Some(Commands::Defaults {
             database,
             collection,
         }) => {}
-        Some(Commands::SetRemote { remote }) => {}
+
         Some(Commands::Transform { format_csv_for_gaf }) => {}
         Some(Commands::PropagateAnnotations {
             name,
@@ -518,7 +549,7 @@ fn main() {
             // Null sample
             println!();
             for sample_name in sample_names {
-                println!("{}", sample_name);
+                println!("{sample_name}");
             }
         }
         Some(Commands::ListGraphs { name, sample }) => {
@@ -559,7 +590,7 @@ fn main() {
                 .unwrap_or_else(|| {
                     panic!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
                 });
-            let path = BlockGroup::get_current_path(&conn, block_group.id);
+            let path = BlockGroup::get_current_path(&conn, &block_group.id);
             let sequence = path.sequence(&conn);
             let start_coordinate;
             let mut end_coordinate;
@@ -741,12 +772,13 @@ fn main() {
                 &new_region,
             ) {
                 Ok(_) => {}
+                Err(GraphOperationError::OperationError(OperationError::NoChanges)) => {}
                 Err(e) => panic!("Error stitching subgraphs: {e}"),
             }
             conn.execute("END TRANSACTION", []).unwrap();
             operation_conn.execute("END TRANSACTION", []).unwrap();
         }
-        Some(Commands::Push {}) => match push(&operation_conn, &db_uuid) {
+        Some(Commands::Push { remote }) => match push(&operation_conn, remote.as_deref()) {
             Ok(_) => {
                 println!("Push succeeded.");
             }
@@ -754,6 +786,6 @@ fn main() {
                 println!("Push failed: {e}");
             }
         },
-        Some(Commands::Pull {}) => {}
+        Some(Commands::Pull { remote }) => {}
     }
 }

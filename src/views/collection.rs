@@ -1,10 +1,11 @@
-use crate::config::get_theme_color;
-use crate::models::block_group::BlockGroup;
-use crate::models::collection::Collection;
-use crate::models::sample::Sample;
-use crate::models::traits::Query;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use crossterm::event::{KeyCode, KeyEvent};
+use gen_core::HashId;
+use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample, traits::Query};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -13,9 +14,9 @@ use ratatui::{
     widgets::{Block, Paragraph, StatefulWidget, Wrap},
 };
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
-use std::fmt;
 use tui_widget_list::{ListBuilder, ListState, ListView};
+
+use crate::config::get_theme_color;
 
 /// Represents the different focus zones in the UI
 /// TODO: implement a proper cycler
@@ -100,11 +101,11 @@ pub struct CollectionExplorerData {
     /// if the full collection is "/foo/bar", this would be "bar".
     pub current_collection: String,
     /// The block groups in the *entire* collection that have sample_name = NULL
-    pub reference_block_groups: Vec<(i64, String)>,
+    pub reference_block_groups: Vec<(HashId, String)>,
     /// The samples in the entire collection
     pub collection_samples: Vec<String>,
     /// The block groups for each sample
-    pub sample_block_groups: HashMap<String, Vec<(i64, String)>>,
+    pub sample_block_groups: HashMap<String, Vec<(HashId, String)>>,
     /// Immediate sub-collections ("direct children") one level deeper
     pub nested_collections: Vec<String>,
 }
@@ -126,7 +127,7 @@ pub fn gather_collection_explorer_data(
            AND sample_name IS NULL",
         params![full_collection_name],
     );
-    let reference_block_groups: Vec<(i64, String)> =
+    let reference_block_groups: Vec<(HashId, String)> =
         base_bgs.iter().map(|bg| (bg.id, bg.name.clone())).collect();
 
     // 3) Gather all samples associated with the entire collection
@@ -145,7 +146,7 @@ pub fn gather_collection_explorer_data(
         let pairs = bgs
             .iter()
             .map(|bg| (bg.id, bg.name.clone()))
-            .collect::<Vec<(i64, String)>>();
+            .collect::<Vec<(HashId, String)>>();
         sample_block_groups.insert(sample.clone(), pairs);
     }
 
@@ -186,7 +187,7 @@ pub enum ExplorerItem {
         is_current: bool,
     },
     BlockGroup {
-        id: i64,
+        id: HashId,
         name: String,
     },
     Sample {
@@ -216,7 +217,7 @@ pub struct CollectionExplorerState {
     pub total_items: usize,
     pub has_focus: bool,
     /// The currently selected block group
-    pub selected_block_group_id: Option<i64>,
+    pub selected_block_group_id: Option<HashId>,
     /// Tracks which samples are expanded/collapsed
     expanded_samples: HashSet<String>,
     /// Indicates which focus zone should receive focus (if any)
@@ -228,7 +229,7 @@ impl CollectionExplorerState {
         Self::with_selected_block_group(None)
     }
 
-    pub fn with_selected_block_group(block_group_id: Option<i64>) -> Self {
+    pub fn with_selected_block_group(block_group_id: Option<HashId>) -> Self {
         Self {
             list_state: ListState::default(),
             total_items: 0,
@@ -404,7 +405,7 @@ impl CollectionExplorer {
         // Reference block groups
         for (id, name) in &self.data.reference_block_groups {
             items.push(ExplorerItem::BlockGroup {
-                id: *id,
+                id: id.clone(),
                 name: name.clone(),
             });
         }
@@ -430,7 +431,7 @@ impl CollectionExplorer {
                 if let Some(block_groups) = self.data.sample_block_groups.get(sample) {
                     for (id, name) in block_groups {
                         items.push(ExplorerItem::BlockGroup {
-                            id: *id,
+                            id: id.clone(),
                             name: name.clone(),
                         });
                     }
@@ -488,12 +489,12 @@ impl StatefulWidget for &CollectionExplorer {
                                 "Collection:",
                                 Style::default().add_modifier(Modifier::UNDERLINED),
                             ),
-                            Span::raw(format!(" {}", name)),
+                            Span::raw(format!(" {name}")),
                         ]))
                         .wrap(Wrap { trim: false })
                     } else {
                         // This is a link to another collection
-                        Paragraph::new(Line::from(vec![Span::raw(format!("  • {}", name))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("  • {name}"))]))
                             .wrap(Wrap { trim: false })
                     }
                 }
@@ -507,10 +508,10 @@ impl StatefulWidget for &CollectionExplorer {
                         .any(|(ref_id, _)| *ref_id == *id);
 
                     if is_reference {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("   • {}", name))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("   • {name}"))]))
                             .wrap(Wrap { trim: false })
                     } else {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("     • {}", name))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("     • {name}"))]))
                             .wrap(Wrap { trim: false })
                     }
                 }
@@ -563,12 +564,12 @@ impl StatefulWidget for &CollectionExplorer {
         if state.list_state.selected.is_none() || state.list_state.selected.unwrap() >= total_items
         {
             // Selection is invalid or missing - try to find a valid one
-            state.list_state.selected = if let Some(block_group_id) = state.selected_block_group_id
+            state.list_state.selected = if let Some(block_group_id) = &state.selected_block_group_id
             {
                 // Try to find the selected block group in the current items
                 self.get_display_items(state).iter()
                     .enumerate()
-                    .find(|(_, item)| matches!(item, ExplorerItem::BlockGroup { id, .. } if *id == block_group_id))
+                    .find(|(_, item)| matches!(item, ExplorerItem::BlockGroup { id, .. } if id == block_group_id))
                     .map(|(i, _)| i)
                     .or_else(|| self.find_next_selectable(state, 0))
             } else {
@@ -583,11 +584,9 @@ impl StatefulWidget for &CollectionExplorer {
 
 #[cfg(test)]
 mod tests {
+    use gen_models::{block_group::BlockGroup, operations::setup_db, sample::Sample};
+
     use super::*;
-    use crate::models::block_group::BlockGroup;
-    use crate::models::metadata::get_db_uuid;
-    use crate::models::operations::setup_db;
-    use crate::models::sample::Sample;
     use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
 
     /// For these tests we create an in-memory database, run minimal schema
@@ -595,10 +594,9 @@ mod tests {
     #[test]
     fn test_gather_collection_explorer_data() {
         setup_gen_dir();
-        let conn = &mut get_connection(None);
-        let db_uuid = get_db_uuid(conn);
-        let operation_conn = &get_operation_connection(None);
-        setup_db(operation_conn, &db_uuid);
+        let conn = &mut get_connection(None).unwrap();
+        let operation_conn = &get_operation_connection(None).unwrap();
+        setup_db(operation_conn);
 
         // Create collections with hierarchical paths
         Collection::create(conn, "/foo/bar");

@@ -1,15 +1,20 @@
-use crate::gfa::{path_line, write_links, write_segments, Link, Path as GFAPath, Segment};
-use crate::graph::{project_path, GenGraph};
-use crate::models::{
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    fs::File,
+    io::{BufWriter, Write},
+    path::PathBuf,
+};
+
+use gen_core::{is_terminal, strand::Strand, HashId};
+use gen_graph::{project_path, GenGraph};
+use gen_models::{
     block_group::BlockGroup, block_group_edge::BlockGroupEdge, collection::Collection, edge::Edge,
-    node::Node, path::Path, sample::Sample, strand::Strand,
+    path::Path, sample::Sample,
 };
 use itertools::Itertools;
 use rusqlite::Connection;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+
+use crate::gfa::{path_line, write_links, write_segments, Link, Path as GFAPath, Segment};
 
 pub fn export_gfa(
     conn: &Connection,
@@ -28,18 +33,15 @@ pub fn export_gfa(
     if let Some(sample) = sample_name.as_deref() {
         let sample_block_groups = Sample::get_block_groups(conn, collection_name, Some(sample));
         if sample_block_groups.is_empty() {
-            panic!(
-                "No block groups found for collection {} and sample {}",
-                collection_name, sample
-            );
+            panic!("No block groups found for collection {collection_name} and sample {sample}");
         }
         for block_group in sample_block_groups {
-            let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, block_group.id);
+            let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
             edge_set.extend(block_group_edges);
         }
     } else {
         for block_group in block_groups {
-            let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, block_group.id);
+            let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
             edge_set.extend(block_group_edges);
         }
     }
@@ -49,7 +51,15 @@ pub fn export_gfa(
     let mut blocks = Edge::blocks_from_edges(conn, &edges);
     blocks.sort_by(|a, b| a.node_id.cmp(&b.node_id));
 
-    let (graph, _edges_by_node_pair) = Edge::build_graph(&edges, &blocks);
+    let (gen_graph, _edges_by_node_pair) = Edge::build_graph(&edges, &blocks);
+
+    // Create GenGraph from the built graph
+    let mut graph = GenGraph::new();
+    graph.extend(
+        gen_graph
+            .all_edges()
+            .map(|(src, dest, weight)| (src, dest, weight.clone())),
+    );
 
     let file = File::create(filename).unwrap();
     let mut writer = BufWriter::new(file);
@@ -57,7 +67,7 @@ pub fn export_gfa(
     let mut segments = BTreeSet::new();
     let mut split_segments = HashMap::new();
     for block in &blocks {
-        if !Node::is_terminal(block.node_id) {
+        if !is_terminal(block.node_id) {
             if block.end - block.start > chunk_size {
                 let mut sub_segments = vec![];
                 let block_sequence = block.sequence();
@@ -97,7 +107,7 @@ pub fn export_gfa(
 
     let mut links = BTreeSet::new();
     for (source, target, edge_info) in graph.all_edges() {
-        if !Node::is_terminal(source.node_id) && !Node::is_terminal(target.node_id) {
+        if !is_terminal(source.node_id) && !is_terminal(target.node_id) {
             let source_segment = if let Some(splits) = split_segments.get(&source.node_id) {
                 let last_split = splits.last().unwrap();
                 Segment {
@@ -181,14 +191,14 @@ fn get_paths(
     collection_name: &str,
     sample_name: Option<String>,
     graph: &GenGraph,
-    split_segments: &HashMap<i64, Vec<(i64, i64)>>,
+    split_segments: &HashMap<HashId, Vec<(i64, i64)>>,
 ) -> HashMap<String, Vec<(String, Strand)>> {
     let paths = Path::query_for_collection_and_sample(conn, collection_name, sample_name);
 
     let mut path_links: HashMap<String, Vec<(String, Strand)>> = HashMap::new();
 
     for path in paths {
-        let block_group = BlockGroup::get_by_id(conn, path.block_group_id);
+        let block_group = BlockGroup::get_by_id(conn, &path.block_group_id);
         let sample_name = block_group.sample_name;
 
         let path_blocks = path.blocks(conn);
@@ -205,7 +215,7 @@ fn get_paths(
                 projected_path
                     .iter()
                     .filter_map(|(node, strand)| {
-                        if !Node::is_terminal(node.node_id) {
+                        if !is_terminal(node.node_id) {
                             if let Some(splits) = split_segments.get(&node.node_id) {
                                 Some(
                                     splits
@@ -261,41 +271,42 @@ fn write_paths(writer: &mut BufWriter<File>, path_links: HashMap<String, Vec<(St
         };
         writer
             .write_all(&path_line(&path).into_bytes())
-            .unwrap_or_else(|_| panic!("Error writing path {} to GFA stream", name));
+            .unwrap_or_else(|_| panic!("Error writing path {name} to GFA stream"));
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
-
-    use crate::imports::gfa::import_gfa;
-    use crate::models::{
+    use gen_core::{path::PathBlock, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+    use gen_models::{
         block_group::{BlockGroup, PathChange},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
-        metadata,
-        node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID},
-        path::PathBlock,
+        node::Node,
+        operations::setup_db,
         sequence::Sequence,
-        strand::Strand,
-    };
-
-    use crate::models::operations::setup_db;
-    use crate::test_helpers::{
-        get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
+        traits::Query,
     };
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        imports::gfa::import_gfa,
+        test_helpers::{
+            get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
+        },
+        track_database,
+    };
 
     #[test]
     fn test_simple_export() {
         // Sets up a basic graph and then exports it to a GFA file
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
@@ -316,10 +327,10 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCC")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, None);
-        let node2_id = Node::create(conn, &sequence2.hash, None);
-        let node3_id = Node::create(conn, &sequence3.hash, None);
-        let node4_id = Node::create(conn, &sequence4.hash, None);
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
 
         let edge1 = Edge::create(
             conn,
@@ -369,31 +380,31 @@ mod tests {
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: edge1.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: edge2.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: edge3.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: edge4.id,
                 chromosome_index: 0,
                 phased: 0,
             },
             BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: edge5.id,
                 chromosome_index: 0,
                 phased: 0,
@@ -404,11 +415,11 @@ mod tests {
         Path::create(
             conn,
             "1234",
-            block_group.id,
+            &block_group.id,
             &[edge1.id, edge2.id, edge3.id, edge4.id, edge5.id],
         );
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -421,7 +432,7 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, block_group2.id, false);
+        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
 
         assert_eq!(all_sequences, all_sequences2);
 
@@ -433,13 +444,13 @@ mod tests {
     #[test]
     fn test_splits_nodes() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let (bg_id, _path) = setup_block_group(conn);
-        let all_sequences = BlockGroup::get_all_sequences(conn, bg_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &bg_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("split.gfa");
@@ -451,15 +462,15 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, block_group2.id, false);
+        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
 
         assert_eq!(all_sequences, all_sequences2);
 
-        let graph = BlockGroup::get_graph(conn, block_group2.id);
+        let graph = BlockGroup::get_graph(conn, &block_group2.id);
         let graph_nodes = graph
             .nodes()
             .filter_map(|node| {
-                if Node::is_terminal(node.node_id) {
+                if is_terminal(node.node_id) {
                     None
                 } else {
                     Some(node.node_id)
@@ -483,14 +494,15 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/simple.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -502,7 +514,7 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, block_group2.id, false);
+        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -513,14 +525,15 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/anderson_promoters.gfa");
         let collection_name = "anderson promoters".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -532,7 +545,7 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "anderson promoters 2")
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, block_group2.id, false);
+        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -543,14 +556,15 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/reverse_strand.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -562,7 +576,7 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, block_group2.id, false);
+        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -573,16 +587,17 @@ mod tests {
         // split into multiple segments in the exported GFA, and that the multiple segments are
         // re-imported as multiple sequences
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
+
         let (block_group_id, path) = setup_block_group(conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
             .save(conn);
-        let insert_node_id = Node::create(conn, insert_sequence.hash.as_str(), None);
+        let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             id: 0,
             node_id: insert_node_id,
@@ -594,7 +609,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id,
+            block_group_id: block_group_id.clone(),
             path: path.clone(),
             path_accession: None,
             start: 7,
@@ -607,18 +622,18 @@ mod tests {
         let tree = path.intervaltree(conn);
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
 
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
         let mut node_ids = HashSet::new();
         let mut edge_ids = HashSet::new();
         for augmented_edge in augmented_edges {
             let edge = &augmented_edge.edge;
-            if !Node::is_terminal(edge.source_node_id) {
+            if !is_terminal(edge.source_node_id) {
                 node_ids.insert(edge.source_node_id);
             }
-            if !Node::is_terminal(edge.target_node_id) {
+            if !is_terminal(edge.target_node_id) {
                 node_ids.insert(edge.target_node_id);
             }
-            if !Node::is_terminal(edge.source_node_id) && !Node::is_terminal(edge.target_node_id) {
+            if !is_terminal(edge.source_node_id) && !is_terminal(edge.target_node_id) {
                 edge_ids.insert(edge.id);
             }
         }
@@ -631,10 +646,10 @@ mod tests {
         // 7 total
         assert_eq!(edge_ids.len(), 7);
 
-        let nodes = Node::get_nodes(conn, &node_ids.into_iter().collect::<Vec<i64>>());
+        let nodes = Node::query_by_ids(conn, &node_ids);
         let mut node_hashes = HashSet::new();
         for node in nodes {
-            if !Node::is_terminal(node.id) {
+            if !is_terminal(node.id) {
                 node_hashes.insert(node.sequence_hash);
             }
         }
@@ -652,18 +667,18 @@ mod tests {
             .pop()
             .unwrap();
 
-        let augmented_edges2 = BlockGroupEdge::edges_for_block_group(conn, block_group2.id);
+        let augmented_edges2 = BlockGroupEdge::edges_for_block_group(conn, &block_group2.id);
         let mut node_ids2 = HashSet::new();
         let mut edge_ids2 = HashSet::new();
         for augmented_edge in augmented_edges2 {
             let edge = &augmented_edge.edge;
-            if !Node::is_terminal(edge.source_node_id) {
+            if !is_terminal(edge.source_node_id) {
                 node_ids2.insert(edge.source_node_id);
             }
-            if !Node::is_terminal(edge.target_node_id) {
+            if !is_terminal(edge.target_node_id) {
                 node_ids2.insert(edge.target_node_id);
             }
-            if !Node::is_terminal(edge.source_node_id) && !Node::is_terminal(edge.target_node_id) {
+            if !is_terminal(edge.source_node_id) && !is_terminal(edge.target_node_id) {
                 edge_ids2.insert(edge.id);
             }
         }
@@ -677,10 +692,10 @@ mod tests {
         // 7 total
         assert_eq!(edge_ids2.len(), 7);
 
-        let nodes2 = Node::get_nodes(conn, &node_ids2.into_iter().collect::<Vec<i64>>());
+        let nodes2 = Node::query_by_ids(conn, &node_ids2);
         let mut node_hashes2 = HashSet::new();
         for node in nodes2 {
-            if !Node::is_terminal(node.id) {
+            if !is_terminal(node.id) {
                 node_hashes2.insert(node.sequence_hash);
             }
         }

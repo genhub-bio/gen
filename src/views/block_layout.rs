@@ -1,14 +1,15 @@
-use crate::graph::find_articulation_points;
-use crate::graph::{GenGraph, GraphEdge, GraphNode};
-use crate::models::node::Node;
-use crate::views::block_group_viewer::PlotParameters;
-use log::{debug, info, warn};
-use petgraph::algo::toposort;
-use petgraph::graph::NodeIndex;
-use petgraph::graphmap::GraphMap;
-use petgraph::stable_graph::StableDiGraph;
-use rust_sugiyama::configure::Config;
 use std::collections::HashMap;
+
+use gen_core::is_terminal;
+use gen_graph::{find_articulation_points, GenGraph, GraphEdge, GraphNode};
+use gen_models::node::Node;
+use log::{debug, info, warn};
+use petgraph::{
+    algo::toposort, graph::NodeIndex, graphmap::GraphMap, stable_graph::StableDiGraph, Directed,
+};
+use rust_sugiyama::configure::Config;
+
+use crate::views::block_group_viewer::PlotParameters;
 
 /// Parameters for the partition-based layout algorithm
 /// - `MIN_CHUNK_SIZE`: the minimum size to start a new partition at an articulation point
@@ -66,9 +67,13 @@ impl Partition {
 
         // Create a topological sort of the graph to ensure that each time we visit an articulation point,
         // we have already visited all the nodes that can possibly come before it.
-        let sorted_nodes = toposort(&graph, None).unwrap_or_else(|_| {
-            panic!("Graph is not a DAG");
-        });
+        let sorted_nodes = toposort(&graph, None)
+            .unwrap_or_else(|_| {
+                panic!("Graph is not a DAG");
+            })
+            .into_iter()
+            .map(|n| n)
+            .collect::<Vec<_>>();
 
         // Create the partition subgraphs
         for node in sorted_nodes {
@@ -235,10 +240,13 @@ impl BaseLayout {
                 );
             });
 
-        // Make a GraphMap based on the first partition subgraph (StableGraph) we're asked to process
+        // Make a GenGraph based on the first partition subgraph (StableGraph) we're asked to process
         // - we can't convert a StableGraph to a DiGraphMap directly, so we convert to a Graph first
         // - this will grow (and shrink) as we traverse the partition
-        let subgraph = GraphMap::from_graph(partition.parts[origin_idx].clone().into());
+        let temp_graph: GraphMap<GraphNode, Vec<GraphEdge>, Directed> =
+            GraphMap::from_graph(partition.parts[origin_idx].clone().into());
+        let mut subgraph = GenGraph::new();
+        subgraph.extend(temp_graph.all_edges().map(|(a, b, c)| (a, b, c.clone())));
 
         // Set up the config for the layout algorithm
         // We set the vertex size to 1.0, 1.0 so that the layout algorithm does not take individual node size into account
@@ -269,8 +277,7 @@ impl BaseLayout {
         // Make sure it succeeded
         assert!(
             base_layout._partial_layouts.contains_key(&origin_idx),
-            "Failed to compute layout for partition index {}",
-            origin_idx
+            "Failed to compute layout for partition index {origin_idx}"
         );
 
         // Because this is the first run, we can just move it over to the main layout, without modifications.
@@ -306,7 +313,7 @@ impl BaseLayout {
             "Invalid partition index"
         );
 
-        info!("Computing layout for partition index {}", partition_index);
+        info!("Computing layout for partition index {partition_index}");
 
         // Make a mutable clone of the subgraph we want to layout
         // - this does not include the dummy nodes and edges to connect to the next subgraph
@@ -395,8 +402,7 @@ impl BaseLayout {
 
         assert!(
             self._partial_layouts.contains_key(&next_idx),
-            "Failed to compute layout for partition index {}",
-            next_idx
+            "Failed to compute layout for partition index {next_idx}"
         );
 
         // Get the partial layout of the new partition subgraph
@@ -478,7 +484,10 @@ impl BaseLayout {
         // - inter-partition edges
         // This does require converting from the stablegraph format to graphmap format
         let subgraph = self.partition.parts[next_idx].clone();
-        let subgraph_map: GenGraph = GraphMap::from_graph(subgraph.into());
+        let temp_graph: GraphMap<GraphNode, Vec<GraphEdge>, Directed> =
+            GraphMap::from_graph(subgraph.into());
+        let mut subgraph_map = GenGraph::new();
+        subgraph_map.extend(temp_graph.all_edges().map(|(a, b, c)| (a, b, c.clone())));
         self.layout_graph.extend(subgraph_map.all_edges());
 
         // The inter-partition edges are not included in the subgraph, so we add them separately
@@ -629,7 +638,7 @@ impl ScaledLayout {
             .all_edges()
             .filter(|(source, target, _)| {
                 // Filter out edges that connect to start or end nodes
-                !Node::is_terminal(source.node_id) && !Node::is_terminal(target.node_id)
+                !is_terminal(source.node_id) && !is_terminal(target.node_id)
             })
             .map(|(source, target, _)| {
                 let source_coord = self
@@ -663,11 +672,22 @@ impl ScaledLayout {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::graph::{GraphEdge, GraphNode};
-    use crate::models::strand::Strand;
+    use gen_core::{strand::Strand, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
+    use gen_graph::{GraphEdge, GraphNode};
     use itertools::Itertools;
     use petgraph::graphmap::DiGraphMap;
+
+    use super::*;
+
+    fn get_id(i: i32) -> HashId {
+        if i == 1 {
+            PATH_START_NODE_ID
+        } else if i == 2 {
+            PATH_END_NODE_ID
+        } else {
+            HashId::pad_str(i)
+        }
+    }
 
     fn make_test_graph(edges: Vec<(i32, i32)>, nodes: Option<Vec<GraphNode>>) -> GenGraph {
         // Create default nodes if none provided
@@ -679,26 +699,33 @@ mod tests {
                 .into_iter()
                 .map(|id| GraphNode {
                     block_id: id as i64,
-                    node_id: id as i64,
+                    node_id: get_id(id),
                     sequence_start: 0,
                     sequence_end: 10,
                 })
                 .collect()
         });
 
-        DiGraphMap::from_edges(edges.iter().map(|(s, t)| {
+        let temp_graph = DiGraphMap::from_edges(edges.iter().map(|(s, t)| {
             (
                 *nodes.iter().find(|gn| gn.block_id == *s as i64).unwrap(),
                 *nodes.iter().find(|gn| gn.block_id == *t as i64).unwrap(),
                 vec![GraphEdge {
-                    edge_id: 0,
+                    edge_id: HashId::pad_str(0),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
                 }],
             )
-        }))
+        }));
+        let mut wrapped_graph = GenGraph::new();
+        wrapped_graph.extend(
+            temp_graph
+                .all_edges()
+                .map(|(src, dest, weight)| (src, dest, weight.clone())),
+        );
+        wrapped_graph
     }
 
     #[test]
@@ -719,9 +746,9 @@ mod tests {
         let graph = make_test_graph(edges, None);
         let ap = find_articulation_points(&graph)
             .iter()
-            .map(|node| node.block_id)
+            .map(|node| node.node_id)
             .collect::<Vec<_>>();
-        let expected = vec![2, 4];
+        let expected = vec![get_id(2), get_id(4)];
         assert_eq!(ap, expected);
     }
 
@@ -735,9 +762,9 @@ mod tests {
         let graph = make_test_graph(edges, None);
         let ap = find_articulation_points(&graph)
             .iter()
-            .map(|node| node.block_id)
+            .map(|node| node.node_id)
             .collect::<Vec<_>>();
-        let expected = vec![2, 5];
+        let expected = vec![get_id(2), get_id(5)];
         assert_eq!(ap, expected);
     }
 
@@ -863,19 +890,19 @@ mod tests {
         // Create a test subgraph manually
         let n0 = GraphNode {
             block_id: 0,
-            node_id: Node::get_start_node().id,
+            node_id: get_id(0),
             sequence_start: 0,
             sequence_end: 10,
         };
         let n1 = GraphNode {
             block_id: 1,
-            node_id: 10,
+            node_id: get_id(1),
             sequence_start: 0,
             sequence_end: 20,
         };
         let n2 = GraphNode {
             block_id: 2,
-            node_id: 20,
+            node_id: get_id(2),
             sequence_start: 0,
             sequence_end: 40,
         };
@@ -916,7 +943,7 @@ mod tests {
         let mut nodes = (0..6)
             .map(|i| GraphNode {
                 block_id: i,
-                node_id: i,
+                node_id: get_id(i as i32),
                 sequence_start: 0,
                 sequence_end: 10,
             })
@@ -963,7 +990,7 @@ mod tests {
         let nodes = (0..6)
             .map(|i| GraphNode {
                 block_id: i,
-                node_id: i,
+                node_id: get_id(i as i32),
                 sequence_start: 0,
                 sequence_end: (i + 1) * 10,
             })

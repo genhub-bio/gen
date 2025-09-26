@@ -1,23 +1,27 @@
-use crate::calculate_hash;
-use crate::gfa::bool_to_strand;
-use crate::gfa_reader::{Gfa, Segment};
-use crate::models::block_group_edge::AugmentedEdgeData;
-use crate::models::operations::{OperationFile, OperationInfo};
-use crate::models::{
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
+
+use gen_core::{is_terminal, HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_models::{
     block_group::BlockGroup,
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     edge::{Edge, EdgeData},
     file_types::FileTypes,
-    node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID},
+    node::Node,
+    operations::{OperationFile, OperationInfo},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    strand::Strand,
+    session_operations,
 };
-use crate::operation_management;
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
-use std::io;
+
+use crate::{
+    gfa::bool_to_strand,
+    gfa_reader::{Gfa, Segment},
+};
 
 pub fn update_with_gfa(
     conn: &Connection,
@@ -37,7 +41,7 @@ pub fn update_with_gfa(
     (let's call it an "unmatched path"), we create a new path (and nodes and edges as necessary)
     for the unmatched path within the same block group as the existing path.
     */
-    let mut session = operation_management::start_operation(conn);
+    let mut session = session_operations::start_operation(conn);
 
     let _new_sample =
         Sample::get_or_create_child(conn, collection_name, new_sample_name, parent_sample_name);
@@ -47,7 +51,7 @@ pub fn update_with_gfa(
     // be the basis for an update
     let existing_paths = block_groups
         .iter()
-        .map(|block_group| BlockGroup::get_current_path(conn, block_group.id))
+        .map(|block_group| BlockGroup::get_current_path(conn, &block_group.id))
         .collect::<Vec<Path>>();
 
     let gfa: Gfa<String, (), ()> = Gfa::parse_gfa_file(gfa_path);
@@ -82,7 +86,8 @@ pub fn update_with_gfa(
             .join("");
         for existing_path in existing_paths.iter() {
             if existing_path.sequence(conn) == path_sequence {
-                existing_path_ids_by_new_path_name.insert(path.name.clone(), existing_path.id);
+                existing_path_ids_by_new_path_name
+                    .insert(path.name.clone(), existing_path.id.clone());
             }
         }
     }
@@ -109,7 +114,8 @@ pub fn update_with_gfa(
             .join("");
         for existing_path in existing_paths.iter() {
             if existing_path.sequence(conn) == walk_sequence {
-                existing_path_ids_by_new_path_name.insert(walk_name.clone(), existing_path.id);
+                existing_path_ids_by_new_path_name
+                    .insert(walk_name.clone(), existing_path.id.clone());
             }
         }
     }
@@ -169,15 +175,14 @@ pub fn update_with_gfa(
         }
         if matched_new_paths.is_empty() {
             println!(
-                "Warning: No path found that matches path {} from input GFA, skipping",
-                unmatched_path_name
+                "Warning: No path found that matches path {unmatched_path_name} from input GFA, skipping"
             );
         } else if matched_new_paths.len() == 1 {
             let matched_new_path_name = matched_new_paths.iter().next().unwrap();
             let existing_path_id = existing_path_ids_by_new_path_name
                 .get(*matched_new_path_name)
                 .unwrap();
-            let existing_path = Path::get(conn, *existing_path_id);
+            let existing_path = Path::get_by_id(conn, existing_path_id);
             let matched_path_segments = path_segments_by_name.get(*matched_new_path_name).unwrap();
             let unmatched_path_segments = path_segments_by_name.get(unmatched_path_name).unwrap();
             let unmatched_path_strands = path_strands_by_name.get(unmatched_path_name).unwrap();
@@ -194,8 +199,7 @@ pub fn update_with_gfa(
             new_paths_added += 1;
         } else {
             println!(
-                "Warning: Multiple paths found that match path {} from input GFA, skipping",
-                unmatched_path_name
+                "Warning: Multiple paths found that match path {unmatched_path_name} from input GFA, skipping"
             );
         }
     }
@@ -204,9 +208,9 @@ pub fn update_with_gfa(
     // segments that aren't in any path, create the corresponding edges and nodes, and do the same
     // recursively (complete the transitive closure)
 
-    let summary_str = format!("{} new paths added", new_paths_added);
+    let summary_str = format!("{new_paths_added} new paths added");
 
-    operation_management::end_operation(
+    session_operations::end_operation(
         conn,
         operation_conn,
         &mut session,
@@ -222,7 +226,7 @@ pub fn update_with_gfa(
     )
     .unwrap();
 
-    println!("Updated with GFA file: {}", gfa_path);
+    println!("Updated with GFA file: {gfa_path}");
 
     Ok(())
 }
@@ -296,7 +300,7 @@ fn create_new_path_from_existing(
                 });
 
                 // Create the boundary edges that will be interrupted by the new path
-                if !Node::is_terminal(block_with_start.node_id) && *start > 0 {
+                if !is_terminal(block_with_start.node_id) && *start > 0 {
                     healing_edges.push(AugmentedEdgeData {
                         edge_data: EdgeData {
                             source_node_id: block_with_start.node_id,
@@ -310,7 +314,7 @@ fn create_new_path_from_existing(
                         phased: 0,
                     });
                 }
-                if !Node::is_terminal(block_with_end.node_id) {
+                if !is_terminal(block_with_end.node_id) {
                     healing_edges.push(AugmentedEdgeData {
                         edge_data: EdgeData {
                             source_node_id: block_with_end.node_id,
@@ -343,7 +347,7 @@ fn create_new_path_from_existing(
             let node_id = Node::create(
                 conn,
                 &sequence.hash,
-                calculate_hash(&format!(
+                &HashId::convert_str(&format!(
                     "{unmatched_path_name}_{segment_id}_{hash}",
                     hash = &sequence.hash
                 )),
@@ -428,7 +432,7 @@ fn create_new_path_from_existing(
         });
     }
 
-    let block_group_id = existing_path.block_group_id;
+    let block_group_id = existing_path.block_group_id.clone();
     let new_edge_ids = Edge::bulk_create(
         conn,
         &new_path_edges
@@ -449,27 +453,30 @@ fn create_new_path_from_existing(
         .iter()
         .enumerate()
         .map(|(i, edge_id)| BlockGroupEdgeData {
-            block_group_id,
+            block_group_id: block_group_id.clone(),
             edge_id: *edge_id,
             chromosome_index: all_edges[i].chromosome_index,
             phased: all_edges[i].phased,
         })
         .collect::<Vec<BlockGroupEdgeData>>();
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
-    Path::create(conn, unmatched_path_name, block_group_id, &new_edge_ids);
+    Path::create(conn, unmatched_path_name, &block_group_id, &new_edge_ids);
 }
 
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
-
-    use crate::imports::fasta::import_fasta;
-    use crate::models::operations::setup_db;
-    use crate::models::{metadata, traits::Query};
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
-    use rusqlite::types::Value as SQLValue;
     use std::path::PathBuf;
+
+    use gen_models::{operations::setup_db, traits::Query};
+    use rusqlite::types::Value as SQLValue;
+
+    use super::*;
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     #[test]
     fn test_basic_update() {
@@ -483,10 +490,10 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
 
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -526,7 +533,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -538,10 +545,10 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
 
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -581,7 +588,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
     }

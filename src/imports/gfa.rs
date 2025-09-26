@@ -1,31 +1,36 @@
-use crate::gfa::bool_to_strand;
-use crate::gfa_reader::Gfa;
-use crate::graph::{GraphEdge, GraphNode};
-use crate::models::file_types::FileTypes;
-use crate::models::operations::{OperationFile, OperationInfo};
-use crate::models::sample::Sample;
-use crate::models::{
+use std::{collections::HashMap, path::Path as FilePath};
+
+use gen_core::{
+    is_end_node, is_start_node, HashId, Strand, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID,
+    PATH_START_NODE_ID,
+};
+use gen_graph::{GraphEdge, GraphNode};
+use gen_models::{
     block_group::BlockGroup,
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData, NO_CHROMOSOME_INDEX},
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     edge::{Edge, EdgeData},
-    node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID},
-    operations::Operation,
+    errors::OperationError,
+    file_types::FileTypes,
+    node::Node,
+    operations::{Operation, OperationFile, OperationInfo},
     path::Path,
+    sample::Sample,
     sequence::Sequence,
-    strand::Strand,
+    session_operations::{end_operation, start_operation},
+    traits::Query,
 };
-use crate::operation_management::{end_operation, start_operation, OperationError};
-use crate::progress_bar::{get_handler, get_message_bar, get_progress_bar, get_time_elapsed_bar};
+use indexmap::IndexSet;
 use itertools::Itertools;
-use petgraph::algo::kosaraju_scc;
-use petgraph::prelude::UnGraphMap;
-use petgraph::visit::Dfs;
-use rusqlite;
-use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
-use std::path::Path as FilePath;
+use petgraph::{algo::kosaraju_scc, prelude::UnGraphMap, visit::Dfs};
+use rusqlite::{self, Connection};
 use thiserror::Error;
+
+use crate::{
+    gfa::bool_to_strand,
+    gfa_reader::Gfa,
+    progress_bar::{get_handler, get_message_bar, get_progress_bar, get_time_elapsed_bar},
+};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum GFAImportError {
@@ -53,7 +58,7 @@ pub fn import_gfa<'a>(
     bar.set_message("Parsing GFA");
     let gfa: Gfa<String, (), ()> = Gfa::parse_gfa_file(gfa_path.to_str().unwrap());
     let mut sequences_by_segment_id: HashMap<&String, Sequence> = HashMap::new();
-    let mut node_ids_by_segment_id: HashMap<&String, i64> = HashMap::new();
+    let mut node_ids_by_segment_id: HashMap<&String, HashId> = HashMap::new();
     bar.finish();
 
     let bar = progress_bar.add(get_progress_bar(gfa.segments.len() as u64));
@@ -65,16 +70,18 @@ pub fn import_gfa<'a>(
             .sequence(input_sequence)
             .save(conn);
         sequences_by_segment_id.insert(&segment.id, sequence.clone());
-        let node_id = Node::create(conn, &sequence.hash, None);
+        // TODO: Node hash is always new, it's sorted by insert time via being a v7 uuid but maybe want to
+        // define the hash itself for idempotency?
+        let node_id = Node::create(conn, &sequence.hash, &HashId::uuid7());
         node_ids_by_segment_id.insert(&segment.id, node_id);
         bar.inc(1);
     }
     bar.finish();
 
-    let mut edges = HashSet::new();
+    let mut edges = IndexSet::new();
     let bar = progress_bar.add(get_progress_bar(gfa.links.len() as u64));
-    let mut source_refs_in_links = HashSet::new();
-    let mut target_refs_in_links = HashSet::new();
+    let mut source_refs_in_links = IndexSet::new();
+    let mut target_refs_in_links = IndexSet::new();
 
     bar.set_message("Parsing Links");
     for link in &gfa.links {
@@ -96,10 +103,10 @@ pub fn import_gfa<'a>(
 
     let pure_source_refs = source_refs_in_links
         .difference(&target_refs_in_links)
-        .collect::<HashSet<_>>();
+        .collect::<IndexSet<_>>();
     let pure_target_refs = target_refs_in_links
         .difference(&source_refs_in_links)
-        .collect::<HashSet<_>>();
+        .collect::<IndexSet<_>>();
     for source_ref in pure_source_refs {
         let source_node_id = *node_ids_by_segment_id.get(source_ref).unwrap();
         edges.insert(edge_data_from_fields(
@@ -191,7 +198,7 @@ pub fn import_gfa<'a>(
     gen_bar.set_message("Creating Gen Objects");
     let edge_ids = Edge::bulk_create(conn, &edges.into_iter().collect::<Vec<EdgeData>>());
 
-    let saved_edges = Edge::bulk_load(conn, &edge_ids);
+    let saved_edges = Edge::query_by_ids(conn, &edge_ids);
     let mut edge_ids_by_data = HashMap::new();
     for edge in saved_edges {
         let key = edge_data_from_fields(
@@ -204,7 +211,7 @@ pub fn import_gfa<'a>(
         edge_ids_by_data.insert(key, edge.id);
     }
 
-    let mut created_blockgroup_edges: HashSet<i64> = HashSet::new();
+    let mut created_blockgroup_edges: IndexSet<HashId> = IndexSet::new();
 
     for input_path in &gfa.paths {
         let path_name = &input_path.name;
@@ -252,7 +259,7 @@ pub fn import_gfa<'a>(
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, block_group.id, &path_edge_ids);
+        Path::create(conn, path_name, &block_group.id, &path_edge_ids);
     }
 
     for input_walk in &gfa.walk {
@@ -294,14 +301,14 @@ pub fn import_gfa<'a>(
             &path_edge_ids
                 .iter()
                 .map(|id| BlockGroupEdgeData {
-                    block_group_id: block_group.id,
+                    block_group_id: block_group.id.clone(),
                     edge_id: *id,
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, block_group.id, &path_edge_ids);
+        Path::create(conn, path_name, &block_group.id, &path_edge_ids);
     }
 
     // make any block group edges not in paths or walks
@@ -328,7 +335,7 @@ pub fn import_gfa<'a>(
     let bar = progress_bar.add(get_progress_bar(None));
     bar.set_message("Breaking cycles");
     let message_bar = progress_bar.add(get_message_bar());
-    let graph = BlockGroup::get_graph(conn, block_group.id);
+    let graph = BlockGroup::get_graph(conn, &block_group.id);
     let mut undirected_graph: UnGraphMap<GraphNode, GraphEdge> = UnGraphMap::new();
     for node in graph.nodes() {
         undirected_graph.add_node(node);
@@ -343,9 +350,9 @@ pub fn import_gfa<'a>(
             let mut has_start = false;
             let mut has_end = false;
             for node in subgraph.iter() {
-                if !has_start && Node::is_start_node(node.node_id) {
+                if !has_start && is_start_node(node.node_id) {
                     has_start = true;
-                } else if !has_end && Node::is_end_node(node.node_id) {
+                } else if !has_end && is_end_node(node.node_id) {
                     has_end = true;
                 };
                 if has_start && has_end {
@@ -403,7 +410,7 @@ pub fn import_gfa<'a>(
         &new_edge_ids
             .iter()
             .map(|id| BlockGroupEdgeData {
-                block_group_id: block_group.id,
+                block_group_id: block_group.id.clone(),
                 edge_id: *id,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
@@ -432,10 +439,10 @@ pub fn import_gfa<'a>(
 }
 
 fn edge_data_from_fields(
-    source_node_id: i64,
+    source_node_id: HashId,
     source_coordinate: i64,
     source_strand: Strand,
-    target_node_id: i64,
+    target_node_id: HashId,
     target_strand: Strand,
 ) -> EdgeData {
     EdgeData {
@@ -450,13 +457,16 @@ fn edge_data_from_fields(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::models::metadata;
-    use crate::models::operations::setup_db;
-    use crate::models::traits::*;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
+    use std::{collections::HashSet, path::PathBuf};
+
+    use gen_models::{operations::setup_db, traits::*};
     use rusqlite::types::Value as SQLValue;
-    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     #[test]
     fn test_import_simple_gfa() {
@@ -464,18 +474,18 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/simple.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
             rusqlite::params!(
-                SQLValue::from(block_group_id),
+                SQLValue::from(block_group_id.clone()),
                 SQLValue::from("m123".to_string()),
             ),
         )[0]
@@ -494,10 +504,10 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/simple.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, "new-sample", conn, op_conn);
         assert_eq!(
             Sample::get_by_name(conn, "new-sample").unwrap().name,
@@ -511,14 +521,14 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/no_path.gfa");
         let collection_name = "no path".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAAATTTTGGGGCCCC".to_string()])
@@ -534,18 +544,18 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/walk.gfa");
         let collection_name = "walk".to_string();
-        let conn = &mut get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &mut get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
             rusqlite::params!(
-                SQLValue::from(block_group_id),
+                SQLValue::from(block_group_id.clone()),
                 SQLValue::from("291344".to_string()),
             ),
         )[0]
@@ -564,18 +574,18 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/reverse_strand.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
             rusqlite::params!(
-                SQLValue::from(block_group_id),
+                SQLValue::from(block_group_id.clone()),
                 SQLValue::from("124".to_string()),
             ),
         )[0]
@@ -594,21 +604,21 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/anderson_promoters.gfa");
         let collection_name = "anderson promoters".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
         let paths = Path::query_for_collection(conn, &collection_name);
         assert_eq!(paths.len(), 20);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
             rusqlite::params!(
-                SQLValue::from(block_group_id),
+                SQLValue::from(block_group_id.clone()),
                 SQLValue::from("BBa_J23100".to_string()),
             ),
         )[0]
@@ -689,7 +699,7 @@ mod tests {
                 }
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(all_sequences.len(), 1024);
         assert_eq!(all_sequences, expected_sequences);
 
@@ -703,18 +713,18 @@ mod tests {
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/aa.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
             rusqlite::params!(
-                SQLValue::from(block_group_id),
+                SQLValue::from(block_group_id.clone()),
                 SQLValue::from("124".to_string()),
             ),
         )[0]
@@ -723,7 +733,7 @@ mod tests {
         let result = path.sequence(conn);
         assert_eq!(result, "AA");
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(all_sequences, HashSet::from_iter(vec!["AA".to_string()]));
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -736,15 +746,15 @@ mod tests {
         let gfa_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/cycle_no_path.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAACCCTTTGGGACTCTA".to_string()])
@@ -759,15 +769,15 @@ mod tests {
         let gfa_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/cycle_with_path.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
-        let block_group_id = BlockGroup::get_id(conn, &collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["TTTGGGACTCTAAAACCC".to_string()])

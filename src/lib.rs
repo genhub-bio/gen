@@ -1,7 +1,10 @@
-use std::fs::File;
-use std::io::BufRead;
-use std::path::Path;
-use std::{io, str};
+use std::{
+    fs::File,
+    io,
+    io::BufRead,
+    path::{Path, PathBuf},
+    str,
+};
 pub mod annotations;
 pub mod commands;
 pub mod config;
@@ -9,17 +12,19 @@ pub mod diffs;
 pub mod exports;
 pub mod fasta;
 pub mod genbank;
+// needed for cross-schema imports
+use gen_models::gen_models_capnp;
+#[allow(clippy::all)]
+pub mod generated;
+pub use generated::gen_schema_capnp;
 pub mod gfa;
 pub mod gfa_reader;
-pub mod graph;
 pub mod graph_operators;
 pub mod imports;
-pub mod migrations;
-pub mod models;
+
 pub mod operation_management;
 pub mod patch;
 mod progress_bar;
-pub mod range;
 #[cfg(any(test, debug_assertions))]
 pub mod test_helpers;
 pub mod translate;
@@ -29,17 +34,106 @@ pub mod views;
 #[cfg(feature = "python-bindings")]
 pub mod python_api;
 
-use crate::migrations::run_migrations;
+// reexports for public api, put behind features as needed
+pub use gen_core as core;
+pub use gen_graph as graph;
+#[cfg(feature = "models")]
+pub use gen_models as models;
+use gen_models::{
+    files::GenDatabase,
+    migrations::{run_migrations, run_operation_migrations},
+};
 use noodles::vcf::variant::record::samples::series::value::genotype::Phasing;
-use rusqlite::Connection;
-use sha2::{Digest, Sha256};
+use rusqlite::{Connection, OptionalExtension};
 
-pub fn get_connection(db_path: &str) -> Connection {
-    let mut conn =
-        Connection::open(db_path).unwrap_or_else(|_| panic!("Error connecting to {}", db_path));
+pub fn get_connection(
+    db_path: impl Into<PathBuf>,
+) -> Result<Connection, core::errors::ConnectionError> {
+    let db_path = db_path.into();
+    let mut conn = Connection::open(&db_path)?;
     rusqlite::vtab::array::load_module(&conn).unwrap();
     run_migrations(&mut conn);
-    conn
+
+    Ok(conn)
+}
+
+pub fn track_database(
+    conn: &Connection,
+    op_conn: &Connection,
+) -> Result<(), core::errors::ConnectionError> {
+    // This records the database in the main gen database file. It prevents things like a user copying a database to a new file
+    // or overwriting databases without informing Gen about the changes. Not doing this would lead to situations like 2 databases
+    // with the same uuid having changes being made in parallel but not having the same content.
+    let db_uuid = models::metadata::Metadata::get_db_uuid(conn);
+    if let Some(db_path) = conn.path() {
+        if db_path.is_empty() {
+            GenDatabase::create(op_conn, &db_uuid, "memory", ":memory:").map_err(|e| {
+                core::errors::ConnectionError::DatabaseTracking(format!(
+                    "Failed to create database tracking entry: {e}"
+                ))
+            })?;
+        } else {
+            let path = PathBuf::from(db_path);
+            let mut rel_path = vec![];
+            for component in path.ancestors() {
+                let component_name = component.file_name().unwrap();
+                if component.join(".gen").exists() {
+                    break;
+                }
+                rel_path.push(component_name);
+            }
+            let relative_path = rel_path.iter().rev().collect::<PathBuf>();
+            let relative_path_str = relative_path.to_str().unwrap();
+
+            let exist_by_uuid = GenDatabase::get_by_uuid(op_conn, &db_uuid).optional()?;
+            let exist_by_path = GenDatabase::get_by_path(op_conn, relative_path_str).optional()?;
+            if let Some(path_db) = exist_by_path {
+                if let Some(uuid_db) = exist_by_uuid {
+                    if path_db == uuid_db {
+                        return Ok(());
+                    }
+                } else {
+                    return Err(core::errors::ConnectionError::DatabaseTracking(
+                format!("Database conflict: Database '{}' (UUID: {}) is registered at path '{}', which does not match the database found at {}",
+                    path_db.name, path_db.db_uuid, path_db.path, db_path)
+            ));
+                }
+            } else if let Some(uuid_db) = exist_by_uuid {
+                return Err(core::errors::ConnectionError::DatabaseTracking(
+                format!("Database conflict: Database '{}' (UUID: {}) is registered at path '{}', but was accessed from {}. Was this file moved?",
+                    uuid_db.name, uuid_db.db_uuid, uuid_db.path, db_path)
+            ));
+            }
+
+            let db_name = relative_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            GenDatabase::create(op_conn, &db_uuid, &db_name, relative_path_str).map_err(|e| {
+                core::errors::ConnectionError::DatabaseTracking(format!(
+                    "Failed to create database tracking entry: {e}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+pub fn get_operation_connection(
+    db_path: impl Into<Option<PathBuf>>,
+) -> Result<Connection, core::errors::ConnectionError> {
+    let db_path = db_path.into();
+    let path = if let Some(s) = db_path {
+        s
+    } else {
+        core::config::get_gen_db_path()
+    };
+    let mut conn = Connection::open(&path)?;
+    rusqlite::vtab::array::load_module(&conn).unwrap();
+    run_operation_migrations(&mut conn);
+    Ok(conn)
 }
 
 pub fn run_query(conn: &Connection, query: &str) {
@@ -47,14 +141,6 @@ pub fn run_query(conn: &Connection, query: &str) {
     for entry in stmt.query_map([], |_| Ok(())).unwrap() {
         println!("{entry:?}");
     }
-}
-
-pub fn calculate_hash(t: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(t);
-    let result = hasher.finalize();
-
-    format!("{:x}", result)
 }
 
 pub struct Genotype {
@@ -116,8 +202,12 @@ pub fn normalize_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use gen_models::{files::GenDatabase, metadata::get_db_uuid, traits::Query};
+
     use super::*;
-    use crate::test_helpers::get_connection;
+    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
 
     #[cfg(test)]
     mod test_normalize_string {
@@ -138,16 +228,8 @@ mod tests {
     }
 
     #[test]
-    fn it_hashes() {
-        assert_eq!(
-            calculate_hash("a test"),
-            "a82639b6f8c3a6e536d8cc562c3b86ff4b012c84ab230c1e5be649aa9ad26d21"
-        );
-    }
-
-    #[test]
     fn it_queries() {
-        let conn = get_connection(None);
+        let conn = get_connection(None).unwrap();
         let sequence_count: i64 = conn
             .query_row(
                 "SELECT count(*) from sequences where hash = 'foo'",
@@ -214,5 +296,103 @@ mod tests {
         assert_eq!(get_overlap(10, 20, 10, 20), (true, false, true));
         assert_eq!(get_overlap(10, 20, 5, 15), (false, true, true));
         assert_eq!(get_overlap(10, 20, 0, 10), (false, true, false));
+    }
+
+    #[test]
+    fn test_database_tracking_integration() {
+        // Assert that connecting to the database triggers database tracking
+
+        let gen_dir = setup_gen_dir();
+        let db_path = gen_dir.parent().unwrap().join("test_tracking.db");
+        let conn = &get_connection(db_path.to_str()).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        track_database(conn, op_conn).unwrap();
+
+        let db_uuid: String = models::metadata::get_db_uuid(conn);
+
+        let tracked_db = GenDatabase::get_by_uuid(op_conn, &db_uuid).unwrap();
+
+        assert_eq!(tracked_db.db_uuid, db_uuid);
+        assert_eq!(tracked_db.name, "test_tracking");
+        assert_eq!(tracked_db.path, "test_tracking.db");
+
+        // Connect again - should not create duplicate entry
+        let _conn2 = crate::get_connection(db_path).unwrap();
+
+        let all_entries: Vec<GenDatabase> = GenDatabase::query(
+            op_conn,
+            "SELECT * FROM gen_databases WHERE db_uuid = ?1",
+            rusqlite::params![db_uuid],
+        );
+
+        assert_eq!(all_entries.len(), 1);
+    }
+
+    #[test]
+    fn test_path_conflict_detection_different_path() {
+        let gen_dir = setup_gen_dir();
+        let db_path = gen_dir.parent().unwrap().join("original_location.db");
+
+        // Because the test_helper get_connection overwrites existing db files, we have to
+        // use the actual get_connection function
+        let conn = &crate::get_connection(&db_path).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        track_database(conn, op_conn).unwrap();
+
+        // Force write of the WAL file into the db so we can copy
+        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .unwrap();
+
+        // Move database to different location within .gen directory
+        let moved_db_path = gen_dir.parent().unwrap().join("moved_location.db");
+        fs::copy(&db_path, &moved_db_path).unwrap();
+
+        // Try to access from moved location - should detect path conflict
+        let conn = &crate::get_connection(&moved_db_path).unwrap();
+        let result = track_database(conn, op_conn);
+
+        assert!(result.is_err());
+        match result {
+            Err(core::errors::ConnectionError::DatabaseTracking(_)) => {
+                // Expected error type
+            }
+            _ => panic!("Expected DatabaseTracking error, got: {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_path_conflict_detection_uuid_mismatch() {
+        let gen_dir = setup_gen_dir();
+        let db_path = gen_dir.parent().unwrap().join("original_location.db");
+        let conn = &crate::get_connection(db_path.clone()).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        track_database(conn, op_conn).unwrap();
+
+        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .unwrap();
+        let db_uuid1 = get_db_uuid(conn);
+
+        let new_db_path = gen_dir.parent().unwrap().join("new.db");
+        let conn = &crate::get_connection(new_db_path.clone()).unwrap();
+        track_database(conn, op_conn).unwrap();
+        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .unwrap();
+
+        let db_uuid2 = get_db_uuid(conn);
+
+        assert_ne!(db_uuid1, db_uuid2);
+
+        // Replace
+        fs::copy(&new_db_path, &db_path).unwrap();
+        let conn = &crate::get_connection(db_path.clone()).unwrap();
+        let result = track_database(conn, op_conn);
+
+        assert!(result.is_err());
+        match result {
+            Err(core::errors::ConnectionError::DatabaseTracking(_)) => {
+                // Expected error type
+            }
+            _ => panic!("Expected DatabaseTracking error, got: {result:?}"),
+        }
     }
 }

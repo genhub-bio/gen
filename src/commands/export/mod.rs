@@ -1,6 +1,7 @@
-use crate::commands::cli_context::CliContext;
 use clap::{Args, Subcommand};
 use clap_nested_commands::generate_sync_commands;
+
+use crate::commands::cli_context::CliContext;
 
 mod fasta;
 mod genbank;

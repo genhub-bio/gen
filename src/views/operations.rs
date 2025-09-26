@@ -1,31 +1,33 @@
-use crate::graph::{GenGraph, GraphNode};
-use crate::models::block_group::BlockGroup;
-use crate::models::operations::{Operation, OperationSummary};
-use crate::models::traits::Query;
-use crate::views::block_group_viewer::{PlotParameters, Viewer};
-use crossterm::event::KeyModifiers;
+use std::{backtrace::Backtrace, collections::HashMap, io, rc::Rc};
+
 use crossterm::{
-    event::{self, KeyCode},
+    event::{self, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use gen_core::HashId;
+use gen_graph::{GenGraph, GraphNode};
+use gen_models::{
+    block_group::BlockGroup,
+    operations::{Operation, OperationSummary},
+    traits::Query,
+};
 use itertools::Itertools;
-use petgraph::prelude::DiGraphMap;
-use ratatui::prelude::{Color, Style, Text};
-use ratatui::style::Modifier;
-use ratatui::widgets::Paragraph;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Row, Table},
+    prelude::{Color, Style, Text},
+    style::Modifier,
+    widgets::{Block, Borders, Paragraph, Row, Table},
     Terminal,
 };
 use rusqlite::{params, types::Value, Connection};
-use std::backtrace::Backtrace;
-use std::collections::HashMap;
-use std::io;
-use std::rc::Rc;
 use tui_textarea::TextArea;
+
+use crate::views::{
+    block_group_viewer::{PlotParameters, Viewer},
+    patch::get_change_graph_from_hash,
+};
 
 fn clip_text(t: &str, limit: usize) -> String {
     let t = t.replace("\n", " ");
@@ -55,14 +57,14 @@ pub fn view_operations(
         restore_terminal();
         eprintln!("Application crashed: {info}");
         let backtrace = Backtrace::capture();
-        eprintln!("Stack trace:\n{}", backtrace);
+        eprintln!("Stack trace:\n{backtrace}");
     }));
 
-    let operation_by_hash: HashMap<String, &Operation> = HashMap::from_iter(
+    let operation_by_hash: HashMap<_, &Operation> = HashMap::from_iter(
         operations
             .iter()
-            .map(|op| (op.hash.clone(), op))
-            .collect::<Vec<(String, &Operation)>>(),
+            .map(|op| (op.hash, op))
+            .collect::<Vec<(_, &Operation)>>(),
     );
     let summaries = OperationSummary::query(
         op_conn,
@@ -89,11 +91,11 @@ pub fn view_operations(
     let mut terminal = Terminal::new(backend)?;
 
     let mut textarea = TextArea::default();
-    let mut empty_graph: GenGraph = DiGraphMap::new();
-    let mut blockgroup_graphs: Vec<(i64, String, GenGraph)> = vec![];
+    let mut empty_graph: GenGraph = GenGraph::new();
+    let mut blockgroup_graphs: Vec<(HashId, String, GenGraph)> = vec![];
     let mut selected_blockgroup_graph: usize = 0;
     empty_graph.add_node(GraphNode {
-        node_id: 1,
+        node_id: HashId::convert_str("1"),
         block_id: 0,
         sequence_start: 0,
         sequence_end: 1,
@@ -124,7 +126,7 @@ pub fn view_operations(
                     };
 
                     Row::new(vec![
-                        clip_text(&op.operation.hash, 40),
+                        clip_text(&format!("{}", op.operation.hash), 40),
                         clip_text(&op.operation.change_type, 20),
                         clip_text(&op.summary.summary, 50),
                     ])
@@ -382,13 +384,13 @@ pub fn view_operations(
                             };
                             panel_focus = focus_rotation[focus_index];
                             let hash = &operation_summaries[selected].operation.hash;
-                            let graphs = Operation::get_change_graph(op_conn, hash).unwrap();
+                            let graphs = get_change_graph_from_hash(op_conn, hash).unwrap();
                             blockgroup_graphs.clear();
-                            let bg_info = BlockGroup::get_by_ids(
+                            let bg_info = BlockGroup::query_by_ids(
                                 conn,
-                                &graphs.keys().copied().collect::<Vec<i64>>(),
+                                &graphs.keys().cloned().collect::<Vec<_>>(),
                             );
-                            let bg_map: HashMap<i64, &BlockGroup> =
+                            let bg_map: HashMap<HashId, &BlockGroup> =
                                 HashMap::from_iter(bg_info.iter().map(|k| (k.id, k)));
                             for (i, v) in graphs {
                                 blockgroup_graphs.push((

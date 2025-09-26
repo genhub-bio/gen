@@ -1,17 +1,16 @@
-use crate::config::get_theme_color;
-use crate::graph::{GenGraph, GraphNode};
-use crate::models::{
-    block_group::BlockGroup, node::Node, node::PATH_START_NODE_ID, path::Path, traits::Query,
+use std::{
+    error::Error,
+    time::{Duration, Instant},
 };
-use crate::progress_bar::{get_handler, get_time_elapsed_bar};
-use crate::views::block_group_viewer::{PlotParameters, Viewer};
-use crate::views::collection::{CollectionExplorer, CollectionExplorerState, FocusZone};
 
 use crossterm::{
     event::{self, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use gen_core::{HashId, PATH_START_NODE_ID};
+use gen_graph::{GenGraph, GraphNode};
+use gen_models::{block_group::BlockGroup, node::Node, path::Path, traits::Query};
 use log::warn;
 use ratatui::{
     layout::Constraint,
@@ -20,8 +19,15 @@ use ratatui::{
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
 };
 use rusqlite::{params, types::Value as SQLValue, Connection};
-use std::error::Error;
-use std::time::{Duration, Instant};
+
+use crate::{
+    config::get_theme_color,
+    progress_bar::{get_handler, get_time_elapsed_bar},
+    views::{
+        block_group_viewer::{PlotParameters, Viewer},
+        collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
+    },
+};
 
 // Frequency by which we check for external updates to the db
 const REFRESH_INTERVAL: u64 = 3; // seconds
@@ -40,7 +46,7 @@ fn get_empty_graph() -> GenGraph {
 /// Parses a string with markdown-like asterisk syntax for highlighting.
 /// Segments surrounded by '*' are styled with `highlight_style`.
 /// Other segments are styled with `default_style`.
-fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line {
+fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<'_> {
     let mut spans = Vec::new();
     let mut is_highlighted = false;
     for part in text.split('*') {
@@ -74,7 +80,7 @@ pub fn view_block_group(
     let origin = if let Some(position_str) = position {
         let parts = position_str.split(":").collect::<Vec<&str>>();
         if parts.len() != 2 {
-            panic!("Invalid position: {}", position_str);
+            panic!("Invalid position: {position_str}");
         }
         let node_id = parts[0].parse::<i64>().unwrap();
         let offset = parts[1].parse::<i64>().unwrap();
@@ -94,7 +100,7 @@ pub fn view_block_group(
     }
 
     let mut block_graph;
-    let mut block_group_id: Option<i64> = None;
+    let mut block_group_id: Option<HashId> = None;
     let mut focus_zone = FocusZone::Sidebar;
 
     if let Some(name) = name {
@@ -118,7 +124,7 @@ pub fn view_block_group(
 
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, block_group.id);
+        block_graph = BlockGroup::get_graph(conn, &block_group.id);
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -170,7 +176,7 @@ pub fn view_block_group(
         // Trigger reload if selection changed to a new block group
         if explorer_state.selected_block_group_id != last_selected_block_group_id {
             is_loading = true;
-            last_selected_block_group_id = explorer_state.selected_block_group_id;
+            last_selected_block_group_id = explorer_state.selected_block_group_id.clone();
         }
 
         // Draw the UI
@@ -356,7 +362,7 @@ pub fn view_block_group(
 
         // After drawing, update the viewer if needed
         if is_loading {
-            if let Some(new_block_group_id) = explorer_state.selected_block_group_id {
+            if let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
                 // Create a new graph for the selected block group
                 block_graph = BlockGroup::get_graph(conn, new_block_group_id);
                 // Update the viewer
@@ -431,13 +437,15 @@ pub fn view_block_group(
                                 // Toggle current path highlighting
                                 if viewer.has_highlight(Color::Red) {
                                     viewer.clear_highlight(Color::Red);
-                                } else if let Some(bg_id) = explorer_state.selected_block_group_id {
+                                } else if let Some(ref bg_id) =
+                                    explorer_state.selected_block_group_id
+                                {
                                     // BlockGroup::get_current_path will panic if there's no path,
                                     // so we roll our own query here. (todo: have get_current_path return an Option)
                                     let current_path = <Path as Query>::get(
                                         conn,
-                                        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY id DESC LIMIT 1",
-                                        rusqlite::params!(SQLValue::from(bg_id)),
+                                        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
+                                        rusqlite::params!(SQLValue::from(bg_id.clone())),
                                     );
                                     match current_path {
                                         Ok(path) => {
@@ -445,14 +453,11 @@ pub fn view_block_group(
                                                 .show_path(&path, get_theme_color("error").unwrap())
                                             {
                                                 // todo: pop up a message in the panel
-                                                warn!("{}", err);
+                                                warn!("{err}");
                                             }
                                         }
                                         Err(err) => {
-                                            warn!(
-                                                "No path found for block group {}: {}",
-                                                bg_id, err
-                                            );
+                                            warn!("No path found for block group {bg_id}: {err}");
                                         }
                                     }
                                 } else {

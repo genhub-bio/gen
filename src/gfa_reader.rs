@@ -22,10 +22,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use std::fs::File;
-use std::io::{prelude::*, BufReader};
-
-use std::path::Path as file_path;
+use std::{
+    fs::File,
+    io::{prelude::*, BufReader},
+    path::Path as file_path,
+};
 
 #[derive(Debug, Clone, Default, Ord, PartialEq, Eq, PartialOrd)]
 /// GFA header line
@@ -102,12 +103,11 @@ impl Opt for () {
 
 impl Opt for SeqIndex {
     fn parse1(input: Option<&str>, s: &mut String) -> Self {
-        if input.is_none() {
-            SeqIndex([0, 0])
-        } else {
-            let input = input.unwrap();
+        if let Some(input) = input {
             s.push_str(input);
             Self([s.len() - input.len(), s.len()])
+        } else {
+            SeqIndex([0, 0])
         }
     }
 }

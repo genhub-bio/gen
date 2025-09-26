@@ -1,11 +1,11 @@
-use crate::commands::cli_context::CliContext;
-use crate::commands::{get_db_for_command, get_default_collection};
-use crate::config::get_operation_connection;
-use crate::get_connection;
-use crate::models::metadata;
-use crate::models::operations::setup_db;
-use crate::updates::fasta::update_with_fasta;
 use clap::Args;
+use gen_models::operations::setup_db;
+
+use crate::{
+    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
+    get_connection, get_operation_connection,
+    updates::fasta::update_with_fasta,
+};
 
 /// Update with a fasta file
 #[derive(Debug, Args)]
@@ -39,13 +39,12 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) {
     println!("Update with fasta called");
 
-    let operation_conn = get_operation_connection(None);
-    let db = get_db_for_command(cli_context, &operation_conn);
-    let conn = get_connection(&db);
-    let db_uuid = metadata::get_db_uuid(&conn);
+    let operation_conn = get_operation_connection(None).unwrap();
+    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
+    let conn = get_connection(&db).unwrap();
 
     // initialize the selected database if needed.
-    setup_db(&operation_conn, &db_uuid);
+    setup_db(&operation_conn);
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 

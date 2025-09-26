@@ -1,26 +1,28 @@
-use crate::calculate_hash;
-use crate::models::operations::OperationFile;
-use crate::models::{
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::BufReader,
+    str,
+};
+
+use gen_core::{HashId, Strand, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     edge::{Edge, EdgeData},
     file_types::FileTypes,
-    node::{Node, PATH_END_NODE_ID, PATH_START_NODE_ID},
-    operations::OperationInfo,
+    node::Node,
+    operations::{OperationFile, OperationInfo},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    strand::Strand,
+    session_operations,
+    traits::Query,
 };
-use crate::operation_management;
 use itertools::Itertools;
 use noodles::fasta;
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::BufReader;
-use std::str;
 
 pub fn import_library<'a>(
     conn: &Connection,
@@ -31,7 +33,7 @@ pub fn import_library<'a>(
     library_file_path: &str,
     region_name: &str,
 ) -> std::io::Result<()> {
-    let mut session = operation_management::start_operation(conn);
+    let mut session = session_operations::start_operation(conn);
 
     if !Collection::exists(conn, collection_name) {
         Collection::create(conn, collection_name);
@@ -59,7 +61,7 @@ pub fn import_library<'a>(
             .save(conn);
 
         if sequence_hashes_by_name.contains_key(&name) {
-            panic!("Duplicate sequence name: {}", name);
+            panic!("Duplicate sequence name: {name}");
         }
         sequence_hashes_by_name.insert(name, seq.hash.clone());
         sequence_lengths_by_hash.insert(seq.hash, seq.length);
@@ -83,7 +85,7 @@ pub fn import_library<'a>(
                 let part_node_id = Node::create(
                     conn,
                     part_hash,
-                    calculate_hash(&format!(
+                    &HashId::convert_str(&format!(
 			"{region_name}:{part}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
 			ref_start = 0,
 			ref_end = seq_length,
@@ -157,14 +159,14 @@ pub fn import_library<'a>(
 
     path_changes_count *= end_parts.len();
 
-    let new_edge_ids = Edge::bulk_create(conn, &new_edges.iter().cloned().collect());
+    let new_edge_ids = Edge::bulk_create(conn, &new_edges.iter().cloned().collect::<Vec<_>>());
 
     let new_block_group_edges = new_edge_ids
         .iter()
         .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: new_block_group.id,
+            block_group_id: new_block_group.id.clone(),
             edge_id: *edge_id,
-            chromosome_index: *edge_id, // TODO: This is a hack, clean it up with phase layers
+            chromosome_index: edge_id.extract_digits(), // TODO: This is a hack, clean it up with phase layers
             phased: 0,
         })
         .collect::<Vec<_>>();
@@ -177,7 +179,7 @@ pub fn import_library<'a>(
     }
     path_node_ids.push(PATH_END_NODE_ID);
 
-    let new_edges = Edge::bulk_load(conn, &new_edge_ids);
+    let new_edges = Edge::query_by_ids(conn, &new_edge_ids);
     let new_edge_ids_by_source_and_target_node = new_edges
         .iter()
         .map(|edge| ((edge.source_node_id, edge.target_node_id), edge.id))
@@ -193,13 +195,13 @@ pub fn import_library<'a>(
         .collect::<Vec<_>>();
     Path::create(
         conn,
-        format!("{} default path", region_name).as_str(),
-        new_block_group.id,
+        format!("{region_name} default path").as_str(),
+        &new_block_group.id,
         &path_edge_ids,
     );
 
     let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
-    operation_management::end_operation(
+    session_operations::end_operation(
         conn,
         operation_conn,
         &mut session,
@@ -215,28 +217,30 @@ pub fn import_library<'a>(
     )
     .unwrap();
 
-    println!(
-        "Imported library file {} and parts file {}",
-        library_file_path, parts_file_path
-    );
+    println!("Imported library file {library_file_path} and parts file {parts_file_path}");
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::models::{block_group::BlockGroup, metadata, operations::setup_db};
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
     use std::path::PathBuf;
+
+    use gen_models::{block_group::BlockGroup, operations::setup_db};
+
+    use super::*;
+    use crate::{
+        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        track_database,
+    };
 
     #[test]
     fn imports_a_library() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test";
 
         let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/affix_parts.fa");
@@ -268,14 +272,14 @@ mod tests {
             "TCTAGAGAAAGAAGAGACTCACTAG",
         ] {
             for part2 in &["ATGCGTAAAGGAGAAGAACTTTAA", "ATGAGTAAGGGTGAAGAGCTGTAA"] {
-                expected_sequences.insert(format!("{}{}", part1, part2));
+                expected_sequences.insert(format!("{part1}{part2}"));
             }
         }
 
-        let actual_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let actual_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(actual_sequences, expected_sequences);
 
-        let current_path = BlockGroup::get_current_path(conn, block_group.id);
+        let current_path = BlockGroup::get_current_path(conn, &block_group.id);
         assert_eq!(
             current_path.sequence(conn),
             "TCTAGAGAAAGAGGGGACAAACTAGATGCGTAAAGGAGAAGAACTTTAA"
@@ -285,10 +289,10 @@ mod tests {
     #[test]
     fn one_column_of_parts() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test";
 
         let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
@@ -308,7 +312,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -322,10 +326,10 @@ mod tests {
     #[test]
     fn two_columns_of_same_parts() {
         setup_gen_dir();
-        let conn = &get_connection(None);
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None);
-        setup_db(op_conn, &db_uuid);
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        setup_db(op_conn);
+        track_database(conn, op_conn).unwrap();
         let collection = "test";
 
         let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
@@ -351,7 +355,7 @@ mod tests {
                 expected_sequences.push(part1.to_string() + part2);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
         assert_eq!(
             all_sequences,
             expected_sequences

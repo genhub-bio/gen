@@ -1,7 +1,9 @@
-use crate::views::block_group_viewer::PlotParameters;
-use crate::views::block_layout::{BaseLayout, ScaledLayout};
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::{prelude::*, types::PyDict};
+
+use crate::views::{
+    block_group_viewer::PlotParameters,
+    block_layout::{BaseLayout, ScaledLayout},
+};
 
 // BaseLayout class for visualization
 #[pyclass]

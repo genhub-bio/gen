@@ -1,25 +1,27 @@
-use crate::config::get_theme_color;
-use crate::graph::{project_path, GenGraph, GraphNode};
-use crate::models::node::Node;
-use crate::models::path::Path;
-use crate::models::sequence::Sequence;
-use crate::views::block_layout::{BaseLayout, ScaledLayout};
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use log::info;
-use log::warn;
-use petgraph::graphmap::DiGraphMap;
-use petgraph::Direction;
+use gen_core::{is_end_node, is_start_node, is_terminal, HashId, PATH_START_NODE_ID};
+use gen_graph::{project_path, GenGraph, GraphNode};
+use gen_models::{node::Node, path::Path, sequence::Sequence};
+use log::{info, warn};
+use petgraph::{graphmap::DiGraphMap, Direction};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
     text::Span,
-    widgets::canvas::{Canvas, Line, Points},
-    widgets::{Block, Widget},
+    widgets::{
+        canvas::{Canvas, Line, Points},
+        Block, Widget,
+    },
 };
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
+
+use crate::{
+    config::get_theme_color,
+    views::block_layout::{BaseLayout, ScaledLayout},
+};
 
 /// Labels used in the graph visualization (selected, not-selected)
 /// the trick is to get them to align with the braille characters
@@ -256,7 +258,7 @@ pub struct Viewer<'a> {
     pub conn: &'a Connection,
     pub base_layout: BaseLayout,
     pub scaled_layout: ScaledLayout,
-    pub node_sequences: HashMap<i64, Sequence>,
+    pub node_sequences: HashMap<HashId, Sequence>,
     pub state: State,
     pub parameters: PlotParameters,
     pub origin_block: Option<GraphNode>,
@@ -281,7 +283,7 @@ impl<'a> Viewer<'a> {
         // If we're being asked to view an empty graph, show the splash screen
         if block_graph.node_count() == 1 {
             if let Some(node) = block_graph.nodes().next() {
-                if node.node_id == crate::models::node::PATH_START_NODE_ID && node.block_id == -1 {
+                if node.node_id == PATH_START_NODE_ID && node.block_id == -1 {
                     new_viewer.state.show_splash_screen = true;
                 }
             }
@@ -304,12 +306,12 @@ impl<'a> Viewer<'a> {
                 .layout_graph
                 .nodes()
                 .map(|node| node.node_id)
-                .collect::<HashSet<i64>>()
+                .collect::<HashSet<_>>()
                 .into_iter()
-                .collect::<Vec<i64>>(),
+                .collect::<Vec<_>>(),
         )
         .into_iter()
-        .collect::<HashMap<i64, Sequence>>();
+        .collect::<HashMap<_, Sequence>>();
 
         // Stretch and scale the base layout to account for the sequence labels and plot parameters
         let scaled_layout = ScaledLayout::from_base_layout(&base_layout, &plot_parameters);
@@ -351,7 +353,7 @@ impl<'a> Viewer<'a> {
         // Filter out the start/end nodes
         let path_nodes: Vec<GraphNode> = projected_path
             .iter()
-            .filter_map(|(node, _)| (!Node::is_terminal(node.node_id)).then_some(*node))
+            .filter_map(|(node, _)| (!is_terminal(node.node_id)).then_some(*node))
             .collect();
 
         // Build a linear subgraph
@@ -446,7 +448,7 @@ impl<'a> Viewer<'a> {
             self.update_scroll_for_cursor(cursor_x, cursor_y);
             Ok((cursor_x, cursor_y))
         } else {
-            Err(format!("Block ID {:?} not found in layout", block))
+            Err(format!("Block ID {block:?} not found in layout"))
         }
     }
 
@@ -596,10 +598,7 @@ impl<'a> Viewer<'a> {
             ctx.print(
                 x,
                 y + 1.0,
-                Span::styled(
-                    format!("↓({:.1},{:.1})", x, y),
-                    Style::default().fg(Color::Red),
-                ),
+                Span::styled(format!("↓({x:.1},{y:.1})"), Style::default().fg(Color::Red)),
             );
         }
     }
@@ -688,15 +687,13 @@ impl<'a> Viewer<'a> {
             && self.state.viewport.height > 0
         {
             if let Some(origin) = self.origin_block {
-                if Node::is_start_node(origin.node_id) {
+                if is_start_node(origin.node_id) {
                     // Find the first non-start/end node by looking at outgoing neighbors of the start node
                     self.state.selected_block = self
                         .base_layout
                         .layout_graph
                         .neighbors_directed(origin, Direction::Outgoing)
-                        .find(|node| {
-                            !Node::is_start_node(node.node_id) && !Node::is_end_node(node.node_id)
-                        });
+                        .find(|node| !is_start_node(node.node_id) && !is_end_node(node.node_id));
                 } else {
                     self.state.selected_block = Some(origin);
                 }
@@ -745,7 +742,7 @@ impl<'a> Viewer<'a> {
                 for &block in self.scaled_layout.labels.keys() {
                     // Skip the start and end dummy nodes, we draw those as "arrows" on the blocks
                     // to which they are connected.
-                    if Node::is_start_node(block.node_id) || Node::is_end_node(block.node_id) {
+                    if is_start_node(block.node_id) || is_end_node(block.node_id) {
                         continue;
                     }
 
@@ -783,7 +780,7 @@ impl<'a> Viewer<'a> {
                         .base_layout
                         .layout_graph
                         .neighbors_directed(block, Direction::Incoming)
-                        .any(|neighbor| Node::is_start_node(neighbor.node_id))
+                        .any(|neighbor| is_start_node(neighbor.node_id))
                     {
                         let x3 = x - 1.0 - (label::START.chars().count() as f64);
                         self.place_label(
@@ -799,7 +796,7 @@ impl<'a> Viewer<'a> {
                         .base_layout
                         .layout_graph
                         .neighbors_directed(block, Direction::Outgoing)
-                        .any(|neighbor| Node::is_end_node(neighbor.node_id))
+                        .any(|neighbor| is_end_node(neighbor.node_id))
                     {
                         let x3 = x2 + 1.0;
                         self.place_label(
@@ -937,7 +934,7 @@ impl<'a> Viewer<'a> {
         {
             self.state.selected_block = Some(new_selection);
             if let Err(e) = self.center_on_block(new_selection) {
-                warn!("Viewer - error finding block to switch to: {}", e);
+                warn!("Viewer - error finding block to switch to: {e}");
             }
         }
     }
@@ -955,7 +952,7 @@ impl<'a> Viewer<'a> {
 
         for (block, ((x1, y), (x2, _))) in &self.scaled_layout.labels {
             // Skip start and end nodes
-            if Node::is_start_node(block.node_id) || Node::is_end_node(block.node_id) {
+            if is_start_node(block.node_id) || is_end_node(block.node_id) {
                 continue;
             }
 
@@ -1008,8 +1005,8 @@ impl<'a> Viewer<'a> {
         for (&node, &node_pos) in &self.base_layout.node_positions {
             // Skip the currently selected block and any start/end node
             if Some(node) == self.state.selected_block
-                || Node::is_start_node(node.node_id)
-                || Node::is_end_node(node.node_id)
+                || is_start_node(node.node_id)
+                || is_end_node(node.node_id)
             {
                 continue;
             }
