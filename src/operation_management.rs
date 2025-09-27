@@ -10,7 +10,10 @@ use gen_models::{
     changesets::{apply_changeset, revert_changeset},
     errors::{ChangesetError, OperationError, RemoteError},
     file_types::FileTypes,
-    manifest::{ManifestDiff, ManifestError, ManifestGenerator},
+    manifest::{
+        ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
+        ManifestOperation,
+    },
     operations::{
         Branch, Defaults, FileAddition, Operation, OperationFile, OperationInfo, OperationState,
         Remote,
@@ -22,7 +25,6 @@ use itertools::Itertools;
 use petgraph::Direction;
 use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Connection, Error as SQLError};
-use tempfile::tempdir;
 use thiserror::Error;
 use url_parse::core::Parser;
 
@@ -116,8 +118,14 @@ pub enum RemoteOperationError {
     IOError(#[from] std::io::Error),
     #[error("Manifest Error: {0}")]
     ManifestError(#[from] ManifestError),
+    #[error("Manifest Diff Error: {0}")]
+    ManifestDiffError(#[from] ManifestDiffError),
+    #[error("Connection Error: {0}")]
+    ConnectionError(#[from] ConnectionError),
     #[error("Reqwest Error: {0}")]
     ReqwestError(#[from] reqwest::Error),
+    #[error("SQLite Error: {0}")]
+    SqliteError(#[from] SQLError),
 
     #[error("No operations present in current branch")]
     NoOperations,
@@ -479,172 +487,253 @@ fn port_mappings() -> HashMap<&'static str, (u32, &'static str)> {
     ])
 }
 
-fn file_exists(file_path: &str, filename: &str) -> Result<bool, RemoteOperationError> {
-    match Parser::new(Some(port_mappings())).parse(file_path) {
-        Ok(result) => {
-            if let Some(scheme) = result.scheme {
-                if scheme == "file" {
-                    let path_parts = result.path.unwrap();
-                    let mut path = PathBuf::from("/");
-                    for part in path_parts {
-                        path.push(part);
-                    }
-
-                    let file_parts = FilePath::new(&filename);
-                    for part in file_parts {
-                        path.push(part);
-                    }
-                    Ok(path.exists())
-                } else {
-                    Err(RemoteOperationError::UnsupportedRemoteScheme(
-                        scheme,
-                        file_path.to_string(),
-                    ))
-                }
-            } else {
-                Err(RemoteOperationError::InvalidRemoteUrl(
-                    file_path.to_string(),
-                ))
-            }
-        }
-        Err(_) => Err(RemoteOperationError::InvalidRemoteUrl(
-            file_path.to_string(),
-        )),
-    }
-}
-
-fn transfer_file(
-    local_file_path: &str,
+fn setup_remote_repository(
     remote_url: &str,
-    filename: &str,
-    push: bool,
-) -> Result<(), RemoteOperationError> {
-    match Parser::new(Some(port_mappings())).parse(remote_url) {
-        Ok(result) => {
-            if let Some(scheme) = result.scheme {
-                if scheme == "file" {
-                    // copy
-                    if let Some(path_parts) = result.path {
-                        let mut remote_path = path_parts
-                            .iter()
-                            .map(|p| p.to_string())
-                            .collect::<PathBuf>();
-                        let file_relative_path = FilePath::new(&filename);
-                        let source_filename =
-                            file_relative_path.file_name().unwrap().to_str().unwrap();
+) -> Result<(PathBuf, Option<Connection>), RemoteOperationError> {
+    // Parse the file:// URL to get the filesystem path
+    let parsed_url = Parser::new(Some(port_mappings()))
+        .parse(remote_url)
+        .map_err(|_| RemoteOperationError::InvalidRemoteUrl(remote_url.to_string()))?;
 
-                        if push {
-                            // Ensure that the directory we're copying to exists--the filename may
-                            // actually be a relative path
-                            if let Some(file_prefix) = file_relative_path.parent() {
-                                for part in file_prefix {
-                                    remote_path.push(part);
-                                }
-                            }
-                            let remote_directory = format!("/{}", &remote_path.to_str().unwrap());
-                            fs::create_dir_all(&remote_directory)?;
+    let scheme = parsed_url
+        .scheme
+        .ok_or_else(|| RemoteOperationError::InvalidRemoteUrl(remote_url.to_string()))?;
 
-                            let remote_filename = format!("{remote_directory}/{source_filename}");
-                            let local_filename = format!("{local_file_path}/{filename}");
-
-                            fs::copy(&local_filename, &remote_filename).map_err(|_| {
-                                RemoteOperationError::FileTransferError(
-                                    filename.to_string(),
-                                    local_filename,
-                                    remote_filename,
-                                )
-                            })?;
-                        } else {
-                            // Ensure that the directory we're copying to exists--the filename may
-                            // actually be a relative path
-                            let mut local_path = PathBuf::from(local_file_path);
-                            if let Some(file_prefix) = file_relative_path.parent() {
-                                for part in file_prefix {
-                                    local_path.push(part);
-                                }
-                            }
-                            fs::create_dir_all(&local_path)?;
-
-                            let remote_path_filename =
-                                format!("/{}/{}", remote_path.to_str().unwrap(), filename);
-                            let local_filename =
-                                format!("{}/{}", local_path.to_str().unwrap(), source_filename);
-                            fs::copy(&remote_path_filename, &local_filename).map_err(|_| {
-                                RemoteOperationError::FileTransferError(
-                                    filename.to_string(),
-                                    remote_path_filename,
-                                    local_filename,
-                                )
-                            })?;
-                        }
-                        Ok(())
-                    } else {
-                        Err(RemoteOperationError::InvalidRemoteUrl(
-                            remote_url.to_string(),
-                        ))
-                    }
-                } else {
-                    Err(RemoteOperationError::UnsupportedRemoteScheme(
-                        scheme,
-                        remote_url.to_string(),
-                    ))
-                }
-            } else {
-                Err(RemoteOperationError::InvalidRemoteUrl(
-                    remote_url.to_string(),
-                ))
-            }
-        }
-        Err(_) => Err(RemoteOperationError::InvalidRemoteUrl(
+    if scheme != "file" {
+        return Err(RemoteOperationError::UnsupportedRemoteScheme(
+            scheme,
             remote_url.to_string(),
-        )),
+        ));
     }
+
+    let path_parts = parsed_url
+        .path
+        .ok_or_else(|| RemoteOperationError::InvalidRemoteUrl(remote_url.to_string()))?;
+
+    // Construct the remote filesystem path
+    let mut remote_path = PathBuf::from("/");
+    for part in path_parts {
+        remote_path.push(part);
+    }
+
+    // Check if remote operation database exists and open connection
+    let remote_op_conn =
+        {
+            let op_db_path = remote_path.join(".gen").join("gen.db");
+            if op_db_path.exists() {
+                Some(get_operation_connection(Some(op_db_path)).map_err(|e| {
+                    RemoteOperationError::IOError(std::io::Error::other(e.to_string()))
+                })?)
+            } else {
+                None
+            }
+        };
+
+    Ok((remote_path, remote_op_conn))
 }
 
-fn generate_file_manifest(
-    local_op_conn: &Connection,
-    remote_op_conn: Option<&Connection>,
-    db_name: String,
-) -> Result<Vec<String>, RemoteOperationError> {
-    let mut remote_filenames = HashSet::new();
-    if let Some(remote_op_conn) = remote_op_conn {
-        let remote_ops = Operation::query(
+/// Apply operations to remote repository by transferring files and applying changesets
+fn apply_operations_to_remote(
+    remote_op_conn: &Connection,
+    operations: &[ManifestOperation],
+    remote_path: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let gen_dir = get_gen_dir().ok_or_else(|| {
+        RemoteOperationError::IOError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Gen directory not found",
+        ))
+    })?;
+    let gen_dir = PathBuf::from(gen_dir);
+
+    // Process operations in dependency order (they should already be ordered correctly)
+    for manifest_op in operations {
+        let operation = &manifest_op.operation;
+        let op_hash = &operation.hash;
+
+        let changeset_src = operation.get_changeset_path();
+
+        // Create remote operation directory
+        let changeset_dst = remote_path.join("changeset").join(op_hash.to_string());
+        fs::create_dir_all(&changeset_dst)?;
+
+        fs::copy(&changeset_src, changeset_dst.join("changeset")).map_err(|_| {
+            RemoteOperationError::FileTransferError(
+                "changeset".to_string(),
+                changeset_src.to_string_lossy().to_string(),
+                changeset_dst.to_string_lossy().to_string(),
+            )
+        })?;
+
+        // Transfer dependencies file
+        let dependencies_src = operation.get_changeset_dependencies_path();
+        fs::copy(&dependencies_src, changeset_dst.join("dependencies")).map_err(|_| {
+            RemoteOperationError::FileTransferError(
+                "dependencies".to_string(),
+                dependencies_src.to_string_lossy().to_string(),
+                changeset_dst.to_string_lossy().to_string(),
+            )
+        })?;
+
+        // Transfer file additions
+        for file_addition in &manifest_op.file_additions {
+            let src_path = gen_dir.join(&file_addition.file_path);
+            let dst_path = remote_path.join(&file_addition.file_path);
+
+            // Create parent directories if needed
+            if let Some(parent) = dst_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            if src_path.exists() {
+                fs::copy(&src_path, &dst_path).map_err(|_| {
+                    RemoteOperationError::FileTransferError(
+                        file_addition.file_path.clone(),
+                        src_path.to_string_lossy().to_string(),
+                        dst_path.to_string_lossy().to_string(),
+                    )
+                })?;
+            }
+        }
+
+        // Apply changeset to remote data database if it exists
+        let changeset = operation.get_changeset();
+        let dependencies = operation.get_changeset_dependencies();
+
+        // Apply changeset within a transaction
+        remote_op_conn.execute("BEGIN TRANSACTION", [])?;
+        match apply_changeset(remote_op_conn, &changeset.changes, &dependencies) {
+            Ok(_) => {
+                remote_op_conn.execute("COMMIT TRANSACTION", [])?;
+            }
+            Err(e) => {
+                remote_op_conn.execute("ROLLBACK TRANSACTION", [])?;
+                return Err(RemoteOperationError::IOError(std::io::Error::other(
+                    format!("Failed to apply changeset for operation {}: {}", op_hash, e),
+                )));
+            }
+        }
+
+        // Insert operation into remote operation database
+        remote_op_conn.execute("BEGIN TRANSACTION", [])?;
+        match Operation::create_without_tracking(
             remote_op_conn,
-            "select * from operation;",
-            rusqlite::params![],
-        );
-        for remote_op in remote_ops {
-            let op_file_additions =
-                FileAddition::get_files_for_operation(remote_op_conn, &remote_op.hash);
-            for op_file_addition in op_file_additions {
-                remote_filenames.insert(op_file_addition.file_path);
+            &operation.hash,
+            &operation.change_type,
+            operation.parent_hash,
+        ) {
+            Ok(_) => {
+                // Add file associations for this operation
+                for file_addition in &manifest_op.file_additions {
+                    // Create file addition record in remote database
+                    let remote_file_addition = FileAddition::create(
+                        remote_op_conn,
+                        &file_addition.file_path,
+                        file_addition.file_type,
+                    );
+
+                    // Link operation to file addition
+                    Operation::add_file(remote_op_conn, &operation.hash, remote_file_addition.id)?;
+                }
+
+                remote_op_conn.execute("COMMIT TRANSACTION", [])?;
+            }
+            Err(e) => {
+                remote_op_conn.execute("ROLLBACK TRANSACTION", [])?;
+                return Err(RemoteOperationError::IOError(std::io::Error::other(
+                    format!(
+                        "Failed to save operation {} to remote database: {}",
+                        op_hash, e
+                    ),
+                )));
             }
         }
     }
 
-    let local_ops = Operation::query(
-        local_op_conn,
-        "select * from operation;",
-        rusqlite::params![],
-    );
-    let mut local_filenames = HashSet::new();
-    for local_op in local_ops {
-        let op_file_additions =
-            FileAddition::get_files_for_operation(local_op_conn, &local_op.hash);
-        for op_file_addition in op_file_additions {
-            local_filenames.insert(op_file_addition.file_path);
+    Ok(())
+}
+
+/// Push to file scheme remote using manifest comparison
+fn push_to_file_remote(
+    local_op_conn: &Connection,
+    remote_url: &str,
+    current_branch_id: i64,
+) -> Result<(), RemoteOperationError> {
+    // Generate local manifest
+    let generator = ManifestGenerator::new(local_op_conn);
+    let current_branch = Branch::get_by_id(local_op_conn, current_branch_id).ok_or_else(|| {
+        RemoteOperationError::IOError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Current branch not found",
+        ))
+    })?;
+
+    let current_hash = current_branch
+        .current_operation_hash
+        .ok_or(RemoteOperationError::NoOperations)?;
+
+    let local_manifest = generator.generate_manifest(&current_branch.name, &current_hash)?;
+
+    // Setup remote repository connections
+    let (remote_path, remote_op_conn) = setup_remote_repository(remote_url)?;
+
+    // Generate remote manifest if remote repository exists and has operations
+    let remote_manifest = if let Some(ref remote_op_conn) = remote_op_conn {
+        let remote_branch = Branch::get_by_id(remote_op_conn, current_branch_id);
+        if let Some(branch) = remote_branch {
+            if let Some(hash) = branch.current_operation_hash {
+                Some(generator.generate_manifest(&branch.name, &hash)?)
+            } else {
+                None
+            }
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    // Compare manifests to determine missing operations
+    let diff = if let Some(remote_manifest) = remote_manifest {
+        ManifestComparer::diff_manifests(&local_manifest, &remote_manifest)?
+    } else {
+        // Empty remote - all local operations are missing
+        ManifestDiff {
+            missing_in_manifest2: local_manifest.operations.clone(),
+            missing_in_manifest1: vec![],
+        }
+    };
+
+    // Check for RemoteBranchAhead condition
+    if !diff.missing_in_manifest1.is_empty() {
+        return Err(RemoteOperationError::RemoteBranchAhead);
     }
 
-    let mut filenames_to_push = local_filenames
-        .difference(&remote_filenames)
-        .collect::<Vec<&String>>();
-    let binding = ".gen/gen.db".to_string();
-    filenames_to_push.push(&binding);
-    let db_filename = format!(".gen/{db_name}.db");
-    filenames_to_push.push(&db_filename);
+    // Apply missing operations to remote if any
+    if !diff.missing_in_manifest2.is_empty() {
+        // Create remote .gen directory if it doesn't exist
+        let remote_gen_dir = remote_path.join(".gen");
+        fs::create_dir_all(&remote_gen_dir)?;
 
-    Ok(filenames_to_push.iter().map(|f| f.to_string()).collect())
+        let remote_op_conn = remote_op_conn.ok_or(RemoteOperationError::InvalidRemoteUrl(
+            "Remote repository not initialized.".to_string(),
+        ))?;
+        Branch::get_or_create(&remote_op_conn, &current_branch.name);
+
+        // Apply operations to remote
+        apply_operations_to_remote(&remote_op_conn, &diff.missing_in_manifest2, &remote_path)?;
+
+        // Update remote branch to point to the latest operation
+        let latest_op_hash = diff
+            .missing_in_manifest2
+            .last()
+            .map(|op| op.operation.hash)
+            .unwrap_or(current_hash);
+
+        Branch::set_current_operation(&remote_op_conn, current_branch_id, &latest_op_hash);
+    }
+
+    Ok(())
 }
 
 // Pushes the current state of the local repo and branch to the corresponding remote repo and branch
@@ -662,74 +751,15 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
         Ok(result) => {
             if let Some(scheme) = result.scheme {
                 if scheme == "file" {
-                    // Existing file-to-file copy logic
-                    let mut remote_op_db_path = tempdir().unwrap().keep();
-                    let remote_op_db_dir = remote_op_db_path.to_str().unwrap().to_string();
-                    let remote_op_conn = if file_exists(&remote_url, ".gen/gen.db")? {
-                        transfer_file(&remote_op_db_dir, &remote_url, ".gen/gen.db", false)?;
+                    let current_branch_id = OperationState::get_current_branch(operation_conn)
+                        .ok_or_else(|| {
+                            RemoteOperationError::IOError(std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "No current branch set",
+                            ))
+                        })?;
 
-                        remote_op_db_path.push(".gen");
-                        remote_op_db_path.push("gen.db");
-                        Some(get_operation_connection(Some(remote_op_db_path)).unwrap())
-                    } else {
-                        None
-                    };
-
-                    let current_branch_id =
-                        OperationState::get_current_branch(operation_conn).unwrap();
-                    let remote_branch_operations = if let Some(ref remote_op_conn) = remote_op_conn
-                    {
-                        let branch = Branch::get_by_id(remote_op_conn, current_branch_id);
-                        if let Some(_branch) = branch {
-                            Branch::get_operations(remote_op_conn, current_branch_id)
-                        } else {
-                            vec![]
-                        }
-                    } else {
-                        vec![]
-                    };
-                    let local_branch_operations =
-                        Branch::get_operations(operation_conn, current_branch_id);
-
-                    let remote_op_hashes = remote_branch_operations
-                        .iter()
-                        .map(|op| op.hash)
-                        .collect::<HashSet<_>>();
-                    let local_op_hashes = local_branch_operations
-                        .iter()
-                        .map(|op| op.hash)
-                        .collect::<HashSet<_>>();
-                    let leading_remote_ops = remote_op_hashes
-                        .difference(&local_op_hashes)
-                        .collect::<Vec<_>>();
-                    if !leading_remote_ops.is_empty() {
-                        return Err(RemoteOperationError::RemoteBranchAhead);
-                    }
-
-                    let mut stmt = operation_conn
-                        .prepare("select db_name from defaults where id = 1;")
-                        .unwrap();
-                    let row: Option<String> = stmt.query_row((), |row| row.get(0)).unwrap();
-                    let db_name = if let Some(row) = row {
-                        row
-                    } else {
-                        "default".to_string()
-                    };
-
-                    let gen_dir = get_gen_dir().unwrap();
-                    let parent_dir = FilePath::new(&gen_dir).parent().unwrap();
-                    let parent_dir_str = parent_dir.to_str().unwrap().to_string();
-
-                    let filenames =
-                        generate_file_manifest(operation_conn, remote_op_conn.as_ref(), db_name)?;
-                    for filename in filenames {
-                        if filename.starts_with("/") {
-                            println!("Skipping since it is an absolute path: {filename}");
-                        } else {
-                            transfer_file(&parent_dir_str, &remote_url, &filename, true)?;
-                        }
-                    }
-                    Ok(())
+                    push_to_file_remote(operation_conn, &remote_url, current_branch_id)
                 } else {
                     // New manifest-based push logic
                     let generator = ManifestGenerator::new(operation_conn);
@@ -861,6 +891,7 @@ mod tests {
         sample::Sample,
     };
     use rusqlite::params;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
@@ -2185,5 +2216,570 @@ mod tests {
         let mut remote_db_path = remote_gen_path.clone();
         remote_db_path.push("gen.db");
         assert!(remote_db_path.exists());
+    }
+
+    #[test]
+    fn test_setup_remote_repository_with_invalid_url() {
+        let result = setup_remote_repository("invalid-url");
+        assert!(matches!(
+            result,
+            Err(RemoteOperationError::InvalidRemoteUrl(_))
+        ));
+    }
+
+    #[test]
+    fn test_setup_remote_repository_with_unsupported_scheme() {
+        let result = setup_remote_repository("http://example.com/repo");
+        assert!(matches!(
+            result,
+            Err(RemoteOperationError::UnsupportedRemoteScheme(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_setup_remote_repository_with_nonexistent_remote() {
+        let temp_dir = tempdir().unwrap();
+        let nonexistent_path = temp_dir.path().join("nonexistent");
+        let remote_url = format!("file://{}", nonexistent_path.to_str().unwrap());
+
+        let result = setup_remote_repository(&remote_url);
+        assert!(result.is_ok());
+
+        let (remote_path, remote_op_conn) = result.unwrap();
+        assert_eq!(remote_path, nonexistent_path);
+        assert!(remote_op_conn.is_none());
+    }
+
+    #[test]
+    fn test_setup_remote_repository_with_existing_remote() {
+        let temp_dir = tempdir().unwrap().keep();
+        let remote_path = &temp_dir;
+
+        // Create .gen directory and operation database
+        let gen_dir = remote_path.join(".gen");
+        fs::create_dir_all(&gen_dir).unwrap();
+
+        let op_db_path = gen_dir.join("gen.db");
+        let op_conn = get_operation_connection(op_db_path.to_str()).unwrap();
+        setup_db(&op_conn);
+
+        // Set a database name in defaults
+        op_conn
+            .execute("update defaults set db_name=?1 where id = 1", ("test_db",))
+            .unwrap();
+
+        // Create the data database
+        let data_db_path = gen_dir.join("test_db.db");
+        let _data_conn = get_connection(data_db_path.to_str()).unwrap();
+
+        // Close connections to ensure files are written
+        drop(op_conn);
+        drop(_data_conn);
+
+        let remote_url = format!("file://{}", remote_path.to_str().unwrap());
+        let result = setup_remote_repository(&remote_url);
+        assert!(result.is_ok());
+
+        let (parsed_remote_path, remote_op_conn) = result.unwrap();
+        assert_eq!(parsed_remote_path, *remote_path);
+        assert!(remote_op_conn.is_some());
+    }
+
+    #[test]
+    fn test_setup_remote_repository_with_operation_db_only() {
+        let temp_dir = tempdir().unwrap().keep();
+        let remote_path = &temp_dir;
+
+        // Create .gen directory and operation database only
+        let gen_dir = remote_path.join(".gen");
+        fs::create_dir_all(&gen_dir).unwrap();
+
+        let op_db_path = gen_dir.join("gen.db");
+        let op_conn = get_operation_connection(op_db_path.to_str()).unwrap();
+        setup_db(&op_conn);
+
+        // Don't create the data database
+        drop(op_conn);
+
+        let remote_url = format!("file://{}", remote_path.to_str().unwrap());
+        let result = setup_remote_repository(&remote_url);
+        assert!(result.is_ok());
+
+        let (parsed_remote_path, remote_op_conn) = result.unwrap();
+        assert_eq!(parsed_remote_path, *remote_path);
+        assert!(remote_op_conn.is_some());
+    }
+
+    #[cfg(test)]
+    mod apply_operations_to_remote {
+        use gen_models::{
+            collection::Collection,
+            operations::{FileAddition, OperationFile, OperationInfo},
+            session_operations::{end_operation, start_operation},
+        };
+        use tempfile::tempdir;
+
+        use super::*;
+
+        #[test]
+        fn test_apply_operations_to_remote_basic() {
+            setup_gen_dir();
+            let local_conn = &get_connection(None).unwrap();
+            let local_op_conn = &get_operation_connection(None).unwrap();
+            setup_db(local_op_conn);
+            track_database(local_conn, local_op_conn).unwrap();
+
+            // Create a test collection and operation
+            let _collection = Collection::create(local_conn, "test_collection");
+            let mut session = start_operation(local_conn);
+
+            // Make some actual changes to trigger changeset creation
+            Collection::create(local_conn, "test_collection_2");
+
+            let op_info = OperationInfo {
+                files: vec![OperationFile {
+                    file_path: "test_file.txt".to_string(),
+                    file_type: FileTypes::None,
+                }],
+                description: "Test operation".to_string(),
+            };
+            let operation = end_operation(
+                local_conn,
+                local_op_conn,
+                &mut session,
+                &op_info,
+                "Test operation",
+                None,
+            )
+            .unwrap();
+
+            // Create file addition
+            let file_addition =
+                FileAddition::create(local_op_conn, "test_file.txt", FileTypes::None);
+            Operation::add_file(local_op_conn, &operation.hash, file_addition.id).unwrap();
+
+            // Create manifest operation
+            let manifest_op = ManifestOperation {
+                operation: operation.clone(),
+                changeset_hash: "test_changeset_hash".to_string(),
+                dependencies_hash: "test_dependencies_hash".to_string(),
+                file_additions: vec![file_addition],
+                operation_summary: None,
+            };
+
+            // Create remote directory structure
+            let remote_dir = tempdir().unwrap();
+            let remote_path = remote_dir.path();
+            let remote_gen_dir = remote_path.join(".gen");
+            fs::create_dir_all(&remote_gen_dir).unwrap();
+
+            // Create remote operation database
+            let remote_op_db_path = remote_gen_dir.join("gen.db");
+            let remote_op_conn = get_operation_connection(remote_op_db_path.to_str()).unwrap();
+            setup_db(&remote_op_conn);
+
+            // Create remote data database
+            let remote_data_db_path = remote_gen_dir.join("test.db");
+            let remote_data_conn = get_connection(remote_data_db_path.to_str()).unwrap();
+
+            // Create test files in local gen directory
+            let local_gen_dir = PathBuf::from(get_gen_dir().unwrap());
+            let op_dir = local_gen_dir.join(operation.hash.to_string());
+            fs::create_dir_all(&op_dir).unwrap();
+            fs::write(op_dir.join("changeset"), "test changeset content").unwrap();
+            fs::write(op_dir.join("dependencies"), "test dependencies content").unwrap();
+            fs::write(local_gen_dir.join("test_file.txt"), "test file content").unwrap();
+
+            // Test the function
+            let result = apply_operations_to_remote(&remote_op_conn, &[manifest_op], remote_path);
+
+            assert!(
+                result.is_ok(),
+                "apply_operations_to_remote failed: {:?}",
+                result.err()
+            );
+
+            // Verify files were transferred
+            let remote_op_dir = remote_path.join(operation.hash.to_string());
+            assert!(remote_op_dir.join("changeset").exists());
+            assert!(remote_op_dir.join("dependencies").exists());
+            assert!(remote_path.join("test_file.txt").exists());
+
+            // Verify operation was saved to remote database
+            let remote_operation = Operation::get_by_id(&remote_op_conn, &operation.hash);
+            assert!(remote_operation.is_some());
+            assert_eq!(remote_operation.unwrap().hash, operation.hash);
+        }
+
+        #[test]
+        fn test_apply_operations_to_remote_no_data_conn() {
+            setup_gen_dir();
+            let local_conn = &get_connection(None).unwrap();
+            let local_op_conn = &get_operation_connection(None).unwrap();
+            setup_db(local_op_conn);
+            track_database(local_conn, local_op_conn).unwrap();
+
+            // Create a simple operation
+            let mut session = start_operation(local_conn);
+
+            // Make some actual changes to trigger changeset creation
+            Collection::create(local_conn, "test_collection");
+
+            let op_info = OperationInfo {
+                files: vec![],
+                description: "Test operation".to_string(),
+            };
+            let operation = end_operation(
+                local_conn,
+                local_op_conn,
+                &mut session,
+                &op_info,
+                "Test operation",
+                None,
+            )
+            .unwrap();
+
+            let manifest_op = ManifestOperation {
+                operation: operation.clone(),
+                changeset_hash: "test_changeset_hash".to_string(),
+                dependencies_hash: "test_dependencies_hash".to_string(),
+                file_additions: vec![],
+                operation_summary: None,
+            };
+
+            // Create remote directory structure
+            let remote_dir = tempdir().unwrap();
+            let remote_path = remote_dir.path();
+            let remote_gen_dir = remote_path.join(".gen");
+            fs::create_dir_all(&remote_gen_dir).unwrap();
+
+            // Create remote operation database
+            let remote_op_db_path = remote_gen_dir.join("gen.db");
+            let remote_op_conn = get_operation_connection(remote_op_db_path.to_str()).unwrap();
+            setup_db(&remote_op_conn);
+
+            // Create test files in local gen directory
+            let local_gen_dir = PathBuf::from(get_gen_dir().unwrap());
+            let op_dir = local_gen_dir.join(operation.hash.to_string());
+            fs::create_dir_all(&op_dir).unwrap();
+            fs::write(op_dir.join("changeset"), "test changeset content").unwrap();
+            fs::write(op_dir.join("dependencies"), "test dependencies content").unwrap();
+
+            // Test the function without remote data connection
+            let result = apply_operations_to_remote(&remote_op_conn, &[manifest_op], remote_path);
+
+            assert!(
+                result.is_ok(),
+                "apply_operations_to_remote failed: {:?}",
+                result.err()
+            );
+
+            // Verify files were transferred
+            let remote_op_dir = remote_path.join(operation.hash.to_string());
+            assert!(remote_op_dir.join("changeset").exists());
+            assert!(remote_op_dir.join("dependencies").exists());
+
+            // Verify operation was saved to remote database
+            let remote_operation = Operation::get_by_id(&remote_op_conn, &operation.hash);
+            assert!(remote_operation.is_some());
+        }
+
+        #[test]
+        fn test_apply_operations_to_remote_multiple_operations() {
+            setup_gen_dir();
+            let local_conn = &get_connection(None).unwrap();
+            let local_op_conn = &get_operation_connection(None).unwrap();
+            setup_db(local_op_conn);
+            track_database(local_conn, local_op_conn).unwrap();
+
+            // Create multiple operations
+            let mut operations = Vec::new();
+            let mut manifest_ops = Vec::new();
+
+            for i in 0..3 {
+                let mut session = start_operation(local_conn);
+
+                // Make some actual changes to trigger changeset creation
+                Collection::create(local_conn, &format!("test_collection_{}", i));
+
+                let op_info = OperationInfo {
+                    files: vec![OperationFile {
+                        file_path: format!("test_file_{}.txt", i),
+                        file_type: FileTypes::None,
+                    }],
+                    description: format!("Test operation {}", i),
+                };
+                let operation = end_operation(
+                    local_conn,
+                    local_op_conn,
+                    &mut session,
+                    &op_info,
+                    &format!("Test operation {}", i),
+                    None,
+                )
+                .unwrap();
+
+                let file_addition = FileAddition::create(
+                    local_op_conn,
+                    &format!("test_file_{}.txt", i),
+                    FileTypes::None,
+                );
+                Operation::add_file(local_op_conn, &operation.hash, file_addition.id).unwrap();
+
+                let manifest_op = ManifestOperation {
+                    operation: operation.clone(),
+                    changeset_hash: format!("test_changeset_hash_{}", i),
+                    dependencies_hash: format!("test_dependencies_hash_{}", i),
+                    file_additions: vec![file_addition],
+                    operation_summary: None,
+                };
+
+                operations.push(operation);
+                manifest_ops.push(manifest_op);
+            }
+
+            // Create remote directory structure
+            let remote_dir = tempdir().unwrap();
+            let remote_path = remote_dir.path();
+            let remote_gen_dir = remote_path.join(".gen");
+            fs::create_dir_all(&remote_gen_dir).unwrap();
+
+            // Create remote operation database
+            let remote_op_db_path = remote_gen_dir.join("gen.db");
+            let remote_op_conn = get_operation_connection(remote_op_db_path.to_str()).unwrap();
+            setup_db(&remote_op_conn);
+
+            // Create test files in local gen directory
+            let local_gen_dir = PathBuf::from(get_gen_dir().unwrap());
+            for (i, operation) in operations.iter().enumerate() {
+                let op_dir = local_gen_dir.join(operation.hash.to_string());
+                fs::create_dir_all(&op_dir).unwrap();
+                fs::write(
+                    op_dir.join("changeset"),
+                    format!("test changeset content {}", i),
+                )
+                .unwrap();
+                fs::write(
+                    op_dir.join("dependencies"),
+                    format!("test dependencies content {}", i),
+                )
+                .unwrap();
+                fs::write(
+                    local_gen_dir.join(format!("test_file_{}.txt", i)),
+                    format!("test file content {}", i),
+                )
+                .unwrap();
+            }
+
+            // Test the function with multiple operations
+            let result = apply_operations_to_remote(&remote_op_conn, &manifest_ops, remote_path);
+
+            assert!(
+                result.is_ok(),
+                "apply_operations_to_remote failed: {:?}",
+                result.err()
+            );
+
+            // Verify all files were transferred and operations saved
+            for (i, operation) in operations.iter().enumerate() {
+                let remote_op_dir = remote_path.join(operation.hash.to_string());
+                assert!(remote_op_dir.join("changeset").exists());
+                assert!(remote_op_dir.join("dependencies").exists());
+                assert!(remote_path.join(format!("test_file_{}.txt", i)).exists());
+
+                let remote_operation = Operation::get_by_id(&remote_op_conn, &operation.hash);
+                assert!(remote_operation.is_some());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod push_to_file_remote {
+        use super::*;
+
+        #[test]
+        fn test_push_to_empty_remote() {
+            setup_gen_dir();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
+            // Create a test operation with actual changes
+            let mut session = start_operation(conn);
+            // Add some data to create actual changes
+            gen_models::sequence::Sequence::new()
+                .sequence("ATCG")
+                .sequence_type("DNA")
+                .save(conn);
+            let op_info = OperationInfo {
+                files: vec![],
+                description: "test operation".to_string(),
+            };
+            let operation =
+                end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+
+            // Create a temporary remote directory
+            let remote_dir = tempdir().unwrap();
+            let remote_url = format!("file://{}", remote_dir.path().to_string_lossy());
+
+            let current_branch_id = OperationState::get_current_branch(op_conn).unwrap();
+
+            // Test push to empty remote
+            let result = push_to_file_remote(op_conn, &remote_url, current_branch_id);
+            assert!(result.is_ok());
+
+            // Verify remote directory structure was created
+            let remote_gen_dir = remote_dir.path().join(".gen");
+            assert!(remote_gen_dir.exists());
+            assert!(remote_gen_dir.join("gen.db").exists());
+
+            // Verify operation was transferred
+            let remote_op_dir = remote_dir.path().join(operation.hash.to_string());
+            assert!(remote_op_dir.exists());
+        }
+
+        #[test]
+        fn test_push_to_existing_remote() {
+            setup_gen_dir();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
+            // Create first operation with actual changes
+            let mut session = start_operation(conn);
+            gen_models::sequence::Sequence::new()
+                .sequence("ATCG")
+                .sequence_type("DNA")
+                .save(conn);
+            let op_info = OperationInfo {
+                files: vec![],
+                description: "first operation".to_string(),
+            };
+            let op1 = end_operation(conn, op_conn, &mut session, &op_info, "test1", None).unwrap();
+
+            // Create a temporary remote directory and initialize it
+            let remote_dir = tempdir().unwrap();
+            let remote_url = format!("file://{}", remote_dir.path().to_string_lossy());
+
+            let current_branch_id = OperationState::get_current_branch(op_conn).unwrap();
+
+            // First push to initialize remote
+            let result = push_to_file_remote(op_conn, &remote_url, current_branch_id);
+            assert!(result.is_ok());
+
+            // Create second operation with actual changes
+            let mut session = start_operation(conn);
+            gen_models::sequence::Sequence::new()
+                .sequence("GCTA")
+                .sequence_type("DNA")
+                .save(conn);
+            let op_info = OperationInfo {
+                files: vec![],
+                description: "second operation".to_string(),
+            };
+            let op2 = end_operation(conn, op_conn, &mut session, &op_info, "test2", None).unwrap();
+
+            // Second push should only transfer the new operation
+            let result = push_to_file_remote(op_conn, &remote_url, current_branch_id);
+            assert!(result.is_ok());
+
+            // Verify both operations exist in remote
+            let remote_op1_dir = remote_dir.path().join(op1.hash.to_string());
+            let remote_op2_dir = remote_dir.path().join(op2.hash.to_string());
+            assert!(remote_op1_dir.exists());
+            assert!(remote_op2_dir.exists());
+        }
+
+        #[test]
+        fn test_push_when_remote_ahead() {
+            // This test verifies that the RemoteBranchAhead logic works
+            // by directly testing the manifest comparison logic
+            setup_gen_dir();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
+            // Create a local operation
+            let mut session = start_operation(conn);
+            gen_models::sequence::Sequence::new()
+                .sequence("ATCG")
+                .sequence_type("DNA")
+                .save(conn);
+            let op_info = OperationInfo {
+                files: vec![],
+                description: "local operation".to_string(),
+            };
+            let local_op =
+                end_operation(conn, op_conn, &mut session, &op_info, "local", None).unwrap();
+
+            // Create a mock remote manifest with a different operation
+            let remote_manifest_op = ManifestOperation {
+                operation: Operation {
+                    hash: gen_core::HashId::convert_str("remote_operation_hash"),
+                    parent_hash: None,
+                    change_type: "test".to_string(),
+                },
+                changeset_hash: "remote_changeset".to_string(),
+                dependencies_hash: "remote_deps".to_string(),
+                file_additions: vec![],
+                operation_summary: None,
+            };
+
+            let local_manifest = gen_models::manifest::Manifest {
+                manifest_version: "1.0".to_string(),
+                branch_name: "main".to_string(),
+                end_hash: local_op.hash,
+                operations: vec![ManifestOperation {
+                    operation: local_op,
+                    changeset_hash: "local_changeset".to_string(),
+                    dependencies_hash: "local_deps".to_string(),
+                    file_additions: vec![],
+                    operation_summary: None,
+                }],
+            };
+
+            let remote_manifest = gen_models::manifest::Manifest {
+                manifest_version: "1.0".to_string(),
+                branch_name: "main".to_string(),
+                end_hash: gen_core::HashId::convert_str("remote_operation_hash"),
+                operations: vec![remote_manifest_op],
+            };
+
+            // Test that ManifestComparer correctly identifies the conflict
+            let diff = ManifestComparer::diff_manifests(&local_manifest, &remote_manifest).unwrap();
+
+            // Both manifests should have operations missing in the other
+            assert!(
+                !diff.missing_in_manifest1.is_empty(),
+                "Remote should have operations not in local"
+            );
+            assert!(
+                !diff.missing_in_manifest2.is_empty(),
+                "Local should have operations not in remote"
+            );
+
+            // This simulates the RemoteBranchAhead condition
+            // In the actual push_to_file_remote function, this would trigger the error
+        }
+
+        #[test]
+        fn test_push_with_no_operations() {
+            setup_gen_dir();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            setup_db(op_conn);
+            track_database(conn, op_conn).unwrap();
+
+            let remote_dir = tempdir().unwrap();
+            let remote_url = format!("file://{}", remote_dir.path().to_string_lossy());
+            let current_branch_id = OperationState::get_current_branch(op_conn).unwrap();
+
+            // Push with no operations should fail
+            let result = push_to_file_remote(op_conn, &remote_url, current_branch_id);
+            assert!(matches!(result, Err(RemoteOperationError::NoOperations)));
+        }
     }
 }
