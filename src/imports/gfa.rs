@@ -459,7 +459,7 @@ fn edge_data_from_fields(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{operations::setup_db, traits::*};
+    use gen_models::traits::*;
     use rusqlite::params;
 
     use super::*;
@@ -476,7 +476,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
@@ -503,7 +503,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, "new-sample", conn, op_conn);
         assert_eq!(
@@ -520,7 +520,7 @@ mod tests {
         let collection_name = "no path".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
@@ -543,7 +543,7 @@ mod tests {
         let collection_name = "walk".to_string();
         let conn = &mut get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
@@ -570,7 +570,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
@@ -597,7 +597,7 @@ mod tests {
         let collection_name = "anderson promoters".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
@@ -703,7 +703,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
@@ -733,7 +733,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 
@@ -756,7 +756,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
 

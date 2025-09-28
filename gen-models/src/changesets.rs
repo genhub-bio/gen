@@ -949,7 +949,7 @@ mod tests {
     use super::*;
     use crate::{
         file_types::FileTypes,
-        operations::{OperationFile, OperationInfo, setup_db},
+        operations::{OperationFile, OperationInfo},
         session_operations::{end_operation, start_operation},
         test_helpers::{
             get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
@@ -1166,7 +1166,6 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
 
             let db_uuid = crate::metadata::get_db_uuid(conn);
             crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")
@@ -1215,7 +1214,6 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
 
             let db_uuid = crate::metadata::get_db_uuid(conn);
             crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")

@@ -318,7 +318,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        crate::operations::setup_db(op_conn);
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -363,7 +362,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        crate::operations::setup_db(op_conn);
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -405,7 +403,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        crate::operations::setup_db(op_conn);
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -447,7 +444,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        crate::operations::setup_db(op_conn);
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -492,7 +488,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        crate::operations::setup_db(op_conn);
+
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
@@ -587,7 +583,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        crate::operations::setup_db(op_conn);
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();

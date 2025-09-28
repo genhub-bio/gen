@@ -594,7 +594,7 @@ mod tests {
     use std::time;
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{accession::Accession, node::Node, operations::setup_db};
+    use gen_models::{accession::Accession, node::Node};
 
     use super::*;
     use crate::{
@@ -612,7 +612,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -659,7 +659,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -714,7 +714,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
@@ -765,7 +765,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
@@ -803,7 +803,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
@@ -850,7 +850,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
@@ -890,7 +890,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -936,7 +936,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -988,7 +988,7 @@ mod tests {
         fasta_path.push("fixtures/multiseq.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -1046,7 +1046,7 @@ mod tests {
         fasta_path.push("fixtures/chr22.fa.gz");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -1088,7 +1088,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -1144,7 +1144,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -1208,7 +1208,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();

@@ -30,9 +30,7 @@ use gen_models::{
     errors::{OperationError, RemoteError},
     file_types::FileTypes,
     metadata,
-    operations::{
-        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, setup_db,
-    },
+    operations::{Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState},
     sample::Sample,
     traits::Query,
 };
@@ -125,7 +123,6 @@ fn main() {
             panic!("Error tracking database: {err}");
         }
     };
-    setup_db(&operation_conn);
 
     match cli.command {
         Some(Commands::Init {}) => {

@@ -865,7 +865,7 @@ mod tests {
         edge::Edge,
         file_types::FileTypes,
         node::Node,
-        operations::{Branch, Operation, OperationState, setup_db},
+        operations::{Branch, Operation, OperationState},
         sample::Sample,
     };
     use tempfile::tempdir;
@@ -888,7 +888,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
 
             let op_1 = create_operation(
@@ -983,7 +983,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
 
             let _op_1 = create_operation(
@@ -1028,7 +1028,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
 
             let _op_1 = create_operation(
@@ -1084,7 +1084,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
 
             let _op_1 = create_operation(
@@ -1139,7 +1139,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
         let collection = "test".to_string();
         import_fasta(
@@ -1291,7 +1291,7 @@ mod tests {
         let vcf2_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple2.vcf");
         let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
         let collection = "test".to_string();
 
@@ -1419,7 +1419,7 @@ mod tests {
         let vcf2_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple2.vcf");
         let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
         let collection = "test".to_string();
         import_fasta(
@@ -1592,7 +1592,7 @@ mod tests {
         setup_gen_dir();
         let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
 
         let main_branch = Branch::get_by_name(operation_conn, "main").unwrap();
@@ -1748,7 +1748,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let op_1 = create_operation(
@@ -1847,8 +1847,7 @@ mod tests {
             fs::create_dir_all(&gen_dir).unwrap();
 
             let op_db_path = gen_dir.join("gen.db");
-            let op_conn = get_operation_connection(op_db_path.to_str()).unwrap();
-            setup_db(&op_conn);
+            get_operation_connection(op_db_path.to_str()).unwrap();
 
             let remote_url = format!("file://{}", remote_path.to_str().unwrap());
             let result = connect_file_remote(&remote_url);
@@ -1875,7 +1874,6 @@ mod tests {
             let local_gen_dir = setup_gen_dir();
             let local_conn = &get_connection(None).unwrap();
             let local_op_conn = &get_operation_connection(None).unwrap();
-            setup_db(local_op_conn);
             track_database(local_conn, local_op_conn).unwrap();
 
             // Create a test collection and operation
@@ -1962,7 +1960,7 @@ mod tests {
         fn test_push_to_uninitialized_remote_is_error() {
             setup_gen_dir();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             let remote_dir = tempdir().unwrap();
             let remote_url = format!("file://{}", remote_dir.path().to_string_lossy());
             let result = push_to_file_remote(op_conn, &remote_url, "main");
@@ -1974,7 +1972,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
 
             // Create first operation with actual changes
@@ -2022,7 +2020,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
 
             create_operation(
@@ -2042,7 +2040,6 @@ mod tests {
             let remote_conn = &get_connection(None).unwrap();
             let remote_op_conn =
                 &get_operation_connection(remote_gen_path.join("gen.db").to_str()).unwrap();
-            setup_db(remote_op_conn);
             track_database(remote_conn, remote_op_conn).unwrap();
 
             create_operation(
@@ -2066,7 +2063,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
 
             let remote_dir = tempdir().unwrap();

@@ -584,7 +584,7 @@ impl StatefulWidget for &CollectionExplorer {
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{block_group::BlockGroup, operations::setup_db, sample::Sample};
+    use gen_models::{block_group::BlockGroup, sample::Sample};
 
     use super::*;
     use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
@@ -595,8 +595,7 @@ mod tests {
     fn test_gather_collection_explorer_data() {
         setup_gen_dir();
         let conn = &mut get_connection(None).unwrap();
-        let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+        get_operation_connection(None).unwrap();
 
         // Create collections with hierarchical paths
         Collection::create(conn, "/foo/bar");
