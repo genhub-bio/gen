@@ -69,4 +69,6 @@ CREATE TABLE gen_databases (
     path TEXT NOT NULL
 ) STRICT;
 
+INSERT INTO branch (id, name) values (1, 'main');
 INSERT INTO defaults values (1, NULL, NULL, NULL);
+INSERT INTO operation_state (id, branch_id) values (1, 1);

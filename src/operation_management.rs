@@ -488,10 +488,7 @@ fn port_mappings() -> HashMap<&'static str, (u32, &'static str)> {
     ])
 }
 
-fn setup_remote_repository(
-    remote_url: &str,
-) -> Result<(PathBuf, Connection), RemoteOperationError> {
-    // Parse the file:// URL to get the filesystem path
+fn connect_file_remote(remote_url: &str) -> Result<(PathBuf, Connection), RemoteOperationError> {
     let parsed_url = Parser::new(Some(port_mappings()))
         .parse(remote_url)
         .map_err(|_| RemoteOperationError::InvalidRemoteUrl(remote_url.to_string()))?;
@@ -507,10 +504,8 @@ fn setup_remote_repository(
         ));
     }
 
-    // Construct the remote filesystem path
     let remote_path = PathBuf::from(remote_url.strip_prefix("file://").unwrap());
 
-    // Check if remote operation database exists and open connection
     let op_db_path = remote_path.join(".gen").join("gen.db");
     let remote_op_conn = if op_db_path.exists() {
         get_operation_connection(Some(op_db_path))
@@ -652,7 +647,6 @@ fn push_to_file_remote(
     remote_url: &str,
     branch_name: &str,
 ) -> Result<(), RemoteOperationError> {
-    // Generate local manifest
     let generator = ManifestGenerator::new(local_op_conn);
     let current_branch = Branch::get_by_name(local_op_conn, branch_name).ok_or_else(|| {
         RemoteOperationError::IOError(std::io::Error::new(
@@ -667,18 +661,12 @@ fn push_to_file_remote(
 
     let local_manifest = generator.generate_manifest(&current_branch.name, &current_hash)?;
 
-    // Setup remote repository connections
-    let (remote_path, ref remote_op_conn) = setup_remote_repository(remote_url)?;
+    let (remote_path, ref remote_op_conn) = connect_file_remote(remote_url)?;
 
-    // Generate remote manifest if remote repository exists and has operations
-    let remote_branch = Branch::get_by_name(remote_op_conn, branch_name);
-    let remote_manifest = if let Some(branch) = remote_branch {
-        let remote_generator = ManifestGenerator::new(remote_op_conn);
-        if let Some(hash) = branch.current_operation_hash {
-            Some(remote_generator.generate_manifest(branch_name, &hash)?)
-        } else {
-            None
-        }
+    let remote_branch = Branch::get_or_create(remote_op_conn, branch_name);
+    let remote_generator = ManifestGenerator::new(remote_op_conn);
+    let remote_manifest = if let Some(hash) = remote_branch.current_operation_hash {
+        Some(remote_generator.generate_manifest(branch_name, &hash)?)
     } else {
         None
     };
@@ -701,13 +689,6 @@ fn push_to_file_remote(
 
     // Apply missing operations to remote if any
     if !diff.missing_in_manifest2.is_empty() {
-        // Create remote .gen directory if it doesn't exist
-        let remote_gen_dir = remote_path.join(".gen");
-        fs::create_dir_all(&remote_gen_dir)?;
-
-        let branch = Branch::get_or_create(remote_op_conn, &current_branch.name);
-
-        // Apply operations to remote
         apply_operations_to_remote(remote_op_conn, &diff.missing_in_manifest2, &remote_path)?;
 
         // Update remote branch to point to the latest operation
@@ -717,7 +698,13 @@ fn push_to_file_remote(
             .map(|op| op.operation.hash)
             .unwrap_or(current_hash);
 
-        Branch::set_current_operation(remote_op_conn, branch.id, &latest_op_hash);
+        Branch::set_current_operation(remote_op_conn, remote_branch.id, &latest_op_hash);
+        let current_state = OperationState::get_current_branch(remote_op_conn);
+        if let Some(current_branch) = current_state
+            && current_branch == remote_branch.id
+        {
+            OperationState::set_operation(remote_op_conn, &latest_op_hash);
+        }
     }
 
     Ok(())
@@ -1818,53 +1805,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_setup_remote_repository_with_invalid_url() {
-        let result = setup_remote_repository("invalid-url");
-        assert!(matches!(
-            result,
-            Err(RemoteOperationError::InvalidRemoteUrl(_))
-        ));
-    }
+    #[cfg(test)]
+    mod connect_file_remote {
+        use super::*;
 
-    #[test]
-    fn test_setup_remote_repository_with_unsupported_scheme() {
-        let result = setup_remote_repository("http://example.com/repo");
-        assert!(matches!(
-            result,
-            Err(RemoteOperationError::UnsupportedRemoteScheme(_, _))
-        ));
-    }
+        #[test]
+        fn test_with_invalid_url() {
+            let result = connect_file_remote("invalid-url");
+            assert!(matches!(
+                result,
+                Err(RemoteOperationError::InvalidRemoteUrl(_))
+            ));
+        }
 
-    #[test]
-    fn test_setup_remote_repository_with_nonexistent_remote() {
-        let temp_dir = tempdir().unwrap();
-        let nonexistent_path = temp_dir.path().join("nonexistent");
-        let remote_url = format!("file://{}", nonexistent_path.to_str().unwrap());
+        #[test]
+        fn test_with_unsupported_scheme() {
+            let result = connect_file_remote("http://example.com/repo");
+            assert!(matches!(
+                result,
+                Err(RemoteOperationError::UnsupportedRemoteScheme(_, _))
+            ));
+        }
 
-        let result = setup_remote_repository(&remote_url);
-        assert!(matches!(result, Err(RemoteOperationError::DoesNotExist(_))));
-    }
+        #[test]
+        fn test_with_nonexistent_remote() {
+            let temp_dir = tempdir().unwrap();
+            let nonexistent_path = temp_dir.path().join("nonexistent");
+            let remote_url = format!("file://{}", nonexistent_path.to_str().unwrap());
 
-    #[test]
-    fn test_setup_remote_repository_with_existing_remote() {
-        let temp_dir = tempdir().unwrap().keep();
-        let remote_path = &temp_dir;
+            let result = connect_file_remote(&remote_url);
+            assert!(matches!(result, Err(RemoteOperationError::DoesNotExist(_))));
+        }
 
-        // Create .gen directory and operation database
-        let gen_dir = remote_path.join(".gen");
-        fs::create_dir_all(&gen_dir).unwrap();
+        #[test]
+        fn test_with_existing_remote() {
+            let temp_dir = tempdir().unwrap().keep();
+            let remote_path = &temp_dir;
 
-        let op_db_path = gen_dir.join("gen.db");
-        let op_conn = get_operation_connection(op_db_path.to_str()).unwrap();
-        setup_db(&op_conn);
+            // Create .gen directory and operation database
+            let gen_dir = remote_path.join(".gen");
+            fs::create_dir_all(&gen_dir).unwrap();
 
-        let remote_url = format!("file://{}", remote_path.to_str().unwrap());
-        let result = setup_remote_repository(&remote_url);
-        assert!(result.is_ok());
+            let op_db_path = gen_dir.join("gen.db");
+            let op_conn = get_operation_connection(op_db_path.to_str()).unwrap();
+            setup_db(&op_conn);
 
-        let (parsed_remote_path, _remote_op_conn) = result.unwrap();
-        assert_eq!(parsed_remote_path, *remote_path);
+            let remote_url = format!("file://{}", remote_path.to_str().unwrap());
+            let result = connect_file_remote(&remote_url);
+            assert!(result.is_ok());
+
+            let (parsed_remote_path, _remote_op_conn) = result.unwrap();
+            assert_eq!(parsed_remote_path, *remote_path);
+        }
     }
 
     #[cfg(test)]
@@ -1967,7 +1959,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn test_push_to_empty_remote_is_error() {
+        fn test_push_to_uninitialized_remote_is_error() {
             setup_gen_dir();
             let op_conn = &get_operation_connection(None).unwrap();
             setup_db(op_conn);
