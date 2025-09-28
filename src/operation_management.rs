@@ -530,14 +530,12 @@ fn apply_operations_to_remote(
     })?;
     let gen_dir = PathBuf::from(gen_dir);
 
-    // Process operations in dependency order (they should already be ordered correctly)
     for manifest_op in operations {
         let operation = &manifest_op.operation;
         let op_hash = &operation.hash;
 
         let changeset_src = operation.get_changeset_path();
 
-        // Create remote operation directory
         let changeset_dst = remote_path
             .join(".gen")
             .join("changeset")
@@ -552,7 +550,6 @@ fn apply_operations_to_remote(
             )
         })?;
 
-        // Transfer dependencies file
         let dependencies_src = operation.get_changeset_dependencies_path();
         fs::copy(&dependencies_src, changeset_dst.join("dependencies")).map_err(|_| {
             RemoteOperationError::FileTransferError(
@@ -562,17 +559,17 @@ fn apply_operations_to_remote(
             )
         })?;
 
-        // Transfer file additions
         for file_addition in &manifest_op.file_additions {
             let src_path = gen_dir.join(&file_addition.file_path);
             let dst_path = remote_path.join(&file_addition.file_path);
-
-            // Create parent directories if needed
-            if let Some(parent) = dst_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-
+            // we do a conditional transfer because users may be making tmp files to just add nodes/etc. and don't actually
+            // care about keeping those files around
             if src_path.exists() {
+                // Create parent directories if needed on the remote
+                if let Some(parent) = dst_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
                 fs::copy(&src_path, &dst_path).map_err(|_| {
                     RemoteOperationError::FileTransferError(
                         file_addition.file_path.clone(),
@@ -583,11 +580,9 @@ fn apply_operations_to_remote(
             }
         }
 
-        // Apply changeset to remote data database if it exists
         let changeset = operation.get_changeset();
         let dependencies = operation.get_changeset_dependencies();
 
-        // Apply changeset within a transaction
         let remote_data_db = remote_path.join(changeset.db_path);
         let remote_data_conn = &get_connection(&remote_data_db)?;
         remote_data_conn.execute("BEGIN TRANSACTION", [])?;
@@ -603,7 +598,6 @@ fn apply_operations_to_remote(
             }
         }
 
-        // Insert operation into remote operation database
         remote_op_conn.execute("BEGIN TRANSACTION", [])?;
         match Operation::create_without_tracking(
             remote_op_conn,
@@ -612,16 +606,13 @@ fn apply_operations_to_remote(
             operation.parent_hash,
         ) {
             Ok(_) => {
-                // Add file associations for this operation
+                // Add file associations for this operation, these aren't tracked in changesets atm
                 for file_addition in &manifest_op.file_additions {
-                    // Create file addition record in remote database
                     let remote_file_addition = FileAddition::create(
                         remote_op_conn,
                         &file_addition.file_path,
                         file_addition.file_type,
                     );
-
-                    // Link operation to file addition
                     Operation::add_file(remote_op_conn, &operation.hash, remote_file_addition.id)?;
                 }
 
@@ -671,7 +662,6 @@ fn push_to_file_remote(
         None
     };
 
-    // Compare manifests to determine missing operations
     let diff = if let Some(remote_manifest) = remote_manifest {
         ManifestComparer::diff_manifests(&local_manifest, &remote_manifest)?
     } else {
@@ -682,12 +672,10 @@ fn push_to_file_remote(
         }
     };
 
-    // Check for RemoteBranchAhead condition
     if !diff.missing_in_manifest1.is_empty() {
         return Err(RemoteOperationError::RemoteBranchAhead);
     }
 
-    // Apply missing operations to remote if any
     if !diff.missing_in_manifest2.is_empty() {
         apply_operations_to_remote(remote_op_conn, &diff.missing_in_manifest2, &remote_path)?;
 
@@ -736,7 +724,6 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
 
                     push_to_file_remote(operation_conn, &remote_url, &branch.name)
                 } else {
-                    // New manifest-based push logic
                     let generator = ManifestGenerator::new(operation_conn);
                     let current_branch_id =
                         OperationState::get_current_branch(operation_conn).unwrap();
