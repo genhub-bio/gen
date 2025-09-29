@@ -465,6 +465,7 @@ impl Edge {
                     target_strand: edge.target_strand,
                     chromosome_index: augmented_edge.chromosome_index,
                     phased: augmented_edge.phased,
+                    created_on: augmented_edge.created_on,
                 };
                 if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
                     existing_edges.push(graph_edge);

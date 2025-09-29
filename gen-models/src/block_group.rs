@@ -349,19 +349,14 @@ impl BlockGroup {
 
     pub fn prune_graph(graph: &mut GenGraph) {
         // Prunes a graph by removing edges on the same chromosome_index. This means if 2 edges are
-        // both "chromosome index 0", we keep the newer one (newer known by the higher edge id).
-        // TODO: This check is not actually right but allows us to test some functionality wrt
-        // inherited block groups now. We need to know whether an edge was added to a blockgroup
-        // via inheritance or created by it. Because edges can be reused, if an edge created
-        // earlier in some other sample is added to a sample, it may be the correct one but have
-        // a lower edge id than some edge in the current sample.
+        // both "chromosome index 0", we keep the newer one.
         let mut root_nodes = HashSet::new();
         let mut edges_to_remove: Vec<(GraphNode, GraphNode)> = vec![];
         for node in graph.nodes() {
             if node.node_id == PATH_START_NODE_ID {
                 root_nodes.insert(node);
             }
-            let mut edges_by_ci: HashMap<i64, (HashId, GraphNode, GraphNode)> = HashMap::new();
+            let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
             for (source_node, target_node, edge_weights) in graph.edges(node) {
                 for edge_weight in edge_weights {
                     if edge_weight.chromosome_index == -1 {
@@ -369,17 +364,17 @@ impl BlockGroup {
                     }
                     edges_by_ci
                         .entry(edge_weight.chromosome_index)
-                        .and_modify(|(edge_id, source, target)| {
-                            if edge_weight.edge_id > *edge_id {
+                        .and_modify(|(source, target, created_on)| {
+                            if edge_weight.created_on > *created_on {
                                 edges_to_remove.push((*source, *target));
-                                *edge_id = edge_weight.edge_id;
                                 *source = source_node;
                                 *target = target_node;
+                                *created_on = edge_weight.created_on;
                             } else {
                                 edges_to_remove.push((source_node, target_node));
                             }
                         })
-                        .or_insert((edge_weight.edge_id, source_node, target_node));
+                        .or_insert((source_node, target_node, edge_weight.created_on));
                 }
             }
         }

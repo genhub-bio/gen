@@ -151,6 +151,7 @@ pub fn get_change_graph(
                         target_strand: Forward,
                         chromosome_index: 0,
                         phased: 0,
+                        created_on: 0,
                     }],
                 );
             }
@@ -175,6 +176,7 @@ pub fn get_change_graph(
                         target_strand: Forward,
                         chromosome_index: 0,
                         phased: 0,
+                        created_on: 0,
                     }],
                 );
             }

@@ -717,6 +717,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             )
         }));

@@ -484,6 +484,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // second starting point for the graph, this also represents a node that is part of the path, but part of the sequence we don't want to use in our path
@@ -506,6 +507,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // represent node_id being split into 3 pieces
@@ -528,6 +530,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // put the same node_id 1 somewhere random in the graph on an edge we don't want to follow
@@ -550,6 +553,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -571,6 +575,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -592,6 +597,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // final part of path block
@@ -614,6 +620,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -635,6 +642,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -656,6 +664,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         let path_blocks = vec![
@@ -739,6 +748,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -760,6 +770,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -781,6 +792,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         let path_blocks = vec![PathBlock {
