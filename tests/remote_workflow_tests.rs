@@ -5,14 +5,13 @@ mod remote_workflow_integration_tests {
         operation_management::push,
         test_helpers::{get_operation_connection, setup_gen_dir},
     };
-    use gen_models::operations::{Branch, Defaults, Remote, setup_db};
+    use gen_models::operations::{Branch, Defaults, Remote};
 
     /// Test remote deletion with branch associations (should set to null)
     #[test]
     fn test_remote_deletion_with_branch_associations() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Add remotes
         Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -99,7 +98,6 @@ mod remote_workflow_integration_tests {
     fn test_remote_workflow_error_scenarios() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Test 1: Try to associate branch with non-existent remote
         let main_branch = Branch::get_by_name(op_conn, "main").unwrap();

@@ -498,7 +498,7 @@ mod tests {
     use gen_core::Strand;
     use gen_models::{
         block_group_edge::BlockGroupEdgeData, collection::Collection, edge::Edge, node::Node,
-        operations::setup_db, sequence::Sequence,
+        sequence::Sequence,
     };
 
     use super::*;
@@ -522,7 +522,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         Collection::create(conn, "test");
@@ -647,7 +647,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test";
@@ -764,7 +764,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test";

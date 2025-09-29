@@ -30,9 +30,7 @@ use gen_models::{
     errors::{OperationError, RemoteError},
     file_types::FileTypes,
     metadata,
-    operations::{
-        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, setup_db,
-    },
+    operations::{Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState},
     sample::Sample,
     traits::Query,
 };
@@ -59,6 +57,7 @@ fn main() {
     // commands not requiring a db connection are handled here
     if let Some(Commands::Init {}) = &cli.command {
         get_or_create_gen_dir();
+        get_operation_connection(None).unwrap();
         println!("Gen repository initialized.");
         return;
     }
@@ -124,7 +123,6 @@ fn main() {
             panic!("Error tracking database: {err}");
         }
     };
-    setup_db(&operation_conn);
 
     match cli.command {
         Some(Commands::Init {}) => {

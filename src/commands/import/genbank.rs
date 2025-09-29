@@ -3,7 +3,7 @@ use std::fs::File;
 use clap::Args;
 use gen_models::{
     file_types::FileTypes,
-    operations::{OperationFile, OperationInfo, setup_db},
+    operations::{OperationFile, OperationInfo},
 };
 
 use crate::{
@@ -34,7 +34,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     let conn = get_connection(&db).unwrap();
 
     // initialize the selected database if needed.
-    setup_db(&operation_conn);
+
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 

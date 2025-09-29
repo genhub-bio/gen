@@ -94,7 +94,6 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::path::PathBuf;
 
-    use gen_models::operations::setup_db;
     use tempfile::tempdir;
 
     use super::*;
@@ -116,7 +115,7 @@ mod tests {
         gff_path.push("fixtures/simple.gff");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         import_fasta(

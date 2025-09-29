@@ -842,15 +842,6 @@ impl OperationState {
     }
 }
 
-// TODO: make this part of migrations
-pub fn setup_db(conn: &Connection) {
-    // check if the database is known. If not, initialize it.
-    if Branch::get_by_name(conn, "main").is_none() {
-        Branch::get_or_create(conn, "main");
-        OperationState::set_branch(conn, "main");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -868,7 +859,7 @@ mod tests {
         fn test_writes_operation_hash() {
             setup_gen_dir();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             let operation =
                 Operation::create(op_conn, "test", &HashId::convert_str("some-hash")).unwrap();
             OperationState::set_operation(op_conn, &operation.hash);
@@ -991,7 +982,6 @@ mod tests {
             let op_conn = &get_operation_connection(None).unwrap();
 
             // Get database UUID and setup database
-            setup_db(op_conn);
 
             // Create test remotes
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -1019,7 +1009,6 @@ mod tests {
             let op_conn = &get_operation_connection(None).unwrap();
 
             // Get database UUID and setup database
-            setup_db(op_conn);
 
             // Create test branch
             let branch = Branch::get_or_create(op_conn, "test_branch");
@@ -1038,7 +1027,6 @@ mod tests {
             let op_conn = &get_operation_connection(None).unwrap();
 
             // Get database UUID and setup database
-            setup_db(op_conn);
 
             // Create test remotes
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -1064,7 +1052,6 @@ mod tests {
             let op_conn = &get_operation_connection(None).unwrap();
 
             // Get database UUID and setup database
-            setup_db(op_conn);
 
             // Create test remotes
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -1097,7 +1084,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -1319,7 +1305,6 @@ mod tests {
     fn test_graph_representation() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // operations will be made in ascending order.
         // The branch topology is as follows. () indicate where a branch starts
@@ -1371,7 +1356,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -1603,7 +1587,6 @@ mod tests {
     fn test_remote_delete_with_branch_associations() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Create a remote
         Remote::create(op_conn, "test_remote", "https://test.com/repo.gen").unwrap();
@@ -1652,7 +1635,6 @@ mod tests {
     fn test_branch_set_remote() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Create a remote
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1683,7 +1665,6 @@ mod tests {
     fn test_branch_get_remote() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Create remotes
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1715,7 +1696,6 @@ mod tests {
     fn test_branch_create_with_remote() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Create a remote
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1740,7 +1720,6 @@ mod tests {
     fn test_branch_process_row_with_remote() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Create a remote
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1766,7 +1745,6 @@ mod tests {
     fn test_branch_set_remote_foreign_key_constraint() {
         setup_gen_dir();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
 
         // Create a branch
         let branch = Branch::get_or_create(op_conn, "test_branch");

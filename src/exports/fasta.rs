@@ -33,7 +33,6 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{io, path::PathBuf, str};
 
-    use gen_models::operations::setup_db;
     use noodles::fasta;
     use tempfile;
 
@@ -52,7 +51,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -102,7 +101,7 @@ mod tests {
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();

@@ -171,7 +171,7 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{errors::OperationError, operations::setup_db, traits::*};
+    use gen_models::{errors::OperationError, traits::*};
 
     use super::*;
     use crate::{
@@ -186,7 +186,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         import_fasta(
@@ -218,7 +218,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/gzipped.fa.gz");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         import_fasta(
@@ -244,7 +244,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         import_fasta(
@@ -270,7 +270,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         import_fasta(
@@ -306,7 +306,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         import_fasta(
@@ -338,7 +338,7 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();

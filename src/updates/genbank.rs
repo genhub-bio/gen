@@ -224,10 +224,7 @@ where
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_models::{
-        file_types::FileTypes,
-        operations::{OperationFile, setup_db},
-    };
+    use gen_models::{file_types::FileTypes, operations::OperationFile};
     use noodles::fasta;
 
     use super::*;
@@ -251,7 +248,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         assert_eq!(
             update_with_genbank(
@@ -280,7 +277,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
@@ -320,7 +317,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
@@ -378,7 +375,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
@@ -448,7 +445,7 @@ mod tests {
             setup_gen_dir();
             let conn = &get_connection(None).unwrap();
             let op_conn = &get_operation_connection(None).unwrap();
-            setup_db(op_conn);
+
             track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");

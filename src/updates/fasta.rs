@@ -165,8 +165,6 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::operations::setup_db;
-
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
@@ -188,7 +186,7 @@ mod tests {
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -244,7 +242,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/aaaaaaaa.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -311,7 +309,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/multiple.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -375,7 +373,7 @@ mod tests {
         fasta_update2_path.push("fixtures/tttttttt.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -451,7 +449,7 @@ mod tests {
         fasta_update2_path.push("fixtures/tttttttt.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -533,7 +531,7 @@ mod tests {
         fasta_update2_path.push("fixtures/tttttttt.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -609,7 +607,7 @@ mod tests {
         fasta_update2_path.push("fixtures/tttttttt.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -683,7 +681,7 @@ mod tests {
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
