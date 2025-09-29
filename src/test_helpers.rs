@@ -2,7 +2,7 @@ use std::{fmt::Debug, fs, io::Write, ops::Add, path::PathBuf};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand,
-    config::{BASE_DIR, get_or_create_gen_dir},
+    config::{get_or_create_gen_dir, set_base_dir},
     errors::ConnectionError,
 };
 use gen_graph::GenGraph;
@@ -62,12 +62,7 @@ pub fn get_operation_connection<'a>(
 
 pub fn setup_gen_dir() -> PathBuf {
     let tmp_dir = tempdir().unwrap().keep();
-    {
-        BASE_DIR.with(|v| {
-            let mut writer = v.write().unwrap();
-            *writer = tmp_dir;
-        });
-    }
+    set_base_dir(&tmp_dir);
     get_or_create_gen_dir()
 }
 
