@@ -242,7 +242,7 @@ mod tests {
 
     use gen_models::{
         block_group::BlockGroup,
-        operations::{Branch, OperationState, setup_db},
+        operations::{Branch, OperationState},
     };
 
     use super::*;
@@ -261,7 +261,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
         let collection = "test".to_string();
         let op_1 = import_fasta(
@@ -296,7 +296,7 @@ mod tests {
         let conn = &mut get_connection(None).unwrap();
         let conn2 = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
         track_database(conn2, operation_conn).unwrap();
         let collection = "test".to_string();
@@ -337,7 +337,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
 
         let collection = "test".to_string();
@@ -389,7 +389,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = &mut get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
         let collection = "test".to_string();
         let op_1 = import_fasta(
@@ -429,7 +429,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = &get_connection(None).unwrap();
         let operation_conn = &get_operation_connection(None).unwrap();
-        setup_db(operation_conn);
+
         track_database(conn, operation_conn).unwrap();
 
         let collection = "test".to_string();

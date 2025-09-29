@@ -90,8 +90,6 @@ where
 mod tests {
     use std::{fs::File, io::BufReader, path::PathBuf};
 
-    use gen_models::operations::setup_db;
-
     use super::*;
     use crate::{
         test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
@@ -105,7 +103,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");

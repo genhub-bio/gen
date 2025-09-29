@@ -385,7 +385,7 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_graph::{GraphEdge, GraphNode};
-    use gen_models::{operations::setup_db, traits::Query};
+    use gen_models::traits::Query;
     use petgraph::Direction;
 
     use super::*;
@@ -466,7 +466,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
@@ -534,7 +534,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();

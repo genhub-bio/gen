@@ -299,7 +299,7 @@ mod tests {
     use gen_models::{
         file_types::FileTypes,
         metadata,
-        operations::{OperationFile, OperationInfo, setup_db},
+        operations::{OperationFile, OperationInfo},
     };
     use tempfile;
 
@@ -369,7 +369,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let db_uuid = metadata::get_db_uuid(conn);
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -402,7 +402,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let db_uuid = metadata::get_db_uuid(conn);
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -435,7 +435,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let db_uuid = metadata::get_db_uuid(conn);
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

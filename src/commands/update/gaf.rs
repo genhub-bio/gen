@@ -1,5 +1,4 @@
 use clap::Args;
-use gen_models::operations::setup_db;
 
 use crate::{
     commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
@@ -35,7 +34,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     let conn = get_connection(&db).unwrap();
 
     // initialize the selected database if needed.
-    setup_db(&operation_conn);
+
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 

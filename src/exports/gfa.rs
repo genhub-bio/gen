@@ -284,7 +284,6 @@ mod tests {
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
         node::Node,
-        operations::setup_db,
         sequence::Sequence,
         traits::Query,
     };
@@ -305,7 +304,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
@@ -446,7 +445,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let (bg_id, _path) = setup_block_group(conn);
@@ -496,7 +495,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
@@ -527,7 +526,7 @@ mod tests {
         let collection_name = "anderson promoters".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
@@ -558,7 +557,7 @@ mod tests {
         let collection_name = "test".to_string();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
@@ -589,7 +588,7 @@ mod tests {
         setup_gen_dir();
         let conn = &get_connection(None).unwrap();
         let op_conn = &get_operation_connection(None).unwrap();
-        setup_db(op_conn);
+
         track_database(conn, op_conn).unwrap();
 
         let (block_group_id, path) = setup_block_group(conn);

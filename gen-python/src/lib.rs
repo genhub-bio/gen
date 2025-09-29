@@ -10,7 +10,7 @@ use r#gen::{
     updates::fasta::update_with_fasta as gen_update_with_fasta,
 };
 use gen_core::config::get_or_create_gen_dir;
-use gen_models::{errors::OperationError, operations::setup_db};
+use gen_models::errors::OperationError;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 #[pyfunction]
@@ -30,7 +30,7 @@ fn import_fasta(
     println!("Fasta import called");
 
     let operation_conn = get_operation_connection(None).unwrap();
-    setup_db(&operation_conn);
+
     let db = get_db_for_command(db_name, &operation_conn);
     let conn = get_connection(&db).unwrap();
 
@@ -98,7 +98,7 @@ pub fn update_with_fasta(
     };
 
     // initialize the selected database if needed.
-    setup_db(&operation_conn);
+
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -157,7 +157,7 @@ pub fn export_fasta(
     };
 
     // initialize the selected database if needed.
-    setup_db(&operation_conn);
+
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
