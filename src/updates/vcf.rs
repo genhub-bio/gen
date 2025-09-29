@@ -916,8 +916,6 @@ mod tests {
         )
         .unwrap();
 
-        // TODO: Fix this once pruning works correctly. The issue currently is we prune away the boundary edge
-        // and only see a single path through the graph.
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, true),
             HashSet::from_iter(vec![
