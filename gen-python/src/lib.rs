@@ -25,7 +25,7 @@ use gen_core::config::get_or_create_gen_dir;
 use gen_models::{
     errors::OperationError,
     file_types::FileTypes,
-    operations::{OperationFile, OperationInfo, setup_db},
+    operations::{OperationFile, OperationInfo},
     sample::Sample,
     session_operations,
 };
@@ -59,7 +59,6 @@ fn import_fasta(
         }
     };
 
-    // initialize the selected database if needed.
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -99,7 +98,6 @@ fn import_genbank(
     sample: Option<String>,
 ) -> PyResult<String> {
     let operation_conn = get_operation_connection(None).unwrap();
-    setup_db(&operation_conn);
 
     let db = get_db_for_command(db_name, &operation_conn);
     let conn = get_connection(&db).unwrap();
@@ -111,7 +109,6 @@ fn import_genbank(
         }
     };
 
-    // initialize the selected database if needed.
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -159,7 +156,6 @@ fn import_gfa(
     sample: Option<String>,
 ) -> PyResult<String> {
     let operation_conn = get_operation_connection(None).unwrap();
-    setup_db(&operation_conn);
 
     let db = get_db_for_command(db_name, &operation_conn);
     let conn = get_connection(&db).unwrap();
@@ -171,7 +167,6 @@ fn import_gfa(
         }
     };
 
-    // initialize the selected database if needed.
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -213,7 +208,6 @@ fn import_library(
     region_name: &str,
 ) -> PyResult<String> {
     let operation_conn = get_operation_connection(None).unwrap();
-    setup_db(&operation_conn);
 
     let db = get_db_for_command(db_name, &operation_conn);
     let conn = get_connection(&db).unwrap();
@@ -225,7 +219,6 @@ fn import_library(
         }
     };
 
-    // initialize the selected database if needed.
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -299,8 +292,6 @@ fn update_with_fasta(
         }
     };
 
-    // initialize the selected database if needed.
-
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -361,8 +352,6 @@ fn update_with_sequence(
         }
     };
 
-    // initialize the selected database if needed.
-    setup_db(&operation_conn);
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -411,8 +400,6 @@ fn export_fasta(
         }
     };
 
-    // initialize the selected database if needed.
-
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -452,9 +439,6 @@ fn derive_subgraph(
             panic!("Error tracking database: {err}");
         }
     };
-
-    // initialize the selected database if needed.
-    setup_db(&operation_conn);
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
@@ -508,9 +492,6 @@ fn derive_breakpoint_chunks(
             panic!("Error tracking database: {err}");
         }
     };
-
-    // initialize the selected database if needed.
-    setup_db(&operation_conn);
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
@@ -595,9 +576,6 @@ fn derive_sized_chunks(
         }
     };
 
-    // initialize the selected database if needed.
-    setup_db(&operation_conn);
-
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -676,9 +654,6 @@ fn make_stitch(
             panic!("Error tracking database: {err}");
         }
     };
-
-    // initialize the selected database if needed.
-    setup_db(&operation_conn);
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();

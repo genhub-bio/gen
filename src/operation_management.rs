@@ -593,7 +593,7 @@ fn apply_operations_to_remote(
             Err(e) => {
                 remote_data_conn.execute("ROLLBACK TRANSACTION", [])?;
                 return Err(RemoteOperationError::IOError(std::io::Error::other(
-                    format!("Failed to apply changeset for operation {}: {}", op_hash, e),
+                    format!("Failed to apply changeset for operation {op_hash}: {e}"),
                 )));
             }
         }
@@ -621,10 +621,7 @@ fn apply_operations_to_remote(
             Err(e) => {
                 remote_op_conn.execute("ROLLBACK TRANSACTION", [])?;
                 return Err(RemoteOperationError::IOError(std::io::Error::other(
-                    format!(
-                        "Failed to save operation {} to remote database: {}",
-                        op_hash, e
-                    ),
+                    format!("Failed to save operation {op_hash} to remote database: {e}",),
                 )));
             }
         }
