@@ -71,7 +71,7 @@ impl Operation {
         let current_branch_id =
             OperationState::get_current_branch(conn).expect("No branch is checked out.");
 
-        let query = "INSERT INTO operation (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
+        let query = "INSERT INTO operations (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
         let mut stmt = conn.prepare(query).unwrap();
         stmt.execute(params![hash, change_type, current_op])?;
         let operation = Operation {
@@ -91,7 +91,7 @@ impl Operation {
         change_type: &str,
         parent_hash: Option<HashId>,
     ) -> SQLResult<Operation> {
-        let query = "INSERT INTO operation (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
+        let query = "INSERT INTO operations (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
         let mut stmt = conn.prepare(query).unwrap();
         stmt.execute(params![hash, change_type, parent_hash])?;
         let operation = Operation {
@@ -115,10 +115,10 @@ impl Operation {
     }
 
     pub fn get_upstream(conn: &Connection, operation_hash: &HashId) -> Vec<HashId> {
-        let query = "WITH RECURSIVE operations(operation_hash, depth) AS ( \
+        let query = "WITH RECURSIVE r_operations(operation_hash, depth) AS ( \
         select ?1, 0 UNION \
-        select parent_hash, depth + 1 from operation join operations ON hash=operation_hash \
-        ) SELECT operation_hash, depth from operations where operation_hash is not null order by depth desc;";
+        select parent_hash, depth + 1 from r_operations join operations ON hash=operation_hash \
+        ) SELECT operation_hash, depth from r_operations where operation_hash is not null order by depth desc;";
         let mut stmt = conn.prepare(query).unwrap();
         stmt.query_map([operation_hash], |row| row.get(0))
             .unwrap()
@@ -128,7 +128,7 @@ impl Operation {
 
     pub fn get_operation_graph(conn: &Connection) -> OperationGraph {
         let mut graph = OperationGraph::new();
-        let operations = Operation::query(conn, "select * from operation;", rusqlite::params![]);
+        let operations = Operation::query(conn, "select * from operations;", rusqlite::params![]);
         for op in operations.iter() {
             graph.add_node(op.hash);
             if let Some(v) = op.parent_hash {
@@ -184,7 +184,7 @@ impl Operation {
     pub fn search_hash(conn: &Connection, op_hash: &str) -> SQLResult<Operation> {
         Operation::get(
             conn,
-            "select * from operation where hash LIKE ?1",
+            "select * from operations where hash LIKE ?1",
             params![op_hash],
         )
     }
@@ -212,7 +212,7 @@ impl Query for Operation {
     type Model = Operation;
 
     const PRIMARY_KEY: &'static str = "hash";
-    const TABLE_NAME: &'static str = "operation";
+    const TABLE_NAME: &'static str = "operations";
 
     fn process_row(row: &Row) -> Self::Model {
         Operation {
@@ -243,7 +243,7 @@ pub struct FileAddition {
 impl Query for FileAddition {
     type Model = FileAddition;
 
-    const TABLE_NAME: &'static str = "file_addition";
+    const TABLE_NAME: &'static str = "file_additions";
 
     fn process_row(row: &Row) -> Self::Model {
         Self::Model {
@@ -257,7 +257,7 @@ impl Query for FileAddition {
 impl FileAddition {
     pub fn create(conn: &Connection, file_path: &str, file_type: FileTypes) -> FileAddition {
         let query =
-            "INSERT INTO file_addition (file_path, file_type) VALUES (?1, ?2) RETURNING (id)";
+            "INSERT INTO file_additions (file_path, file_type) VALUES (?1, ?2) RETURNING (id)";
         let mut stmt = conn.prepare(query).unwrap();
         let mut rows = stmt
             .query_map(
@@ -281,7 +281,7 @@ impl FileAddition {
         conn: &Connection,
         operation_hash: &HashId,
     ) -> Vec<FileAddition> {
-        let query = "select fa.* from file_addition fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
+        let query = "select fa.* from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
             .query_map(params![operation_hash], |row| {
