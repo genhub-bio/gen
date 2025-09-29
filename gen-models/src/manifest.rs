@@ -205,11 +205,11 @@ impl<'a> ManifestGenerator<'a> {
                 let changeset_hash =
                     Sha256::digest(serde_json::to_vec(&changeset.changes).unwrap())
                         .iter()
-                        .map(|b| format!("{:02x}", b))
+                        .map(|b| format!("{b:02x}"))
                         .collect();
                 let dependencies_hash = Sha256::digest(serde_json::to_vec(&dependencies).unwrap())
                     .iter()
-                    .map(|b| format!("{:02x}", b))
+                    .map(|b| format!("{b:02x}"))
                     .collect();
 
                 let file_additions = FileAddition::get_files_for_operation(self.conn, &op.hash);

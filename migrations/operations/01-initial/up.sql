@@ -9,18 +9,18 @@ CREATE TABLE operation_state (
   id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
   operation_hash BLOB,
   branch_id INTEGER,
-  FOREIGN KEY(operation_hash) REFERENCES operation(hash),
+  FOREIGN KEY(operation_hash) REFERENCES operations(hash),
   FOREIGN KEY(branch_id) REFERENCES branch(id)
 ) STRICT;
 
-CREATE TABLE operation (
+CREATE TABLE operations (
   hash BLOB PRIMARY KEY NOT NULL,
   parent_hash BLOB,
   change_type TEXT NOT NULL,
-  FOREIGN KEY(parent_hash) REFERENCES operation(hash)
+  FOREIGN KEY(parent_hash) REFERENCES operations(hash)
 ) STRICT;
 
-CREATE TABLE file_addition (
+CREATE TABLE file_additions (
   id INTEGER PRIMARY KEY NOT NULL,
   file_path TEXT NOT NULL,
   file_type TEXT NOT NULL
@@ -30,15 +30,15 @@ CREATE TABLE operation_files (
   id INTEGER PRIMARY KEY NOT NULL,
   operation_hash BLOB NOT NULL,
   file_addition_id INTEGER NOT NULL,
-  FOREIGN KEY(operation_hash) REFERENCES operation(hash),
-  FOREIGN KEY(file_addition_id) REFERENCES file_addition(id)
+  FOREIGN KEY(operation_hash) REFERENCES operations(hash),
+  FOREIGN KEY(file_addition_id) REFERENCES file_additions(id)
 ) STRICT;
 
 CREATE TABLE operation_summary (
   id INTEGER PRIMARY KEY NOT NULL,
   operation_hash BLOB NOT NULL,
   summary TEXT NOT NULL,
-  FOREIGN KEY(operation_hash) REFERENCES operation(hash)
+  FOREIGN KEY(operation_hash) REFERENCES operations(hash)
 ) STRICT;
 
 CREATE TABLE remotes (
@@ -57,7 +57,7 @@ CREATE TABLE branch (
   name TEXT NOT NULL,
   current_operation_hash BLOB,
   remote_name TEXT,
-  FOREIGN KEY(current_operation_hash) REFERENCES operation(hash),
+  FOREIGN KEY(current_operation_hash) REFERENCES operations(hash),
   FOREIGN KEY(remote_name) REFERENCES remotes(name) ON DELETE SET NULL
 ) STRICT;
 CREATE UNIQUE INDEX branch_uidx ON branch(name);
