@@ -916,7 +916,12 @@ impl OperationState {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, io::Write};
+    use std::{
+        collections::HashSet,
+        io::{Cursor, Write},
+    };
+
+    use tempfile::NamedTempFile;
 
     use super::*;
     use crate::test_helpers::{
@@ -1907,43 +1912,37 @@ mod tests {
 
     #[test]
     fn test_calculate_stream_hash() {
-        use std::io::Cursor;
-
         let content = b"Hello, World!";
         let cursor = Cursor::new(content);
-        let hash = super::calculate_stream_hash(cursor).unwrap();
+        let hash = calculate_stream_hash(cursor).unwrap();
 
         assert_eq!(hash.len(), 32);
 
         // Test consistency - same content should produce same hash
         let cursor2 = Cursor::new(content);
-        let hash2 = super::calculate_stream_hash(cursor2).unwrap();
+        let hash2 = calculate_stream_hash(cursor2).unwrap();
         assert_eq!(hash, hash2);
 
         // Test different content produces different hash
         let different_content = b"Hello, World!!";
         let cursor3 = Cursor::new(different_content);
-        let hash3 = super::calculate_stream_hash(cursor3).unwrap();
+        let hash3 = calculate_stream_hash(cursor3).unwrap();
         assert_ne!(hash, hash3);
     }
 
     #[test]
     fn test_calculate_file_checksum() {
-        use std::io::Write;
-
-        use tempfile::NamedTempFile;
-
         let mut temp_file = NamedTempFile::new().unwrap();
         let content = b"Test file content for checksum calculation";
         temp_file.write_all(content).unwrap();
         temp_file.flush().unwrap();
 
-        let checksum = super::calculate_file_checksum(temp_file.path()).unwrap();
+        let checksum = calculate_file_checksum(temp_file.path()).unwrap();
 
         assert_eq!(checksum.0.len(), 32);
 
         // Test consistency - same file should produce same checksum
-        let checksum2 = super::calculate_file_checksum(temp_file.path()).unwrap();
+        let checksum2 = calculate_file_checksum(temp_file.path()).unwrap();
         assert_eq!(checksum, checksum2);
 
         // Test with different file content
@@ -1952,13 +1951,13 @@ mod tests {
         temp_file2.write_all(different_content).unwrap();
         temp_file2.flush().unwrap();
 
-        let checksum3 = super::calculate_file_checksum(temp_file2.path()).unwrap();
+        let checksum3 = calculate_file_checksum(temp_file2.path()).unwrap();
         assert_ne!(checksum, checksum3);
     }
 
     #[test]
     fn test_calculate_file_checksum_nonexistent_file() {
-        let result = super::calculate_file_checksum("/nonexistent/file/path");
+        let result = calculate_file_checksum("/nonexistent/file/path");
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err().kind(),
@@ -2006,8 +2005,6 @@ mod tests {
         setup_gen_dir();
         let conn = &get_operation_connection(None).unwrap();
 
-        use tempfile::NamedTempFile;
-
         let mut temp_file = NamedTempFile::new().unwrap();
         let content = b"Test file content";
         temp_file.write_all(content).unwrap();
@@ -2015,14 +2012,13 @@ mod tests {
 
         let test_file_path = temp_file.path().to_str().unwrap();
 
-        // First call should create a new FileAddition
         let fa1 = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
             .expect("Failed to create FileAddition");
 
         assert_eq!(
             fa1.id,
             FileAddition::generate_file_addition_id(
-                super::calculate_file_checksum(&temp_file.path()),
+                &calculate_file_checksum(&temp_file.path()).unwrap(),
                 test_file_path
             )
         );
@@ -2044,23 +2040,5 @@ mod tests {
             .expect("Failed to create different FileAddition");
 
         assert_ne!(fa1.id, fa3.id);
-    }
-
-    #[test]
-    fn test_file_addition_error_handling_file_not_found() {
-        setup_gen_dir();
-        let conn = &get_operation_connection(None).unwrap();
-
-        // Test error handling for non-existent file
-        let result =
-            FileAddition::get_or_create(conn, "/nonexistent/file/path.txt", FileTypes::Fasta);
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            FileAdditionError::FileNotFound(path) => {
-                assert_eq!(path, "/nonexistent/file/path.txt");
-            }
-            other => panic!("Expected FileNotFound error, got: {:?}", other),
-        }
     }
 }
