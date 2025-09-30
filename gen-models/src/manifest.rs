@@ -338,9 +338,10 @@ mod tests {
             changeset_hash: "changeset_hash_123".to_string(),
             dependencies_hash: "dependencies_hash_456".to_string(),
             file_additions: vec![FileAddition {
-                id: 1,
+                id: HashId([1u8; 32]),
                 file_path: "/path/to/file.fa".to_string(),
                 file_type: FileTypes::Fasta,
+                checksum: HashId([2u8; 32]),
             }],
             operation_summary: Some(OperationSummary {
                 id: 1,

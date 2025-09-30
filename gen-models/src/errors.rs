@@ -87,6 +87,27 @@ pub enum RemoteError {
     DefaultRemoteNotFound(String),
 }
 
+#[derive(Debug, Error)]
+pub enum FileAdditionError {
+    #[error("Failed to read file: {0}")]
+    FileReadError(#[from] std::io::Error),
+
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
+    #[error("Permission denied accessing file: {0}")]
+    FilePermissionDenied(String),
+
+    #[error("Failed to calculate checksum: {0}")]
+    ChecksumError(String),
+
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+
+    #[error("HashId generation failed: {0}")]
+    HashIdError(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
