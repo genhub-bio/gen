@@ -58,6 +58,9 @@ pub enum Commands {
         /// Position as "node id:coordinate" to center the graph on
         #[arg(short, long)]
         position: Option<String>,
+        /// Use inline widget view instead of full-screen view
+        #[arg(short, long)]
+        inline: bool,
     },
     /// Export a set of operations to a patch file
     #[command(name = "patch-create", arg_required_else_help(true))]

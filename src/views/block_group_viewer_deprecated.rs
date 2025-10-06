@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node, is_terminal};
+use gen_core::{PATH_START_NODE_ID, is_end_node, is_start_node, is_terminal};
 use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_models::{node::Node, path::Path, sequence::Sequence};
 use log::{info, warn};
@@ -258,7 +258,7 @@ pub struct Viewer<'a> {
     pub conn: &'a Connection,
     pub base_layout: BaseLayout,
     pub scaled_layout: ScaledLayout,
-    pub node_sequences: HashMap<HashId, Sequence>,
+    pub node_sequences: HashMap<i64, Sequence>,
     pub state: State,
     pub parameters: PlotParameters,
     pub origin_block: Option<GraphNode>,
@@ -281,12 +281,12 @@ impl<'a> Viewer<'a> {
         );
 
         // If we're being asked to view an empty graph, show the splash screen
-        if block_graph.node_count() == 1
-            && let Some(node) = block_graph.nodes().next()
-            && node.node_id == PATH_START_NODE_ID
-            && node.block_id == -1
-        {
-            new_viewer.state.show_splash_screen = true;
+        if block_graph.node_count() == 1 {
+            if let Some(node) = block_graph.nodes().next() {
+                if node.node_id == PATH_START_NODE_ID && node.block_id == -1 {
+                    new_viewer.state.show_splash_screen = true;
+                }
+            }
         }
         new_viewer
     }
@@ -306,12 +306,12 @@ impl<'a> Viewer<'a> {
                 .layout_graph
                 .nodes()
                 .map(|node| node.node_id)
-                .collect::<HashSet<_>>()
+                .collect::<HashSet<i64>>()
                 .into_iter()
-                .collect::<Vec<_>>(),
+                .collect::<Vec<i64>>(),
         )
         .into_iter()
-        .collect::<HashMap<_, Sequence>>();
+        .collect::<HashMap<i64, Sequence>>();
 
         // Stretch and scale the base layout to account for the sequence labels and plot parameters
         let scaled_layout = ScaledLayout::from_base_layout(&base_layout, &plot_parameters);
@@ -433,10 +433,10 @@ impl<'a> Viewer<'a> {
 
     /// Unselect the currently selected block if it's not visible in the viewport.
     pub fn unselect_if_not_visible(&mut self) {
-        if let Some(selected_block) = self.state.selected_block
-            && !self.is_block_visible(selected_block)
-        {
-            self.state.selected_block = None;
+        if let Some(selected_block) = self.state.selected_block {
+            if !self.is_block_visible(selected_block) {
+                self.state.selected_block = None;
+            }
         }
     }
 
@@ -448,7 +448,7 @@ impl<'a> Viewer<'a> {
             self.update_scroll_for_cursor(cursor_x, cursor_y);
             Ok((cursor_x, cursor_y))
         } else {
-            Err(format!("Block ID {block:?} not found in layout"))
+            Err(format!("Block ID {:?} not found in layout", block))
         }
     }
 
@@ -546,7 +546,7 @@ impl<'a> Viewer<'a> {
             return label::NODE.to_string().to_string();
         }
 
-        if let Some(sequence) = self.node_sequences.get(&block.node_id) {
+        let label = if let Some(sequence) = self.node_sequences.get(&block.node_id) {
             inner_truncation(
                 sequence
                     .get_sequence(block.sequence_start, block.sequence_end)
@@ -558,7 +558,9 @@ impl<'a> Viewer<'a> {
             // do show a placeholder of the correct length.
             let seq_len = (block.sequence_end - block.sequence_start).unsigned_abs() as u32;
             "?".repeat(max_width.min(seq_len) as usize)
-        }
+        };
+
+        label
     }
 
     /// Print a block label at the given position.
@@ -596,7 +598,10 @@ impl<'a> Viewer<'a> {
             ctx.print(
                 x,
                 y + 1.0,
-                Span::styled(format!("↓({x:.1},{y:.1})"), Style::default().fg(Color::Red)),
+                Span::styled(
+                    format!("↓({:.1},{:.1})", x, y),
+                    Style::default().fg(Color::Red),
+                ),
             );
         }
     }
@@ -932,7 +937,7 @@ impl<'a> Viewer<'a> {
         {
             self.state.selected_block = Some(new_selection);
             if let Err(e) = self.center_on_block(new_selection) {
-                warn!("Viewer - error finding block to switch to: {e}");
+                warn!("Viewer - error finding block to switch to: {}", e);
             }
         }
     }
@@ -1250,16 +1255,18 @@ impl<'a> Viewer<'a> {
                 self.state.world = self.compute_bounding_box();
 
                 // Adjust viewport to maintain terminal coordinates of selected block
-                if let Some((old_x, old_y)) = terminal_coords
-                    && let Some(block) = self.state.selected_block
-                    && let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
-                {
-                    let new_center_x = (start + end) / 2.0;
-                    let new_center_y = *y;
+                if let Some((old_x, old_y)) = terminal_coords {
+                    if let Some(block) = self.state.selected_block {
+                        if let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
+                        {
+                            let new_center_x = (start + end) / 2.0;
+                            let new_center_y = *y;
 
-                    // Calculate new offsets to maintain terminal coordinates
-                    self.state.offset_x = (new_center_x - old_x).round() as i32;
-                    self.state.offset_y = (new_center_y - old_y).round() as i32;
+                            // Calculate new offsets to maintain terminal coordinates
+                            self.state.offset_x = (new_center_x - old_x).round() as i32;
+                            self.state.offset_y = (new_center_y - old_y).round() as i32;
+                        }
+                    }
                 }
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
@@ -1282,16 +1289,18 @@ impl<'a> Viewer<'a> {
                 self.state.world = self.compute_bounding_box();
 
                 // Adjust viewport to maintain terminal coordinates of selected block
-                if let Some((old_x, old_y)) = terminal_coords
-                    && let Some(block) = self.state.selected_block
-                    && let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
-                {
-                    let new_center_x = (start + end) / 2.0;
-                    let new_center_y = *y;
+                if let Some((old_x, old_y)) = terminal_coords {
+                    if let Some(block) = self.state.selected_block {
+                        if let Some(((start, y), (end, _))) = self.scaled_layout.labels.get(&block)
+                        {
+                            let new_center_x = (start + end) / 2.0;
+                            let new_center_y = *y;
 
-                    // Calculate new offsets to maintain terminal coordinates
-                    self.state.offset_x = (new_center_x - old_x).round() as i32;
-                    self.state.offset_y = (new_center_y - old_y).round() as i32;
+                            // Calculate new offsets to maintain terminal coordinates
+                            self.state.offset_x = (new_center_x - old_x).round() as i32;
+                            self.state.offset_y = (new_center_y - old_y).round() as i32;
+                        }
+                    }
                 }
             }
             KeyCode::Char('s') | KeyCode::Char('S') => {

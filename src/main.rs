@@ -22,7 +22,10 @@ use r#gen::{
     operation_management::{parse_patch_operations, push},
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
-    views::{block_group::view_block_group, operations::view_operations, patch::view_patches},
+    views::{
+        block_group::view_block_group, inline_gen_graph_widget::show_inline_gen_graph_widget,
+        patch::view_patches,
+    },
 };
 use gen_core::config::{get_gen_dir, get_or_create_gen_dir};
 use gen_models::{
@@ -151,20 +154,63 @@ fn main() {
             sample,
             collection,
             position,
+            inline,
         }) => {
             let collection_name = &collection
                 .clone()
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
 
-            // view_block_group is a long-running operation that manages its own transactions
-            view_block_group(
-                &conn,
-                graph.clone(),
-                sample.clone(),
-                collection_name,
-                position.clone(),
-            );
+            if inline {
+                // Use the inline widget
+                if let Some(name) = graph {
+                    let block_group = if let Some(ref sample_name) = sample {
+                        BlockGroup::get(
+                            &conn,
+                            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+                            params![collection_name, sample_name, name],
+                        )
+                    } else {
+                        BlockGroup::get(
+                            &conn,
+                            "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
+                            params![collection_name, name],
+                        )
+                    };
+
+                    match block_group {
+                        Ok(bg) => {
+                            let block_graph = BlockGroup::get_graph(&conn, &bg.id);
+                            // Use a default height of 10 for now
+                            if let Err(e) = show_inline_gen_graph_widget(&block_graph, &conn, 10) {
+                                eprintln!("Error showing inline widget: {}", e);
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "No block group found with name {:?} and sample {:?} in collection {}",
+                                name,
+                                sample.clone().unwrap_or_else(|| "null".to_string()),
+                                collection_name
+                            );
+                        }
+                    }
+                } else {
+                    eprintln!("Graph name is required for inline view");
+                }
+            } else {
+                // Use the original full-screen viewer
+                if let Err(e) = view_block_group(
+                    &conn,
+                    graph.clone(),
+                    sample.clone(),
+                    collection_name,
+                    position.clone(),
+                ) {
+                    eprintln!("Error: {}", e);
+                }
+            }
         }
+
         Some(Commands::Translate {
             bed,
             gff,
@@ -228,7 +274,8 @@ fn main() {
                         .id,
                 );
                 if interactive {
-                    view_operations(&conn, &operation_conn, &operations);
+                    // TODO: view_operations is deprecated, need to implement new interactive viewer
+                    eprintln!("Interactive view not yet implemented for new viewer");
                 } else {
                     let mut indicator = "";
                     println!(

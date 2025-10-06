@@ -8,24 +8,24 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::{HashId, PATH_START_NODE_ID};
+use gen_core::PATH_START_NODE_ID;
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{block_group::BlockGroup, node::Node, path::Path, traits::Query};
+use gen_models::{block_group::BlockGroup, node::Node, traits::Query};
+use gen_widget::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
 use log::warn;
 use ratatui::{
     layout::Constraint,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
 };
 use rusqlite::{Connection, params};
 
 use crate::{
-    config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        block_group_viewer::{PlotParameters, Viewer},
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
+        gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
     },
 };
 
@@ -80,7 +80,7 @@ pub fn view_block_group(
     let origin = if let Some(position_str) = position {
         let parts = position_str.split(":").collect::<Vec<&str>>();
         if parts.len() != 2 {
-            panic!("Invalid position: {position_str}");
+            panic!("Invalid position: {}", position_str);
         }
         let node_id = parts[0].parse::<i64>().unwrap();
         let offset = parts[1].parse::<i64>().unwrap();
@@ -100,7 +100,7 @@ pub fn view_block_group(
     }
 
     let mut block_graph;
-    let mut block_group_id: Option<HashId> = None;
+    let mut block_group_id: Option<gen_core::HashId> = None;
     let mut focus_zone = FocusZone::Sidebar;
 
     if let Some(name) = name {
@@ -140,15 +140,19 @@ pub fn view_block_group(
 
     bar.finish();
 
-    // Create the viewer and the initial graph
+    // Create the graph controller and initial graph
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
-    let mut viewer = if let Some(origin) = origin {
-        Viewer::with_origin(&block_graph, conn, PlotParameters::default(), origin)
-    } else {
-        Viewer::new(&block_graph, conn, PlotParameters::default())
-    };
+    let node_sizer = GenGraphNodeSizer;
+    let mut graph_controller = GraphController::new(&block_graph, node_sizer);
+    graph_controller.set_detail_level(VisualDetail::Minimal);
+    graph_controller.enable_cursor();
+
+    // TODO: Handle origin positioning - not directly supported in new widget yet
+    if origin.is_some() {
+        warn!("Origin positioning not yet supported in GenGraphWidget");
+    }
 
     bar.finish();
 
@@ -161,6 +165,7 @@ pub fn view_block_group(
     // Basic event loop
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
+    let mut last_frame_time = Instant::now();
     let mut show_panel = false;
     let show_sidebar = true;
     let mut tui_layout_change = false;
@@ -186,8 +191,18 @@ pub fn view_block_group(
             last_selected_block_group_id = explorer_state.selected_block_group_id;
         }
 
+        // Calculate frame delta for smooth animations
+        let now = Instant::now();
+        let frame_delta = now.duration_since(last_frame_time);
+        last_frame_time = now;
+
         // Draw the UI
         terminal.draw(|frame| {
+            // Update viewport state with frame delta for camera animations
+            graph_controller
+                .viewport_state
+                .update(frame_delta, (frame.area().width, frame.area().height));
+
             let status_bar_height: u16 = 1;
 
             // The outer layout is a vertical split between the status bar and everything else
@@ -244,9 +259,7 @@ pub fn view_block_group(
 
             // Status bar
             let mut status_message = match focus_zone {
-                FocusZone::Canvas => {
-                    Viewer::get_status_line() + " | *p* toggle current path | *esc* back to sidebar"
-                }
+                FocusZone::Canvas => "*←→↑↓* pan | *+/-* zoom | *esc* back to sidebar".to_string(),
                 FocusZone::Panel => "*esc* close panel".to_string(),
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
@@ -294,9 +307,18 @@ pub fn view_block_group(
                 frame.render_widget(Clear, canvas_area); // Clear the canvas area first
                 frame.render_widget(loading_para, loading_area);
             } else {
-                // Ask the viewer to paint the canvas
-                viewer.has_focus = focus_zone == FocusZone::Canvas;
-                viewer.draw(frame, canvas_area);
+                // Update viewport bounds and focus for the current canvas area
+                graph_controller.viewport_state.viewport_bounds = canvas_area;
+                graph_controller.viewport_state.focus();
+                let _ = graph_controller.ensure_camera_coverage();
+
+                // Render the GenGraphWidget with cursor enabled and canvas background
+                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+                let widget = create_gen_graph_widget(conn)
+                    .detail_level(graph_controller.get_detail_level())
+                    .style(canvas_style)
+                    .cursor();
+                frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
             }
 
             // Panel
@@ -317,39 +339,33 @@ pub fn view_block_group(
                         Style::default().fg(get_theme_color("text").unwrap())
                     });
 
-                let panel_text = if let Some(selected_block) = viewer.state.selected_block {
-                    vec![
-                        Line::from(vec![
-                            Span::styled(
-                                "Block ID: ",
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(selected_block.block_id.to_string()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled(
-                                "Node ID: ",
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(selected_block.node_id.to_string()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("Start: ", Style::default().add_modifier(Modifier::BOLD)),
-                            Span::raw(selected_block.sequence_start.to_string()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("End: ", Style::default().add_modifier(Modifier::BOLD)),
-                            Span::raw(selected_block.sequence_end.to_string()),
-                        ]),
-                    ]
-                } else {
-                    vec![Line::from(vec![Span::styled(
-                        "No block selected",
+                // TODO: Node selection not yet supported in GenGraphWidget
+                let panel_text = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            "Camera Position: ",
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!(
+                            "({}, {})",
+                            graph_controller.viewport_state.camera_current.x,
+                            graph_controller.viewport_state.camera_current.y
+                        )),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            "Detail Level: ",
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!("{:?}", graph_controller.get_detail_level())),
+                    ]),
+                    Line::from(vec![Span::styled(
+                        "Node selection not yet supported",
                         Style::default()
                             .fg(get_theme_color("text").unwrap())
-                            .add_modifier(Modifier::BOLD),
-                    )])]
-                };
+                            .add_modifier(Modifier::ITALIC),
+                    )]),
+                ];
 
                 let panel_content = Paragraph::new(panel_text)
                     .wrap(Wrap { trim: true })
@@ -367,124 +383,97 @@ pub fn view_block_group(
             }
         })?;
 
-        // After drawing, update the viewer if needed
-        if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
-            // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id);
-            // Update the viewer
-            viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
-            viewer.state.selected_block = None;
-            is_loading = false;
+        // After drawing, update the graph controller if needed
+        if is_loading {
+            if let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
+                // Create a new graph for the selected block group
+                block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+                // Update the graph controller
+                let node_sizer = GenGraphNodeSizer;
+                graph_controller = GraphController::new(&block_graph, node_sizer);
+                graph_controller.set_detail_level(VisualDetail::Minimal);
+                graph_controller.enable_cursor();
+                is_loading = false;
+            }
         }
 
         // Handle input
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
-        if crossterm::event::poll(timeout)?
-            && let event::Event::Key(key) = event::read()?
-        {
-            if viewer.state.show_splash_screen {
-                viewer.state.show_splash_screen = false;
-            }
-            if key.kind == KeyEventKind::Press {
-                // Global handlers
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Tab => {
-                        // Tab - cycle forwards
-                        focus_zone = match focus_zone {
-                            FocusZone::Canvas => {
-                                if show_panel {
-                                    FocusZone::Panel
-                                } else {
-                                    FocusZone::Sidebar
+        if crossterm::event::poll(timeout)? {
+            if let event::Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    // Global handlers
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Tab => {
+                            // Tab - cycle forwards
+                            focus_zone = match focus_zone {
+                                FocusZone::Canvas => {
+                                    if show_panel {
+                                        FocusZone::Panel
+                                    } else {
+                                        FocusZone::Sidebar
+                                    }
                                 }
+                                FocusZone::Sidebar => FocusZone::Canvas,
+                                FocusZone::Panel => FocusZone::Sidebar,
                             }
-                            FocusZone::Sidebar => FocusZone::Canvas,
-                            FocusZone::Panel => FocusZone::Sidebar,
                         }
-                    }
-                    KeyCode::BackTab => {
-                        // Shift+Tab - cycle backwards
-                        focus_zone = match focus_zone {
-                            FocusZone::Canvas => FocusZone::Sidebar,
-                            FocusZone::Sidebar => {
-                                if show_panel {
-                                    FocusZone::Panel
-                                } else {
-                                    FocusZone::Canvas
+                        KeyCode::BackTab => {
+                            // Shift+Tab - cycle backwards
+                            focus_zone = match focus_zone {
+                                FocusZone::Canvas => FocusZone::Sidebar,
+                                FocusZone::Sidebar => {
+                                    if show_panel {
+                                        FocusZone::Panel
+                                    } else {
+                                        FocusZone::Canvas
+                                    }
                                 }
+                                FocusZone::Panel => FocusZone::Canvas,
                             }
-                            FocusZone::Panel => FocusZone::Canvas,
                         }
+                        _ => {}
                     }
-                    _ => {}
-                }
 
-                // Focus-specific handlers
-                match focus_zone {
-                    FocusZone::Canvas => match key.code {
-                        KeyCode::Enter => {
-                            if viewer.state.selected_block.is_some() {
+                    // Focus-specific handlers
+                    match focus_zone {
+                        FocusZone::Canvas => match key.code {
+                            KeyCode::Enter => {
+                                // TODO: Node selection not yet supported, always show panel for now
                                 show_panel = true;
                                 focus_zone = FocusZone::Panel;
                                 tui_layout_change = true;
                             }
-                        }
-                        KeyCode::Esc => {
-                            if !show_panel {
-                                focus_zone = FocusZone::Sidebar;
-                                viewer.state.selected_block = None;
-                            }
-                        }
-                        KeyCode::Char('p') => {
-                            // TODO: make current path highlighted by default, and boundary edges indicated as dashed lines
-                            // Toggle current path highlighting
-                            if viewer.has_highlight(Color::Red) {
-                                viewer.clear_highlight(Color::Red);
-                            } else if let Some(ref bg_id) = explorer_state.selected_block_group_id {
-                                // BlockGroup::get_current_path will panic if there's no path,
-                                // so we roll our own query here. (todo: have get_current_path return an Option)
-                                let current_path = <Path as Query>::get(
-                                    conn,
-                                    "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
-                                    params![bg_id],
-                                );
-                                match current_path {
-                                    Ok(path) => {
-                                        if let Err(err) = viewer
-                                            .show_path(&path, get_theme_color("error").unwrap())
-                                        {
-                                            // todo: pop up a message in the panel
-                                            warn!("{err}");
-                                        }
-                                    }
-                                    Err(err) => {
-                                        warn!("No path found for block group {bg_id}: {err}");
-                                    }
+                            KeyCode::Esc => {
+                                if !show_panel {
+                                    focus_zone = FocusZone::Sidebar;
                                 }
-                            } else {
-                                warn!("No block group selected");
+                            }
+                            KeyCode::Char('p') => {
+                                // TODO: Path highlighting not yet supported in GenGraphWidget
+                                warn!("Path highlighting not yet supported in GenGraphWidget");
+                            }
+                            _ => {
+                                graph_controller.handle_key_event(key);
+                            }
+                        },
+                        FocusZone::Panel => {
+                            if key.code == KeyCode::Esc {
+                                show_panel = false;
+                                focus_zone = FocusZone::Canvas;
+                                tui_layout_change = true;
                             }
                         }
-                        _ => {
-                            viewer.handle_input(key);
-                        }
-                    },
-                    FocusZone::Panel => {
-                        if key.code == KeyCode::Esc {
-                            show_panel = false;
-                            focus_zone = FocusZone::Canvas;
-                            tui_layout_change = true;
-                        }
-                    }
-                    FocusZone::Sidebar => {
-                        explorer.handle_input(&mut explorer_state, key);
-                        // Check if focus change was requested by the explorer
-                        if let Some(requested_zone) = explorer_state.focus_change_requested {
-                            focus_zone = requested_zone;
-                            explorer_state.focus_change_requested = None;
+                        FocusZone::Sidebar => {
+                            explorer.handle_input(&mut explorer_state, key);
+                            // Check if focus change was requested by the explorer
+                            if let Some(requested_zone) = explorer_state.focus_change_requested {
+                                focus_zone = requested_zone;
+                                explorer_state.focus_change_requested = None;
+                            }
                         }
                     }
                 }

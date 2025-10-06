@@ -18,7 +18,7 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = ["gen-core", "gen-models", "gen-graph", "gen-python"]
+members = ["gen-core", "gen-models", "gen-graph", "gen-python", "gen-widget"]
 
 [features]
 benchmark = []
@@ -32,6 +32,7 @@ cli = []
 gen-core = { path = "gen-core" }
 gen-models = { path = "gen-models" }
 gen-graph = { path = "gen-graph" }
+gen-widget = { path = "gen-widget" }
 clap = { version = "4.5.32", features = ["derive"] }
 clap-nested-commands = "0.0.6"
 convert_case = "0.8.0"

@@ -6,8 +6,10 @@ use std::{
 };
 
 use itertools::Itertools;
+use petgraph::graph::NodeIndex;
 
-use super::{EdgeData, LayoutError, NodeData, temp_graph::TempGraph};
+use super::{LayoutError, NodeData, temp_graph::TempGraph};
+use crate::layout::LayoutEdge;
 
 #[derive(Clone, Debug)]
 struct JogScore {
@@ -102,13 +104,30 @@ impl GraphBuilder<'_> {
         for node_id in &edge_nodes {
             let position = self.node_positions_by_id.get(node_id);
             if let Some(position) = position {
+                // Get port information if available
+                let ports = self
+                    .node_ports_by_id
+                    .get(node_id)
+                    .map(|(n, e, s, w)| (*n != 0, *e != 0, *s != 0, *w != 0));
+
+                // Calculate glyph index from ports
+                let glyph_index = if let Some((n, e, s, w)) = ports {
+                    Some(((n as i64) << 3) | ((e as i64) << 2) | ((s as i64) << 1) | (w as i64))
+                } else {
+                    None
+                };
+
                 let node_data = NodeData {
                     node_id: *node_id,
                     position: *position,
-                    node_type: None,
-                    ports: None,
-                    glyph_index: None,
-                    size: (1, 1),
+                    node_type: Some("Routing".to_string()),
+                    ports,
+                    glyph_index,
+                    size: (1, 1), // Routing nodes are small
+                    // Routing nodes don't have original domain data
+                    original_node_id: None,
+                    layer: None,
+                    partition_index: None,
                 };
                 graph.add_node(*node_id, node_data);
             }
@@ -120,9 +139,10 @@ impl GraphBuilder<'_> {
                 edge_id_counter,
                 edge.0,
                 edge.1,
-                EdgeData {
-                    role: Some("Rectilinear".to_string()),
-                },
+                LayoutEdge::new(
+                    NodeIndex::new(edge.0 as usize),
+                    NodeIndex::new(edge.1 as usize),
+                ),
             )?;
             edge_id_counter += 1;
         }
@@ -149,6 +169,45 @@ pub struct Router {
 }
 
 impl Router {
+    pub fn new(
+        bottom_pin_list: Vec<u64>,
+        top_pin_list: Vec<u64>,
+        initial_channel_width: Option<i64>,
+        minimum_jog_length: i64,
+        steady_net_constant: i64,
+    ) -> Self {
+        let channel_length = bottom_pin_list.len().max(top_pin_list.len()) as i64;
+
+        // Create a temporary router to compute density
+        let temp_router = Router {
+            bottom_pin_list: bottom_pin_list.clone(),
+            top_pin_list: top_pin_list.clone(),
+            minimum_jog_length,
+            steady_net_constant,
+            current_column: 0,
+            channel_length,
+            channel_width: 1, // temporary value
+        };
+
+        let channel_width = if let Some(width) = initial_channel_width {
+            assert!(width > 0, "initial_channel_width must be positive");
+            width
+        } else {
+            // Use computed density if no initial width provided
+            std::cmp::max(1, temp_router.compute_density())
+        };
+
+        Router {
+            bottom_pin_list,
+            top_pin_list,
+            minimum_jog_length,
+            steady_net_constant,
+            current_column: 0,
+            channel_length,
+            channel_width,
+        }
+    }
+
     fn next_pin(&self, net: Option<u64>, side: Option<&str>) -> Option<i64> {
         let top;
         let bottom;
@@ -224,6 +283,59 @@ impl Router {
         }
     }
 
+    fn compute_density(&self) -> i64 {
+        // Check density at each possible column position following Python implementation
+        let mut max_density = 0;
+
+        // Check density at each possible column position
+        for alpha in 0..self.channel_length {
+            // Find nets with pins to the left of position alpha
+            let mut left_nets = std::collections::HashSet::new();
+            for i in 0..alpha {
+                if (i as usize) < self.top_pin_list.len() {
+                    let top_net = self.top_pin_list[i as usize];
+                    if top_net != 0 {
+                        left_nets.insert(top_net);
+                    }
+                }
+                if (i as usize) < self.bottom_pin_list.len() {
+                    let bottom_net = self.bottom_pin_list[i as usize];
+                    if bottom_net != 0 {
+                        left_nets.insert(bottom_net);
+                    }
+                }
+            }
+
+            // Find nets with pins to the right of position alpha (inclusive)
+            let mut right_nets = std::collections::HashSet::new();
+            for i in alpha..self.channel_length {
+                if (i as usize) < self.top_pin_list.len() {
+                    let top_net = self.top_pin_list[i as usize];
+                    if top_net != 0 {
+                        right_nets.insert(top_net);
+                    }
+                }
+                if (i as usize) < self.bottom_pin_list.len() {
+                    let bottom_net = self.bottom_pin_list[i as usize];
+                    if bottom_net != 0 {
+                        right_nets.insert(bottom_net);
+                    }
+                }
+            }
+
+            // Crossing nets are those that appear on both sides
+            let crossing_nets: std::collections::HashSet<u64> =
+                left_nets.intersection(&right_nets).cloned().collect();
+            let density = crossing_nets.len() as i64;
+
+            if density > max_density {
+                max_density = density;
+            }
+        }
+
+        max_density
+    }
+
     // Step 1: Make feasible top and bottom connections in minimal manner
     // ------------------------------------------------------------------
     fn add_vertical_wire(
@@ -254,12 +366,12 @@ impl Router {
                 let u_position = graph_builder.get_node_position(*u_id);
                 let v_position = graph_builder.get_node_position(*v_id);
 
-                if let Some((x1, y1)) = u_position
-                    && let Some((x2, y2)) = v_position
-                    && x1 == x2
-                    && x1 == self.current_column
-                {
-                    vertical_wires.push((cmp::min(y1, y2), cmp::max(y1, y2), *net));
+                if let Some((x1, y1)) = u_position {
+                    if let Some((x2, y2)) = v_position {
+                        if x1 == x2 && x1 == self.current_column {
+                            vertical_wires.push((cmp::min(y1, y2), cmp::max(y1, y2), *net));
+                        }
+                    }
                 }
             }
         }
@@ -359,26 +471,11 @@ impl Router {
 
         // If there is overlap, only keep the shortest vertical wire,
         // the other pin will be connected when the channel is widened.
-        if let (Some(bottom_track), Some(top_track)) = (bottom_track, top_track)
-            && bottom_net != 0
-            && !bottom_connected
-            && top_net != 0
-            && !top_connected
-        {
-            // Check if the same net is connecting top and bottom
-            if top_net == bottom_net {
-                // Same net (T[i] == B[i] != 0): Allow overlap
-                if let Some(entry) = tracks_by_net.get_mut(&bottom_net) {
-                    entry.insert(bottom_track);
-                };
-                if let Some(entry) = tracks_by_net.get_mut(&top_net) {
-                    entry.insert(top_track);
-                };
-                self.add_vertical_wire(bottom_net, 0, bottom_track, graph_builder);
-                self.add_vertical_wire(top_net, top_track, self.channel_width + 1, graph_builder);
-            } else {
-                // Different nets:
-                if bottom_track < top_track {
+        if bottom_net != 0 && !bottom_connected && top_net != 0 && !top_connected {
+            if let (Some(bottom_track), Some(top_track)) = (bottom_track, top_track) {
+                // Check if the same net is connecting top and bottom
+                if top_net == bottom_net {
+                    // Same net (T[i] == B[i] != 0): Allow overlap
                     if let Some(entry) = tracks_by_net.get_mut(&bottom_net) {
                         entry.insert(bottom_track);
                     };
@@ -393,42 +490,57 @@ impl Router {
                         graph_builder,
                     );
                 } else {
-                    // Overlap, only keep the shortest vertical wire
-                    // Compare vertical distances: bottom pin vs top pin
-                    if bottom_track < (self.channel_width + 1 - top_track) {
+                    // Different nets:
+                    if bottom_track < top_track {
                         if let Some(entry) = tracks_by_net.get_mut(&bottom_net) {
                             entry.insert(bottom_track);
                         };
-                        self.add_vertical_wire(bottom_net, 0, bottom_track, graph_builder);
-                    } else {
                         if let Some(entry) = tracks_by_net.get_mut(&top_net) {
                             entry.insert(top_track);
                         };
+                        self.add_vertical_wire(bottom_net, 0, bottom_track, graph_builder);
                         self.add_vertical_wire(
                             top_net,
                             top_track,
                             self.channel_width + 1,
                             graph_builder,
                         );
+                    } else {
+                        // Overlap, only keep the shortest vertical wire
+                        // Compare vertical distances: bottom pin vs top pin
+                        if bottom_track < (self.channel_width + 1 - top_track) {
+                            if let Some(entry) = tracks_by_net.get_mut(&bottom_net) {
+                                entry.insert(bottom_track);
+                            };
+                            self.add_vertical_wire(bottom_net, 0, bottom_track, graph_builder);
+                        } else {
+                            if let Some(entry) = tracks_by_net.get_mut(&top_net) {
+                                entry.insert(top_track);
+                            };
+                            self.add_vertical_wire(
+                                top_net,
+                                top_track,
+                                self.channel_width + 1,
+                                graph_builder,
+                            );
+                        }
                     }
                 }
             }
-        } else if let Some(bottom_track) = bottom_track
-            && bottom_net != 0
-            && !bottom_connected
-        {
-            if let Some(entry) = tracks_by_net.get_mut(&bottom_net) {
-                entry.insert(bottom_track);
-            };
-            self.add_vertical_wire(bottom_net, 0, bottom_track, graph_builder);
-        } else if let Some(top_track) = top_track
-            && top_net != 0
-            && !top_connected
-        {
-            if let Some(entry) = tracks_by_net.get_mut(&top_net) {
-                entry.insert(top_track);
-            };
-            self.add_vertical_wire(top_net, top_track, self.channel_width + 1, graph_builder);
+        } else if bottom_net != 0 && !bottom_connected {
+            if let Some(bottom_track) = bottom_track {
+                if let Some(entry) = tracks_by_net.get_mut(&bottom_net) {
+                    entry.insert(bottom_track);
+                };
+                self.add_vertical_wire(bottom_net, 0, bottom_track, graph_builder);
+            }
+        } else if top_net != 0 && !top_connected {
+            if let Some(top_track) = top_track {
+                if let Some(entry) = tracks_by_net.get_mut(&top_net) {
+                    entry.insert(top_track);
+                };
+                self.add_vertical_wire(top_net, top_track, self.channel_width + 1, graph_builder);
+            }
         }
     }
 
@@ -469,7 +581,13 @@ impl Router {
         let mut jog_powersets: Vec<Vec<Vec<(i64, i64)>>> = vec![];
 
         for net_jogs in jogs_partitioned_by_net {
-            let powerset: Vec<Vec<(i64, i64)>> = net_jogs.iter().cloned().powerset().collect();
+            // Exclude the empty subset so each split net contributes at least one jog in a pattern.
+            let powerset: Vec<Vec<(i64, i64)>> = net_jogs
+                .iter()
+                .cloned()
+                .powerset()
+                .filter(|subset| !subset.is_empty())
+                .collect();
             jog_powersets.push(powerset.clone());
         }
 
@@ -708,12 +826,12 @@ impl Router {
             let u_pos = graph_builder.get_node_position(*u_id);
             let v_pos = graph_builder.get_node_position(*v_id);
 
-            if let Some((x1, y1)) = u_pos
-                && let Some((x2, y2)) = v_pos
-                && x1 == x2
-                && x2 == self.current_column
-            {
-                existing_verticals.push((cmp::min(y1, y2), cmp::max(y1, y2), net));
+            if let Some((x1, y1)) = u_pos {
+                if let Some((x2, y2)) = v_pos {
+                    if x1 == x2 && x2 == self.current_column {
+                        existing_verticals.push((cmp::min(y1, y2), cmp::max(y1, y2), net));
+                    }
+                }
             }
         }
 
@@ -834,23 +952,25 @@ impl Router {
         let occupied_tracks = self.occupied_tracks(tracks_by_net);
         let net_tracks = tracks_by_net.get(&net);
         for i in tracks.iter().copied() {
-            // If the vertical layer is occupied, we have to stop the search.
-            for (y1, y2, _) in &vertical_wiring {
-                if *cmp::min(y1, y2) <= i && i <= *cmp::max(y1, y2) {
-                    break;
-                }
+            // If ANY vertical wire spans track i, we must stop scanning entirely (can't pass).
+            let blocked_vertically = vertical_wiring
+                .iter()
+                .any(|(y1, y2, _)| *cmp::min(y1, y2) <= i && i <= *cmp::max(y1, y2));
+            if blocked_vertically {
+                break;
+            }
 
-                // If the horizontal layer is occupied we can jump over it but not land there
-                if let Some(net_tracks) = net_tracks
-                    && occupied_tracks.iter().contains(&i)
-                    && !net_tracks.contains(&i)
-                {
+            // If the horizontal layer is occupied by a different net, we can jump over but not land.
+            if let Some(net_tracks) = net_tracks {
+                if occupied_tracks.contains(&i) && !net_tracks.contains(&i) {
                     continue;
                 }
-
-                // If we made it this far, we can record the index of this iteration in the marker variable
-                marker = i;
+            } else if occupied_tracks.contains(&i) {
+                continue;
             }
+
+            // Reached a valid landing track; advance marker.
+            marker = i;
         }
 
         marker
@@ -972,7 +1092,7 @@ impl Router {
                         track_distances.push((distance, net, *track, goal));
                     }
                 } else {
-                    println!("No tracks found for net: {net}");
+                    println!("No tracks found for net: {}", net);
                 }
             }
         }
@@ -1006,10 +1126,8 @@ impl Router {
         // If the track x is selected, then the old tracks x, x+1, ... will be moved up to x+1, x+2, ...
         // Note: we are assuming that this function is only called when there is no space left on the channel
 
-        let mut mid_track = (self.channel_width / 2) + 1; // +1 because tracks are indexed from 1 to channel_width
-        if self.channel_width % 2 == 1 {
-            mid_track += 1;
-        }
+        // Choose the lower middle on odd widths (match Python's round-half-to-even then +1).
+        let mid_track = ((self.channel_width as f64) / 2.0).round() as i64 + 1;
 
         // Find a position for the new track that is as close to the middle as possible,
         // and that is accessible from the pins without violating a vertical constraint.
@@ -1107,11 +1225,11 @@ impl Router {
 
     fn extend_nets(
         &mut self,
-        tracks_by_net: &HashMap<u64, HashSet<i64>>,
+        tracks_by_net: &mut HashMap<u64, HashSet<i64>>,
         graph_builder: &mut GraphBuilder,
     ) {
         // Only extend nets that either are split or have a pin coming up
-        for (net, tracks) in tracks_by_net.clone().iter_mut() {
+        for (net, tracks) in tracks_by_net.iter_mut() {
             if tracks.len() == 1 && self.next_pin(Some(*net), None).is_none() {
                 // Clear the Y dict entry for this net
                 tracks.clear();
@@ -1139,39 +1257,38 @@ impl Router {
     fn _add_border_spacing(&self, edge_spacing: i64, graph_builder: &mut GraphBuilder) {
         // Increase the space between nodes at the minimum and maximum y coordinates
         // and all other nodes by a set distance.
+        // Following Python implementation exactly
         //
         // Parameters:
-        //     edge_spacing (float): Distance to add between edge nodes and other nodes
+        //     edge_spacing: Distance to add between edge nodes and other nodes
 
         if graph_builder.node_ids().is_empty() {
             return;
         }
 
-        // Single pass: update positions knowing min_x=0 and max_x=channel_width
+        // Single pass: update positions knowing min_y=0 and max_y=channel_width+1
+        // Clear the position mapping and rebuild it
         graph_builder.node_ids_by_position.clear();
-        let mut new_node_positions_by_id = HashMap::new();
+
         for (node_id, position) in graph_builder.node_positions_by_id.iter_mut() {
-            let (x, y) = position;
-            let mut new_y = *y;
-            if *y > 0 {
+            let (x, y) = *position;
+            let mut new_y = y;
+
+            // Add spacing above y=0 (bottom boundary)
+            if y > 0 {
                 new_y += edge_spacing;
             }
 
-            if *y == self.channel_width + 1 {
+            // Add additional spacing for the top boundary (channel_width + 1)
+            // This matches Python's condition exactly
+            if y == self.channel_width + 1 {
                 new_y += edge_spacing;
             }
 
-            new_node_positions_by_id.insert(*node_id, (*x, new_y));
+            *position = (x, new_y);
             graph_builder
                 .node_ids_by_position
-                .insert((*x, new_y), *node_id);
-        }
-
-        graph_builder.node_positions_by_id.clear();
-        for (node_id, position) in new_node_positions_by_id.iter() {
-            graph_builder
-                .node_positions_by_id
-                .insert(*node_id, *position);
+                .insert((x, new_y), *node_id);
         }
     }
 
@@ -1198,19 +1315,146 @@ impl Router {
         let top_net = self.top_pin_list[x as usize];
         let bottom_net = self.bottom_pin_list[x as usize];
 
-        let top = if !graph_builder.has_node_at_position(x, y_t) {
+        let top = if !graph_builder.has_node_at_position(x, y_t) && top_net != 0 {
             Some(top_net)
         } else {
             None
         };
 
-        let bottom = if !graph_builder.has_node_at_position(x, y_b) {
+        let bottom = if !graph_builder.has_node_at_position(x, y_b) && bottom_net != 0 {
             Some(bottom_net)
         } else {
             None
         };
 
         (top, bottom)
+    }
+
+    fn simplify_linear_paths(&self, graph_builder: &mut GraphBuilder) {
+        // Find and remove nodes from linear paths to simplify the graph
+        // A node can be removed if it has exactly 2 neighbors and forms a straight line
+
+        let mut nodes_to_remove = Vec::new();
+
+        // First pass: identify nodes that can be removed
+        for node_id in graph_builder.node_ids() {
+            if self.is_removable_linear_node(&node_id, graph_builder) {
+                nodes_to_remove.push(node_id);
+            }
+        }
+
+        // Second pass: remove nodes and update edges
+        for node_id in nodes_to_remove {
+            self.remove_linear_node(node_id, graph_builder);
+        }
+    }
+
+    fn is_removable_linear_node(&self, node_id: &u64, graph_builder: &GraphBuilder) -> bool {
+        // Count how many edges this node is part of
+        let connected_edges: Vec<&(u64, u64)> = graph_builder
+            .edges
+            .iter()
+            .filter(|(u, v)| *u == *node_id || *v == *node_id)
+            .collect();
+
+        // Node must have exactly 2 connections to be part of a linear path
+        if connected_edges.len() != 2 {
+            return false;
+        }
+
+        // Get the two neighbor nodes
+        let edge1 = connected_edges[0];
+        let edge2 = connected_edges[1];
+
+        let neighbor1 = if edge1.0 == *node_id {
+            edge1.1
+        } else {
+            edge1.0
+        };
+        let neighbor2 = if edge2.0 == *node_id {
+            edge2.1
+        } else {
+            edge2.0
+        };
+
+        // Get positions of all three nodes
+        let node_pos = graph_builder.get_node_position(*node_id);
+        let neighbor1_pos = graph_builder.get_node_position(neighbor1);
+        let neighbor2_pos = graph_builder.get_node_position(neighbor2);
+
+        if let (Some(node_pos), Some(neighbor1_pos), Some(neighbor2_pos)) =
+            (node_pos, neighbor1_pos, neighbor2_pos)
+        {
+            // Check if the three points form a straight line (either horizontal or vertical)
+            self.is_straight_line(neighbor1_pos, node_pos, neighbor2_pos)
+        } else {
+            false
+        }
+    }
+
+    fn is_straight_line(&self, p1: (i64, i64), p2: (i64, i64), p3: (i64, i64)) -> bool {
+        // Check if three points form a straight horizontal or vertical line
+        // For horizontal line: all y-coordinates must be the same
+        // For vertical line: all x-coordinates must be the same
+        (p1.1 == p2.1 && p2.1 == p3.1) || (p1.0 == p2.0 && p2.0 == p3.0)
+    }
+
+    fn remove_linear_node(&self, node_id: u64, graph_builder: &mut GraphBuilder) {
+        // Find the edges connected to this node
+        let connected_edges: Vec<(u64, u64)> = graph_builder
+            .edges
+            .iter()
+            .filter(|(u, v)| *u == node_id || *v == node_id)
+            .cloned()
+            .collect();
+
+        if connected_edges.len() != 2 {
+            return; // Safety check
+        }
+
+        // Get the two neighbors
+        let edge1 = &connected_edges[0];
+        let edge2 = &connected_edges[1];
+
+        let neighbor1 = if edge1.0 == node_id { edge1.1 } else { edge1.0 };
+        let neighbor2 = if edge2.0 == node_id { edge2.1 } else { edge2.0 };
+
+        // Get the net and role information from one of the edges (they should be the same)
+        let net = graph_builder.nets_by_edge.get(edge1).cloned();
+        let role = graph_builder.roles_by_edge.get(edge1).cloned();
+
+        // Remove the old edges
+        graph_builder
+            .edges
+            .retain(|(u, v)| !(*u == node_id || *v == node_id));
+        graph_builder
+            .nets_by_edge
+            .retain(|(u, v), _| !(*u == node_id || *v == node_id));
+        graph_builder
+            .roles_by_edge
+            .retain(|(u, v), _| !(*u == node_id || *v == node_id));
+
+        // Add a new direct edge between the neighbors
+        graph_builder.edges.push((neighbor1, neighbor2));
+
+        // Preserve the net and role information
+        if let Some(net) = net {
+            graph_builder
+                .nets_by_edge
+                .insert((neighbor1, neighbor2), net);
+        }
+        if let Some(role) = role {
+            graph_builder
+                .roles_by_edge
+                .insert((neighbor1, neighbor2), role);
+        }
+
+        // Remove the node from position tracking
+        if let Some(position) = graph_builder.get_node_position(node_id) {
+            graph_builder.node_ids_by_position.remove(&position);
+        }
+        graph_builder.node_positions_by_id.remove(&node_id);
+        graph_builder.node_ports_by_id.remove(&node_id);
     }
 
     /*
@@ -1274,7 +1518,7 @@ impl Router {
             }
 
             // 6) Extend nets to the next column and advance the column pointer
-            self.extend_nets(&tracks_by_net, graph_builder);
+            self.extend_nets(&mut tracks_by_net, graph_builder);
             self.current_column += 1;
 
             // Failsafe: if we keep extending the channel without making progress,
@@ -1286,6 +1530,9 @@ impl Router {
 
         // Add a unit of spacing at the edges of the channel
         self._add_border_spacing(1, graph_builder);
+
+        // Simplify linear paths by removing unnecessary intermediate nodes
+        self.simplify_linear_paths(graph_builder);
 
         // Transpose the graph so we have a horizontal layout again
         graph_builder.transpose();
@@ -1300,30 +1547,26 @@ mod tests {
 
     #[test]
     fn test_all_tracks() {
-        let test_router = Router {
-            bottom_pin_list: vec![1, 2, 3],
-            top_pin_list: vec![3, 2, 1],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 5,
-        };
+        let test_router = Router::new(
+            vec![1, 2, 3],
+            vec![3, 2, 1],
+            Some(5), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
 
         assert_eq!((1..6).collect::<HashSet<i64>>(), test_router.all_tracks());
     }
 
     #[test]
     fn test_occupied_tracks() {
-        let test_router = Router {
-            bottom_pin_list: vec![1, 2, 3],
-            top_pin_list: vec![3, 2, 1],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 5,
-        };
+        let test_router = Router::new(
+            vec![1, 2, 3],
+            vec![3, 2, 1],
+            Some(5), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
 
         assert_eq!((1..6).collect::<HashSet<i64>>(), test_router.all_tracks());
     }
@@ -1345,15 +1588,13 @@ mod tests {
 
     #[test]
     fn test_vertical_wiring() {
-        let test_router = Router {
-            bottom_pin_list: vec![1, 2, 3],
-            top_pin_list: vec![3, 2, 1],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 5,
-        };
+        let test_router = Router::new(
+            vec![1, 2, 3],
+            vec![3, 2, 1],
+            Some(5), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
 
         let mut test_graph_builder1 = GraphBuilder::new();
         assert_eq!(
@@ -1376,15 +1617,13 @@ mod tests {
         );
 
         // # Add a vertical wire
-        let test_router2 = Router {
-            bottom_pin_list: vec![1, 2, 3],
-            top_pin_list: vec![3, 2, 1],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 5,
-        };
+        let test_router2 = Router::new(
+            vec![1, 2, 3],
+            vec![3, 2, 1],
+            Some(5), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
         let mut test_graph_builder3 = GraphBuilder::new();
         test_router2.add_vertical_wire(1, 1, 2, &mut test_graph_builder3);
         assert_eq!(
@@ -1396,15 +1635,13 @@ mod tests {
     #[test]
     fn test_next_pin() {
         // Setup: top and bottom pin lists with multiple pins for net 1
-        let mut test_router = Router {
-            bottom_pin_list: vec![0, 1, 0, 1],
-            top_pin_list: vec![1, 0, 1, 0],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 5,
-        };
+        let mut test_router = Router::new(
+            vec![0, 1, 0, 1],
+            vec![1, 0, 1, 0],
+            Some(5), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
         // Next pin for net 1, bottom side
         assert_eq!(test_router.next_pin(Some(1), Some("B")), Some(1));
         // Advance column and check again
@@ -1417,15 +1654,13 @@ mod tests {
     #[test]
     fn test_connect_pins() {
         // Case 1: Only top pin present, should assign to a free track and add vertical wire
-        let mut test_router = Router {
-            bottom_pin_list: vec![0],
-            top_pin_list: vec![1],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 3,
-        };
+        let mut test_router = Router::new(
+            vec![0],
+            vec![1],
+            Some(3), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
 
         let mut test_graph_builder = GraphBuilder::new();
 
@@ -1446,13 +1681,15 @@ mod tests {
             if *edge_net == 1 {
                 let u_pos = test_graph_builder.get_node_position(*u_id);
                 let v_pos = test_graph_builder.get_node_position(*v_id);
-                if let Some(u_pos) = u_pos
-                    && let Some(v_pos) = v_pos
-                    && (u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == top_boundary_y
-                        || v_pos.1 == top_boundary_y)
-                {
-                    found_top_wire = true;
-                    break;
+                if let Some(u_pos) = u_pos {
+                    if let Some(v_pos) = v_pos {
+                        if u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == top_boundary_y
+                            || v_pos.1 == top_boundary_y
+                        {
+                            found_top_wire = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1460,15 +1697,13 @@ mod tests {
         assert!(found_top_wire);
 
         // Case 2: Only bottom pin present, should assign to a free track and add vertical wire
-        test_router = Router {
-            bottom_pin_list: vec![2],
-            top_pin_list: vec![0],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 3,
-        };
+        test_router = Router::new(
+            vec![2],
+            vec![0],
+            Some(3), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
         test_graph_builder = GraphBuilder::new();
         tracks_by_net = HashMap::from([(0, HashSet::new()), (2, HashSet::new())]);
         test_router.connect_pins(&mut tracks_by_net, &mut test_graph_builder);
@@ -1480,26 +1715,25 @@ mod tests {
         for (u_id, v_id) in &test_graph_builder.edges {
             let u_pos = test_graph_builder.get_node_position(*u_id);
             let v_pos = test_graph_builder.get_node_position(*v_id);
-            if let Some(u_pos) = u_pos
-                && let Some(v_pos) = v_pos
-                && (u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == 0 || v_pos.1 == 0)
-            {
-                found = true;
-                break;
+            if let Some(u_pos) = u_pos {
+                if let Some(v_pos) = v_pos {
+                    if u_pos.0 == 0 && v_pos.0 == 0 && u_pos.1 == 0 || v_pos.1 == 0 {
+                        found = true;
+                        break;
+                    }
+                }
             }
         }
         assert!(found);
 
         // Case 3: Both pins present, both nets different, should assign both
-        test_router = Router {
-            bottom_pin_list: vec![2],
-            top_pin_list: vec![1],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 3,
-        };
+        test_router = Router::new(
+            vec![2],
+            vec![1],
+            Some(3), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
         test_graph_builder = GraphBuilder::new();
         tracks_by_net = HashMap::from([(1, HashSet::new()), (2, HashSet::new())]);
         test_router.connect_pins(&mut tracks_by_net, &mut test_graph_builder);
@@ -1510,17 +1744,21 @@ mod tests {
         assert_eq!(1, net2_result.len());
 
         // Case 4: Both pins present, same net, all tracks occupied, should add vertical wire from top to bottom
-        test_router = Router {
-            bottom_pin_list: vec![3],
-            top_pin_list: vec![3],
-            minimum_jog_length: 10,
-            steady_net_constant: 5,
-            current_column: 0,
-            channel_length: 5,
-            channel_width: 0,
-        };
+        test_router = Router::new(
+            vec![3],
+            vec![3],
+            Some(1), // explicit channel width (minimum)
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
         test_graph_builder = GraphBuilder::new();
-        tracks_by_net = HashMap::from([(3, HashSet::new())]);
+        // Make all tracks occupied by creating a net that occupies track 1
+        let mut occupied_tracks = HashSet::new();
+        occupied_tracks.insert(1);
+        tracks_by_net = HashMap::from([
+            (3, HashSet::new()),    // Net 3 has no tracks yet
+            (999, occupied_tracks), // Another net occupies track 1
+        ]);
         test_router.connect_pins(&mut tracks_by_net, &mut test_graph_builder);
 
         // Should have a vertical wire from 0 to channel_width+1
@@ -1528,13 +1766,15 @@ mod tests {
         for (u_id, v_id) in &test_graph_builder.edges {
             let u_pos = test_graph_builder.get_node_position(*u_id);
             let v_pos = test_graph_builder.get_node_position(*v_id);
-            if let Some(u_pos) = u_pos
-                && let Some(v_pos) = v_pos
-                && (u_pos.1 == 0 && v_pos.1 == test_router.channel_width + 1
-                    || v_pos.1 == 0 && u_pos.1 == test_router.channel_width + 1)
-            {
-                found = true;
-                break;
+            if let Some(u_pos) = u_pos {
+                if let Some(v_pos) = v_pos {
+                    if (u_pos.1 == 0 && v_pos.1 == test_router.channel_width + 1)
+                        || (v_pos.1 == 0 && u_pos.1 == test_router.channel_width + 1)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
             }
         }
         assert!(found);
@@ -1555,17 +1795,91 @@ mod tests {
         ];
 
         for (bottom, top) in pin_list_pairs {
-            let mut test_router = Router {
-                bottom_pin_list: bottom,
-                top_pin_list: top,
-                minimum_jog_length: 10,
-                steady_net_constant: 5,
-                current_column: 0,
-                channel_length: 3,
-                channel_width: 4,
-            };
+            let mut test_router = Router::new(
+                bottom,
+                top,
+                Some(4), // explicit channel width
+                10,      // minimum_jog_length
+                5,       // steady_net_constant
+            );
 
             let _ = test_router.route();
         }
+    }
+
+    #[test]
+    fn test_simplify_linear_paths() {
+        let test_router = Router::new(
+            vec![1, 0, 0],
+            vec![0, 0, 1],
+            Some(4), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
+
+        // Create a simple linear path: node1 -> node2 -> node3
+        let mut test_graph_builder = GraphBuilder::new();
+        let node1 = test_graph_builder.add_node_at_position(0, 1);
+        let node2 = test_graph_builder.add_node_at_position(1, 1); // intermediate node in straight line
+        let node3 = test_graph_builder.add_node_at_position(2, 1);
+
+        // Add edges to form a linear path
+        test_graph_builder.edges.push((node1, node2));
+        test_graph_builder.edges.push((node2, node3));
+        test_graph_builder.nets_by_edge.insert((node1, node2), 1);
+        test_graph_builder.nets_by_edge.insert((node2, node3), 1);
+        test_graph_builder
+            .roles_by_edge
+            .insert((node1, node2), vec!["Rectilinear"]);
+        test_graph_builder
+            .roles_by_edge
+            .insert((node2, node3), vec!["Rectilinear"]);
+
+        // Count edges before simplification (for documentation)
+        let _edges_before = test_graph_builder.edges.len();
+        let _nodes_before = test_graph_builder.node_ids().len();
+
+        // Apply simplification
+        test_router.simplify_linear_paths(&mut test_graph_builder);
+
+        // Count edges after simplification
+        let edges_after = test_graph_builder.edges.len();
+        let nodes_after = test_graph_builder.node_ids().len();
+
+        // Should have removed one edge and created a direct connection
+        assert_eq!(edges_after, 1);
+        assert_eq!(nodes_after, 2); // node2 should be removed
+
+        // Verify direct connection exists between node1 and node3
+        assert!(
+            test_graph_builder.edges.contains(&(node1, node3))
+                || test_graph_builder.edges.contains(&(node3, node1))
+        );
+
+        // Verify intermediate node was removed
+        assert!(!test_graph_builder.node_positions_by_id.contains_key(&node2));
+    }
+
+    #[test]
+    fn test_is_straight_line() {
+        let test_router = Router::new(
+            vec![],
+            vec![],
+            Some(4), // explicit channel width
+            10,      // minimum_jog_length
+            5,       // steady_net_constant
+        );
+
+        // Test horizontal line
+        assert!(test_router.is_straight_line((0, 1), (1, 1), (2, 1)));
+
+        // Test vertical line
+        assert!(test_router.is_straight_line((1, 0), (1, 1), (1, 2)));
+
+        // Test non-straight line
+        assert!(!test_router.is_straight_line((0, 0), (1, 1), (2, 0)));
+
+        // Test diagonal (should not be considered straight for our purposes)
+        assert!(!test_router.is_straight_line((0, 0), (1, 1), (2, 2)));
     }
 }

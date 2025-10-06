@@ -4,7 +4,6 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent};
-use gen_core::HashId;
 use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample, traits::Query};
 use ratatui::{
     buffer::Buffer,
@@ -101,11 +100,11 @@ pub struct CollectionExplorerData {
     /// if the full collection is "/foo/bar", this would be "bar".
     pub current_collection: String,
     /// The block groups in the *entire* collection that have sample_name = NULL
-    pub reference_block_groups: Vec<(HashId, String)>,
+    pub reference_block_groups: Vec<(gen_core::HashId, String)>,
     /// The samples in the entire collection
     pub collection_samples: Vec<String>,
     /// The block groups for each sample
-    pub sample_block_groups: HashMap<String, Vec<(HashId, String)>>,
+    pub sample_block_groups: HashMap<String, Vec<(gen_core::HashId, String)>>,
     /// Immediate sub-collections ("direct children") one level deeper
     pub nested_collections: Vec<String>,
 }
@@ -127,7 +126,7 @@ pub fn gather_collection_explorer_data(
            AND sample_name IS NULL",
         params![full_collection_name],
     );
-    let reference_block_groups: Vec<(HashId, String)> =
+    let reference_block_groups: Vec<(gen_core::HashId, String)> =
         base_bgs.iter().map(|bg| (bg.id, bg.name.clone())).collect();
 
     // 3) Gather all samples associated with the entire collection
@@ -146,7 +145,7 @@ pub fn gather_collection_explorer_data(
         let pairs = bgs
             .iter()
             .map(|bg| (bg.id, bg.name.clone()))
-            .collect::<Vec<(HashId, String)>>();
+            .collect::<Vec<(gen_core::HashId, String)>>();
         sample_block_groups.insert(sample.clone(), pairs);
     }
 
@@ -187,7 +186,7 @@ pub enum ExplorerItem {
         is_current: bool,
     },
     BlockGroup {
-        id: HashId,
+        id: gen_core::HashId,
         name: String,
     },
     Sample {
@@ -217,7 +216,7 @@ pub struct CollectionExplorerState {
     pub total_items: usize,
     pub has_focus: bool,
     /// The currently selected block group
-    pub selected_block_group_id: Option<HashId>,
+    pub selected_block_group_id: Option<gen_core::HashId>,
     /// Tracks which samples are expanded/collapsed
     expanded_samples: HashSet<String>,
     /// Indicates which focus zone should receive focus (if any)
@@ -229,7 +228,7 @@ impl CollectionExplorerState {
         Self::with_selected_block_group(None)
     }
 
-    pub fn with_selected_block_group(block_group_id: Option<HashId>) -> Self {
+    pub fn with_selected_block_group(block_group_id: Option<gen_core::HashId>) -> Self {
         Self {
             list_state: ListState::default(),
             total_items: 0,
@@ -427,14 +426,14 @@ impl CollectionExplorer {
                 expanded: state.is_sample_expanded(sample),
             });
 
-            if state.is_sample_expanded(sample)
-                && let Some(block_groups) = self.data.sample_block_groups.get(sample)
-            {
-                for (id, name) in block_groups {
-                    items.push(ExplorerItem::BlockGroup {
-                        id: *id,
-                        name: name.clone(),
-                    });
+            if state.is_sample_expanded(sample) {
+                if let Some(block_groups) = self.data.sample_block_groups.get(sample) {
+                    for (id, name) in block_groups {
+                        items.push(ExplorerItem::BlockGroup {
+                            id: *id,
+                            name: name.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -489,12 +488,12 @@ impl StatefulWidget for &CollectionExplorer {
                                 "Collection:",
                                 Style::default().add_modifier(Modifier::UNDERLINED),
                             ),
-                            Span::raw(format!(" {name}")),
+                            Span::raw(format!(" {}", name)),
                         ]))
                         .wrap(Wrap { trim: false })
                     } else {
                         // This is a link to another collection
-                        Paragraph::new(Line::from(vec![Span::raw(format!("  • {name}"))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("  • {}", name))]))
                             .wrap(Wrap { trim: false })
                     }
                 }
@@ -505,13 +504,13 @@ impl StatefulWidget for &CollectionExplorer {
                         .data
                         .reference_block_groups
                         .iter()
-                        .any(|(ref_id, _)| *ref_id == *id);
+                        .any(|(ref_id, _)| ref_id == id);
 
                     if is_reference {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("   • {name}"))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("   • {}", name))]))
                             .wrap(Wrap { trim: false })
                     } else {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("     • {name}"))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("     • {}", name))]))
                             .wrap(Wrap { trim: false })
                     }
                 }
@@ -564,7 +563,8 @@ impl StatefulWidget for &CollectionExplorer {
         if state.list_state.selected.is_none() || state.list_state.selected.unwrap() >= total_items
         {
             // Selection is invalid or missing - try to find a valid one
-            state.list_state.selected = if let Some(block_group_id) = &state.selected_block_group_id
+            state.list_state.selected = if let Some(ref block_group_id) =
+                state.selected_block_group_id
             {
                 // Try to find the selected block group in the current items
                 self.get_display_items(state).iter()
@@ -595,7 +595,7 @@ mod tests {
     fn test_gather_collection_explorer_data() {
         setup_gen_dir();
         let conn = &mut get_connection(None).unwrap();
-        get_operation_connection(None).unwrap();
+        let _operation_conn = &get_operation_connection(None).unwrap();
 
         // Create collections with hierarchical paths
         Collection::create(conn, "/foo/bar");
