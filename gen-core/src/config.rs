@@ -17,11 +17,24 @@ fn ensure_dir(path: &PathBuf) {
     }
 }
 
+pub fn set_base_dir(d: &Path) {
+    BASE_DIR
+        .try_with(|v| {
+            let mut w = v.write().unwrap();
+            *w = d.to_path_buf()
+        })
+        .unwrap();
+}
+
+pub fn get_base_dir() -> PathBuf {
+    BASE_DIR.with(|v| v.read().unwrap().clone())
+}
+
 /// Looks for the .gen directory in the current directory, or in a temporary directory if setup_gen_dir()
 /// was called first.  If it doesn't exist, it will be created.
 /// Returns the path to the .gen directory.
 pub fn get_or_create_gen_dir() -> PathBuf {
-    let start_dir = BASE_DIR.with(|v| v.read().unwrap().clone());
+    let start_dir = get_base_dir();
     let cur_dir = start_dir.as_path();
     let gen_path = cur_dir.join(".gen");
     ensure_dir(&gen_path);
@@ -33,7 +46,7 @@ pub fn get_or_create_gen_dir() -> PathBuf {
 /// or in a temporary directory if setup_gen_dir() was called first.
 /// Returns the path to the .gen directory if found, otherwise returns None.
 pub fn get_gen_dir() -> Option<String> {
-    let start_dir = BASE_DIR.with(|v| v.read().unwrap().clone());
+    let start_dir = get_base_dir();
     let mut cur_dir = start_dir.as_path();
     let mut gen_path = cur_dir.join(".gen");
     while !gen_path.is_dir() {
@@ -81,13 +94,17 @@ mod tests {
     #[test]
     fn test_finds_gen_dir() {
         let tmp_dir = tempdir().unwrap().keep();
-        {
-            BASE_DIR.with(|v| {
-                let mut writer = v.write().unwrap();
-                *writer = tmp_dir;
-            });
-        }
+        set_base_dir(&tmp_dir);
         get_or_create_gen_dir();
         assert!(get_gen_dir().is_some());
+    }
+
+    #[test]
+    fn test_set_base_dir() {
+        let old_dir = get_base_dir();
+        let tmp_dir = tempdir().unwrap().keep();
+        set_base_dir(&tmp_dir);
+        assert_eq!(tmp_dir, get_base_dir());
+        assert_ne!(get_base_dir(), old_dir);
     }
 }

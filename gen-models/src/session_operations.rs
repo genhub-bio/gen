@@ -11,7 +11,7 @@ use crate::{
     changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
     collection::Collection,
     edge::Edge,
-    errors::OperationError,
+    errors::{FileAdditionError, OperationError},
     files::GenDatabase,
     gen_models_capnp::dependency_models,
     metadata::{self, get_db_uuid},
@@ -63,9 +63,15 @@ pub fn end_operation(
     match Operation::create(operation_conn, &operation_info.description, &hash) {
         Ok(operation) => {
             for op_file in operation_info.files.iter() {
-                let fa =
-                    FileAddition::create(operation_conn, &op_file.file_path, op_file.file_type);
-                Operation::add_file(operation_conn, &operation.hash, fa.id)
+                let fa = match FileAddition::get_or_create(
+                    operation_conn,
+                    &op_file.file_path,
+                    op_file.file_type,
+                ) {
+                    Ok(fa) => fa,
+                    Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
+                };
+                Operation::add_file(operation_conn, &operation.hash, &fa.id)
                     .map_err(|err| OperationError::SQLError(format!("{err}")))?
             }
             OperationSummary::create(operation_conn, &operation.hash, summary_str);
