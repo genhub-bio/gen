@@ -21,15 +21,16 @@ CREATE TABLE operations (
 ) STRICT;
 
 CREATE TABLE file_additions (
-  id INTEGER PRIMARY KEY NOT NULL,
+  id BLOB PRIMARY KEY NOT NULL,
   file_path TEXT NOT NULL,
-  file_type TEXT NOT NULL
+  file_type TEXT NOT NULL,
+  checksum BLOB NOT NULL
 ) STRICT;
 
 CREATE TABLE operation_files (
   id INTEGER PRIMARY KEY NOT NULL,
   operation_hash BLOB NOT NULL,
-  file_addition_id INTEGER NOT NULL,
+  file_addition_id BLOB NOT NULL,
   FOREIGN KEY(operation_hash) REFERENCES operations(hash),
   FOREIGN KEY(file_addition_id) REFERENCES file_additions(id)
 ) STRICT;

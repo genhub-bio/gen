@@ -1,16 +1,22 @@
-use std::{convert::TryInto, path::PathBuf, string::ToString};
+use std::{
+    convert::TryInto,
+    io::{self, BufReader},
+    path::{Path, PathBuf},
+    string::ToString,
+};
 
-use gen_core::{HashId, config::get_changeset_path, traits::Capnp};
+use gen_core::{HashId, calculate_hash, config::get_changeset_path, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
 use petgraph::{Direction, graphmap::UnGraphMap};
-use rusqlite::{Connection, Result as SQLResult, Row, params, params_from_iter, types::Value};
+use rusqlite::{Connection, Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     changesets::{
         DatabaseChangeset, get_changeset_dependencies_from_path, get_changeset_from_path,
     },
-    errors::{BranchError, RemoteError},
+    errors::{BranchError, FileAdditionError, RemoteError},
     file_types::FileTypes,
     gen_models_capnp::operation,
     session_operations::DependencyModels,
@@ -105,7 +111,7 @@ impl Operation {
     pub fn add_file(
         conn: &Connection,
         operation_hash: &HashId,
-        file_addition_id: i64,
+        file_addition_id: &HashId,
     ) -> SQLResult<()> {
         let query =
             "INSERT INTO operation_files (operation_hash, file_addition_id) VALUES (?1, ?2)";
@@ -233,11 +239,28 @@ pub struct OperationInfo {
     pub description: String,
 }
 
+pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<HashId, std::io::Error> {
+    let file = std::fs::File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let hash_bytes = calculate_stream_hash(reader)?;
+    Ok(HashId(hash_bytes))
+}
+
+fn calculate_stream_hash<R: std::io::Read>(mut reader: R) -> Result<[u8; 32], std::io::Error> {
+    let mut hasher = Sha256::new();
+    io::copy(&mut reader, &mut hasher);
+    let result = hasher.finalize();
+    let mut hash_array = [0u8; 32];
+    hash_array.copy_from_slice(&result);
+    Ok(hash_array)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct FileAddition {
-    pub id: i64,
+    pub id: HashId,
     pub file_path: String,
     pub file_type: FileTypes,
+    pub checksum: HashId,
 }
 
 impl Query for FileAddition {
@@ -250,31 +273,66 @@ impl Query for FileAddition {
             id: row.get(0).unwrap(),
             file_path: row.get(1).unwrap(),
             file_type: row.get(2).unwrap(),
+            checksum: row.get(3).unwrap(),
         }
     }
 }
 
 impl FileAddition {
-    pub fn create(conn: &Connection, file_path: &str, file_type: FileTypes) -> FileAddition {
-        let query =
-            "INSERT INTO file_additions (file_path, file_type) VALUES (?1, ?2) RETURNING (id)";
-        let mut stmt = conn.prepare(query).unwrap();
-        let mut rows = stmt
-            .query_map(
-                params_from_iter(vec![
-                    Value::from(file_path.to_string()),
-                    Value::from(file_type),
-                ]),
-                |row| {
-                    Ok(FileAddition {
-                        id: row.get(0)?,
-                        file_path: file_path.to_string(),
-                        file_type,
-                    })
+    pub fn generate_file_addition_id(checksum: &HashId, file_path: &str) -> HashId {
+        let combined = format!("{checksum};{file_path}");
+        HashId(calculate_hash(&combined))
+    }
+
+    pub fn get_or_create(
+        conn: &Connection,
+        file_path: &str,
+        file_type: FileTypes,
+    ) -> Result<FileAddition, FileAdditionError> {
+        let checksum = if file_path.is_empty() {
+            HashId::convert_str("empty")
+        } else {
+            match calculate_file_checksum(file_path) {
+                Ok(checksum) => checksum,
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::NotFound => HashId::convert_str("non-existent"),
+                    std::io::ErrorKind::PermissionDenied => {
+                        return Err(FileAdditionError::FilePermissionDenied(
+                            file_path.to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(FileAdditionError::FileReadError(e));
+                    }
                 },
-            )
-            .unwrap();
-        rows.next().unwrap().unwrap()
+            }
+        };
+
+        let id = FileAddition::generate_file_addition_id(&checksum, file_path);
+
+        let query = "INSERT INTO file_additions (id, file_path, file_type, checksum) VALUES (?1, ?2, ?3, ?4);";
+        let mut stmt = conn.prepare(query).unwrap();
+
+        let addition = FileAddition {
+            id,
+            file_path: file_path.to_string(),
+            file_type,
+            checksum,
+        };
+
+        match stmt.execute((&id, file_path, file_type, &checksum)) {
+            Ok(_) => Ok(addition),
+            Err(err) => match &err {
+                rusqlite::Error::SqliteFailure(suberr, _details) => {
+                    if suberr.code == rusqlite::ErrorCode::ConstraintViolation {
+                        Ok(addition)
+                    } else {
+                        Err(FileAdditionError::DatabaseError(err))
+                    }
+                }
+                _ => Err(FileAdditionError::DatabaseError(err)),
+            },
+        }
     }
 
     pub fn get_files_for_operation(
@@ -342,16 +400,30 @@ impl<'a> Capnp<'a> for FileAddition {
     type Reader = crate::gen_models_capnp::file_addition::Reader<'a>;
 
     fn write_capnp(&self, builder: &mut Self::Builder) {
-        builder.set_id(self.id);
+        builder.set_id(&self.id.0).unwrap();
         builder.set_file_path(&self.file_path);
         builder.set_file_type(self.file_type.into());
+        builder.set_checksum(&self.checksum.0).unwrap();
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
         Self {
-            id: reader.get_id(),
+            id: reader
+                .get_id()
+                .unwrap()
+                .as_slice()
+                .unwrap()
+                .try_into()
+                .unwrap(),
             file_path: reader.get_file_path().unwrap().to_string().unwrap(),
             file_type: reader.get_file_type().unwrap().into(),
+            checksum: reader
+                .get_checksum()
+                .unwrap()
+                .as_slice()
+                .unwrap()
+                .try_into()
+                .unwrap(),
         }
     }
 }
@@ -844,7 +916,12 @@ impl OperationState {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{
+        collections::HashSet,
+        io::{Cursor, Write},
+    };
+
+    use tempfile::NamedTempFile;
 
     use super::*;
     use crate::test_helpers::{
@@ -1799,9 +1876,10 @@ mod tests {
         use capnp::message::TypedBuilder;
 
         let file_addition = FileAddition {
-            id: 42,
+            id: HashId([42u8; 32]),
             file_path: "test/path.fasta".to_string(),
             file_type: FileTypes::Fasta,
+            checksum: HashId([24u8; 32]),
         };
 
         let mut message =
@@ -1830,5 +1908,144 @@ mod tests {
 
         let deserialized = OperationSummary::read_capnp(root.into_reader());
         assert_eq!(operation_summary, deserialized);
+    }
+
+    #[test]
+    fn test_calculate_stream_hash() {
+        let content = b"Hello, World!";
+        let cursor = Cursor::new(content);
+        let hash = calculate_stream_hash(cursor).unwrap();
+
+        assert_eq!(hash.len(), 32);
+
+        // Test consistency - same content should produce same hash
+        let cursor2 = Cursor::new(content);
+        let hash2 = calculate_stream_hash(cursor2).unwrap();
+        assert_eq!(hash, hash2);
+
+        // Test different content produces different hash
+        let different_content = b"Hello, World!!";
+        let cursor3 = Cursor::new(different_content);
+        let hash3 = calculate_stream_hash(cursor3).unwrap();
+        assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_calculate_file_checksum() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let content = b"Test file content for checksum calculation";
+        temp_file.write_all(content).unwrap();
+        temp_file.flush().unwrap();
+
+        let checksum = calculate_file_checksum(temp_file.path()).unwrap();
+
+        assert_eq!(checksum.0.len(), 32);
+
+        // Test consistency - same file should produce same checksum
+        let checksum2 = calculate_file_checksum(temp_file.path()).unwrap();
+        assert_eq!(checksum, checksum2);
+
+        // Test with different file content
+        let mut temp_file2 = NamedTempFile::new().unwrap();
+        let different_content = b"Different test file content";
+        temp_file2.write_all(different_content).unwrap();
+        temp_file2.flush().unwrap();
+
+        let checksum3 = calculate_file_checksum(temp_file2.path()).unwrap();
+        assert_ne!(checksum, checksum3);
+    }
+
+    #[test]
+    fn test_calculate_file_checksum_nonexistent_file() {
+        let result = calculate_file_checksum("/nonexistent/file/path");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[test]
+    fn test_generate_file_addition_id_consistency() {
+        let checksum = HashId([1u8; 32]);
+        let file_path = "/path/to/file.txt";
+
+        let id1 = FileAddition::generate_file_addition_id(&checksum, file_path);
+        let id2 = FileAddition::generate_file_addition_id(&checksum, file_path);
+
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_generate_file_addition_id_uniqueness_different_paths() {
+        let checksum = HashId([1u8; 32]);
+        let file_path1 = "/path/to/file1.txt";
+        let file_path2 = "/path/to/file2.txt";
+
+        let id1 = FileAddition::generate_file_addition_id(&checksum, file_path1);
+        let id2 = FileAddition::generate_file_addition_id(&checksum, file_path2);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_generate_file_addition_id_uniqueness_different_checksums() {
+        let checksum1 = HashId([1u8; 32]);
+        let checksum2 = HashId([2u8; 32]);
+        let file_path = "/path/to/file.txt";
+
+        let id1 = FileAddition::generate_file_addition_id(&checksum1, file_path);
+        let id2 = FileAddition::generate_file_addition_id(&checksum2, file_path);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_file_addition_get_or_create() {
+        setup_gen_dir();
+        let conn = &get_operation_connection(None).unwrap();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let content = b"Test file content";
+        temp_file.write_all(content).unwrap();
+        temp_file.flush().unwrap();
+
+        let test_file_path = temp_file.path().to_str().unwrap();
+
+        let fa1 = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
+            .expect("Failed to create FileAddition");
+
+        assert_eq!(
+            fa1.id,
+            FileAddition::generate_file_addition_id(
+                &calculate_file_checksum(&temp_file.path()).unwrap(),
+                test_file_path
+            )
+        );
+
+        // Second call with same file should return the same FileAddition
+        let fa2 = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
+            .expect("Failed to get existing FileAddition");
+
+        assert_eq!(fa1, fa2);
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let content = b"Test file content";
+        temp_file.write_all(content).unwrap();
+        temp_file.flush().unwrap();
+
+        let test_file_path2 = temp_file.path().to_str().unwrap();
+
+        let fa3 = FileAddition::get_or_create(conn, test_file_path2, FileTypes::Fasta)
+            .expect("Failed to create different FileAddition");
+
+        assert_ne!(fa1.id, fa3.id);
+
+        temp_file.write_all(b"new content").unwrap();
+        temp_file.flush().unwrap();
+        let fa1_new = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
+            .expect("Failed to create FileAddition");
+
+        assert_ne!(fa1.id, fa1_new.id);
     }
 }

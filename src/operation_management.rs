@@ -8,7 +8,7 @@ use std::{
 use gen_core::{HashId, config::get_gen_dir, errors::ConnectionError, traits::Capnp};
 use gen_models::{
     changesets::{apply_changeset, revert_changeset},
-    errors::{ChangesetError, OperationError, RemoteError},
+    errors::{ChangesetError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
     manifest::{
         ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
@@ -130,6 +130,8 @@ pub enum RemoteOperationError {
     DoesNotExist(String),
     #[error("No operations present in current branch")]
     NoOperations,
+    #[error("File Addition Error: {0}")]
+    FileAdditionError(#[from] FileAdditionError),
 }
 
 pub enum FileMode {
@@ -608,12 +610,12 @@ fn apply_operations_to_remote(
             Ok(_) => {
                 // Add file associations for this operation, these aren't tracked in changesets atm
                 for file_addition in &manifest_op.file_additions {
-                    let remote_file_addition = FileAddition::create(
+                    let remote_file_addition = FileAddition::get_or_create(
                         remote_op_conn,
                         &file_addition.file_path,
                         file_addition.file_type,
-                    );
-                    Operation::add_file(remote_op_conn, &operation.hash, remote_file_addition.id)?;
+                    )?;
+                    Operation::add_file(remote_op_conn, &operation.hash, &remote_file_addition.id)?;
                 }
 
                 remote_op_conn.execute("COMMIT TRANSACTION", [])?;

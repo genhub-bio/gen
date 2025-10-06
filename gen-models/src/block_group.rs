@@ -349,12 +349,7 @@ impl BlockGroup {
 
     pub fn prune_graph(graph: &mut GenGraph) {
         // Prunes a graph by removing edges on the same chromosome_index. This means if 2 edges are
-        // both "chromosome index 0", we keep the newer one (newer known by the higher edge id).
-        // TODO: This check is not actually right but allows us to test some functionality wrt
-        // inherited block groups now. We need to know whether an edge was added to a blockgroup
-        // via inheritance or created by it. Because edges can be reused, if an edge created
-        // earlier in some other sample is added to a sample, it may be the correct one but have
-        // a lower edge id than some edge in the current sample.
+        // both "chromosome index 0", we keep the newer one.
         let mut root_nodes = HashSet::new();
         let mut edges_to_remove: Vec<(GraphNode, GraphNode)> = vec![];
         for node in graph.nodes() {
