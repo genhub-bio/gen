@@ -295,7 +295,7 @@ impl FileAddition {
             match calculate_file_checksum(file_path) {
                 Ok(checksum) => checksum,
                 Err(e) => match e.kind() {
-                    std::io::ErrorKind::NotFound => HashId::convert_str("non-existant"),
+                    std::io::ErrorKind::NotFound => HashId::convert_str("non-existent"),
                     std::io::ErrorKind::PermissionDenied => {
                         return Err(FileAdditionError::FilePermissionDenied(
                             file_path.to_string(),
@@ -2040,5 +2040,12 @@ mod tests {
             .expect("Failed to create different FileAddition");
 
         assert_ne!(fa1.id, fa3.id);
+
+        temp_file.write_all(b"new content").unwrap();
+        temp_file.flush().unwrap();
+        let fa1_new = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
+            .expect("Failed to create FileAddition");
+
+        assert_ne!(fa1.id, fa1_new.id);
     }
 }
