@@ -74,6 +74,8 @@ pub fn end_operation(
                 Operation::add_file(operation_conn, &operation.hash, &fa.id)
                     .map_err(|err| OperationError::SQLError(format!("{err}")))?
             }
+            Operation::add_database(operation_conn, &operation.hash, &db_uuid)
+                .map_err(|err| OperationError::SQLError(format!("{err}")))?;
             OperationSummary::create(operation_conn, &operation.hash, summary_str);
             let db_uuid = get_db_uuid(conn);
             let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid).unwrap();

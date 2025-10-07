@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     convert::TryInto,
     io::{self, BufReader},
     path::{Path, PathBuf},
+    rc::Rc,
     string::ToString,
 };
 
@@ -11,6 +13,7 @@ use petgraph::{Direction, graphmap::UnGraphMap};
 use rusqlite::{Connection, Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::{
     changesets::{
@@ -28,6 +31,7 @@ pub struct Operation {
     pub hash: HashId,
     pub parent_hash: Option<HashId>,
     pub change_type: String,
+    pub created_on: i64,
 }
 
 impl<'a> Capnp<'a> for Operation {
@@ -45,6 +49,7 @@ impl<'a> Capnp<'a> for Operation {
             }
         }
         builder.set_change_type(&self.change_type);
+        builder.set_created_on(self.created_on);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -62,11 +67,13 @@ impl<'a> Capnp<'a> for Operation {
             }
         };
         let change_type = reader.get_change_type().unwrap().to_string().unwrap();
+        let created_on = reader.get_created_on();
 
         Operation {
             hash,
             parent_hash,
             change_type,
+            created_on,
         }
     }
 }
@@ -77,13 +84,15 @@ impl Operation {
         let current_branch_id =
             OperationState::get_current_branch(conn).expect("No branch is checked out.");
 
-        let query = "INSERT INTO operations (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
+        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let query = "INSERT INTO operations (hash, change_type, parent_hash, created_on) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
-        stmt.execute(params![hash, change_type, current_op])?;
+        stmt.execute(params![hash, change_type, current_op, timestamp])?;
         let operation = Operation {
             hash: *hash,
             parent_hash: current_op,
             change_type: change_type.to_string(),
+            created_on: timestamp,
         };
         // TODO: error condition here where we can write to disk but transaction fails
         OperationState::set_operation(conn, &operation.hash);
@@ -96,14 +105,17 @@ impl Operation {
         hash: &HashId,
         change_type: &str,
         parent_hash: Option<HashId>,
+        created_on: Option<i64>,
     ) -> SQLResult<Operation> {
-        let query = "INSERT INTO operations (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
+        let timestamp = created_on.unwrap_or(chrono::Utc::now().timestamp_nanos_opt().unwrap());
+        let query = "INSERT INTO operations (hash, change_type, parent_hash, created_on) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
-        stmt.execute(params![hash, change_type, parent_hash])?;
+        stmt.execute(params![hash, change_type, parent_hash, timestamp])?;
         let operation = Operation {
             hash: *hash,
             parent_hash,
             change_type: change_type.to_string(),
+            created_on: timestamp,
         };
         Ok(operation)
     }
@@ -117,6 +129,18 @@ impl Operation {
             "INSERT INTO operation_files (operation_hash, file_addition_id) VALUES (?1, ?2)";
         let mut stmt = conn.prepare(query).unwrap();
         stmt.execute(params![operation_hash, file_addition_id])?;
+        Ok(())
+    }
+
+    pub fn add_database(
+        conn: &Connection,
+        operation_hash: &HashId,
+        db_uuid: &str,
+    ) -> SQLResult<()> {
+        let query =
+            "INSERT INTO operation_databases (operation_hash, database_uuid) VALUES (?1, ?2)";
+        let mut stmt = conn.prepare(query).unwrap();
+        stmt.execute(params![operation_hash, db_uuid])?;
         Ok(())
     }
 
@@ -225,6 +249,7 @@ impl Query for Operation {
             hash: row.get(0).unwrap(),
             parent_hash: row.get(1).unwrap(),
             change_type: row.get(2).unwrap(),
+            created_on: row.get(3).unwrap(),
         }
     }
 }
@@ -248,14 +273,14 @@ pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<HashId, s
 
 fn calculate_stream_hash<R: std::io::Read>(mut reader: R) -> Result<[u8; 32], std::io::Error> {
     let mut hasher = Sha256::new();
-    io::copy(&mut reader, &mut hasher);
+    io::copy(&mut reader, &mut hasher)?;
     let result = hasher.finalize();
     let mut hash_array = [0u8; 32];
     hash_array.copy_from_slice(&result);
     Ok(hash_array)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct FileAddition {
     pub id: HashId,
     pub file_path: String,
@@ -348,6 +373,37 @@ impl FileAddition {
             .unwrap();
         rows.map(|row| row.unwrap()).collect()
     }
+
+    pub fn query_by_operations(
+        conn: &Connection,
+        operations: &[HashId],
+    ) -> Result<HashMap<HashId, Vec<FileAddition>>, FileAdditionError> {
+        let query = "select fa.*, of.operation_hash from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash in rarray(?1)";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map(
+                params![Rc::new(
+                    operations
+                        .iter()
+                        .map(|h| Value::from(*h))
+                        .collect::<Vec<Value>>()
+                )],
+                |row| Ok((FileAddition::process_row(row), row.get::<_, HashId>(4)?)),
+            )
+            .unwrap();
+        rows.into_iter()
+            .try_fold(HashMap::new(), |mut acc: HashMap<_, Vec<_>>, row| {
+                let (item, hash) = row?;
+                acc.entry(hash).or_default().push(item);
+                Ok(acc)
+            })
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum OperationSummaryError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -373,7 +429,7 @@ impl Query for OperationSummary {
 
 impl OperationSummary {
     pub fn create(conn: &Connection, operation_hash: &HashId, summary: &str) -> OperationSummary {
-        let query = "INSERT INTO operation_summary (operation_hash, summary) VALUES (?1, ?2) RETURNING (id)";
+        let query = "INSERT INTO operation_summaries (operation_hash, summary) VALUES (?1, ?2) RETURNING (id)";
         let mut stmt = conn.prepare(query).unwrap();
         let mut rows = stmt
             .query_map(params![operation_hash, summary], |row| {
@@ -388,10 +444,35 @@ impl OperationSummary {
     }
 
     pub fn set_message(conn: &Connection, id: i64, message: &str) -> SQLResult<()> {
-        let query = "UPDATE operation_summary SET summary = ?2 where id = ?1";
+        let query = "UPDATE operation_summaries SET summary = ?2 where id = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         stmt.execute(params![id, message])?;
         Ok(())
+    }
+
+    pub fn query_by_operations(
+        conn: &Connection,
+        operations: &[HashId],
+    ) -> Result<HashMap<HashId, Vec<Self>>, OperationSummaryError> {
+        let query = "select * from operation_summaries where operation_hash in rarray(?1)";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map(
+                params![Rc::new(
+                    operations
+                        .iter()
+                        .map(|h| Value::from(*h))
+                        .collect::<Vec<Value>>()
+                )],
+                |row| Ok(Self::process_row(row)),
+            )
+            .unwrap();
+        rows.into_iter()
+            .try_fold(HashMap::new(), |mut acc: HashMap<_, Vec<_>>, row| {
+                let item = row?;
+                acc.entry(item.operation_hash).or_default().push(item);
+                Ok(acc)
+            })
     }
 }
 

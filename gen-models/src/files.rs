@@ -1,12 +1,20 @@
-use gen_core::traits::Capnp;
-use rusqlite::{Connection, Result as SQLResult, Row, params};
+use std::{collections::HashMap, rc::Rc};
+
+use gen_core::{HashId, traits::Capnp};
+use rusqlite::{Connection, Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{gen_models_capnp::gen_database, traits::*};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Error)]
+pub enum GenDatabaseError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+}
+
+#[derive(Clone, Debug, Eq, Hash, Serialize, Deserialize, PartialEq)]
 pub struct GenDatabase {
-    pub id: i64,
     pub db_uuid: String,
     pub name: String,
     pub path: String,
@@ -17,20 +25,17 @@ impl<'a> Capnp<'a> for GenDatabase {
     type Reader = gen_database::Reader<'a>;
 
     fn write_capnp(&self, builder: &mut Self::Builder) {
-        builder.set_id(self.id);
         builder.set_db_uuid(&self.db_uuid);
         builder.set_name(&self.name);
         builder.set_path(&self.path);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
-        let id = reader.get_id();
         let db_uuid = reader.get_db_uuid().unwrap().to_string().unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
         let path = reader.get_path().unwrap().to_string().unwrap();
 
         GenDatabase {
-            id,
             db_uuid,
             name,
             path,
@@ -41,14 +46,14 @@ impl<'a> Capnp<'a> for GenDatabase {
 impl Query for GenDatabase {
     type Model = GenDatabase;
 
+    const PRIMARY_KEY: &'static str = "db_uuid";
     const TABLE_NAME: &'static str = "gen_databases";
 
     fn process_row(row: &Row) -> Self::Model {
         GenDatabase {
-            id: row.get(0).unwrap(),
-            db_uuid: row.get(1).unwrap(),
-            name: row.get(2).unwrap(),
-            path: row.get(3).unwrap(),
+            db_uuid: row.get(0).unwrap(),
+            name: row.get(1).unwrap(),
+            path: row.get(2).unwrap(),
         }
     }
 }
@@ -60,10 +65,13 @@ impl GenDatabase {
         name: &str,
         path: &str,
     ) -> SQLResult<GenDatabase> {
-        let query = "INSERT INTO gen_databases (db_uuid, name, path) VALUES (?1, ?2, ?3) RETURNING id, db_uuid, name, path";
+        let query = "INSERT INTO gen_databases (db_uuid, name, path) VALUES (?1, ?2, ?3);";
         let mut stmt = conn.prepare(query)?;
-        stmt.query_row(params![db_uuid, name, path], |row| {
-            Ok(GenDatabase::process_row(row))
+        stmt.execute(params![db_uuid, name, path])?;
+        Ok(GenDatabase {
+            db_uuid: db_uuid.to_string(),
+            name: name.to_string(),
+            path: path.to_string(),
         })
     }
 
@@ -78,7 +86,7 @@ impl GenDatabase {
     pub fn get_by_uuid(conn: &Connection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn,
-            "SELECT id, db_uuid, name, path FROM gen_databases WHERE db_uuid = ?1",
+            "SELECT * FROM gen_databases WHERE db_uuid = ?1",
             params![db_uuid],
         )
     }
@@ -86,7 +94,7 @@ impl GenDatabase {
     pub fn get_by_path(conn: &Connection, path: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn,
-            "SELECT id, db_uuid, name, path FROM gen_databases WHERE path = ?1",
+            "SELECT * FROM gen_databases WHERE path = ?1",
             params![path],
         )
     }
@@ -118,6 +126,31 @@ impl GenDatabase {
             }
         }
     }
+
+    pub fn query_by_operations(
+        conn: &Connection,
+        operations: &[HashId],
+    ) -> Result<HashMap<HashId, Vec<GenDatabase>>, GenDatabaseError> {
+        let query = "select gd.*, od.operation_hash from gen_databases gd left join operation_databases od on (gd.db_uuid = od.database_uuid) where od.operation_hash in rarray(?1)";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map(
+                params![Rc::new(
+                    operations
+                        .iter()
+                        .map(|h| Value::from(*h))
+                        .collect::<Vec<Value>>()
+                )],
+                |row| Ok((GenDatabase::process_row(row), row.get::<_, HashId>(3)?)),
+            )
+            .unwrap();
+        rows.into_iter()
+            .try_fold(HashMap::new(), |mut acc: HashMap<_, Vec<_>>, row| {
+                let (item, hash) = row?;
+                acc.entry(hash).or_default().push(item);
+                Ok(acc)
+            })
+    }
 }
 
 #[cfg(test)]
@@ -130,7 +163,6 @@ mod tests {
     #[test]
     fn test_gen_database_capnp_serialization() {
         let gen_database = GenDatabase {
-            id: 42,
             db_uuid: "test-uuid-123".to_string(),
             name: "test_database".to_string(),
             path: "/path/to/test.db".to_string(),
@@ -153,7 +185,6 @@ mod tests {
         assert_eq!(db.db_uuid, "test-uuid-123");
         assert_eq!(db.name, "test_db");
         assert_eq!(db.path, "path/to/db.db");
-        assert!(db.id > 0);
     }
 
     #[test]
@@ -165,7 +196,6 @@ mod tests {
 
         let retrieved_db = GenDatabase::get_by_uuid(&conn, "test-uuid-456").unwrap();
 
-        assert_eq!(retrieved_db.id, created_db.id);
         assert_eq!(retrieved_db.db_uuid, "test-uuid-456");
         assert_eq!(retrieved_db.name, "test_db2");
         assert_eq!(retrieved_db.path, "path/to/db2.db");
@@ -180,7 +210,6 @@ mod tests {
 
         let retrieved_db = GenDatabase::get_by_path(&conn, "path/to/db3.db").unwrap();
 
-        assert_eq!(retrieved_db.id, created_db.id);
         assert_eq!(retrieved_db.db_uuid, "test-uuid-789");
         assert_eq!(retrieved_db.name, "test_db3");
         assert_eq!(retrieved_db.path, "path/to/db3.db");
@@ -207,7 +236,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(retrieved_db.id, created_db.id);
         assert_eq!(retrieved_db.db_uuid, "test-uuid-existing");
         assert_eq!(retrieved_db.name, "existing_db"); // Should keep original name
         assert_eq!(retrieved_db.path, "path/to/existing.db"); // Should keep original path
@@ -247,7 +275,6 @@ mod tests {
         assert_eq!(new_db.db_uuid, "test-uuid-new");
         assert_eq!(new_db.name, "new_db");
         assert_eq!(new_db.path, "path/to/new.db");
-        assert!(new_db.id > 0);
     }
 
     #[test]

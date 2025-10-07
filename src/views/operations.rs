@@ -68,7 +68,7 @@ pub fn view_operations(
     );
     let summaries = OperationSummary::query(
         op_conn,
-        "select * from operation_summary where operation_hash in rarray(?1)",
+        "select * from operation_summaries where operation_hash in rarray(?1)",
         params![Rc::new(
             operations
                 .iter()
