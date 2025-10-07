@@ -572,14 +572,14 @@ mod tests {
         let section_positions: Vec<usize> = result
             .iter()
             .enumerate()
-            .filter(|(_, &idx)| idx % 2 == 0)
+            .filter(|&(_, &idx)| idx % 2 == 0)
             .map(|(pos, _)| pos)
             .collect();
 
         let bridge_positions: Vec<usize> = result
             .iter()
             .enumerate()
-            .filter(|(_, &idx)| idx % 2 == 1)
+            .filter(|&(_, &idx)| idx % 2 == 1)
             .map(|(pos, _)| pos)
             .collect();
 
@@ -605,14 +605,14 @@ mod tests {
         let bridge_positions: Vec<usize> = result
             .iter()
             .enumerate()
-            .filter(|(_, &idx)| idx % 2 == 1)
+            .filter(|&(_, &idx)| idx % 2 == 1)
             .map(|(pos, _)| pos)
             .collect();
 
         let section_positions: Vec<usize> = result
             .iter()
             .enumerate()
-            .filter(|(_, &idx)| idx % 2 == 0)
+            .filter(|&(_, &idx)| idx % 2 == 0)
             .map(|(pos, _)| pos)
             .collect();
 

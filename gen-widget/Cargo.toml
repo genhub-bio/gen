@@ -42,4 +42,5 @@ serial_test = "3.2.0"
 tempfile = "3.14.0"
 env_logger = "0.10.0"
 more-asserts = "0.3.1"
+sha2 = "0.10.8"
 

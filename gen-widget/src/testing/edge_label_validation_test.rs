@@ -7,12 +7,14 @@
 mod tests {
     use std::collections::{HashMap, HashSet};
 
+    use gen_core::HashId;
     use gen_graph::{GenGraph, GraphNode};
     use petgraph::{
         graph::NodeIndex,
         graphmap::DiGraphMap,
         visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences},
     };
+    use sha2::{Digest, Sha256};
 
     use crate::{
         graph_controller::{GraphConfig, GraphController},
@@ -20,6 +22,15 @@ mod tests {
         partition_table::PartitionConfig,
         plotter::NodeSizer,
     };
+
+    /// Helper function to create a HashId from a test integer
+    /// Uses SHA256 hash of the integer's bytes for deterministic results
+    fn test_hash_id(id: i64) -> HashId {
+        let mut hasher = Sha256::new();
+        hasher.update(id.to_le_bytes());
+        let hash_bytes = hasher.finalize();
+        HashId(hash_bytes.into())
+    }
 
     fn make_test_graph(edges: Vec<(i32, i32)>) -> GenGraph {
         let nodes: Vec<GraphNode> = edges
@@ -29,7 +40,7 @@ mod tests {
             .into_iter()
             .map(|id| GraphNode {
                 block_id: id as i64,
-                node_id: id as i64,
+                node_id: test_hash_id(id as i64),
                 sequence_start: 0,
                 sequence_end: 10,
             })
