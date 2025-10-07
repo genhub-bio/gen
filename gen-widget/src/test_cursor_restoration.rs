@@ -30,7 +30,7 @@ mod cursor_restoration_tests {
         // Load initial viewport
         let viewport = BigRect::from_corners(WorldPos::new(-50, -25), WorldPos::new(50, 25));
         controller
-            .update_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph(viewport, VisualDetail::Full)
             .expect("Failed to initialize viewport graph");
 
         // Initialize cursor - this should place it on NodeIndex(0)
@@ -74,7 +74,7 @@ mod cursor_restoration_tests {
 
         // Rebuild viewport graph (this triggers cursor restoration)
         controller
-            .update_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph(viewport, VisualDetail::Full)
             .expect("Failed to update viewport graph after disperse");
 
         // Capture state AFTER disperse
@@ -139,13 +139,13 @@ mod cursor_restoration_tests {
         // Load initial viewport
         let viewport = BigRect::from_corners(WorldPos::new(-50, -25), WorldPos::new(50, 25));
         controller
-            .update_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph(viewport, VisualDetail::Full)
             .expect("Failed to initialize viewport graph");
 
         // First disperse to increase spacing (so we have room to contract)
         controller.disperse();
         controller
-            .update_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph(viewport, VisualDetail::Full)
             .expect("Failed to update after initial disperse");
 
         // Initialize cursor after disperse
@@ -181,7 +181,7 @@ mod cursor_restoration_tests {
 
         // Rebuild viewport graph (this triggers cursor restoration)
         controller
-            .update_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph(viewport, VisualDetail::Full)
             .expect("Failed to update viewport graph after contract");
 
         // Capture state AFTER contract
@@ -235,7 +235,7 @@ mod cursor_restoration_tests {
 
         let viewport = BigRect::from_corners(WorldPos::new(-50, -25), WorldPos::new(50, 25));
         controller
-            .update_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph(viewport, VisualDetail::Full)
             .expect("Failed to initialize viewport graph");
 
         // Manually set cursor to track NodeIndex(1) instead of the default
@@ -261,7 +261,7 @@ mod cursor_restoration_tests {
         // Disperse
         controller.disperse();
         controller
-            .update_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph(viewport, VisualDetail::Full)
             .expect("Failed to update after disperse");
 
         // Verify

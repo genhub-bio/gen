@@ -139,7 +139,7 @@ where
             partition_indices
         );
 
-        let _ = controller.update_viewport_graph(
+        let _ = controller.rebuild_viewport_graph(
             controller.viewport_state.camera_rect(),
             controller.get_detail_level(),
         );
@@ -480,11 +480,11 @@ fn test_layer_coordinate_alignment_and_ordering() {
         loaded_partitions.len()
     );
 
-    // Update the viewport graph with unlimited bounds
-    let result = controller.update_viewport_graph(unlimited_viewport, VisualDetail::Full);
+    // Rebuild the viewport graph with unlimited bounds
+    let result = controller.rebuild_viewport_graph(unlimited_viewport, VisualDetail::Full);
     assert!(
         result.is_ok(),
-        "Failed to create viewport graph: {:?}",
+        "Failed to rebuild viewport graph: {:?}",
         result
     );
 
@@ -716,10 +716,10 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
 
     let _loaded_partitions = controller.ensure_camera_coverage().unwrap_or_default();
 
-    let result = controller.update_viewport_graph(unlimited_viewport, VisualDetail::Full);
+    let result = controller.rebuild_viewport_graph(unlimited_viewport, VisualDetail::Full);
     assert!(
         result.is_ok(),
-        "Failed to create viewport graph: {:?}",
+        "Failed to rebuild viewport graph: {:?}",
         result
     );
 

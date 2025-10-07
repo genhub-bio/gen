@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashSet, hash::Hash};
+use std::{collections::HashSet, hash::Hash};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use log::trace;
@@ -725,77 +725,6 @@ where
             self.viewport_graph.node_count(),
             self.viewport_graph.edge_count()
         );
-
-        Ok(())
-    }
-
-    /// Legacy update_viewport_graph that handles cursor restoration.
-    /// NEW CODE SHOULD USE: rebuild_viewport_graph() + preserve_cursor_during_layout_change()
-    ///
-    /// This is kept temporarily for compatibility with existing rendering code.
-    pub fn update_viewport_graph(
-        &mut self,
-        viewport: crate::geometry::BigRect<i64>,
-        detail_level: VisualDetail,
-    ) -> Result<(), String> {
-        // Use camera's visible rect if rebuild is needed (after layout changes)
-        let viewport = if self.rebuild_needed {
-            self.viewport_state.visible_world_rect()
-        } else {
-            viewport
-        };
-
-        // Handle cursor preservation if we have a tracked node with stored position
-        if self.viewport_state.cursor.enabled
-            && self.viewport_state.cursor.node_domain_idx.is_some()
-            && self.viewport_state.cursor.stored_viewport_pos.is_some()
-        {
-            let tracked_node = self.viewport_state.cursor.node_domain_idx.unwrap();
-            let viewport_pos = self.viewport_state.cursor.stored_viewport_pos.unwrap();
-            let node_offset = self.viewport_state.cursor.node_offset;
-
-            // Try to preserve cursor position
-            if let Err(e) =
-                self.preserve_cursor_during_layout_change(viewport_pos, tracked_node, node_offset)
-            {
-                log::debug!(
-                    "Cursor preservation failed: {}. Clearing cursor tracking.",
-                    e
-                );
-                self.viewport_state.cursor.stored_viewport_pos = None;
-                self.viewport_state.cursor.node_domain_idx = None;
-            }
-
-            // Clear stored position after use
-            self.viewport_state.cursor.stored_viewport_pos = None;
-        }
-
-        // Rebuild the viewport graph
-        self.rebuild_viewport_graph(viewport, detail_level)?;
-
-        // Initialize or restore cursor position
-        if self.viewport_state.cursor.enabled {
-            if let Some(tracked_node) = self.viewport_state.cursor.node_domain_idx {
-                let node_offset = self.viewport_state.cursor.node_offset;
-
-                // Try to restore cursor to the tracked node
-                let current_viewport_offset =
-                    self.viewport_state.cursor.current - self.viewport_state.camera_current;
-                let viewport_pos = ViewportPos::new(
-                    cmp::max(current_viewport_offset.x, 0) as u16,
-                    cmp::max(current_viewport_offset.y, 0) as u16,
-                );
-
-                if self
-                    .restore_cursor_after_viewport_update(tracked_node, node_offset, viewport_pos)
-                    .is_err()
-                {
-                    self.initialize_cursor();
-                }
-            } else {
-                self.initialize_cursor();
-            }
-        }
 
         Ok(())
     }

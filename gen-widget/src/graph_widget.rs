@@ -13,7 +13,7 @@ use ratatui::{
 };
 
 use crate::{
-    geometry::WorldRect,
+    geometry::{ViewportPos, WorldRect},
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer, plot_viewport_graph},
@@ -244,12 +244,46 @@ where
 
         // Update ViewportGraph only if rebuild is needed
         // This ensures we always have the correct visible nodes/edges
+        // Note: Camera and cursor adjustments for layout changes are handled by disperse/contract/set_detail_level
         if controller.rebuild_needed {
             let world_rect = controller.viewport_state.visible_world_rect();
             if let Err(e) =
-                controller.update_viewport_graph(world_rect, controller.get_detail_level())
+                controller.rebuild_viewport_graph(world_rect, controller.get_detail_level())
             {
-                log::error!("Error updating viewport graph: {}", e);
+                log::error!("Error rebuilding viewport graph: {}", e);
+            }
+
+            // Restore cursor position after viewport rebuild
+            // The cursor tracks a domain node, and we need to restore it to that node's position
+            // in the newly rebuilt viewport graph
+            if controller.viewport_state.cursor.enabled {
+                if let Some(tracked_node) = controller.viewport_state.cursor.node_domain_idx {
+                    let node_offset = controller.viewport_state.cursor.node_offset;
+
+                    // Calculate viewport position for restoration
+                    let current_viewport_offset = controller.viewport_state.cursor.current
+                        - controller.viewport_state.camera_current;
+                    let viewport_pos = ViewportPos::new(
+                        current_viewport_offset.x.max(0) as u16,
+                        current_viewport_offset.y.max(0) as u16,
+                    );
+
+                    // Try to restore cursor to the tracked node in the new viewport graph
+                    if controller
+                        .restore_cursor_after_viewport_update(
+                            tracked_node,
+                            node_offset,
+                            viewport_pos,
+                        )
+                        .is_err()
+                    {
+                        // If restoration fails (node not in viewport), initialize cursor
+                        controller.initialize_cursor();
+                    }
+                } else {
+                    // No tracked node, initialize cursor for the first time
+                    controller.initialize_cursor();
+                }
             }
         }
 

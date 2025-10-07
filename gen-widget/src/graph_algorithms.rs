@@ -595,7 +595,7 @@ mod articulation_points_tests {
                 "number of partitions loaded: {}",
                 loaded_partitions.unwrap_or_default().len()
             );
-            let _ = controller.update_viewport_graph(
+            let _ = controller.rebuild_viewport_graph(
                 controller.viewport_state.camera_rect(),
                 controller.get_detail_level(),
             );
@@ -678,7 +678,7 @@ mod articulation_points_tests {
                 "number of partitions loaded: {}",
                 loaded_partitions.unwrap_or_default().len()
             );
-            let _ = controller.update_viewport_graph(
+            let _ = controller.rebuild_viewport_graph(
                 controller.viewport_state.camera_rect(),
                 controller.get_detail_level(),
             );
