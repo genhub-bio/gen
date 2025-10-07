@@ -192,106 +192,122 @@ where
     /// Change the current level of detail and sync with partition controller
     pub fn set_detail_level(&mut self, detail_level: VisualDetail) {
         // Only proceed if detail level is actually changing
-        if detail_level != self.detail_level {
-            // Only try to preserve cursor position if we have a tracked node
-            if let Some(node_idx) = self.viewport_state.cursor.node_domain_idx {
-                // Log comprehensive cursor position before detail level change
-                self.log_cursor_position("before detail level change");
+        if detail_level == self.detail_level {
+            return;
+        }
 
-                // Get old node size and calculate proportional offset BEFORE changing detail level
-                let old_detail = self.detail_level;
-                let node_id = <G as NodeIndexable>::from_index(&self.graph, node_idx.index());
-                let (old_width, old_height) = self
-                    .partition_controller
-                    .node_sizer
-                    .get_node_size(&node_id, old_detail);
+        trace!(
+            "set_detail_level: changing from {:?} to {:?}",
+            self.detail_level, detail_level
+        );
 
-                // Calculate proportional offset (0.0 to 1.0) within the node
-                let proportional_offset_x = if old_width > 0 {
-                    (self.viewport_state.cursor.node_offset.x as f64) / (old_width as f64)
-                } else {
-                    0.0
-                };
-                let proportional_offset_y = if old_height > 0 {
-                    (self.viewport_state.cursor.node_offset.y as f64) / (old_height as f64)
-                } else {
-                    0.0
-                };
+        // Store cursor info for preservation
+        let cursor_viewport_pos = if self.viewport_state.cursor.enabled
+            && self.viewport_state.cursor.node_domain_idx.is_some()
+        {
+            self.viewport_state
+                .world_to_viewport(self.viewport_state.cursor.current)
+        } else {
+            None
+        };
 
-                trace!(
-                    "Old node size: ({}, {}), offset: {:?}, proportional: ({:.2}, {:.2})",
-                    old_width,
-                    old_height,
-                    self.viewport_state.cursor.node_offset,
-                    proportional_offset_x,
-                    proportional_offset_y
-                );
+        let cursor_node = self.viewport_state.cursor.node_domain_idx;
 
-                // Store current viewport position for restoration after detail level change
-                if let Some(viewport_pos) = self
-                    .viewport_state
-                    .world_to_viewport(self.viewport_state.cursor.current)
-                {
-                    trace!(
-                        "Storing cursor viewport position {:?} for restoration after detail level change",
-                        viewport_pos
-                    );
-                    self.viewport_state.cursor.stored_viewport_pos = Some(viewport_pos);
-                } else {
-                    trace!(
-                        "Could not get viewport position for cursor at world {:?}",
-                        self.viewport_state.cursor.current
-                    );
-                    self.viewport_state.cursor.stored_viewport_pos = None;
-                }
+        // Scale cursor offset proportionally when changing detail levels
+        if let Some(node_idx) = cursor_node {
+            let old_detail = self.detail_level;
+            let node_id = <G as NodeIndexable>::from_index(&self.graph, node_idx.index());
 
-                // Now change the detail level
-                self.detail_level = detail_level;
-                self.partition_controller.set_detail_level(detail_level);
+            // Get old node size and calculate proportional offset
+            let (old_width, old_height) = self
+                .partition_controller
+                .node_sizer
+                .get_node_size(&node_id, old_detail);
 
-                // Get new node size and scale the offset proportionally
-                let (new_width, new_height) = self
-                    .partition_controller
-                    .node_sizer
-                    .get_node_size(&node_id, detail_level);
-
-                let new_offset_x = (proportional_offset_x * new_width as f64).round() as i64;
-                let new_offset_y = (proportional_offset_y * new_height as f64).round() as i64;
-
-                self.viewport_state.cursor.node_offset = Point::new(new_offset_x, new_offset_y);
-
-                trace!(
-                    "New node size: ({}, {}), scaled offset: {:?}",
-                    new_width, new_height, self.viewport_state.cursor.node_offset
-                );
-
-                // Reset camera to origin for new coordinate system
-                self.viewport_state.camera_current = WorldPos::ZERO;
-                self.viewport_state.camera_target = WorldPos::ZERO;
-                self.viewport_state.camera_anim = None;
-
-                // Force viewport graph to rebuild with new detail level
-                self.viewport_graph = ViewportGraph::empty();
-
-                // The cursor will be restored in update_viewport_graph() which will:
-                // 1. Find the node's new world position
-                // 2. Adjust camera BEFORE building viewport graph
-                // 3. Build viewport graph with adjusted camera
-                // 4. Restore cursor position
+            let proportional_offset_x = if old_width > 0 {
+                (self.viewport_state.cursor.node_offset.x as f64) / (old_width as f64)
             } else {
-                // No tracked node, just change the detail level
-                self.detail_level = detail_level;
-                self.partition_controller.set_detail_level(detail_level);
+                0.0
+            };
+            let proportional_offset_y = if old_height > 0 {
+                (self.viewport_state.cursor.node_offset.y as f64) / (old_height as f64)
+            } else {
+                0.0
+            };
 
-                // Reset camera to origin for new coordinate system
-                self.viewport_state.camera_current = WorldPos::ZERO;
-                self.viewport_state.camera_target = WorldPos::ZERO;
-                self.viewport_state.camera_anim = None;
+            trace!(
+                "set_detail_level: scaling offset - old size ({}, {}), old offset {:?}, proportional ({:.2}, {:.2})",
+                old_width,
+                old_height,
+                self.viewport_state.cursor.node_offset,
+                proportional_offset_x,
+                proportional_offset_y
+            );
 
-                // Force viewport graph to rebuild with new detail level
-                self.viewport_graph = ViewportGraph::empty();
+            // Change detail level
+            self.detail_level = detail_level;
+            self.partition_controller.set_detail_level(detail_level);
+
+            // Get new node size and scale the offset proportionally
+            let (new_width, new_height) = self
+                .partition_controller
+                .node_sizer
+                .get_node_size(&node_id, detail_level);
+
+            let new_offset_x = (proportional_offset_x * new_width as f64).round() as i64;
+            let new_offset_y = (proportional_offset_y * new_height as f64).round() as i64;
+
+            self.viewport_state.cursor.node_offset = Point::new(new_offset_x, new_offset_y);
+
+            trace!(
+                "set_detail_level: new size ({}, {}), new offset {:?}",
+                new_width, new_height, self.viewport_state.cursor.node_offset
+            );
+        } else {
+            // No cursor tracking, just change detail level
+            self.detail_level = detail_level;
+            self.partition_controller.set_detail_level(detail_level);
+        }
+
+        // Reset camera to origin for new coordinate system
+        self.viewport_state.camera_current = WorldPos::ZERO;
+        self.viewport_state.camera_target = WorldPos::ZERO;
+        self.viewport_state.camera_anim = None;
+
+        // Clear all layouts to force recalculation with new detail level
+        self.partition_controller.clear_all_layouts();
+        self.loaded_partitions.clear();
+
+        // Reload anchor partition (usually 0) for new coordinate system
+        if let Err(e) = self.partition_controller.set_anchor_partition(0) {
+            eprintln!(
+                "Warning: Failed to set anchor partition during detail level change: {}",
+                e
+            );
+        }
+
+        // Preserve cursor position if we have one
+        if let (Some(viewport_pos), Some(node)) = (cursor_viewport_pos, cursor_node) {
+            let offset = self.viewport_state.cursor.node_offset;
+            if let Err(e) = self.preserve_cursor_during_layout_change(viewport_pos, node, offset) {
+                trace!("set_detail_level: cursor preservation failed: {}", e);
+                // Camera already reset to origin above
             }
         }
+
+        // Load partitions for current camera view
+        if let Err(e) = self.ensure_camera_coverage() {
+            eprintln!(
+                "Error ensuring camera coverage during detail level change: {}",
+                e
+            );
+        }
+
+        // Force viewport graph rebuild
+        self.viewport_graph = ViewportGraph::empty();
+        self.rebuild_needed = true;
+
+        trace!("set_detail_level: complete");
     }
 
     /// Get the current level of detail
@@ -421,32 +437,20 @@ where
 
     /// Increase vertex spacing and refresh layouts
     pub fn disperse(&mut self) {
-        // Store cursor position before layout change
-        let cursor_node = self.viewport_state.cursor.node_domain_idx;
-        let cursor_node_offset = self.viewport_state.cursor.node_offset;
+        trace!("disperse: starting");
 
-        // Log comprehensive cursor position before disperse
-        if cursor_node.is_some() {
-            self.log_cursor_position("before disperse");
-        }
-
-        // IMPORTANT: Store viewport position BEFORE changing layouts
-        let stored_viewport_pos = if cursor_node.is_some() {
-            let viewport_pos = self
-                .viewport_state
-                .world_to_viewport(self.viewport_state.cursor.current);
-            if let Some(pos) = viewport_pos {
-                trace!(
-                    "Storing cursor viewport position {:?} for restoration after disperse",
-                    pos
-                );
-            }
-            // Store in cursor state for update_viewport_graph() to use
-            self.viewport_state.cursor.stored_viewport_pos = viewport_pos;
-            viewport_pos
+        // Store cursor viewport position before layout change
+        let cursor_viewport_pos = if self.viewport_state.cursor.enabled
+            && self.viewport_state.cursor.node_domain_idx.is_some()
+        {
+            self.viewport_state
+                .world_to_viewport(self.viewport_state.cursor.current)
         } else {
             None
         };
+
+        let cursor_node = self.viewport_state.cursor.node_domain_idx;
+        let cursor_node_offset = self.viewport_state.cursor.node_offset;
 
         // Look up which partition contains the tracked node BEFORE clearing layouts
         let tracked_node_partition = if let Some(node_idx) = cursor_node {
@@ -463,19 +467,15 @@ where
         // Increase vertex spacing
         self.partition_controller.increment_vertex_spacing(2.0);
         trace!(
-            "vertex spacing now {}",
+            "disperse: vertex spacing now {}",
             self.partition_controller.get_vertex_spacing()
         );
 
         // Clear all layouts to force complete recalculation with new spacing
         self.partition_controller.clear_all_layouts();
-
-        // Clear loaded partitions tracking since layouts are gone
         self.loaded_partitions.clear();
 
         // Set the tracked node's partition as anchor
-        // This makes the node's world position = its local position within the partition
-        // We only load what we need, not everything from partition 0 to here
         let anchor_partition = tracked_node_partition.unwrap_or(0);
         if let Err(e) = self
             .partition_controller
@@ -487,56 +487,19 @@ where
             );
         }
 
-        // Now try to adjust camera to preserve cursor position if we have a tracked node
-        if let (Some(node_idx), Some(viewport_pos)) = (cursor_node, stored_viewport_pos) {
-            // Find the tracked node's position in the new layout
-            // The partition is now loaded because set_anchor_partition() loaded it
-            if let Some(node_world_pos) = self.find_domain_node_world_position(node_idx) {
-                trace!(
-                    "Found tracked node {:?} at new world position {:?}",
-                    node_idx, node_world_pos
-                );
-
-                // Calculate the cursor world position with offset
-                let cursor_world_pos = WorldPos::new(
-                    node_world_pos.x + cursor_node_offset.x,
-                    node_world_pos.y + cursor_node_offset.y,
-                );
-
-                // Calculate the camera position needed to keep cursor at stored viewport position
-                //
-                // IMPORTANT: camera_current represents the CENTER of the viewport in world coordinates,
-                // not the top-left corner. The top-left corner is at: camera - (width/2, height/2)
-                //
-                // The camera origin (top-left) is: camera_origin = camera - (width/2, height/2)
-                // Viewport position relative to origin: viewport_pos = world_pos - camera_origin
-                // Substituting: viewport_pos = world_pos - camera + (width/2, height/2)
-                // Solving for camera: camera = world_pos - viewport_pos + (width/2, height/2)
-                let half_width = self.viewport_state.viewport_bounds.width as i64 / 2;
-                let half_height = self.viewport_state.viewport_bounds.height as i64 / 2;
-
-                let camera_x = cursor_world_pos.x - viewport_pos.x as i64 + half_width;
-                let camera_y = cursor_world_pos.y - viewport_pos.y as i64 + half_height;
-
-                self.viewport_state.camera_current = WorldPos::new(camera_x, camera_y);
-                self.viewport_state.camera_target = WorldPos::new(camera_x, camera_y);
-                self.viewport_state.camera_anim = None;
-
-                trace!(
-                    "Adjusted camera to {:?} to preserve cursor at viewport ({}, {})",
-                    self.viewport_state.camera_current, viewport_pos.x, viewport_pos.y
-                );
-            } else {
-                trace!(
-                    "Could not find tracked node {:?} in new layout, resetting camera to origin",
-                    node_idx
-                );
+        // Preserve cursor position using the new helper
+        if let (Some(viewport_pos), Some(node), Some(offset)) =
+            (cursor_viewport_pos, cursor_node, Some(cursor_node_offset))
+        {
+            if let Err(e) = self.preserve_cursor_during_layout_change(viewport_pos, node, offset) {
+                trace!("disperse: cursor preservation failed: {}", e);
+                // Reset camera to origin if cursor preservation fails
                 self.viewport_state.camera_current = WorldPos::ZERO;
                 self.viewport_state.camera_target = WorldPos::ZERO;
                 self.viewport_state.camera_anim = None;
             }
         } else {
-            // No tracked node or no stored viewport position, reset camera to origin
+            // No cursor to preserve, reset camera to origin
             self.viewport_state.camera_current = WorldPos::ZERO;
             self.viewport_state.camera_target = WorldPos::ZERO;
             self.viewport_state.camera_anim = None;
@@ -547,142 +510,96 @@ where
             eprintln!("Error ensuring camera coverage during disperse: {}", e);
         }
 
-        // Force viewport graph rebuild - let update_viewport_graph() handle cursor restoration
+        // Force viewport graph rebuild
         self.viewport_graph = ViewportGraph::empty();
         self.rebuild_needed = true;
+
+        trace!("disperse: complete");
     }
 
     /// Decrease vertex spacing and refresh layouts
     pub fn contract(&mut self) {
         let current_spacing = self.get_current_vertex_spacing();
-        if current_spacing > VERTEX_SPACING_DEFAULT {
-            // Store cursor position before layout change
-            let cursor_node = self.viewport_state.cursor.node_domain_idx;
-            let cursor_node_offset = self.viewport_state.cursor.node_offset;
+        if current_spacing <= VERTEX_SPACING_DEFAULT {
+            return; // Already at minimum spacing
+        }
 
-            // Log comprehensive cursor position before contract
-            if cursor_node.is_some() {
-                self.log_cursor_position("before contract");
-            }
+        trace!("contract: starting");
 
-            // IMPORTANT: Store viewport position BEFORE resetting camera
-            let stored_viewport_pos = if cursor_node.is_some() {
-                let viewport_pos = self
-                    .viewport_state
-                    .world_to_viewport(self.viewport_state.cursor.current);
-                if let Some(pos) = viewport_pos {
-                    trace!(
-                        "Storing cursor viewport position {:?} for restoration after contract",
-                        pos
-                    );
-                }
-                // Store in cursor state for update_viewport_graph() to use
-                self.viewport_state.cursor.stored_viewport_pos = viewport_pos;
-                viewport_pos
-            } else {
-                None
-            };
+        // Store cursor viewport position before layout change
+        let cursor_viewport_pos = if self.viewport_state.cursor.enabled
+            && self.viewport_state.cursor.node_domain_idx.is_some()
+        {
+            self.viewport_state
+                .world_to_viewport(self.viewport_state.cursor.current)
+        } else {
+            None
+        };
 
-            // Look up which partition contains the tracked node BEFORE clearing layouts
-            let tracked_node_partition = if let Some(node_idx) = cursor_node {
-                let node_id = <G as NodeIndexable>::from_index(&self.graph, node_idx.index());
-                self.partition_controller
-                    .partition_table
-                    .node_map
-                    .get(&node_id)
-                    .map(|(partition_idx, _)| *partition_idx)
-            } else {
-                None
-            };
+        let cursor_node = self.viewport_state.cursor.node_domain_idx;
+        let cursor_node_offset = self.viewport_state.cursor.node_offset;
 
-            // Decrease vertex spacing
-            let new_spacing = (current_spacing - 2.0).max(VERTEX_SPACING_DEFAULT);
-            self.partition_controller.set_vertex_spacing(new_spacing);
+        // Look up which partition contains the tracked node BEFORE clearing layouts
+        let tracked_node_partition = if let Some(node_idx) = cursor_node {
+            let node_id = <G as NodeIndexable>::from_index(&self.graph, node_idx.index());
+            self.partition_controller
+                .partition_table
+                .node_map
+                .get(&node_id)
+                .map(|(partition_idx, _)| *partition_idx)
+        } else {
+            None
+        };
 
-            // Clear all layouts to force complete recalculation with new spacing
-            self.partition_controller.clear_all_layouts();
+        // Decrease vertex spacing
+        let new_spacing = (current_spacing - 2.0).max(VERTEX_SPACING_DEFAULT);
+        self.partition_controller.set_vertex_spacing(new_spacing);
+        trace!("contract: vertex spacing now {}", new_spacing);
 
-            // Clear loaded partitions tracking since layouts are gone
-            self.loaded_partitions.clear();
+        // Clear all layouts to force complete recalculation with new spacing
+        self.partition_controller.clear_all_layouts();
+        self.loaded_partitions.clear();
 
-            // Set the tracked node's partition as anchor
-            // This makes the node's world position = its local position within the partition
-            // We only load what we need, not everything from partition 0 to here
-            let anchor_partition = tracked_node_partition.unwrap_or(0);
-            if let Err(e) = self
-                .partition_controller
-                .set_anchor_partition(anchor_partition)
-            {
-                eprintln!(
-                    "Warning: Failed to set anchor partition during contract: {}",
-                    e
-                );
-            }
+        // Set the tracked node's partition as anchor
+        let anchor_partition = tracked_node_partition.unwrap_or(0);
+        if let Err(e) = self
+            .partition_controller
+            .set_anchor_partition(anchor_partition)
+        {
+            eprintln!(
+                "Warning: Failed to set anchor partition during contract: {}",
+                e
+            );
+        }
 
-            // Now try to adjust camera to preserve cursor position if we have a tracked node
-            if let (Some(node_idx), Some(viewport_pos)) = (cursor_node, stored_viewport_pos) {
-                // Find the tracked node's position in the new layout
-                // The partition is now loaded because set_anchor_partition() loaded it
-                if let Some(node_world_pos) = self.find_domain_node_world_position(node_idx) {
-                    trace!(
-                        "Found tracked node {:?} at new world position {:?}",
-                        node_idx, node_world_pos
-                    );
-
-                    // Calculate the cursor world position with offset
-                    let cursor_world_pos = WorldPos::new(
-                        node_world_pos.x + cursor_node_offset.x,
-                        node_world_pos.y + cursor_node_offset.y,
-                    );
-
-                    // Calculate the camera position needed to keep cursor at stored viewport position
-                    //
-                    // IMPORTANT: camera_current represents the CENTER of the viewport in world coordinates,
-                    // not the top-left corner. The top-left corner is at: camera - (width/2, height/2)
-                    //
-                    // The camera origin (top-left) is: camera_origin = camera - (width/2, height/2)
-                    // Viewport position relative to origin: viewport_pos = world_pos - camera_origin
-                    // Substituting: viewport_pos = world_pos - camera + (width/2, height/2)
-                    // Solving for camera: camera = world_pos - viewport_pos + (width/2, height/2)
-                    let half_width = self.viewport_state.viewport_bounds.width as i64 / 2;
-                    let half_height = self.viewport_state.viewport_bounds.height as i64 / 2;
-
-                    let camera_x = cursor_world_pos.x - viewport_pos.x as i64 + half_width;
-                    let camera_y = cursor_world_pos.y - viewport_pos.y as i64 + half_height;
-
-                    self.viewport_state.camera_current = WorldPos::new(camera_x, camera_y);
-                    self.viewport_state.camera_target = WorldPos::new(camera_x, camera_y);
-                    self.viewport_state.camera_anim = None;
-
-                    trace!(
-                        "Adjusted camera to {:?} to preserve cursor at viewport ({}, {})",
-                        self.viewport_state.camera_current, viewport_pos.x, viewport_pos.y
-                    );
-                } else {
-                    trace!(
-                        "Could not find tracked node {:?} in new layout, resetting camera to origin",
-                        node_idx
-                    );
-                    self.viewport_state.camera_current = WorldPos::ZERO;
-                    self.viewport_state.camera_target = WorldPos::ZERO;
-                    self.viewport_state.camera_anim = None;
-                }
-            } else {
-                // No tracked node or no stored viewport position, reset camera to origin
+        // Preserve cursor position using the new helper
+        if let (Some(viewport_pos), Some(node), Some(offset)) =
+            (cursor_viewport_pos, cursor_node, Some(cursor_node_offset))
+        {
+            if let Err(e) = self.preserve_cursor_during_layout_change(viewport_pos, node, offset) {
+                trace!("contract: cursor preservation failed: {}", e);
+                // Reset camera to origin if cursor preservation fails
                 self.viewport_state.camera_current = WorldPos::ZERO;
                 self.viewport_state.camera_target = WorldPos::ZERO;
                 self.viewport_state.camera_anim = None;
             }
-
-            // Load partitions needed for current camera view
-            if let Err(e) = self.ensure_camera_coverage() {
-                eprintln!("Error ensuring camera coverage during contract: {}", e);
-            }
-
-            // Force viewport graph rebuild - let update_viewport_graph() handle cursor restoration
-            self.viewport_graph = ViewportGraph::empty();
-            self.rebuild_needed = true;
+        } else {
+            // No cursor to preserve, reset camera to origin
+            self.viewport_state.camera_current = WorldPos::ZERO;
+            self.viewport_state.camera_target = WorldPos::ZERO;
+            self.viewport_state.camera_anim = None;
         }
+
+        // Load partitions needed for current camera view
+        if let Err(e) = self.ensure_camera_coverage() {
+            eprintln!("Error ensuring camera coverage during contract: {}", e);
+        }
+
+        // Force viewport graph rebuild
+        self.viewport_graph = ViewportGraph::empty();
+        self.rebuild_needed = true;
+
+        trace!("contract: complete");
     }
 
     /// Get current vertex spacing from partition controller
@@ -758,256 +675,127 @@ where
         }
     }
 
-    // TODO: rename this function and retain only the node positioning logic
-    // (viewport graphs are made on demand instead of receiving updates)
-    /// Update the viewport graph with nodes and edges visible in the given viewport
-    pub fn update_viewport_graph(
+    /// Rebuild the viewport graph to show nodes and edges visible in the current camera view.
+    /// This is a simple graph builder - all camera and cursor positioning must be done beforehand.
+    ///
+    /// # Design
+    /// This function has a single responsibility: build the viewport graph from the current
+    /// camera view. It does NOT handle:
+    /// - Camera positioning (use update_camera() before calling)
+    /// - Cursor restoration (use preserve_cursor_during_layout_change() before calling)
+    /// - Detail level changes (caller should handle)
+    ///
+    /// # Parameters
+    /// - viewport: The world-space rectangle to build the graph for
+    /// - detail_level: The visual detail level to use
+    pub fn rebuild_viewport_graph(
         &mut self,
         viewport: crate::geometry::BigRect<i64>,
         detail_level: VisualDetail,
     ) -> Result<(), String> {
-        // Sanity check - log if detail levels don't match
-        if self.detail_level != detail_level {
-            log::debug!(
-                "Detail level mismatch: controller has {:?}, requested {:?}",
-                self.detail_level,
-                detail_level
-            );
-        }
+        trace!(
+            "rebuild_viewport_graph: viewport rect x:{}-{}, y:{}-{}, detail:{:?}",
+            viewport.min.x, viewport.max.x, viewport.min.y, viewport.max.y, detail_level
+        );
 
+        // Sync detail level if needed
         if self.detail_level != detail_level {
             self.detail_level = detail_level;
             self.partition_controller.set_detail_level(detail_level);
         }
 
-        // If rebuild is needed (e.g., after disperse/contract), use camera's actual viewport
-        // This handles coordinate system changes when anchor partition shifts
+        // Build viewport graph with a buffer around the requested rect
+        // Buffer factor of 2.0 reduces rebuild frequency during small camera movements
+        let covered_rect = viewport.resize(2.0);
+
+        trace!(
+            "rebuild_viewport_graph: building with covered rect x:{}-{}, y:{}-{}",
+            covered_rect.min.x, covered_rect.max.x, covered_rect.min.y, covered_rect.max.y
+        );
+
+        self.viewport_graph =
+            ViewportGraph::new(covered_rect, &mut self.partition_controller, detail_level)?;
+
+        // Update rebuild tracking
+        self.last_rebuild_camera_center = self.viewport_state.camera_current;
+        self.rebuild_needed = false;
+
+        trace!(
+            "rebuild_viewport_graph: complete - {} nodes, {} edges",
+            self.viewport_graph.node_count(),
+            self.viewport_graph.edge_count()
+        );
+
+        Ok(())
+    }
+
+    /// Legacy update_viewport_graph that handles cursor restoration.
+    /// NEW CODE SHOULD USE: rebuild_viewport_graph() + preserve_cursor_during_layout_change()
+    ///
+    /// This is kept temporarily for compatibility with existing rendering code.
+    pub fn update_viewport_graph(
+        &mut self,
+        viewport: crate::geometry::BigRect<i64>,
+        detail_level: VisualDetail,
+    ) -> Result<(), String> {
+        // Use camera's visible rect if rebuild is needed (after layout changes)
         let viewport = if self.rebuild_needed {
             self.viewport_state.visible_world_rect()
         } else {
             viewport
         };
 
+        // Handle cursor preservation if we have a tracked node with stored position
         if self.viewport_state.cursor.enabled
             && self.viewport_state.cursor.node_domain_idx.is_some()
             && self.viewport_state.cursor.stored_viewport_pos.is_some()
         {
             let tracked_node = self.viewport_state.cursor.node_domain_idx.unwrap();
             let viewport_pos = self.viewport_state.cursor.stored_viewport_pos.unwrap();
+            let node_offset = self.viewport_state.cursor.node_offset;
 
-            // Find the tracked node's position in the new layout system
-            let node_world_pos = match self.find_domain_node_world_position(tracked_node) {
-                Some(pos) => pos,
-                None => {
-                    log::debug!(
-                        "Cannot find tracked node {:?} in new layout during zoom/detail change. \
-                         Stored viewport position: ({}, {}), Camera: {:?}. \
-                         Clearing cursor tracking.",
-                        tracked_node,
-                        viewport_pos.x,
-                        viewport_pos.y,
-                        self.viewport_state.camera_current
-                    );
-                    // Clear cursor tracking and continue without restoration
-                    self.viewport_state.cursor.stored_viewport_pos = None;
-                    self.viewport_state.cursor.node_domain_idx = None;
-                    self.last_rebuild_camera_center = self.viewport_state.camera_current;
-                    self.rebuild_needed = false;
-                    return Ok(());
-                }
-            };
-
+            // Try to preserve cursor position
+            if let Err(e) =
+                self.preserve_cursor_during_layout_change(viewport_pos, tracked_node, node_offset)
             {
-                trace!(
-                    "Found tracked node {:?} at world position {:?}",
-                    tracked_node, node_world_pos
+                log::debug!(
+                    "Cursor preservation failed: {}. Clearing cursor tracking.",
+                    e
                 );
-
-                // Add the cursor offset to get the actual cursor position
-                let cursor_offset = self.viewport_state.cursor.node_offset;
-                let new_cursor_world_pos = WorldPos::new(
-                    node_world_pos.x + cursor_offset.x,
-                    node_world_pos.y + cursor_offset.y,
-                );
-                trace!(
-                    "Cursor world position with offset {:?}: {:?}",
-                    cursor_offset, new_cursor_world_pos
-                );
-
-                // Verify the adjustment worked - cursor should now be at exact viewport position
-                if let Some(actual_vp) = self.viewport_state.world_to_viewport(new_cursor_world_pos)
-                {
-                    trace!(
-                        "After adjustment, cursor appears at viewport ({}, {})",
-                        actual_vp.x, actual_vp.y
-                    );
-
-                    // CRITICAL: Always verify camera adjustment worked in all builds
-                    if actual_vp != viewport_pos {
-                        trace!(
-                            "BUG: Camera adjustment failed during disperse/contract! \
-                             Cursor at viewport ({}, {}) instead of expected ({}, {}). \
-                             Off by: ({}, {}). \
-                             This will cause cursor to jump position. \
-                             Camera: {:?}, Cursor world: {:?}",
-                            actual_vp.x,
-                            actual_vp.y,
-                            viewport_pos.x,
-                            viewport_pos.y,
-                            actual_vp.x as i32 - viewport_pos.x as i32,
-                            actual_vp.y as i32 - viewport_pos.y as i32,
-                            self.viewport_state.camera_current,
-                            new_cursor_world_pos
-                        );
-                    }
-                } else {
-                    trace!(
-                        "BUG: Cursor not visible in viewport after camera adjustment! \
-                         This should never happen if camera adjustment worked correctly. \
-                         Camera: {:?}, Cursor world: {:?}, Expected viewport: ({}, {})",
-                        self.viewport_state.camera_current,
-                        new_cursor_world_pos,
-                        viewport_pos.x,
-                        viewport_pos.y
-                    );
-                }
+                self.viewport_state.cursor.stored_viewport_pos = None;
+                self.viewport_state.cursor.node_domain_idx = None;
             }
+
+            // Clear stored position after use
+            self.viewport_state.cursor.stored_viewport_pos = None;
         }
 
-        // TODO: handle the partition controller outside of the ViewportGraph constructor (and
-        // rename it to layoutgraph or something like that).
-        // Or alternatively, put a constructor in graph_controller that takes care of the
-        // partition and viewport coverage. That way we don't have to lie about the size of the
-        // viewport we're trying to render. It would require moving all the cursor code out as
-        // well.
-        // Build larger than we need right now, because we don't trigger updates on every scroll
-        let covered_rect = viewport.resize(2.0);
-        self.viewport_graph =
-            ViewportGraph::new(covered_rect, &mut self.partition_controller, detail_level)?;
+        // Rebuild the viewport graph
+        self.rebuild_viewport_graph(viewport, detail_level)?;
 
-        // ASSERTION: If we have a tracked node with stored position, it MUST be in viewport graph
-        if self.viewport_state.cursor.enabled
-            && self.viewport_state.cursor.node_domain_idx.is_some()
-            && self.viewport_state.cursor.stored_viewport_pos.is_some()
-        {
-            let tracked_node = self.viewport_state.cursor.node_domain_idx.unwrap();
-            let mut found_in_viewport = false;
-
-            for node_data in self.viewport_graph.nodes.values() {
-                if let crate::layout::NodeRole::Data(domain_idx) = &node_data.role {
-                    if *domain_idx == tracked_node {
-                        found_in_viewport = true;
-                        break;
-                    }
-                }
-            }
-
-            if !found_in_viewport {
-                trace!(
-                    "BUG: Tracked node {:?} not found in viewport graph after camera adjustment! \
-                     This means cursor restoration will fail. \
-                     Stored viewport pos: {:?}, Camera: {:?}, Covered rect: {:?}",
-                    tracked_node,
-                    self.viewport_state.cursor.stored_viewport_pos,
-                    self.viewport_state.camera_current,
-                    covered_rect
-                );
-            }
-        }
-
-        // Handle cursor restoration/initialization
+        // Initialize or restore cursor position
         if self.viewport_state.cursor.enabled {
             if let Some(tracked_node) = self.viewport_state.cursor.node_domain_idx {
-                // Try to restore cursor position using stored state
                 let node_offset = self.viewport_state.cursor.node_offset;
 
-                if self.viewport_state.cursor.stored_viewport_pos.is_some() {
-                    // The camera has already been adjusted to position the node correctly.
-                    // Now we just need to restore the cursor to the node.
+                // Try to restore cursor to the tracked node
+                let current_viewport_offset =
+                    self.viewport_state.cursor.current - self.viewport_state.camera_current;
+                let viewport_pos = ViewportPos::new(
+                    cmp::max(current_viewport_offset.x, 0) as u16,
+                    cmp::max(current_viewport_offset.y, 0) as u16,
+                );
 
-                    let stored_viewport_pos = self.viewport_state.cursor.stored_viewport_pos;
-
-                    // CRITICAL: If we have a stored viewport position, restoration MUST succeed
-                    // Failing to restore means the camera adjustment or viewport graph is broken
-                    if let Err(e) = self.restore_cursor_to_tracked_node(tracked_node, node_offset) {
-                        trace!(
-                            "Cursor restoration failed during zoom/detail change: {}. \
-                             This should never happen - stored viewport pos: {:?}, \
-                             tracked node: {:?}, camera: {:?}",
-                            e,
-                            stored_viewport_pos,
-                            tracked_node,
-                            self.viewport_state.camera_current
-                        );
-                    }
-
-                    // Log cursor restoration results
-                    self.log_cursor_restoration("cursor restoration", stored_viewport_pos);
-
-                    // Verify cursor is at exact viewport position after restoration
-                    if let Some(expected_vp) = stored_viewport_pos {
-                        if let Some(actual_vp) = self
-                            .viewport_state
-                            .world_to_viewport(self.viewport_state.cursor.current)
-                        {
-                            if actual_vp != expected_vp {
-                                log::debug!(
-                                    "Cursor viewport position restoration mismatch during zoom/detail change: \
-                                     expected viewport ({}, {}), got ({}, {}). \
-                                     Cursor world pos: {:?}, Camera: {:?}",
-                                    expected_vp.x,
-                                    expected_vp.y,
-                                    actual_vp.x,
-                                    actual_vp.y,
-                                    self.viewport_state.cursor.current,
-                                    self.viewport_state.camera_current
-                                );
-                            }
-                        } else {
-                            log::debug!(
-                                "Cursor viewport position restoration failed during zoom/detail change: \
-                                 cursor at world {:?} is not visible in viewport. \
-                                 Expected viewport position: ({}, {}), Camera: {:?}",
-                                self.viewport_state.cursor.current,
-                                expected_vp.x,
-                                expected_vp.y,
-                                self.viewport_state.camera_current
-                            );
-                        }
-                    }
-
-                    // Clear the stored position regardless of success/failure
-                    self.viewport_state.cursor.stored_viewport_pos = None;
-                } else {
-                    // No stored viewport position, just try to restore cursor position on the same node
-                    // This handles cases where viewport graph was rebuilt but not due to layout changes
-                    let current_viewport_offset =
-                        self.viewport_state.cursor.current - self.viewport_state.camera_current;
-                    let viewport_pos = ViewportPos::new(
-                        cmp::max(current_viewport_offset.x, 0) as u16,
-                        cmp::max(current_viewport_offset.y, 0) as u16,
-                    );
-                    if self
-                        .restore_cursor_after_viewport_update(
-                            tracked_node,
-                            node_offset,
-                            viewport_pos,
-                        )
-                        .is_err()
-                    {
-                        // If restoration fails, just re-initialize
-                        self.initialize_cursor();
-                    }
+                if self
+                    .restore_cursor_after_viewport_update(tracked_node, node_offset, viewport_pos)
+                    .is_err()
+                {
+                    self.initialize_cursor();
                 }
             } else {
-                // No tracked node, initialize cursor for the first time
                 self.initialize_cursor();
             }
         }
-
-        // Update rebuild tracking
-        self.last_rebuild_camera_center = self.viewport_state.camera_current;
-        self.rebuild_needed = false; // Clear the rebuild flag after successful rebuild
 
         Ok(())
     }
@@ -1015,6 +803,136 @@ where
     /// Get a reference to the currently available viewport graph
     pub fn get_viewport_graph(&self) -> &ViewportGraph {
         &self.viewport_graph
+    }
+
+    /// Update camera position to keep a focal point (in world coordinates) at a specific viewport position.
+    /// This is the key transformation for maintaining visual stability during layout changes.
+    ///
+    /// # Coordinate System
+    /// - Camera represents the CENTER of the viewport in world coordinates
+    /// - Viewport origin (top-left) = camera - (width/2, height/2)
+    /// - Transformation: viewport_pos = world_pos - camera + (width/2, height/2)
+    /// - Inverse: camera = world_pos - viewport_pos + (width/2, height/2)
+    ///
+    /// # Parameters
+    /// - focal_world: World position of the point we want to keep stable
+    /// - focal_viewport: Viewport position where we want the focal point to appear
+    pub fn update_camera(&mut self, focal_world: WorldPos, focal_viewport: ViewportPos) {
+        let half_width = self.viewport_state.viewport_bounds.width as i64 / 2;
+        let half_height = self.viewport_state.viewport_bounds.height as i64 / 2;
+
+        let camera_x = focal_world.x - focal_viewport.x as i64 + half_width;
+        let camera_y = focal_world.y - focal_viewport.y as i64 + half_height;
+
+        self.viewport_state.camera_current = WorldPos::new(camera_x, camera_y);
+        self.viewport_state.camera_target = WorldPos::new(camera_x, camera_y);
+        self.viewport_state.camera_anim = None;
+
+        trace!(
+            "update_camera: focal_world={:?}, focal_viewport=({}, {}), camera={:?}",
+            focal_world, focal_viewport.x, focal_viewport.y, self.viewport_state.camera_current
+        );
+    }
+
+    /// Update cursor world position from viewport position.
+    /// Uses the existing viewport_to_world coordinate transformation.
+    ///
+    /// # Parameters
+    /// - viewport_pos: The viewport position where the cursor should appear
+    ///
+    /// # Returns
+    /// The computed world position of the cursor
+    pub fn update_cursor_from_viewport(&mut self, viewport_pos: ViewportPos) -> WorldPos {
+        let world_pos = self.viewport_state.viewport_to_world(viewport_pos);
+        self.viewport_state.cursor.current = world_pos;
+
+        trace!(
+            "update_cursor_from_viewport: viewport_pos=({}, {}), camera={:?}, world_pos={:?}",
+            viewport_pos.x, viewport_pos.y, self.viewport_state.camera_current, world_pos
+        );
+
+        world_pos
+    }
+
+    /// Compute cursor world position after a layout change, given the tracked node and offset.
+    /// This searches the new layouts to find where the tracked node ended up.
+    ///
+    /// # Parameters
+    /// - tracked_node: The domain node index the cursor is tracking
+    /// - node_offset: The offset within the node (relative to node's top-left)
+    ///
+    /// # Returns
+    /// The cursor's world position in the new layout, or None if node not found
+    fn compute_cursor_world_pos_after_layout_change(
+        &self,
+        tracked_node: NodeIndex,
+        node_offset: Point<i64>,
+    ) -> Option<WorldPos> {
+        // Find node's new world position in the updated layouts
+        let node_world_pos = self.find_domain_node_world_position(tracked_node)?;
+
+        // Add the offset to get cursor world position
+        let cursor_world_pos = WorldPos::new(
+            node_world_pos.x + node_offset.x,
+            node_world_pos.y + node_offset.y,
+        );
+
+        trace!(
+            "compute_cursor_world_pos_after_layout_change: tracked_node={:?}, offset={:?}, node_world={:?}, cursor_world={:?}",
+            tracked_node, node_offset, node_world_pos, cursor_world_pos
+        );
+
+        Some(cursor_world_pos)
+    }
+
+    /// Preserve cursor viewport position during a layout change (disperse/contract/detail change).
+    /// This adjusts the camera so the cursor stays at the same viewport position after the layout changes.
+    ///
+    /// # Algorithm
+    /// 1. Find cursor's node in new layout (compute new world position)
+    /// 2. Adjust camera to keep cursor at stored viewport position
+    /// 3. Update cursor's world coordinates
+    ///
+    /// # Parameters
+    /// - cursor_viewport_pos: Where the cursor should appear in viewport coordinates
+    /// - cursor_node: The domain node the cursor is tracking
+    /// - cursor_node_offset: Offset within the node
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Err if cursor node not found in new layout
+    fn preserve_cursor_during_layout_change(
+        &mut self,
+        cursor_viewport_pos: ViewportPos,
+        cursor_node: NodeIndex,
+        cursor_node_offset: Point<i64>,
+    ) -> Result<(), String> {
+        trace!(
+            "preserve_cursor_during_layout_change: viewport_pos=({}, {}), node={:?}, offset={:?}",
+            cursor_viewport_pos.x, cursor_viewport_pos.y, cursor_node, cursor_node_offset
+        );
+
+        // Find cursor's new world position in the changed layout
+        let cursor_world_pos = self
+            .compute_cursor_world_pos_after_layout_change(cursor_node, cursor_node_offset)
+            .ok_or_else(|| {
+                format!(
+                    "Cannot preserve cursor: node {:?} not found in new layout",
+                    cursor_node
+                )
+            })?;
+
+        // Adjust camera to keep cursor at the same viewport position
+        self.update_camera(cursor_world_pos, cursor_viewport_pos);
+
+        // Update cursor's world position to match
+        self.viewport_state.cursor.current = cursor_world_pos;
+
+        trace!(
+            "preserve_cursor_during_layout_change: success - cursor_world={:?}, camera={:?}",
+            cursor_world_pos, self.viewport_state.camera_current
+        );
+
+        Ok(())
     }
 }
 
