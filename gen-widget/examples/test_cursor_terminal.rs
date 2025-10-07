@@ -24,7 +24,7 @@ fn main() {
     eprintln!("=== Initial setup at Full detail ===");
     controller.set_detail_level(VisualDetail::Full);
     controller
-        .update_viewport_graph(viewport, VisualDetail::Full)
+        .rebuild_viewport_graph(viewport, VisualDetail::Full)
         .expect("Failed to update viewport graph");
 
     // Enable and initialize cursor
@@ -47,7 +47,7 @@ fn main() {
     eprintln!("=== Changing to Truncated detail ===");
     controller.set_detail_level(VisualDetail::Truncated);
     controller
-        .update_viewport_graph(viewport, VisualDetail::Truncated)
+        .rebuild_viewport_graph(viewport, VisualDetail::Truncated)
         .expect("Failed to update after detail change");
 
     let after_world = controller.viewport_state.cursor.current;

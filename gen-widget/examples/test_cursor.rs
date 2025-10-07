@@ -22,7 +22,7 @@ fn main() {
     eprintln!("=== Setting detail level to Full ===");
     controller.set_detail_level(VisualDetail::Full);
     controller
-        .update_viewport_graph(viewport, VisualDetail::Full)
+        .rebuild_viewport_graph(viewport, VisualDetail::Full)
         .expect("Failed to update viewport graph");
 
     // Initialize cursor
@@ -38,7 +38,7 @@ fn main() {
     eprintln!("=== Changing detail level to Truncated ===");
     controller.set_detail_level(VisualDetail::Truncated);
     controller
-        .update_viewport_graph(viewport, VisualDetail::Truncated)
+        .rebuild_viewport_graph(viewport, VisualDetail::Truncated)
         .expect("Failed to update viewport after detail change");
 
     let after_cursor = controller.viewport_state.cursor.current;
@@ -68,7 +68,7 @@ fn main() {
 
     controller.disperse();
     controller
-        .update_viewport_graph(viewport, VisualDetail::Truncated)
+        .rebuild_viewport_graph(viewport, VisualDetail::Truncated)
         .expect("Failed to update after disperse");
 
     let after_disperse_cursor = controller.viewport_state.cursor.current;

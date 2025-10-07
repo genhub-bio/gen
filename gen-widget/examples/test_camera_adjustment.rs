@@ -24,7 +24,7 @@ fn main() {
     println!("=== Initial setup ===");
     controller.set_detail_level(VisualDetail::Full);
     controller
-        .update_viewport_graph(viewport, VisualDetail::Full)
+        .rebuild_viewport_graph(viewport, VisualDetail::Full)
         .expect("Failed to update viewport graph");
 
     // Enable cursor
@@ -66,7 +66,7 @@ fn main() {
     );
 
     controller
-        .update_viewport_graph(viewport, VisualDetail::Truncated)
+        .rebuild_viewport_graph(viewport, VisualDetail::Truncated)
         .expect("Failed to update after detail change");
 
     let after_world = controller.viewport_state.cursor.current;
@@ -129,7 +129,7 @@ fn main() {
 
     controller.disperse();
     controller
-        .update_viewport_graph(viewport, VisualDetail::Truncated)
+        .rebuild_viewport_graph(viewport, VisualDetail::Truncated)
         .expect("Failed to update after disperse");
 
     let after_disperse_terminal = controller
