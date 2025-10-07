@@ -125,8 +125,8 @@ mod tests {
     #[test]
     pub fn test_delete_by_name() {
         let conn = &get_connection(None).unwrap();
-        let collection1 = Collection::create(conn, "test1");
-        let collection2 = Collection::create(conn, "test2");
+        let _ = Collection::create(conn, "test1");
+        let _ = Collection::create(conn, "test2");
 
         Collection::delete_by_name(conn, "test1");
 

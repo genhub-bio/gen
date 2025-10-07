@@ -69,73 +69,113 @@ pub fn update_with_fasta(
         let sequence = str::from_utf8(record.sequence().as_ref())
             .unwrap()
             .to_string();
-        let seq = Sequence::new()
-            .sequence_type("DNA")
-            .sequence(&sequence)
-            .save(conn);
-        let node_id = Node::create(
-            conn,
-            &seq.hash,
-            &HashId::convert_str(&format!(
-                "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                path_id = path.id,
-                ref_start = 0,
-                ref_end = seq.length,
-                sequence_hash = seq.hash
-            )),
-        );
+        if sequence.is_empty() {
+            // We assume this is a deletion.
+            let node_id = HashId::convert_str("");
+            let path_block = PathBlock {
+                id: -1,
+                node_id,
+                block_sequence: sequence,
+                sequence_start: 0,
+                sequence_end: 0,
+                path_start: start_coordinate,
+                path_end: end_coordinate,
+                strand: Strand::Forward,
+            };
 
-        let path_block = PathBlock {
-            id: -1,
-            node_id,
-            block_sequence: sequence,
-            sequence_start: 0,
-            sequence_end: seq.length,
-            path_start: start_coordinate,
-            path_end: end_coordinate,
-            strand: Strand::Forward,
-        };
+            let path_change = PathChange {
+                block_group_id: new_block_group_id,
+                path: path.clone(),
+                path_accession: None,
+                start: start_coordinate,
+                end: end_coordinate,
+                block: path_block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
 
-        let path_change = PathChange {
-            block_group_id: new_block_group_id,
-            path: path.clone(),
-            path_accession: None,
-            start: start_coordinate,
-            end: end_coordinate,
-            block: path_block,
-            chromosome_index: NO_CHROMOSOME_INDEX,
-            phased: 0,
-            preserve_edge: true,
-        };
-        BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
-        if index == 0 {
-            first_node = Some(node_id);
-        } else if first_node.is_some() {
-            first_node = None;
+            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
+            if index == 0 {
+                first_node = Some(node_id);
+            } else if first_node.is_some() {
+                first_node = None;
+            }
+        } else {
+            let seq = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(&sequence)
+                .save(conn);
+            let node_id = Node::create(
+                conn,
+                &seq.hash,
+                &HashId::convert_str(&format!(
+                    "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
+                    path_id = path.id,
+                    ref_start = 0,
+                    ref_end = seq.length,
+                    sequence_hash = seq.hash
+                )),
+            );
+
+            let path_block = PathBlock {
+                id: -1,
+                node_id,
+                block_sequence: sequence,
+                sequence_start: 0,
+                sequence_end: seq.length,
+                path_start: start_coordinate,
+                path_end: end_coordinate,
+                strand: Strand::Forward,
+            };
+
+            let path_change = PathChange {
+                block_group_id: new_block_group_id,
+                path: path.clone(),
+                path_accession: None,
+                start: start_coordinate,
+                end: end_coordinate,
+                block: path_block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+
+            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
+            if index == 0 {
+                first_node = Some(node_id);
+            } else if first_node.is_some() {
+                first_node = None;
+            }
         }
+
         change_count += 1;
     }
 
     if !disable_reference_path_update && let Some(node_id) = first_node {
-        let edge_to_new_node = Edge::query(
-            conn,
-            "select * from edges where target_node_id = ?1",
-            rusqlite::params!(SQLValue::from(node_id)),
-        )[0]
-        .clone();
-        let edge_from_new_node = Edge::query(
-            conn,
-            "select * from edges where source_node_id = ?1",
-            rusqlite::params!(SQLValue::from(node_id)),
-        )[0]
-        .clone();
-        path.new_path_with(
-            conn,
-            start_coordinate,
-            end_coordinate,
-            &edge_to_new_node,
-            &edge_from_new_node,
-        );
+        if node_id == HashId::convert_str("") {
+            let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
+        } else {
+            let edge_to_new_node = Edge::query(
+                conn,
+                "select * from edges where target_node_id = ?1",
+                rusqlite::params!(SQLValue::from(node_id)),
+            )[0]
+            .clone();
+            let edge_from_new_node = Edge::query(
+                conn,
+                "select * from edges where source_node_id = ?1",
+                rusqlite::params!(SQLValue::from(node_id)),
+            )[0]
+            .clone();
+            path.new_path_with(
+                conn,
+                start_coordinate,
+                end_coordinate,
+                &edge_to_new_node,
+                &edge_from_new_node,
+            );
+        }
     }
 
     let summary_str = format!("{change_count} sequences inserted");
@@ -738,5 +778,67 @@ mod tests {
             BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
+    }
+
+    #[test]
+    fn test_deletion() {
+        /*
+        Graph after fasta update:
+        AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
+           \-> -------- --/
+        */
+        setup_gen_dir();
+        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_path.push("fixtures/simple.fa");
+        let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_update_path.push("fixtures/empty.fa");
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test".to_string();
+
+        import_fasta(
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            None,
+            false,
+            conn,
+            op_conn,
+        )
+        .unwrap();
+        let _ = update_with_fasta(
+            conn,
+            op_conn,
+            &collection,
+            None,
+            "child sample",
+            "m123",
+            2,
+            5,
+            fasta_update_path.to_str().unwrap(),
+            false,
+        );
+
+        let expected_sequences = vec![
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            "ATTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+        ];
+        let block_groups = BlockGroup::query(
+            conn,
+            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
+            rusqlite::params!(
+                SQLValue::from(collection),
+                SQLValue::from("child sample".to_string()),
+            ),
+        );
+        assert_eq!(block_groups.len(), 1);
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            HashSet::from_iter(expected_sequences),
+        );
+
+        // TODO: Check path of child sample
     }
 }

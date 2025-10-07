@@ -1185,7 +1185,7 @@ mod tests {
     fn test_blockgroup_delete_without_sample() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
-        let bg1 = BlockGroup::create(conn, "test", None, "hg19");
+        let _ = BlockGroup::create(conn, "test", None, "hg19");
         let bg2 = BlockGroup::create(conn, "test", None, "hg38");
 
         BlockGroup::delete(conn, "test", None, "hg19");
@@ -1201,7 +1201,7 @@ mod tests {
         Collection::create(conn, "test");
         Sample::get_or_create(conn, "sample1");
         Sample::get_or_create(conn, "sample2");
-        let bg1 = BlockGroup::create(conn, "test", Some("sample1"), "hg19");
+        let _ = BlockGroup::create(conn, "test", Some("sample1"), "hg19");
         let bg2 = BlockGroup::create(conn, "test", Some("sample2"), "hg19");
 
         BlockGroup::delete(conn, "test", Some("sample1"), "hg19");

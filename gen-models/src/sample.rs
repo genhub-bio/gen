@@ -192,8 +192,8 @@ mod tests {
     fn test_delete_by_name() {
         let conn = &get_connection(None).unwrap();
 
-        let sample1 = Sample::create(conn, "sample1").unwrap();
-        let sample2 = Sample::create(conn, "sample2").unwrap();
+        let _ = Sample::create(conn, "sample1").unwrap();
+        let _ = Sample::create(conn, "sample2").unwrap();
 
         assert!(Sample::get_by_name(conn, "sample1").is_ok());
         assert!(Sample::get_by_name(conn, "sample2").is_ok());
