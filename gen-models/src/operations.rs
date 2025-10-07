@@ -1924,6 +1924,7 @@ mod tests {
             hash: HashId::convert_str("test"),
             parent_hash: Some(HashId::convert_str("parent")),
             change_type: "foo".to_string(),
+            created_on: 0,
         };
 
         let mut message = TypedBuilder::<operation::Owned>::new_default();
@@ -1942,6 +1943,7 @@ mod tests {
             hash: HashId::convert_str("test"),
             parent_hash: None,
             change_type: "foo".to_string(),
+            created_on: 1,
         };
 
         let mut message = TypedBuilder::<operation::Owned>::new_default();
