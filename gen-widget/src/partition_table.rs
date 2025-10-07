@@ -1409,18 +1409,8 @@ mod tests {
     use gen_core::HashId;
     use gen_graph::{GenGraph, GraphNode};
     use petgraph::{algo::toposort, graphmap::DiGraphMap};
-    use sha2::{Digest, Sha256};
 
     use super::*;
-
-    /// Helper function to create a HashId from a test integer
-    /// Uses SHA256 hash of the integer's bytes for deterministic results
-    fn test_hash_id(id: i64) -> HashId {
-        let mut hasher = Sha256::new();
-        hasher.update(id.to_le_bytes());
-        let hash_bytes = hasher.finalize();
-        HashId(hash_bytes.into())
-    }
 
     fn make_test_graph(edges: Vec<(i32, i32)>, nodes: Option<Vec<GraphNode>>) -> GenGraph {
         // Create default nodes if none provided
@@ -1432,7 +1422,7 @@ mod tests {
                 .into_iter()
                 .map(|id| GraphNode {
                     block_id: id as i64,
-                    node_id: test_hash_id(id as i64),
+                    node_id: HashId::pad_str(id),
                     sequence_start: 0,
                     sequence_end: 10,
                 })
@@ -1458,7 +1448,7 @@ mod tests {
     fn test_calculate_node_ranks_single_node() {
         let node = GraphNode {
             block_id: 0,
-            node_id: test_hash_id(0),
+            node_id: HashId::pad_str(0),
             sequence_start: 0,
             sequence_end: 10,
         };
