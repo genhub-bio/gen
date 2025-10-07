@@ -345,7 +345,7 @@ mod tests {
             }],
             operation_summary: Some(OperationSummary {
                 id: 1,
-                operation_hash: operation.hash.clone(),
+                operation_hash: operation.hash,
                 summary: "Test operation summary".to_string(),
             }),
         };

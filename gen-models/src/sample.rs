@@ -195,12 +195,12 @@ mod tests {
         let sample1 = Sample::create(conn, "sample1").unwrap();
         let sample2 = Sample::create(conn, "sample2").unwrap();
 
-        assert!(Sample::get_by_name(&conn, "sample1").is_ok());
-        assert!(Sample::get_by_name(&conn, "sample2").is_ok());
+        assert!(Sample::get_by_name(conn, "sample1").is_ok());
+        assert!(Sample::get_by_name(conn, "sample2").is_ok());
 
-        Sample::delete_by_name(&conn, "sample1");
+        Sample::delete_by_name(conn, "sample1");
 
-        assert!(Sample::get_by_name(&conn, "sample1").is_err());
-        assert!(Sample::get_by_name(&conn, "sample2").is_ok());
+        assert!(Sample::get_by_name(conn, "sample1").is_err());
+        assert!(Sample::get_by_name(conn, "sample2").is_ok());
     }
 }

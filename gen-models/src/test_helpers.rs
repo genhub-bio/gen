@@ -32,9 +32,9 @@ pub fn get_connection<'a>(
         if fs::metadata(v).is_ok() {
             fs::remove_file(v).expect("Unable to remove database entry.");
         }
-        conn = Connection::open(v).map_err(|e| ConnectionError::OpenFailed(e))?;
+        conn = Connection::open(v).map_err(ConnectionError::OpenFailed)?;
     } else {
-        conn = Connection::open_in_memory().map_err(|e| ConnectionError::OpenFailed(e))?;
+        conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
     rusqlite::vtab::array::load_module(&conn)?;
     run_migrations(&mut conn);
@@ -50,9 +50,9 @@ pub fn get_operation_connection<'a>(
         if fs::metadata(v).is_ok() {
             fs::remove_file(v).expect("Unable to remove database entry.");
         }
-        conn = Connection::open(v).map_err(|e| ConnectionError::OpenFailed(e))?;
+        conn = Connection::open(v).map_err(ConnectionError::OpenFailed)?;
     } else {
-        conn = Connection::open_in_memory().map_err(|e| ConnectionError::OpenFailed(e))?;
+        conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
     rusqlite::vtab::array::load_module(&conn)?;
     run_operation_migrations(&mut conn);

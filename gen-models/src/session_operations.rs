@@ -11,7 +11,7 @@ use crate::{
     changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
     collection::Collection,
     edge::Edge,
-    errors::{FileAdditionError, OperationError},
+    errors::OperationError,
     files::GenDatabase,
     gen_models_capnp::dependency_models,
     metadata::{self, get_db_uuid},

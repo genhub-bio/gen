@@ -74,6 +74,7 @@ fn import_fasta(
 }
 
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 pub fn update_with_fasta(
     filename: String,
     db_name: Option<String>,

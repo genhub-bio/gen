@@ -1386,7 +1386,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_2_midpoint_1.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1401,7 +1401,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_1.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1414,7 +1414,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_2.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1428,7 +1428,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_1_sub_1.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1443,7 +1443,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_2_sub_1.id)
             .iter()
-            .map(|f: &Operation| f.hash.clone())
+            .map(|f: &Operation| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -2093,31 +2093,31 @@ mod tests {
         temp_file.write_all(content).unwrap();
         temp_file.flush().unwrap();
 
-        let test_file_path = temp_file.path().to_str().unwrap();
+        let test_file_path = temp_file.path().to_str().unwrap().to_string();
 
-        let fa1 = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
+        let fa1 = FileAddition::get_or_create(conn, &test_file_path, FileTypes::Fasta)
             .expect("Failed to create FileAddition");
 
         assert_eq!(
             fa1.id,
             FileAddition::generate_file_addition_id(
-                &calculate_file_checksum(&temp_file.path()).unwrap(),
-                test_file_path
+                &calculate_file_checksum(temp_file.path()).unwrap(),
+                &test_file_path
             )
         );
 
         // Second call with same file should return the same FileAddition
-        let fa2 = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
+        let fa2 = FileAddition::get_or_create(conn, &test_file_path, FileTypes::Fasta)
             .expect("Failed to get existing FileAddition");
 
         assert_eq!(fa1, fa2);
 
-        let mut temp_file = NamedTempFile::new().unwrap();
+        let mut temp_file2 = NamedTempFile::new().unwrap();
         let content = b"Test file content";
-        temp_file.write_all(content).unwrap();
-        temp_file.flush().unwrap();
+        temp_file2.write_all(content).unwrap();
+        temp_file2.flush().unwrap();
 
-        let test_file_path2 = temp_file.path().to_str().unwrap();
+        let test_file_path2 = temp_file2.path().to_str().unwrap();
 
         let fa3 = FileAddition::get_or_create(conn, test_file_path2, FileTypes::Fasta)
             .expect("Failed to create different FileAddition");
@@ -2126,7 +2126,7 @@ mod tests {
 
         temp_file.write_all(b"new content").unwrap();
         temp_file.flush().unwrap();
-        let fa1_new = FileAddition::get_or_create(conn, test_file_path, FileTypes::Fasta)
+        let fa1_new = FileAddition::get_or_create(conn, &test_file_path, FileTypes::Fasta)
             .expect("Failed to create FileAddition");
 
         assert_ne!(fa1.id, fa1_new.id);
