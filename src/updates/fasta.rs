@@ -839,6 +839,10 @@ mod tests {
             HashSet::from_iter(expected_sequences),
         );
 
-        // TODO: Check path of child sample
+        let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
+        assert_eq!(
+            latest_path.sequence(conn),
+            "ATTCGATCGATCGATCGGGAACACACAGAGA"
+        );
     }
 }
