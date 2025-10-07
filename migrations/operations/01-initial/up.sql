@@ -36,7 +36,7 @@ CREATE TABLE operation_files (
   FOREIGN KEY(file_addition_id) REFERENCES file_additions(id)
 ) STRICT;
 
-CREATE TABLE operation_summary (
+CREATE TABLE operation_summaries (
   id INTEGER PRIMARY KEY NOT NULL,
   operation_hash BLOB NOT NULL,
   summary TEXT NOT NULL,
