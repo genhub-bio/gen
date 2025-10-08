@@ -137,9 +137,14 @@ impl ViewportState {
 
         // 3. Only if no camera animation is underway and not panning, apply three-zone following
         if self.camera_anim.is_none() && !self.panning && cursor.is_enabled() {
-            // Get cursor's viewport position directly
-            let cursor_viewport = cursor.get_viewport_pos();
-            {
+            // Calculate cursor's current viewport position from its world position
+            // (not using stored viewport_pos, which doesn't update when camera moves)
+            let cursor_viewport = cursor
+                .to_world_pos(viewport_graph)
+                .and_then(|world_pos| self.world_to_viewport(world_pos));
+
+            // Only proceed with zone following if cursor has a valid viewport position
+            if let Some(cursor_viewport) = cursor_viewport {
                 // Compute the center of the viewport in viewport units
                 let viewport_center = ViewportPos::new(viewport_size.0 / 2, viewport_size.1 / 2);
 
