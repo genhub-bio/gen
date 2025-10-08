@@ -11,6 +11,7 @@ use crate::{
 
 /// A graph containing only the nodes and edges visible in the current viewport.
 /// Uses world coordinates as keys for natural deduplication at partition boundaries.
+#[derive(Clone)]
 pub struct ViewportGraph {
     /// Graph keyed by world coordinates, edges store domain node pairs
     pub graph: UnGraphMap<WorldPos, Vec<(NodeIndex, NodeIndex)>>,

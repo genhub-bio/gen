@@ -4,7 +4,6 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use crate::{
     animation::Animation,
-    cursor::CursorState,
     geometry::{ViewportPos, WorldPos, WorldRect},
 };
 
@@ -20,9 +19,6 @@ pub struct ViewportState {
 
     /// Optional world boundaries: camera_current is clamped to this rect if present.
     pub world_bounds: Option<WorldRect>,
-
-    /// Grouped cursor state
-    pub cursor: CursorState,
 
     /// Camera's current and target world offsets.
     pub camera_current: WorldPos,
@@ -63,7 +59,6 @@ impl ViewportState {
             dead_zone_fraction: (0.6, 0.6), // 60% of viewport radius for dead zone
             soft_zone_fraction: (0.8, 0.8), // 80% of viewport radius for soft zone
             world_bounds: None,
-            cursor: CursorState::default(),
             camera_current: WorldPos::ZERO,
             camera_target: WorldPos::ZERO,
             camera_anim: None,
@@ -71,22 +66,6 @@ impl ViewportState {
             viewport_bounds: Rect::new(0, 0, 0, 0), // Will be set during rendering
             panning: false,
         }
-    }
-
-    /// Set the cursor's target world position and start an interpolation over `duration`.
-    /// Clamps the target within world_bounds (if present).
-    pub fn set_cursor_target(&mut self, target: WorldPos, duration: Duration) {
-        let start = self.cursor.current;
-        // TODO: remove this bounds check completely, we rarely have world_bounds
-        let end = clamp_to_bounds(target, self.world_bounds);
-        self.cursor.target = end;
-
-        self.cursor.anim = Some(Animation::new(
-            start,
-            end,
-            duration,
-            tachyonfx::Interpolation::CubicOut,
-        ));
     }
 
     /// Move the camera to a new world-space offset over `duration` (smoothly).
@@ -263,11 +242,6 @@ impl ViewportState {
             x_fraction.clamp(self.dead_zone_fraction.0, 1.0),
             y_fraction.clamp(self.dead_zone_fraction.1, 1.0),
         );
-    }
-
-    /// Set the character to use for cursor rendering
-    pub fn set_cursor_glyph(&mut self, glyph: char) {
-        self.cursor.glyph = glyph;
     }
 }
 
@@ -673,21 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn test_world_bounds_clamping() {
-        let mut state = ViewportState::new();
-        state.world_bounds = Some(WorldRect::from_corners(
-            WorldPos::new(0, 0),
-            WorldPos::new(10, 10),
-        ));
-
-        // Try to set cursor outside bounds
-        state.set_cursor_target(WorldPos::new(20, 20), Duration::from_millis(100));
-
-        // Should be clamped to bounds
-        assert_eq!(state.cursor.target, WorldPos::new(10, 10));
-    }
-
-    #[test]
     fn test_panning_behavior() {
         let mut state = ViewportState::new();
         // Set zone fractions to enable multizone logic
@@ -708,17 +667,9 @@ mod tests {
         state.handle_mouse_scroll(10, 10, Duration::from_millis(100));
         assert_eq!(state.camera_target, old_target);
 
-        // Place cursor in what would normally be the soft zone
-        state.cursor.current = WorldPos::new(3, 0);
-
-        // Even though cursor is in soft zone, panning mode should disable camera pushing
-        // (This would be tested in the full controller integration)
-
+        // Stop panning
         state.stop_panning();
         assert!(!state.panning);
-
-        // Since cursor is positioned outside dead zone, camera should move
-        // (Full multizone behavior would be tested in controller integration)
     }
 
     #[test]

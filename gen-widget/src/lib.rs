@@ -2,7 +2,9 @@
 //! the Gen version control system for graph genome sequences.
 
 pub mod animation;
-pub mod cursor;
+// pub mod cursor; // Legacy cursor module - replaced by cursor_v2 + cursor_adapter
+pub mod cursor_adapter;
+pub mod cursor_v2;
 pub mod dot_export;
 pub mod edge_router_rs; // Rust port of edge routing
 pub mod geometry;

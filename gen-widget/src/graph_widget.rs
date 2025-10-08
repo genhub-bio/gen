@@ -234,7 +234,7 @@ where
         }
 
         // Enable cursor if requested and not already enabled
-        if self.cursor_enabled && !controller.viewport_state.cursor.enabled {
+        if self.cursor_enabled && !controller.is_cursor_enabled() {
             controller.enable_cursor();
             controller.initialize_cursor();
         }
@@ -253,37 +253,10 @@ where
                 log::error!("Error rebuilding viewport graph: {}", e);
             }
 
-            // Restore cursor position after viewport rebuild
-            // The cursor tracks a domain node, and we need to restore it to that node's position
-            // in the newly rebuilt viewport graph
-            if controller.viewport_state.cursor.enabled {
-                if let Some(tracked_node) = controller.viewport_state.cursor.node_domain_idx {
-                    let node_offset = controller.viewport_state.cursor.node_offset;
-
-                    // Calculate viewport position for restoration
-                    let current_viewport_offset = controller.viewport_state.cursor.current
-                        - controller.viewport_state.camera_current;
-                    let viewport_pos = ViewportPos::new(
-                        current_viewport_offset.x.max(0) as u16,
-                        current_viewport_offset.y.max(0) as u16,
-                    );
-
-                    // Try to restore cursor to the tracked node in the new viewport graph
-                    if controller
-                        .restore_cursor_after_viewport_update(
-                            tracked_node,
-                            node_offset,
-                            viewport_pos,
-                        )
-                        .is_err()
-                    {
-                        // If restoration fails (node not in viewport), initialize cursor
-                        controller.initialize_cursor();
-                    }
-                } else {
-                    // No tracked node, initialize cursor for the first time
-                    controller.initialize_cursor();
-                }
+            // Re-initialize cursor if it's enabled but not tracking a node
+            // (The new ViewportCursor system maintains cursor position automatically during rebuilds)
+            if controller.is_cursor_enabled() && controller.cursor.get_node_idx().is_none() {
+                controller.initialize_cursor();
             }
         }
 
@@ -309,27 +282,27 @@ where
         }
 
         // Render cursor if enabled
-        if controller.viewport_state.cursor.enabled {
-            let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
-
-            // Get the current character at cursor position
-            if let Some(current_char) =
-                cursor_buffer.get_char(controller.viewport_state.cursor.current)
+        if controller.is_cursor_enabled() {
+            // Get cursor world position for rendering
+            if let Some(cursor_world_pos) = controller
+                .cursor
+                .to_world_pos(controller.get_viewport_graph())
             {
-                // Get cursor colors from theme
-                let cursor_bg =
-                    get_theme_color("cursor_bg").unwrap_or(ratatui::style::Color::White);
-                let cursor_fg =
-                    get_theme_color("cursor_fg").unwrap_or(ratatui::style::Color::Black);
+                let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
 
-                let cursor_style = Style::default().bg(cursor_bg).fg(cursor_fg);
+                // Get the current character at cursor position
+                if let Some(current_char) = cursor_buffer.get_char(cursor_world_pos) {
+                    // Get cursor colors from theme
+                    let cursor_bg =
+                        get_theme_color("cursor_bg").unwrap_or(ratatui::style::Color::White);
+                    let cursor_fg =
+                        get_theme_color("cursor_fg").unwrap_or(ratatui::style::Color::Black);
 
-                // Write the same character back with cursor styling
-                cursor_buffer.set_char_styled(
-                    controller.viewport_state.cursor.current,
-                    current_char,
-                    cursor_style,
-                );
+                    let cursor_style = Style::default().bg(cursor_bg).fg(cursor_fg);
+
+                    // Write the same character back with cursor styling
+                    cursor_buffer.set_char_styled(cursor_world_pos, current_char, cursor_style);
+                }
             }
         }
     }

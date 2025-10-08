@@ -3,8 +3,10 @@ use std::time::Duration;
 use tachyonfx::{Interpolatable, Interpolation};
 
 use crate::{
+    cursor_v2::ViewportCursor,
     geometry::{ViewportPos, WorldPos, clamp_to_bounds},
     graph_controller::ViewportState,
+    viewport_graph::ViewportGraph,
 };
 
 impl Interpolatable<WorldPos> for WorldPos {
@@ -16,6 +18,7 @@ impl Interpolatable<WorldPos> for WorldPos {
 }
 
 /// Animation for smooth interpolation between two positions.
+#[derive(Debug, Clone)]
 pub struct Animation {
     pub start: WorldPos,
     pub end: WorldPos,
@@ -75,6 +78,8 @@ impl ViewportState {
     /// # Arguments
     /// - `delta`: elapsed time since the last update (e.g., from a timer).
     /// - `viewport_size`: size of the viewport (width, height) in terminal cells.
+    /// - `cursor`: mutable reference to the ViewportCursor for animation updates
+    /// - `viewport_graph`: reference to viewport graph for coordinate conversions
     ///
     /// Behavior:
     /// 1. Advance any ongoing `cursor_anim` and update `cursor_current`.
@@ -101,18 +106,23 @@ impl ViewportState {
     ///    - Else (cursor is outside Soft Zone, i.e. in **Hard Zone** or beyond): immediately "snap" the camera
     ///      so that the cursor lies exactly on the Soft Zone boundary. (No interpolation.)
     /// 4. Always clamp `camera_current` to `world_bounds` if present.
-    pub fn update(&mut self, delta: Duration, viewport_size: (u16, u16)) {
+    pub fn update(
+        &mut self,
+        delta: Duration,
+        viewport_size: (u16, u16),
+        cursor: &mut ViewportCursor,
+        viewport_graph: &ViewportGraph,
+    ) {
         use ratatui::layout::Rect;
 
         // 0. Set the viewport bounds in screen coordinates
         self.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
 
-        // 1. Advance cursor animation (if present)
-        if let Some(anim) = &mut self.cursor.anim {
-            let new_cursor = anim.update(delta);
-            self.cursor.current = new_cursor;
-            if anim.is_complete() {
-                self.cursor.anim = None;
+        // 1. Advance cursor animation (if present) and update viewport position
+        if let Some(new_world_pos) = cursor.update_animation(delta, viewport_graph) {
+            // Convert new world position to viewport coordinates
+            if let Some(new_viewport_pos) = self.world_to_viewport(new_world_pos) {
+                cursor.set_viewport_pos(new_viewport_pos);
             }
         }
 
@@ -126,9 +136,10 @@ impl ViewportState {
         }
 
         // 3. Only if no camera animation is underway and not panning, apply three-zone following
-        if self.camera_anim.is_none() && !self.panning && self.cursor.enabled {
-            // Only apply three-zone logic if cursor is visible
-            if let Some(cursor_viewport) = self.world_to_viewport(self.cursor.current) {
+        if self.camera_anim.is_none() && !self.panning && cursor.is_enabled() {
+            // Get cursor's viewport position directly
+            let cursor_viewport = cursor.get_viewport_pos();
+            {
                 // Compute the center of the viewport in viewport units
                 let viewport_center = ViewportPos::new(viewport_size.0 / 2, viewport_size.1 / 2);
 
@@ -268,7 +279,7 @@ impl ViewportState {
                     self.camera_current = clamped;
                     self.camera_target = clamped;
                 }
-            } // End of if let Some(cursor_viewport)
+            }
         }
 
         // 4. Finally, ensure camera_current remains within world_bounds (if any).
@@ -318,19 +329,29 @@ mod tests {
 
     #[test]
     fn test_dead_zone_behavior() {
-        use crate::graph_controller::ViewportState;
+        use crate::{
+            cursor_v2::ViewportCursor, graph_controller::ViewportState,
+            viewport_graph::ViewportGraph,
+        };
 
         let mut state = ViewportState::new();
         state.dead_zone_fraction = (0.2, 0.2); // 20% of viewport
         state.soft_zone_fraction = (0.4, 0.4); // 40% of viewport
 
         let viewport_size = (10_u16, 10_u16);
+        let mut cursor = ViewportCursor::new();
+        cursor.set_enabled(true);
+        cursor.set_viewport_pos(ViewportPos::new(5, 5)); // Center of viewport
 
-        // Place cursor in dead zone center
-        state.cursor.current = WorldPos::ZERO;
         let camera_before = state.camera_current;
+        let viewport_graph = ViewportGraph::empty();
 
-        state.update(Duration::from_millis(16), viewport_size);
+        state.update(
+            Duration::from_millis(16),
+            viewport_size,
+            &mut cursor,
+            &viewport_graph,
+        );
 
         // Camera should not move
         assert_eq!(state.camera_current, camera_before);
@@ -339,23 +360,32 @@ mod tests {
 
     #[test]
     fn test_soft_zone_behavior() {
-        use crate::graph_controller::ViewportState;
+        use crate::{
+            cursor_v2::ViewportCursor, graph_controller::ViewportState,
+            viewport_graph::ViewportGraph,
+        };
 
         let mut state = ViewportState::new();
         state.dead_zone_fraction = (0.2, 0.2);
         state.soft_zone_fraction = (0.4, 0.4);
-        state.cursor.enabled = true;
 
         let viewport_size = (10_u16, 10_u16);
+        let mut cursor = ViewportCursor::new();
+        cursor.set_enabled(true);
 
         // Viewport center in screen coords: (5, 5) == (0, 0) in world coords
         // Dead zone radius: 0.2 * 0.5 * 10 = 1, so dead zone is (4,4) to (6,6) in screen coords
         // Soft zone radius: 0.4 * 0.5 * 10 = 2, so soft zone is (3,3) to (7,7) in screen coords
         // Place cursor at screen coordinates (7, 5) (just outside dead zone, inside soft zone)
-        // corresponding to world coordinates (2, 0) since the camera is centered on the origin
-        state.cursor.current = WorldPos::new(2, 0);
+        cursor.set_viewport_pos(ViewportPos::new(7, 5));
 
-        state.update(Duration::from_millis(16), viewport_size);
+        let viewport_graph = ViewportGraph::empty();
+        state.update(
+            Duration::from_millis(16),
+            viewport_size,
+            &mut cursor,
+            &viewport_graph,
+        );
 
         // Camera animation should start
         assert!(state.camera_anim.is_some());
@@ -363,23 +393,32 @@ mod tests {
 
     #[test]
     fn test_hard_zone_behavior() {
-        use crate::graph_controller::ViewportState;
+        use crate::{
+            cursor_v2::ViewportCursor, graph_controller::ViewportState,
+            viewport_graph::ViewportGraph,
+        };
 
         let mut state = ViewportState::new();
         state.dead_zone_fraction = (0.2, 0.2); // 20% of viewport
         state.soft_zone_fraction = (0.4, 0.4); // 40% of viewport
-        state.cursor.enabled = true;
 
         let viewport_size = (10_u16, 10_u16);
+        let mut cursor = ViewportCursor::new();
+        cursor.set_enabled(true);
 
         // Place cursor outside soft zone (in hard zone)
         // Soft zone is (3,3) to (7,7) in screen coords
-        // To place cursor at screen (8, 5) (outside soft zone):
-        // world = (8, 5) + (-5, -5) = (3, 0)
-        state.cursor.current = WorldPos::new(3, 0);
+        // Place cursor at screen (8, 5) (outside soft zone)
+        cursor.set_viewport_pos(ViewportPos::new(8, 5));
         let camera_before = state.camera_current;
 
-        state.update(Duration::from_millis(16), viewport_size);
+        let viewport_graph = ViewportGraph::empty();
+        state.update(
+            Duration::from_millis(16),
+            viewport_size,
+            &mut cursor,
+            &viewport_graph,
+        );
 
         // Camera should snap immediately (no animation)
         assert!(state.camera_anim.is_none());
@@ -388,23 +427,32 @@ mod tests {
 
     #[test]
     fn test_soft_zone_behavior_detailed() {
-        use crate::graph_controller::ViewportState;
+        use crate::{
+            cursor_v2::ViewportCursor, graph_controller::ViewportState,
+            viewport_graph::ViewportGraph,
+        };
 
         let mut state = ViewportState::new();
         state.dead_zone_fraction = (0.2, 0.2); // 20% of viewport
         state.soft_zone_fraction = (0.4, 0.4); // 40% of viewport
-        state.cursor.enabled = true;
 
         let viewport_size = (10_u16, 10_u16);
+        let mut cursor = ViewportCursor::new();
+        cursor.set_enabled(true);
 
-        // Place cursor outside of dead zone, inside soft zone:(7, 5)
-        // world = (7, 5) + (-5, -5) = (2, 0)
-        state.cursor.current = WorldPos::new(2, 0);
+        // Place cursor outside of dead zone, inside soft zone: viewport (7, 5)
+        cursor.set_viewport_pos(ViewportPos::new(7, 5));
         state.camera_current = WorldPos::ZERO;
         state.camera_target = WorldPos::ZERO;
         state.camera_anim = None;
 
-        state.update(Duration::from_millis(16), viewport_size);
+        let viewport_graph = ViewportGraph::empty();
+        state.update(
+            Duration::from_millis(16),
+            viewport_size,
+            &mut cursor,
+            &viewport_graph,
+        );
 
         // Camera should start moving since cursor is in soft zone but outside dead zone
         assert!(
