@@ -72,6 +72,12 @@ pub fn update_with_fasta(
         if sequence.is_empty() {
             // We assume this is a deletion.
             let node_id = HashId::convert_str("");
+            // This path block represents a deletion, so will not actually be
+            // used to create a new node.  So the node ID can be anything, which
+            // is why we're setting it to the HashId of the empty string.  The
+            // important part is that sequence_start == sequence_end (the 0
+            // values for them are arbitrary), which flags that it's a deletion
+            // to the logic in BlockGroup::insert_change.
             let path_block = PathBlock {
                 id: -1,
                 node_id,
@@ -159,7 +165,7 @@ pub fn update_with_fasta(
             let edge_to_new_node = Edge::query(
                 conn,
                 "select * from edges where target_node_id = ?1",
-                rusqlite::params!(SQLValue::from(node_id)),
+                rusqlite::params![node_id],
             )[0]
             .clone();
             let edge_from_new_node = Edge::query(
@@ -828,10 +834,7 @@ mod tests {
         let block_groups = BlockGroup::query(
             conn,
             "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("child sample".to_string()),
-            ),
+            rusqlite::params![collection, "child sample".to_string()],
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
