@@ -23,7 +23,7 @@ pub struct Command {
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) {
-    println!("GFA export called");
+    println!("FASTA export called");
     let operation_conn = get_operation_connection(None).unwrap();
     let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
     let conn = get_connection(&db).unwrap();
