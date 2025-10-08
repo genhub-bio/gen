@@ -198,10 +198,9 @@ pub fn view_block_group(
 
         // Draw the UI
         terminal.draw(|frame| {
-            // Update viewport state with frame delta for camera animations
+            // Update animations with frame delta for smooth camera and cursor animations
             graph_controller
-                .viewport_state
-                .update(frame_delta, (frame.area().width, frame.area().height));
+                .update_animations(frame_delta, (frame.area().width, frame.area().height));
 
             let status_bar_height: u16 = 1;
 

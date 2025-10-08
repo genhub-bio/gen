@@ -18,7 +18,7 @@ use ratatui::style::Color;
 pub use crate::viewport_state::{ViewportState, WorldBuffer};
 use crate::{
     cursor_v2::ViewportCursor,
-    geometry::{BigRect, Point, ViewportPos, WorldPos},
+    geometry::{BigRect, ViewportPos, WorldPos},
     layout::{LayoutEdge, LayoutNode, NodeRole, PartitionLayout, VisualDetail},
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
@@ -710,6 +710,17 @@ where
             "update_camera: focal_world={:?}, focal_viewport=({}, {}), camera={:?}",
             focal_world, focal_viewport.x, focal_viewport.y, self.viewport_state.camera_current
         );
+    }
+
+    /// Update animations (camera and cursor) for the given frame delta.
+    /// This should be called once per frame to advance smooth animations.
+    ///
+    /// # Parameters
+    /// - delta: Time elapsed since last frame
+    /// - viewport_size: Current viewport dimensions (width, height)
+    pub fn update_animations(&mut self, delta: std::time::Duration, viewport_size: (u16, u16)) {
+        self.viewport_state
+            .update(delta, viewport_size, &mut self.cursor, &self.viewport_graph);
     }
 
     // Legacy cursor helper methods removed - now handled by ViewportCursor + camera delta adjustment

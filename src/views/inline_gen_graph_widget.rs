@@ -171,11 +171,11 @@ fn show_interactive_widget(
 
                     // Draw the frame
                     terminal.draw(|frame| {
-                        // Update viewport state with actual frame delta for smooth animations
-                        state
-                            .controller
-                            .viewport_state
-                            .update(frame_delta, (frame.area().width, frame.area().height));
+                        // Update animations with frame delta for smooth camera and cursor animations
+                        state.controller.update_animations(
+                            frame_delta,
+                            (frame.area().width, frame.area().height),
+                        );
 
                         render_inline(frame, &mut state);
                     })?;

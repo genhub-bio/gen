@@ -1,8 +1,6 @@
 use log::trace;
-use petgraph::graph::NodeIndex;
 
 use crate::{
-    cursor_v2::ViewportCursor,
     geometry::{ViewportPos, WorldPos},
     graph_controller::GraphController,
     layout::{LayoutNode, NodeRole},

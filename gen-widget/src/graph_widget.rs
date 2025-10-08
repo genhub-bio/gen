@@ -13,7 +13,7 @@ use ratatui::{
 };
 
 use crate::{
-    geometry::{ViewportPos, WorldRect},
+    geometry::WorldRect,
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer, plot_viewport_graph},
