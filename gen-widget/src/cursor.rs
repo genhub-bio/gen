@@ -108,25 +108,6 @@ where
         }
     }
 
-    /// Find the exact same node at cursor position, returning both the rect and the domain node index
-    pub fn find_domain_node_at_cursor(&self) -> Option<(WorldRect, NodeIndex)> {
-        let cursor_pos = self.viewport_state.cursor.current;
-        let viewport_graph = &self.viewport_graph;
-
-        // Search through all nodes in the viewport graph
-        for (world_pos, node_data) in &viewport_graph.nodes {
-            let rect = BigRect::from_center_and_size(*world_pos, node_data.size);
-
-            if rect.contains(cursor_pos) {
-                if let NodeRole::Data(domain_node_idx) = &node_data.role {
-                    return Some((rect, *domain_node_idx));
-                }
-            }
-        }
-
-        None
-    }
-
     /// Move cursor horizontally to connected node (between ranks in DAG)
     pub fn move_cursor_horizontal(&mut self, direction: i64) {
         // Check if cursor has been properly initialized
@@ -155,11 +136,9 @@ where
         }
 
         // Step 2: At boundary - jump to connected node
-        if let Some((target_world_pos, target_node)) =
-            self.find_connected_node_in_direction(direction)
-        {
+        if let Some((target_world_pos, target_node)) = self.find_connected_nodes(direction) {
             let target_node_clone = target_node.clone();
-            self.jump_cursor_to_node_viewport(target_world_pos, &target_node_clone);
+            self.jump_to_node(target_world_pos, &target_node_clone);
         } else if std::env::var("RUST_LOG").is_ok() {
             eprintln!("No connected node found in direction {}", direction);
         }
@@ -193,18 +172,14 @@ where
         }
 
         // Step 2: At boundary - jump to node in same column
-        if let Some((target_world_pos, target_node)) = self.find_node_in_column(direction) {
+        if let Some((target_world_pos, target_node)) = self.find_parallel_nodes(direction) {
             let target_node_clone = target_node.clone();
-            self.jump_cursor_to_node_viewport(target_world_pos, &target_node_clone);
+            self.jump_to_node(target_world_pos, &target_node_clone);
         }
     }
 
     /// Unified jump function that handles cursor positioning based on ViewportGraph nodes
-    fn jump_cursor_to_node_viewport(
-        &mut self,
-        target_world_pos: WorldPos,
-        target_node: &LayoutNode,
-    ) {
+    fn jump_to_node(&mut self, target_world_pos: WorldPos, target_node: &LayoutNode) {
         let current_world_pos = self.viewport_state.cursor.node_world_pos;
 
         // Determine movement type by comparing current and target positions
@@ -218,21 +193,21 @@ where
 
             if direction != 0 {
                 // Horizontal movement - position at appropriate edge
-                self.jump_cursor_between_ranks_viewport(target_world_pos, target_node, direction);
+                self.jump_cursor_horizontal(target_world_pos, target_node, direction);
             } else {
                 // Vertical movement - maintain x position if possible
                 let current_x = self.viewport_state.cursor.current.x;
-                self.jump_cursor_within_rank_viewport(target_world_pos, target_node, current_x);
+                self.jump_cursor_vertical(target_world_pos, target_node, current_x);
             }
         } else {
             // Fallback: no current node - use within rank behavior
             let current_x = self.viewport_state.cursor.current.x;
-            self.jump_cursor_within_rank_viewport(target_world_pos, target_node, current_x);
+            self.jump_cursor_vertical(target_world_pos, target_node, current_x);
         }
     }
 
     /// Jump cursor within rank (vertical movement), maintaining x position if possible
-    fn jump_cursor_within_rank_viewport(
+    fn jump_cursor_vertical(
         &mut self,
         target_world_pos: WorldPos,
         target_node: &LayoutNode,
@@ -276,7 +251,7 @@ where
     }
 
     /// Jump cursor between ranks (horizontal movement), positioning at appropriate edge
-    fn jump_cursor_between_ranks_viewport(
+    fn jump_cursor_horizontal(
         &mut self,
         target_world_pos: WorldPos,
         target_node: &LayoutNode,
@@ -317,50 +292,6 @@ where
 
         // Ensure node is visible in viewport
         self.ensure_cursor_visible();
-    }
-
-    /// Restore cursor to a tracked node after viewport update
-    /// This is a simplified version that just finds the node and sets the cursor position.
-    /// It assumes the camera has already been adjusted to the correct position.
-    pub fn restore_cursor_to_tracked_node(
-        &mut self,
-        target_node: NodeIndex,
-        node_offset: Point<i64>,
-    ) -> Result<(), String> {
-        // Search viewport graph for the target node
-        for (world_pos, node_data) in &self.viewport_graph.nodes {
-            if let NodeRole::Data(domain_node_idx) = &node_data.role {
-                if *domain_node_idx == target_node {
-                    // Found the target node! Calculate new cursor position
-                    let new_cursor_pos =
-                        WorldPos::new(world_pos.x + node_offset.x, world_pos.y + node_offset.y);
-
-                    // Ensure cursor stays within node bounds
-                    let rect = BigRect::from_center_and_size(*world_pos, node_data.size);
-                    let clamped_cursor = WorldPos::new(
-                        new_cursor_pos.x.clamp(rect.min.x, rect.max.x),
-                        new_cursor_pos.y.clamp(rect.min.y, rect.max.y),
-                    );
-
-                    // Update cursor position and tracking info
-                    self.viewport_state.cursor.current = clamped_cursor;
-                    self.viewport_state.cursor.target = clamped_cursor;
-                    self.viewport_state.cursor.node_domain_idx = Some(target_node);
-                    self.viewport_state.cursor.node_world_pos = Some(*world_pos);
-                    self.viewport_state.cursor.node_offset = Point::new(
-                        clamped_cursor.x - world_pos.x,
-                        clamped_cursor.y - world_pos.y,
-                    );
-
-                    return Ok(());
-                }
-            }
-        }
-
-        Err(format!(
-            "Could not find node {:?} in viewport graph after update",
-            target_node
-        ))
     }
 
     /// Restore cursor position after viewport update using node tracking information
@@ -410,16 +341,6 @@ where
         ))
     }
 
-    /// Helper to check if a cursor position is still within the bounds of a given node
-    #[allow(dead_code)]
-    fn is_cursor_within_node(&self, pos: WorldPos, world_pos: WorldPos) -> bool {
-        if let Some(node_data) = self.viewport_graph.nodes.get(&world_pos) {
-            let rect = BigRect::from_center_and_size(world_pos, node_data.size);
-            return rect.contains(pos);
-        }
-        false
-    }
-
     /// Helper to ensure the cursor is visible in the viewport by adjusting camera if needed
     fn ensure_cursor_visible(&mut self) {
         let cursor_pos = self.viewport_state.cursor.current;
@@ -454,7 +375,7 @@ where
     }
 
     /// Find connected node in the given horizontal direction using layer-based traversal
-    fn find_connected_node_in_direction(&self, direction: i64) -> Option<(WorldPos, &LayoutNode)> {
+    fn find_connected_nodes(&self, direction: i64) -> Option<(WorldPos, &LayoutNode)> {
         let current_node = self
             .viewport_state
             .cursor
@@ -512,7 +433,7 @@ where
     }
 
     /// Find node in the same layer (rank) in the given vertical direction
-    fn find_node_in_column(&self, direction: i64) -> Option<(WorldPos, &LayoutNode)> {
+    fn find_parallel_nodes(&self, direction: i64) -> Option<(WorldPos, &LayoutNode)> {
         let current_pos = self.viewport_state.cursor.current;
         let current_world_pos = self.viewport_state.cursor.node_world_pos?;
 
@@ -628,46 +549,5 @@ where
         }
 
         trace!("=== End Cursor Position Debug ===");
-    }
-
-    /// Log cursor position tracking during layout changes with detailed coordinate information
-    pub fn log_cursor_restoration(&self, context: &str, stored_viewport_pos: Option<ViewportPos>) {
-        if !log::log_enabled!(log::Level::Trace) {
-            return;
-        }
-
-        trace!("=== Cursor Restoration Debug ({}) ===", context);
-
-        if let Some(stored_vp) = stored_viewport_pos {
-            trace!(
-                "  Stored Viewport Position: ({}, {})",
-                stored_vp.x, stored_vp.y
-            );
-
-            // Show where cursor would appear with current camera
-            if let Some(actual_vp) = self
-                .viewport_state
-                .world_to_viewport(self.viewport_state.cursor.current)
-            {
-                trace!(
-                    "  Current Viewport Position: ({}, {})",
-                    actual_vp.x, actual_vp.y
-                );
-                trace!(
-                    "  Viewport Delta: ({}, {})",
-                    actual_vp.x as i32 - stored_vp.x as i32,
-                    actual_vp.y as i32 - stored_vp.y as i32
-                );
-            } else {
-                trace!("  Current Viewport Position: OUT_OF_BOUNDS");
-            }
-        } else {
-            trace!("  No stored viewport position");
-        }
-
-        // Log current positions in all formats
-        self.log_cursor_position(&format!("during {}", context));
-
-        trace!("=== End Cursor Restoration Debug ===");
     }
 }

@@ -20,7 +20,7 @@ use crate::{
     theme::get_theme_color,
 };
 
-pub const NODE_GLYPH: char = '⏺';
+pub const NODE_GLYPH: char = '●'; // changed from '⏺', which renders as an emoji in some fonts;
 
 /// Default NodeSizer that always returns 1x1 size
 #[derive(Debug, Clone, Copy)]
