@@ -1005,8 +1005,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::test_helpers::{
-        create_operation, get_connection, get_operation_connection, setup_gen_dir,
+    use crate::{
+        files::GenDatabase,
+        test_helpers::{create_operation, get_connection, get_operation_connection, setup_gen_dir},
     };
 
     #[cfg(test)]
@@ -1235,6 +1236,27 @@ mod tests {
             assert!(branch_from_db.is_some());
             assert_eq!(branch_from_db.unwrap().remote_name, None);
         }
+    }
+
+    #[test]
+    fn test_create_operation_adds_database() {
+        setup_gen_dir();
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        let gen_db = GenDatabase::create(op_conn, &db_uuid, "foo.db", "/foo.db").unwrap();
+
+        let op = create_operation(
+            conn,
+            op_conn,
+            "something.fa",
+            FileTypes::Fasta,
+            "foo",
+            HashId::convert_str("op-1"),
+        );
+
+        let databases = GenDatabase::query_by_operations(op_conn, &[op.hash]).unwrap();
+        assert_eq!(databases[&op.hash], vec![gen_db]);
     }
 
     #[test]
