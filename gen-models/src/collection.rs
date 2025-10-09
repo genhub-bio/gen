@@ -128,10 +128,10 @@ mod tests {
         let collection1 = Collection::create(conn, "test1");
         let collection2 = Collection::create(conn, "test2");
 
-        Collection::delete_by_name(conn, "test1");
+        Collection::delete_by_name(conn, &collection1.name);
 
         // Verify only the correct one was deleted
-        assert!(!Collection::exists(conn, "test1"));
-        assert!(Collection::exists(conn, "test2"));
+        assert!(!Collection::exists(conn, &collection1.name));
+        assert!(Collection::exists(conn, &collection2.name));
     }
 }

@@ -194,11 +194,9 @@ mod tests {
         let created_db =
             GenDatabase::create(&conn, "test-uuid-456", "test_db2", "path/to/db2.db").unwrap();
 
-        let retrieved_db = GenDatabase::get_by_uuid(&conn, "test-uuid-456").unwrap();
+        let retrieved_db = GenDatabase::get_by_uuid(&conn, &created_db.db_uuid).unwrap();
 
-        assert_eq!(retrieved_db.db_uuid, "test-uuid-456");
-        assert_eq!(retrieved_db.name, "test_db2");
-        assert_eq!(retrieved_db.path, "path/to/db2.db");
+        assert_eq!(retrieved_db, created_db);
     }
 
     #[test]
@@ -210,9 +208,7 @@ mod tests {
 
         let retrieved_db = GenDatabase::get_by_path(&conn, "path/to/db3.db").unwrap();
 
-        assert_eq!(retrieved_db.db_uuid, "test-uuid-789");
-        assert_eq!(retrieved_db.name, "test_db3");
-        assert_eq!(retrieved_db.path, "path/to/db3.db");
+        assert_eq!(retrieved_db, created_db);
     }
 
     #[test]
@@ -236,9 +232,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(retrieved_db.db_uuid, "test-uuid-existing");
-        assert_eq!(retrieved_db.name, "existing_db"); // Should keep original name
-        assert_eq!(retrieved_db.path, "path/to/existing.db"); // Should keep original path
+        assert_eq!(retrieved_db, created_db); // Should keep original path
     }
 
     #[test]

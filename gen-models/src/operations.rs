@@ -780,7 +780,7 @@ impl Branch {
         let branch = Branch::get_by_id(conn, branch_id)
             .unwrap_or_else(|| panic!("No branch with id {branch_id}."));
         if let Some(hash) = branch.current_operation_hash {
-            let hashes = Operation::get_upstream(conn, &branch.current_operation_hash.unwrap());
+            let hashes = Operation::get_upstream(conn, &hash);
             hashes
                 .iter()
                 .map(|hash| Operation::get_by_id(conn, hash).unwrap())

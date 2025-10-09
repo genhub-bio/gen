@@ -1188,7 +1188,7 @@ mod tests {
         let bg1 = BlockGroup::create(conn, "test", None, "hg19");
         let bg2 = BlockGroup::create(conn, "test", None, "hg38");
 
-        BlockGroup::delete(conn, "test", None, "hg19");
+        BlockGroup::delete(conn, "test", None, &bg1.name);
 
         let bgs = BlockGroup::all(conn);
         assert_eq!(bgs.len(), 1);
@@ -1204,7 +1204,7 @@ mod tests {
         let bg1 = BlockGroup::create(conn, "test", Some("sample1"), "hg19");
         let bg2 = BlockGroup::create(conn, "test", Some("sample2"), "hg19");
 
-        BlockGroup::delete(conn, "test", Some("sample1"), "hg19");
+        BlockGroup::delete(conn, "test", bg1.sample_name.as_deref(), &bg1.name);
 
         let bgs = BlockGroup::all(conn);
         assert_eq!(bgs.len(), 1);
