@@ -842,7 +842,7 @@ mod tests {
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
                 block_group_id: block_group.id,
-                edge_id: (*edge_id).clone(),
+                edge_id: (*edge_id),
                 chromosome_index: 0,
                 phased: 0,
             })
@@ -881,7 +881,7 @@ mod tests {
             .iter()
             .map(|edge_id| BlockGroupEdgeData {
                 block_group_id: block_group.id,
-                edge_id: (*edge_id).clone(),
+                edge_id: (*edge_id),
                 chromosome_index: 0,
                 phased: 0,
             })

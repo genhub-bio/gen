@@ -10,10 +10,12 @@ use gen_models::{
     changesets::{apply_changeset, revert_changeset},
     errors::{ChangesetError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
+    files::GenDatabase,
     manifest::{
         ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
         ManifestOperation,
     },
+    metadata::get_db_uuid,
     operations::{
         Branch, Defaults, FileAddition, Operation, OperationFile, OperationInfo, OperationState,
         Remote,
@@ -28,7 +30,9 @@ use rusqlite::{self, Connection, Error as SQLError};
 use thiserror::Error;
 use url_parse::core::Parser;
 
-use crate::{commands::remote::utils::load_tokens, get_connection, get_operation_connection};
+use crate::{
+    commands::remote::utils::load_tokens, get_connection, get_operation_connection, track_database,
+};
 
 /* General information
 
@@ -586,7 +590,12 @@ fn apply_operations_to_remote(
         let dependencies = operation.get_changeset_dependencies();
 
         let remote_data_db = remote_path.join(changeset.db_path);
+        let new_db = !remote_data_db.exists();
         let remote_data_conn = &get_connection(&remote_data_db)?;
+        if new_db {
+            track_database(remote_data_conn, remote_op_conn)?;
+        };
+        let remote_db_uuid = get_db_uuid(remote_data_conn);
         remote_data_conn.execute("BEGIN TRANSACTION", [])?;
         match apply_changeset(remote_data_conn, &changeset.changes, &dependencies) {
             Ok(_) => {
@@ -606,6 +615,7 @@ fn apply_operations_to_remote(
             &operation.hash,
             &operation.change_type,
             operation.parent_hash,
+            Some(operation.created_on),
         ) {
             Ok(_) => {
                 // Add file associations for this operation, these aren't tracked in changesets atm
@@ -617,6 +627,7 @@ fn apply_operations_to_remote(
                     )?;
                     Operation::add_file(remote_op_conn, &operation.hash, &remote_file_addition.id)?;
                 }
+                Operation::add_database(remote_op_conn, &operation.hash, &remote_db_uuid)?;
 
                 remote_op_conn.execute("COMMIT TRANSACTION", [])?;
             }

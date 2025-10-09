@@ -17,6 +17,7 @@ CREATE TABLE operations (
   hash BLOB PRIMARY KEY NOT NULL,
   parent_hash BLOB,
   change_type TEXT NOT NULL,
+  created_on INTEGER NOT NULL,
   FOREIGN KEY(parent_hash) REFERENCES operations(hash)
 ) STRICT;
 
@@ -35,7 +36,7 @@ CREATE TABLE operation_files (
   FOREIGN KEY(file_addition_id) REFERENCES file_additions(id)
 ) STRICT;
 
-CREATE TABLE operation_summary (
+CREATE TABLE operation_summaries (
   id INTEGER PRIMARY KEY NOT NULL,
   operation_hash BLOB NOT NULL,
   summary TEXT NOT NULL,
@@ -64,10 +65,17 @@ CREATE TABLE branch (
 CREATE UNIQUE INDEX branch_uidx ON branch(name);
 
 CREATE TABLE gen_databases (
-    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    db_uuid TEXT NOT NULL UNIQUE,
+    db_uuid TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
     path TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE operation_databases (
+  id INTEGER PRIMARY KEY NOT NULL,
+  database_uuid TEXT NOT NULL,
+  operation_hash BLOB NOT NULL,
+  FOREIGN KEY(operation_hash) REFERENCES operations(hash),
+  FOREIGN KEY(database_uuid) REFERENCES gen_databases(db_uuid)
 ) STRICT;
 
 INSERT INTO branch (id, name) values (1, 'main');

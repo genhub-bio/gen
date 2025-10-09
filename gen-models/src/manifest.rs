@@ -215,7 +215,7 @@ impl<'a> ManifestGenerator<'a> {
                 let file_additions = FileAddition::get_files_for_operation(self.conn, &op.hash);
                 let operation_summary = OperationSummary::query(
                     self.conn,
-                    "select * from operation_summary where operation_hash = ?1",
+                    "select * from operation_summaries where operation_hash = ?1",
                     rusqlite::params![op.hash],
                 )
                 .into_iter()
@@ -345,7 +345,7 @@ mod tests {
             }],
             operation_summary: Some(OperationSummary {
                 id: 1,
-                operation_hash: operation.hash.clone(),
+                operation_hash: operation.hash,
                 summary: "Test operation summary".to_string(),
             }),
         };

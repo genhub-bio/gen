@@ -127,6 +127,7 @@ struct Operation {
     some @2 :List(UInt8);
   }
   changeType @3 :Text;
+  createdOn @4 :Int64;
 }
 
 struct FileAddition {
@@ -178,10 +179,9 @@ struct Defaults {
 
 # Database and metadata models
 struct GenDatabase {
-  id @0 :Int64;
-  dbUuid @1 :Text;
-  name @2 :Text;
-  path @3 :Text;
+  dbUuid @0 :Text;
+  name @1 :Text;
+  path @2 :Text;
 }
 
 struct Metadata {

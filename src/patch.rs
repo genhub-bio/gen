@@ -137,7 +137,7 @@ where
             files: FileAddition::get_files_for_operation(op_conn, &operation.hash),
             summary: OperationSummary::get(
                 op_conn,
-                "select * from operation_summary where operation_hash = ?1",
+                "select * from operation_summaries where operation_hash = ?1",
                 params![Value::from(operation.hash)],
             )
             .unwrap(),

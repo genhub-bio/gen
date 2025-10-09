@@ -568,7 +568,7 @@ mod tests {
             vec![Accession {
                 id: accession.id,
                 name: "test".to_string(),
-                path_id: path.id.clone(),
+                path_id: path.id,
                 parent_accession_id: None,
             }]
         )

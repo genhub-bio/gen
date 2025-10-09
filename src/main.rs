@@ -414,7 +414,7 @@ fn main() {
                     println!("Created branch {name}");
                 }
                 println!("Checking out branch {name}");
-                operation_management::checkout(None, &operation_conn, &Some(name), None);
+                operation_management::checkout(None, &operation_conn, &Some(name), None).unwrap();
             } else if let Some(hash_name) = hash.clone() {
                 // if the hash is a branch, check it out
                 if Branch::get_by_name(&operation_conn, &hash_name).is_some() {

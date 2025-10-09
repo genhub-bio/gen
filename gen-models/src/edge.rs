@@ -732,7 +732,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 7,
