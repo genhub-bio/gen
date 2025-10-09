@@ -356,7 +356,7 @@ impl BlockGroup {
             if node.node_id == PATH_START_NODE_ID {
                 root_nodes.insert(node);
             }
-            let mut edges_by_ci: HashMap<i64, (HashId, GraphNode, GraphNode)> = HashMap::new();
+            let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
             for (source_node, target_node, edge_weights) in graph.edges(node) {
                 for edge_weight in edge_weights {
                     if edge_weight.chromosome_index == -1 {
@@ -364,17 +364,17 @@ impl BlockGroup {
                     }
                     edges_by_ci
                         .entry(edge_weight.chromosome_index)
-                        .and_modify(|(edge_id, source, target)| {
-                            if edge_weight.edge_id > *edge_id {
+                        .and_modify(|(source, target, created_on)| {
+                            if edge_weight.created_on > *created_on {
                                 edges_to_remove.push((*source, *target));
-                                *edge_id = edge_weight.edge_id;
                                 *source = source_node;
                                 *target = target_node;
+                                *created_on = edge_weight.created_on;
                             } else {
                                 edges_to_remove.push((source_node, target_node));
                             }
                         })
-                        .or_insert((edge_weight.edge_id, source_node, target_node));
+                        .or_insert((source_node, target_node, edge_weight.created_on));
                 }
             }
         }

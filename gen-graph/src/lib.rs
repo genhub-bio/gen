@@ -57,6 +57,7 @@ pub struct GraphEdge {
     pub target_strand: Strand,
     pub chromosome_index: i64,
     pub phased: i64,
+    pub created_on: i64,
 }
 
 // #[derive(Debug)]
@@ -583,6 +584,7 @@ pub fn connect_all_boundary_edges(graph: &mut GenGraph) {
                     target_strand: Strand::Forward,
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
         }
@@ -603,6 +605,7 @@ pub fn connect_all_boundary_edges(graph: &mut GenGraph) {
                     target_strand: Strand::Forward,
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
         }
@@ -1015,6 +1018,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1038,6 +1042,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1061,6 +1066,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1084,6 +1090,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1107,6 +1114,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1130,6 +1138,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             let path_blocks = vec![
@@ -1237,6 +1246,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1260,6 +1270,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1283,6 +1294,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1306,6 +1318,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1329,6 +1342,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
 
@@ -1353,6 +1367,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
 
@@ -1377,6 +1392,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
 
@@ -1401,6 +1417,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
 
@@ -1425,6 +1442,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1448,6 +1466,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
 
@@ -1472,6 +1491,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
 
@@ -1496,6 +1516,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             let path_blocks = vec![
@@ -1662,6 +1683,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1685,6 +1707,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             graph.add_edge(
@@ -1708,6 +1731,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             let orphan_node = graph.add_node(GraphNode {
@@ -1737,6 +1761,7 @@ mod tests {
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
                     phased: 0,
+                    created_on: 0,
                 }],
             );
             let incoming_edges: Vec<_> = graph
@@ -1771,7 +1796,8 @@ mod tests {
                         source_strand: Strand::Forward,
                         target_strand: Strand::Forward,
                         chromosome_index: NO_CHROMOSOME_INDEX,
-                        phased: 0
+                        phased: 0,
+                        created_on: 0
                     }]
                 )]
             );
@@ -1792,7 +1818,8 @@ mod tests {
                         source_strand: Strand::Forward,
                         target_strand: Strand::Forward,
                         chromosome_index: NO_CHROMOSOME_INDEX,
-                        phased: 0
+                        phased: 0,
+                        created_on: 0
                     }]
                 )]
             );
