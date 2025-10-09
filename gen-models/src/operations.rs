@@ -779,11 +779,15 @@ impl Branch {
     pub fn get_operations(conn: &Connection, branch_id: i64) -> Vec<Operation> {
         let branch = Branch::get_by_id(conn, branch_id)
             .unwrap_or_else(|| panic!("No branch with id {branch_id}."));
-        let hashes = Operation::get_upstream(conn, &branch.current_operation_hash.unwrap());
-        hashes
-            .iter()
-            .map(|hash| Operation::get_by_id(conn, hash).unwrap())
-            .collect::<Vec<Operation>>()
+        if let Some(hash) = branch.current_operation_hash {
+            let hashes = Operation::get_upstream(conn, &branch.current_operation_hash.unwrap());
+            hashes
+                .iter()
+                .map(|hash| Operation::get_by_id(conn, hash).unwrap())
+                .collect::<Vec<Operation>>()
+        } else {
+            vec![]
+        }
     }
 
     /// Associate a branch with a remote
