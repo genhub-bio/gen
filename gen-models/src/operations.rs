@@ -1341,7 +1341,7 @@ mod tests {
             "foo",
             HashId::convert_str("op-6"),
         );
-        let branch_2_midpoint = create_operation(
+        let _branch_2_midpoint = create_operation(
             conn,
             op_conn,
             "test.fasta",
