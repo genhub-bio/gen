@@ -10,7 +10,6 @@ use gen_models::{
     changesets::{apply_changeset, revert_changeset},
     errors::{ChangesetError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
-    files::GenDatabase,
     manifest::{
         ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
         ManifestOperation,
