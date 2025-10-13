@@ -20,3 +20,6 @@ gen-models = { path = "../gen-models" }
 [dependencies.pyo3]
 version = "0.25.1"
 features = ["extension-module"]
+
+[build-dependencies]
+pyo3-build-config = "0.26.0"
