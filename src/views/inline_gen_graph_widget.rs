@@ -1,9 +1,3 @@
-use std::{
-    io::Result,
-    panic,
-    time::{Duration, Instant},
-};
-
 use crossterm::event::{self, Event, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_widget::{graph_controller::GraphController, layout::VisualDetail};
@@ -13,6 +7,11 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use rusqlite::Connection;
+use std::{
+    io::Result,
+    panic,
+    time::{Duration, Instant},
+};
 
 use crate::views::gen_graph_widget::{
     GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget,
@@ -84,8 +83,8 @@ impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &'a GenGraph, conn: &'a Connection) -> Self {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph, node_sizer);
-        graph_controller.set_detail_level(VisualDetail::Minimal);
         graph_controller.enable_cursor();
+        graph_controller.set_detail_level(VisualDetail::Minimal);
         Self {
             controller: graph_controller,
             conn,
@@ -114,8 +113,6 @@ impl<'a> InlineGenGraphState<'a> {
 /// * `graph` - The GenGraph to visualize
 /// * `conn` - Database connection for sequence data
 /// * `height` - Height of the inline viewport (in terminal rows, typically 10-20)
-/// * `min_width` - Minimum partition width for layout (typically 10-50)
-/// * `max_nodes` - Maximum nodes per partition (typically 100-1000)
 ///
 /// # Returns
 /// * `Ok(())` if completed successfully
@@ -176,7 +173,6 @@ fn show_interactive_widget(
                             frame_delta,
                             (frame.area().width, frame.area().height),
                         );
-
                         render_inline(frame, &mut state);
                     })?;
                 }
@@ -306,7 +302,6 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
 
     let inner_area = block.inner(main_layout[0]);
     frame.render_widget(block, main_layout[0]);
-
     draw_gen_graph(frame, inner_area, state);
     draw_controls_help(frame, main_layout[1], state);
 }
@@ -338,6 +333,12 @@ fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState
     // Update viewport bounds for the current area
     state.controller.viewport_state.viewport_bounds = area;
     state.controller.viewport_state.focus();
+
+    // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
+    state.controller.ensure_camera_coverage();
+    if state.controller.rebuild_needed {
+        state.controller.rebuild_viewport_graph();
+    }
 
     // Create the GenGraph widget with current level of detail
     let detail_level = state.controller.get_detail_level();

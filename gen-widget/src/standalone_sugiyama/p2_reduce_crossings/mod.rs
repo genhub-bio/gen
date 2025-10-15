@@ -477,8 +477,7 @@ fn barycenter(
         .map(|n| *positions.get(&n).unwrap())
         .collect::<Vec<usize>>();
 
-    let bary = adjacent.iter().sum::<usize>() as f64 / adjacent.len() as f64;
-    bary
+    adjacent.iter().sum::<usize>() as f64 / adjacent.len() as f64
 }
 
 fn median(

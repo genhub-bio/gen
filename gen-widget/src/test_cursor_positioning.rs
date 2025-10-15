@@ -31,7 +31,7 @@ mod cursor_positioning_tests {
 
         // Update viewport graph to populate it
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph");
 
         // Initialize cursor and get its position
@@ -61,7 +61,7 @@ mod cursor_positioning_tests {
 
         // Rebuild viewport graph after detail change
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Truncated)
+            .rebuild_viewport_graph()
             .expect("Failed to rebuild viewport graph after detail change");
 
         // Check cursor state after detail change
@@ -147,7 +147,7 @@ mod cursor_positioning_tests {
         let viewport = BigRect::from_corners(WorldPos::new(-50, -25), WorldPos::new(50, 25));
 
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph");
 
         controller.enable_cursor();
@@ -181,7 +181,7 @@ mod cursor_positioning_tests {
 
         // Update viewport graph after disperse - this should trigger our assertions!
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph after disperse");
 
         eprintln!("=== TEST PASSED (no assertion triggered) ===");
@@ -204,7 +204,7 @@ mod cursor_positioning_tests {
         let viewport = BigRect::from_corners(WorldPos::new(-50, -25), WorldPos::new(50, 25));
 
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph");
 
         controller.enable_cursor();
@@ -229,7 +229,7 @@ mod cursor_positioning_tests {
 
         // Update viewport graph after disperse
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph after disperse");
 
         // Check that cursor is restored
@@ -289,13 +289,13 @@ mod cursor_positioning_tests {
         let viewport = BigRect::from_corners(WorldPos::new(-50, -25), WorldPos::new(50, 25));
 
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph");
 
         // First disperse to have something to contract
         controller.disperse();
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update after disperse");
 
         controller.initialize_cursor();
@@ -319,7 +319,7 @@ mod cursor_positioning_tests {
 
         // Update viewport graph after contract
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph after contract");
 
         // Check that cursor is restored
@@ -381,7 +381,7 @@ mod cursor_positioning_tests {
         let viewport = BigRect::from_corners(WorldPos::new(-50, -25), WorldPos::new(50, 25));
 
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed to update viewport graph");
 
         controller.enable_cursor();
@@ -412,13 +412,13 @@ mod cursor_positioning_tests {
         eprintln!("\n--- Zoom in (disperse) #1 ---");
         controller.disperse();
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed after disperse #1");
 
         eprintln!("\n--- Zoom in (disperse) #2 ---");
         controller.disperse();
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed after disperse #2");
 
         // At this point, partitions 0 and 1 should NOT be visible/rendered
@@ -433,7 +433,7 @@ mod cursor_positioning_tests {
         eprintln!("\n--- Zoom out (contract) #1 ---");
         controller.contract();
         controller
-            .rebuild_viewport_graph(viewport, VisualDetail::Full)
+            .rebuild_viewport_graph()
             .expect("Failed after contract #1 - THIS IS WHERE THE BUG OCCURS");
 
         eprintln!("\n=== TEST PASSED ===\n");

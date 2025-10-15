@@ -413,29 +413,25 @@ pub fn make_rectilinear(
 
         // Add edges from the layer graph to the combined graph
         for edge_index in layer_graph.edge_indices() {
-            if let Some((source_idx, target_idx)) = layer_graph.edge_endpoints(edge_index) {
-                if let Some(edge_data) = layer_graph.edge_weight(edge_index) {
-                    // Map the source and target to their combined graph node indices
-                    let combined_source_idx = *layer_node_to_combined_idx.get(&source_idx).unwrap();
-                    let combined_target_idx = *layer_node_to_combined_idx.get(&target_idx).unwrap();
+            if let Some((source_idx, target_idx)) = layer_graph.edge_endpoints(edge_index)
+                && let Some(edge_data) = layer_graph.edge_weight(edge_index)
+            {
+                // Map the source and target to their combined graph node indices
+                let combined_source_idx = *layer_node_to_combined_idx.get(&source_idx).unwrap();
+                let combined_target_idx = *layer_node_to_combined_idx.get(&target_idx).unwrap();
 
-                    // Check if edge already exists (it shouldn't due to position deduplication, but let's be safe)
-                    if combined_graph
-                        .find_edge(combined_source_idx, combined_target_idx)
+                // Check if edge already exists (it shouldn't due to position deduplication, but let's be safe)
+                if combined_graph
+                    .find_edge(combined_source_idx, combined_target_idx)
+                    .is_none()
+                    && combined_graph
+                        .find_edge(combined_target_idx, combined_source_idx)
                         .is_none()
-                        && combined_graph
-                            .find_edge(combined_target_idx, combined_source_idx)
-                            .is_none()
-                    {
-                        let layout_edge = LayoutEdge {
-                            bundle: edge_data.bundle.clone(),
-                        };
-                        combined_graph.add_edge(
-                            combined_source_idx,
-                            combined_target_idx,
-                            layout_edge,
-                        );
-                    }
+                {
+                    let layout_edge = LayoutEdge {
+                        bundle: edge_data.bundle.clone(),
+                    };
+                    combined_graph.add_edge(combined_source_idx, combined_target_idx, layout_edge);
                 }
             }
         }
@@ -543,13 +539,13 @@ fn make_bundles(
                     let u = node_path[i];
                     let v = node_path[i + 1];
 
-                    if let Some(edge_idx) = layer_graph.find_edge(u, v) {
-                        if let Some(edge_weight) = layer_graph.edge_weight_mut(edge_idx) {
-                            // Add the original bundle to this edge (avoiding duplicates)
-                            for &label in &original_bundle {
-                                if !edge_weight.bundle.contains(&label) {
-                                    edge_weight.bundle.push(label);
-                                }
+                    if let Some(edge_idx) = layer_graph.find_edge(u, v)
+                        && let Some(edge_weight) = layer_graph.edge_weight_mut(edge_idx)
+                    {
+                        // Add the original bundle to this edge (avoiding duplicates)
+                        for &label in &original_bundle {
+                            if !edge_weight.bundle.contains(&label) {
+                                edge_weight.bundle.push(label);
                             }
                         }
                     }

@@ -243,7 +243,8 @@ pub fn assign_coordinates(
 
     // Compute provisional coordinates, transposed and rounded to the nearest integer.
     // TODO: don't hardcode the horizontal vs vertical orientation, use a config option
-    let coordinates = x_coordinates
+
+    x_coordinates
         .into_iter()
         .map(|(v, x)| {
             (
@@ -253,9 +254,7 @@ pub fn assign_coordinates(
         })
         // if we round() instead of floor() the layout will be off by 1 cell
         .map(|(i, (x, y))| (i, (y.floor() as i64, x.floor() as i64)))
-        .collect::<Vec<(NodeIndex, (i64, i64))>>();
-
-    coordinates
+        .collect::<Vec<(NodeIndex, (i64, i64))>>()
 }
 
 fn slack(graph: &StableDiGraph<Vertex, Edge>, edge: EdgeIndex, minimum_length: i32) -> i32 {

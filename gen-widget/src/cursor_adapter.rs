@@ -28,43 +28,81 @@ where
     for<'b> &'b G::EdgeId: Clone,
     S: NodeSizer<G>,
 {
-    /// Enable cursor functionality and initialize cursor position to the first data node
+    /// Enable cursor rendering and initialize cursor position to the first data node
+    /// TODO: This will be replaced by automatic initialization in the render loop
     pub fn enable_cursor(&mut self) {
-        self.cursor.set_enabled(true);
-        self.initialize_cursor();
+        self.cursor.set_show_cursor(true);
+        self.initialize_cursor_and_camera();
     }
 
-    /// Initialize cursor position to the first data node in the viewport graph
-    pub fn initialize_cursor(&mut self) {
-        // Find the first data node and extract needed data
-        let cursor_data =
-            self.find_first_data_node_in_viewport()
-                .and_then(|(world_pos, node_data)| {
-                    if let NodeRole::Data(domain_idx) = &node_data.role {
-                        self.viewport_state
-                            .world_to_viewport(world_pos)
-                            .map(|viewport_pos| (*domain_idx, viewport_pos))
-                    } else {
-                        None
-                    }
-                });
+    /// Initialize both cursor and camera positions based on the first data node in the anchor partition.
+    ///
+    /// This method couples camera and cursor initialization:
+    /// 1. Finds a data node in the anchor partition's layout
+    /// 2. Positions the camera so the node's left edge appears at a comfortable viewport position (1/4 from left, centered vertically)
+    /// 3. Sets the cursor to track that node at that viewport position
+    ///
+    /// This ensures the cursor is visible and well-positioned when first enabled.
+    pub fn initialize_cursor_and_camera(&mut self) {
+        let detail_level = self.get_detail_level();
+        let anchor_partition = self.partition_controller.get_anchor_partition();
 
-        // Now mutate cursor with extracted data
-        if let Some((domain_idx, viewport_pos)) = cursor_data {
-            // Position cursor at left edge of node (fractional x=0.0, y=0.5 for center)
+        // Get the anchor partition's layout and find the first data node
+        let node_info = self
+            .partition_controller
+            .partition_table
+            .get_layout(anchor_partition, detail_level)
+            .and_then(|layout| {
+                layout.graph.node_indices().find_map(|layout_node_idx| {
+                    layout.graph.node_weight(layout_node_idx).and_then(|node| {
+                        if let NodeRole::Data(domain_idx) = &node.role {
+                            // Convert local position to world position
+                            let world_pos = self
+                                .partition_controller
+                                .partition_table
+                                .local_to_world(node.pos, detail_level);
+                            Some((*domain_idx, world_pos))
+                        } else {
+                            None
+                        }
+                    })
+                })
+            });
+
+        if let Some((domain_idx, node_world_pos)) = node_info {
+            // Calculate desired viewport position for the cursor
+            // Position it 1/4 from the left edge and vertically centered
+            let desired_viewport_x = self.viewport_state.viewport_bounds.width / 4;
+            let desired_viewport_y = self.viewport_state.viewport_bounds.height / 2;
+            let desired_viewport_pos = ViewportPos::new(desired_viewport_x, desired_viewport_y);
+
+            // Update camera so the node's left edge appears at the desired viewport position
+            self.update_camera(node_world_pos, desired_viewport_pos);
+
+            // Set cursor to track this node at its left edge (fractional x=0.0, y=0.5 for center)
             self.cursor.set_node(domain_idx, (0.0, 0.5));
-            self.cursor.set_viewport_pos(viewport_pos);
+
+            // Set cursor viewport position to where we positioned it via the camera
+            self.cursor.set_viewport_pos(desired_viewport_pos);
 
             trace!(
-                "Initialized cursor at node {:?}, viewport ({}, {})",
-                domain_idx, viewport_pos.x, viewport_pos.y
+                "Initialized cursor and camera: node {:?}, world ({}, {}), viewport ({}, {})",
+                domain_idx,
+                node_world_pos.x,
+                node_world_pos.y,
+                desired_viewport_pos.x,
+                desired_viewport_pos.y
+            );
+        } else {
+            trace!(
+                "No data nodes found in anchor partition layout for cursor/camera initialization"
             );
         }
     }
 
     /// Move cursor horizontally (between layers/ranks)
     pub fn move_cursor_horizontal(&mut self, direction: i64) {
-        if !self.cursor.is_enabled() || self.cursor.get_node_idx().is_none() {
+        if self.cursor.get_node_idx().is_none() {
             return;
         }
 
@@ -84,7 +122,7 @@ where
 
     /// Move cursor vertically (within same layer/rank)
     pub fn move_cursor_vertical(&mut self, direction: i64) {
-        if !self.cursor.is_enabled() || self.cursor.get_node_idx().is_none() {
+        if self.cursor.get_node_idx().is_none() {
             return;
         }
 
@@ -104,10 +142,6 @@ where
 
     /// Helper to ensure the cursor is visible in the viewport by adjusting camera if needed
     fn ensure_cursor_visible(&mut self) {
-        if !self.cursor.is_enabled() {
-            return;
-        }
-
         // Get cursor's viewport position
         let cursor_viewport = self.cursor.get_viewport_pos();
 
@@ -129,31 +163,9 @@ where
         }
     }
 
-    /// Find the first data node in the viewport graph (leftmost, then topmost)
-    fn find_first_data_node_in_viewport(&self) -> Option<(WorldPos, &LayoutNode)> {
-        let mut best_candidate: Option<(WorldPos, &LayoutNode)> = None;
-
-        for (world_pos, node_data) in &self.viewport_graph.nodes {
-            if let NodeRole::Data(_) = &node_data.role {
-                if let Some((best_pos, _)) = best_candidate {
-                    // Prefer nodes further left, then higher up
-                    if world_pos.x < best_pos.x
-                        || (world_pos.x == best_pos.x && world_pos.y > best_pos.y)
-                    {
-                        best_candidate = Some((*world_pos, node_data));
-                    }
-                } else {
-                    best_candidate = Some((*world_pos, node_data));
-                }
-            }
-        }
-
-        best_candidate
-    }
-
-    /// Get cursor's current viewport position for rendering
+    /// Get cursor's current viewport position for rendering (if visible)
     pub fn get_cursor_viewport_pos(&self) -> Option<ViewportPos> {
-        if self.cursor.is_enabled() {
+        if self.cursor.show_cursor() {
             Some(self.cursor.get_viewport_pos())
         } else {
             None
@@ -170,8 +182,13 @@ where
         self.cursor.set_glyph(glyph);
     }
 
-    /// Check if cursor is enabled
+    /// Check if cursor should be shown (visible)
+    pub fn is_cursor_shown(&self) -> bool {
+        self.cursor.show_cursor()
+    }
+
+    /// Check if cursor is enabled (legacy - cursor is always functionally enabled)
     pub fn is_cursor_enabled(&self) -> bool {
-        self.cursor.is_enabled()
+        true
     }
 }

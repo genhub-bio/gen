@@ -63,10 +63,10 @@ fn original(graph: &mut StableDiGraph<Vertex, Edge>, minimum_length: i32) {
 
 fn leave_edge(graph: &StableDiGraph<Vertex, Edge>) -> Option<EdgeIndex> {
     for edge in graph.edge_indices() {
-        if let Some(cut_value) = graph[edge].cut_value {
-            if cut_value < 0 {
-                return Some(edge);
-            }
+        if let Some(cut_value) = graph[edge].cut_value
+            && cut_value < 0
+        {
+            return Some(edge);
         }
     }
     None

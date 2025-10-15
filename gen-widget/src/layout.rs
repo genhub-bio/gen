@@ -266,17 +266,17 @@ impl PartitionLayout {
         // Debug: Check for duplicate domain nodes in the layout graph
         let mut domain_node_counts = std::collections::HashMap::new();
         for node_idx in graph.node_indices() {
-            if let Some(node_data) = graph.node_weight(node_idx) {
-                if let NodeRole::Data(domain_idx) = &node_data.role {
-                    *domain_node_counts.entry(*domain_idx).or_insert(0) += 1;
-                    log::debug!(
-                        "build_spatial_index: found domain node {:?} at layout_pos({}, {}) layout_idx={:?}",
-                        domain_idx,
-                        node_data.pos.x,
-                        node_data.pos.y,
-                        node_idx
-                    );
-                }
+            if let Some(node_data) = graph.node_weight(node_idx)
+                && let NodeRole::Data(domain_idx) = &node_data.role
+            {
+                *domain_node_counts.entry(*domain_idx).or_insert(0) += 1;
+                log::debug!(
+                    "build_spatial_index: found domain node {:?} at layout_pos({}, {}) layout_idx={:?}",
+                    domain_idx,
+                    node_data.pos.x,
+                    node_data.pos.y,
+                    node_idx
+                );
             }
         }
 
@@ -480,10 +480,10 @@ impl std::fmt::Debug for PartitionLayout {
         // Add edge bundle information
         let mut edge_bundles = Vec::new();
         for edge_idx in self.graph.edge_indices() {
-            if let Some(edge) = self.graph.edge_weight(edge_idx) {
-                if let Some((source, target)) = self.graph.edge_endpoints(edge_idx) {
-                    edge_bundles.push((source, target, &edge.bundle));
-                }
+            if let Some(edge) = self.graph.edge_weight(edge_idx)
+                && let Some((source, target)) = self.graph.edge_endpoints(edge_idx)
+            {
+                edge_bundles.push((source, target, &edge.bundle));
             }
         }
         debug_struct.field("edge_bundles", &edge_bundles);
@@ -735,8 +735,7 @@ fn mean_y_for_x(
         .map(|node| node.pos.y)
         .collect::<Vec<i64>>();
 
-    let mean_y = (layer_ys.iter().sum::<i64>() as f64 / layer_ys.len() as f64).round() as i64;
-    mean_y
+    (layer_ys.iter().sum::<i64>() as f64 / layer_ys.len() as f64).round() as i64
 }
 
 /// Take the contents of a layout graph and translate the node coordinates

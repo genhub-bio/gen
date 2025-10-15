@@ -172,15 +172,8 @@ where
             .ensure_partition_loaded(partition_idx)
     }
 
-    /// Detect camera motion and set rebuild flag if viewport graph needs updating
-    /// This checks camera movement and viewport bounds changes to determine if a rebuild is needed
-    pub fn detect_motion(&mut self) {
-        // Always rebuild if the viewport graph is empty (handles initialization)
-        if self.viewport_graph.graph.node_count() == 0 {
-            self.rebuild_needed = true;
-            return;
-        }
-
+    /// Check camera movement and viewport bounds changes to determine if a rebuild is needed
+    pub fn detect_motion(&self) -> bool {
         let threshold_x = self.viewport_state.viewport_bounds.width as i64 / 2;
         let threshold_y = self.viewport_state.viewport_bounds.height as i64 / 2;
 
@@ -188,11 +181,12 @@ where
         let movement_x = (current_camera.x - self.last_rebuild_camera_center.x).abs();
         let movement_y = (current_camera.y - self.last_rebuild_camera_center.y).abs();
 
-        if movement_x > threshold_x || movement_y > threshold_y {
-            self.rebuild_needed = true;
-        }
+        movement_x > threshold_x || movement_y > threshold_y
     }
 
+    /// TODO: change this so there's less "actively happening" when the NodeSizer/NodeRenderer
+    /// are swapped out or disperse/contract are triggered. This could all live withing the
+    /// ViewportGraph constructor.
     /// Change the current level of detail and sync with partition controller
     pub fn set_detail_level(&mut self, detail_level: VisualDetail) {
         // Only proceed if detail level is actually changing
@@ -206,11 +200,7 @@ where
         );
 
         // Get OLD cursor world position before layout change
-        let w1 = if self.cursor.is_enabled() {
-            self.cursor.to_world_pos(&self.viewport_graph)
-        } else {
-            None
-        };
+        let w1 = self.cursor.to_world_pos(&self.viewport_graph);
 
         // Change detail level
         self.detail_level = detail_level;
@@ -221,45 +211,45 @@ where
         self.viewport_state.camera_target = WorldPos::ZERO;
         self.viewport_state.camera_anim = None;
 
+        // TODO: maintain one cache keyed on partition idx and detail level (renamed to layoutkey
+        // for example)
         // Clear all layouts to force recalculation with new detail level
         self.partition_controller.clear_all_layouts();
         self.loaded_partitions.clear();
 
-        // Reload anchor partition (usually 0) for new coordinate system
-        if let Err(e) = self.partition_controller.set_anchor_partition(0) {
+        // TODO: changing the anchor shouldn't have so many side effects
+        // Reload anchor partition for new coordinate system
+        let anchor = self.partition_controller.get_anchor_partition();
+        if let Err(e) = self.set_anchor_partition(anchor) {
             eprintln!(
                 "Warning: Failed to set anchor partition during detail level change: {}",
                 e
             );
         }
 
-        // Load partitions for current camera view
-        if let Err(e) = self.ensure_camera_coverage() {
-            eprintln!(
-                "Error ensuring camera coverage during detail level change: {}",
-                e
-            );
-        }
-
-        // Rebuild viewport graph with new detail level
-        let camera_rect = self.viewport_state.camera_rect();
-        if let Err(e) = self.rebuild_viewport_graph(camera_rect, detail_level) {
+        // Establishing a coordinate frame so we can translated coordinates to partitions:
+        // 1) the cursor is associated with a node
+        // 2) each node is linked to one partition => cursor partition
+        // 3) load every partition from the anchor to the cursor partition
+        // 4) load outwards from the cursor partition until the camera is covered
+        // Rebuild viewport graph (this loads partitions automatically)
+        if let Err(e) = self.rebuild_viewport_graph() {
             eprintln!("Error rebuilding viewport graph: {}", e);
         }
 
         // Compute NEW cursor world position from updated layout
-        if let Some(old_world) = w1 {
-            if let Some(new_world) = self.cursor.to_world_pos(&self.viewport_graph) {
-                // Calculate camera delta and adjust
-                let delta = new_world - old_world;
-                self.viewport_state.camera_current = self.viewport_state.camera_current + delta;
-                self.viewport_state.camera_target = self.viewport_state.camera_target + delta;
+        if let Some(old_world) = w1
+            && let Some(new_world) = self.cursor.to_world_pos(&self.viewport_graph)
+        {
+            // Calculate camera delta and adjust
+            let delta = new_world - old_world;
+            self.viewport_state.camera_current = self.viewport_state.camera_current + delta;
+            self.viewport_state.camera_target = self.viewport_state.camera_target + delta;
 
-                trace!(
-                    "set_detail_level: adjusted camera by delta ({}, {}) to maintain cursor position",
-                    delta.x, delta.y
-                );
-            }
+            trace!(
+                "set_detail_level: adjusted camera by delta ({}, {}) to maintain cursor position",
+                delta.x, delta.y
+            );
         }
 
         trace!("set_detail_level: complete");
@@ -311,11 +301,13 @@ where
         let buffer_factor = 2.0;
         let camera_rect = self.viewport_state.camera_rect().resize(buffer_factor);
         log::trace!(
-            "ensure_camera_coverage: loading partitions for rect coordinates: x: {}-{}, y: {}-{}",
+            "ensure_camera_coverage: loading partitions for rect of {}x{} (coord x: {} - {}, y: {} - {})",
+            camera_rect.width(),
+            camera_rect.height(),
             camera_rect.left(),
             camera_rect.right(),
             camera_rect.bottom(),
-            camera_rect.top()
+            camera_rect.top(),
         );
         self.partition_controller
             .load_partitions_for_rect(camera_rect)
@@ -337,17 +329,16 @@ where
             {
                 // Search for the domain node in this partition's layout
                 for layout_node_idx in layout.graph.node_indices() {
-                    if let Some(layout_node) = layout.graph.node_weight(layout_node_idx) {
-                        if let NodeRole::Data(layout_domain_idx) = &layout_node.role {
-                            if *layout_domain_idx == domain_idx {
-                                // Found the node! Convert its local position to world coordinates
-                                return Some(
-                                    self.partition_controller
-                                        .partition_table
-                                        .local_to_world(layout_node.pos, detail_level),
-                                );
-                            }
-                        }
+                    if let Some(layout_node) = layout.graph.node_weight(layout_node_idx)
+                        && let NodeRole::Data(layout_domain_idx) = &layout_node.role
+                        && *layout_domain_idx == domain_idx
+                    {
+                        // Found the node! Convert its local position to world coordinates
+                        return Some(
+                            self.partition_controller
+                                .partition_table
+                                .local_to_world(layout_node.pos, detail_level),
+                        );
                     }
                 }
             }
@@ -395,11 +386,7 @@ where
         trace!("disperse: starting");
 
         // Get OLD cursor world position before layout change
-        let w1 = if self.cursor.is_enabled() {
-            self.cursor.to_world_pos(&self.viewport_graph)
-        } else {
-            None
-        };
+        let w1 = self.cursor.to_world_pos(&self.viewport_graph);
 
         // Look up which partition contains the tracked node BEFORE clearing layouts
         let tracked_node_partition = if let Some(node_idx) = self.cursor.get_node_idx() {
@@ -441,29 +428,23 @@ where
         self.viewport_state.camera_target = WorldPos::ZERO;
         self.viewport_state.camera_anim = None;
 
-        // Load partitions needed for current camera view
-        if let Err(e) = self.ensure_camera_coverage() {
-            eprintln!("Error ensuring camera coverage during disperse: {}", e);
-        }
-
-        // Rebuild viewport graph
-        let camera_rect = self.viewport_state.camera_rect();
-        if let Err(e) = self.rebuild_viewport_graph(camera_rect, self.detail_level) {
+        // Rebuild viewport graph (this loads partitions automatically)
+        if let Err(e) = self.rebuild_viewport_graph() {
             eprintln!("Error rebuilding viewport graph: {}", e);
         }
 
         // Compute NEW cursor world position and adjust camera by delta
-        if let Some(old_world) = w1 {
-            if let Some(new_world) = self.cursor.to_world_pos(&self.viewport_graph) {
-                let delta = new_world - old_world;
-                self.viewport_state.camera_current = self.viewport_state.camera_current + delta;
-                self.viewport_state.camera_target = self.viewport_state.camera_target + delta;
+        if let Some(old_world) = w1
+            && let Some(new_world) = self.cursor.to_world_pos(&self.viewport_graph)
+        {
+            let delta = new_world - old_world;
+            self.viewport_state.camera_current = self.viewport_state.camera_current + delta;
+            self.viewport_state.camera_target = self.viewport_state.camera_target + delta;
 
-                trace!(
-                    "disperse: adjusted camera by delta ({}, {}) to maintain cursor position",
-                    delta.x, delta.y
-                );
-            }
+            trace!(
+                "disperse: adjusted camera by delta ({}, {}) to maintain cursor position",
+                delta.x, delta.y
+            );
         }
 
         trace!("disperse: complete");
@@ -479,11 +460,7 @@ where
         trace!("contract: starting");
 
         // Get OLD cursor world position before layout change
-        let w1 = if self.cursor.is_enabled() {
-            self.cursor.to_world_pos(&self.viewport_graph)
-        } else {
-            None
-        };
+        let w1 = self.cursor.to_world_pos(&self.viewport_graph);
 
         // Look up which partition contains the tracked node BEFORE clearing layouts
         let tracked_node_partition = if let Some(node_idx) = self.cursor.get_node_idx() {
@@ -523,29 +500,23 @@ where
         self.viewport_state.camera_target = WorldPos::ZERO;
         self.viewport_state.camera_anim = None;
 
-        // Load partitions needed for current camera view
-        if let Err(e) = self.ensure_camera_coverage() {
-            eprintln!("Error ensuring camera coverage during contract: {}", e);
-        }
-
-        // Rebuild viewport graph
-        let camera_rect = self.viewport_state.camera_rect();
-        if let Err(e) = self.rebuild_viewport_graph(camera_rect, self.detail_level) {
+        // Rebuild viewport graph (this loads partitions automatically)
+        if let Err(e) = self.rebuild_viewport_graph() {
             eprintln!("Error rebuilding viewport graph: {}", e);
         }
 
         // Compute NEW cursor world position and adjust camera by delta
-        if let Some(old_world) = w1 {
-            if let Some(new_world) = self.cursor.to_world_pos(&self.viewport_graph) {
-                let delta = new_world - old_world;
-                self.viewport_state.camera_current = self.viewport_state.camera_current + delta;
-                self.viewport_state.camera_target = self.viewport_state.camera_target + delta;
+        if let Some(old_world) = w1
+            && let Some(new_world) = self.cursor.to_world_pos(&self.viewport_graph)
+        {
+            let delta = new_world - old_world;
+            self.viewport_state.camera_current = self.viewport_state.camera_current + delta;
+            self.viewport_state.camera_target = self.viewport_state.camera_target + delta;
 
-                trace!(
-                    "contract: adjusted camera by delta ({}, {}) to maintain cursor position",
-                    delta.x, delta.y
-                );
-            }
+            trace!(
+                "contract: adjusted camera by delta ({}, {}) to maintain cursor position",
+                delta.x, delta.y
+            );
         }
 
         trace!("contract: complete");
@@ -554,6 +525,66 @@ where
     /// Get current vertex spacing from partition controller
     fn get_current_vertex_spacing(&self) -> f64 {
         self.partition_controller.get_vertex_spacing()
+    }
+
+    /// Initialize cursor to viewport center, associated with the node closest to origin in anchor partition
+    /// This should be called once when the controller is first created or when cursor needs reset
+    pub fn initialize_cursor(&mut self) {
+        // Set cursor viewport position to exact center of viewport
+        let viewport_center = ViewportPos::new(
+            self.viewport_state.viewport_bounds.width / 2,
+            self.viewport_state.viewport_bounds.height / 2,
+        );
+        self.cursor.set_viewport_pos(viewport_center);
+
+        // Find the node closest to partition origin (0, 0) and associate cursor with it
+        if let Some(node_idx) = self.find_node_closest_to_origin() {
+            // Set cursor to track this node at fractional (0.0, 0.5) = left edge, vertical middle
+            self.cursor.set_node(node_idx, (0.0, 0.5));
+            trace!(
+                "Cursor initialized: viewport={:?}, node={:?}, fractional=(0.0, 0.5)",
+                viewport_center,
+                node_idx
+            );
+        } else {
+            trace!("Warning: No data nodes found in anchor partition for cursor initialization");
+        }
+    }
+
+    /// Find the data node closest to the origin (0, 0) in local coordinates of the anchor partition
+    /// Since anchor partition has localpos = worldpos, this finds the node closest to world origin
+    /// Returns node_idx if found
+    fn find_node_closest_to_origin(&self) -> Option<NodeIndex> {
+        let detail_level = self.get_detail_level();
+        let anchor_partition = self.partition_controller.get_anchor_partition();
+
+        // Get the anchor partition's layout
+        let layout = self
+            .partition_controller
+            .partition_table
+            .get_layout(anchor_partition, detail_level)?;
+
+        // Find all data nodes and their distances from local origin (0, 0)
+        let mut candidates: Vec<(NodeIndex, i64)> = layout
+            .graph
+            .node_indices()
+            .filter_map(|layout_node_idx| {
+                let node = layout.graph.node_weight(layout_node_idx)?;
+                if let NodeRole::Data(domain_idx) = &node.role {
+                    // Calculate distance from local origin (0, 0) using Manhattan distance
+                    let distance = node.pos.x.abs() + node.pos.y.abs();
+                    Some((*domain_idx, distance))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by distance (closest first)
+        candidates.sort_by_key(|(_, dist)| *dist);
+
+        // Return the closest node
+        candidates.first().map(|(idx, _)| *idx)
     }
 
     /// Handle keyboard events for graph navigation and control
@@ -625,45 +656,45 @@ where
     }
 
     /// Rebuild the viewport graph to show nodes and edges visible in the current camera view.
-    /// This is a simple graph builder - all camera and cursor positioning must be done beforehand.
     ///
-    /// # Design
-    /// This function has a single responsibility: build the viewport graph from the current
-    /// camera view. It does NOT handle:
-    /// - Camera positioning (use update_camera() before calling)
-    /// - Cursor restoration (use preserve_cursor_during_layout_change() before calling)
-    /// - Detail level changes (caller should handle)
+    /// Uses the controller's current `viewport_state.camera_rect()` and `detail_level` to determine
+    /// what should be visible. This function loads any necessary partitions automatically.
     ///
-    /// # Parameters
-    /// - viewport: The world-space rectangle to build the graph for
-    /// - detail_level: The visual detail level to use
-    pub fn rebuild_viewport_graph(
-        &mut self,
-        viewport: crate::geometry::BigRect<i64>,
-        detail_level: VisualDetail,
-    ) -> Result<(), String> {
+    /// All camera and cursor positioning must be done beforehand.
+    pub fn rebuild_viewport_graph(&mut self) -> Result<(), String> {
+        // Get viewport and detail level from controller state
+        let viewport = self.viewport_state.camera_rect();
+        let detail_level = self.detail_level;
+
         trace!(
             "rebuild_viewport_graph: viewport rect x:{}-{}, y:{}-{}, detail:{:?}",
             viewport.min.x, viewport.max.x, viewport.min.y, viewport.max.y, detail_level
         );
 
-        // Sync detail level if needed
-        if self.detail_level != detail_level {
-            self.detail_level = detail_level;
-            self.partition_controller.set_detail_level(detail_level);
-        }
-
-        // Build viewport graph with a buffer around the requested rect
-        // Buffer factor of 2.0 reduces rebuild frequency during small camera movements
+        // Build viewport graph with a buffer around the camera rect
+        // so we don't have to rebuild on small camera movements
         let covered_rect = viewport.resize(2.0);
 
+        // Load partitions and use the returned indices to build the viewport graph
+        let active_partitions = self
+            .partition_controller
+            .load_partitions_for_rect(covered_rect)?;
+
         trace!(
-            "rebuild_viewport_graph: building with covered rect x:{}-{}, y:{}-{}",
-            covered_rect.min.x, covered_rect.max.x, covered_rect.min.y, covered_rect.max.y
+            "rebuild_viewport_graph: building with covered rect x:{}-{}, y:{}-{}, active_partitions={:?}",
+            covered_rect.min.x,
+            covered_rect.max.x,
+            covered_rect.min.y,
+            covered_rect.max.y,
+            active_partitions
         );
 
-        self.viewport_graph =
-            ViewportGraph::new(covered_rect, &mut self.partition_controller, detail_level)?;
+        self.viewport_graph = ViewportGraph::new(
+            covered_rect,
+            &self.partition_controller.partition_table,
+            &active_partitions,
+            detail_level,
+        );
 
         // Update rebuild tracking
         self.last_rebuild_camera_center = self.viewport_state.camera_current;
@@ -785,64 +816,6 @@ mod tests {
         // Test scroll without focus (should be ignored)
         state.handle_mouse_scroll(5, 5, Duration::from_millis(100));
         assert!(state.camera_anim.is_none());
-    }
-
-    #[test]
-    fn test_world_bounds_clamping() {
-        let mut state = ViewportState::new();
-        state.world_bounds = Some(WorldRect::from_corners(
-            WorldPos::new(-10, -10),
-            WorldPos::new(10, 10),
-        ));
-
-        // Try to set cursor outside bounds
-        state.set_cursor_target(WorldPos::new(20, 20), Duration::from_millis(100));
-
-        // Should be clamped to (10, 10)
-        assert_eq!(state.cursor.target, WorldPos::new(10, 10));
-    }
-
-    #[test]
-    fn test_panning_behavior() {
-        let mut state = ViewportState::new();
-        // Set zone fractions to enable multizone logic
-        state.dead_zone_fraction = (0.2, 0.2);
-        state.soft_zone_fraction = (0.4, 0.4);
-        state.focus(); // Enable focus to allow scrolling
-        let viewport_size = (10_u16, 10_u16);
-
-        // Initial state: not panning
-        assert!(!state.panning);
-
-        // Scroll should enable panning mode
-        state.handle_mouse_scroll(5, 5, Duration::from_millis(100));
-        assert!(state.panning);
-        assert!(state.camera_anim.is_some());
-
-        // While panning, multizone logic should be disabled
-        // Place cursor in what would normally be the soft zone
-        state.cursor.current = WorldPos::new(3, 0);
-        let _camera_before = state.camera_current;
-
-        // Update should not trigger multizone camera movement because panning is true
-        state.update(Duration::from_millis(16), viewport_size);
-
-        // Camera should only move due to the scroll animation, not multizone logic
-        // (The camera animation from scrolling should be active)
-        assert!(state.camera_anim.is_some()); // Still animating from scroll
-
-        // Clicking should disable panning
-        state.stop_panning();
-        assert!(!state.panning);
-
-        // Now multizone logic should work again when camera animation finishes
-        state.camera_anim = None; // Simulate animation completion
-        let camera_before_multizone = state.camera_current;
-        state.update(Duration::from_millis(16), viewport_size);
-
-        // Since cursor is positioned outside dead zone, camera should move
-        // (This tests that multizone logic is reactivated after panning ends)
-        assert!(state.camera_anim.is_some() || state.camera_current != camera_before_multizone);
     }
 
     #[test]

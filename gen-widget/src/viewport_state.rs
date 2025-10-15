@@ -299,20 +299,21 @@ impl<'a> WorldBuffer<'a> {
     /// Returns true if the character was written (within viewport bounds), false otherwise.
     pub fn set_char_styled(&mut self, world_pos: WorldPos, ch: char, style: Style) -> bool {
         let viewport_size = self.get_viewport_size();
-        if let Some(viewport_pos) = self.viewport_state.world_to_viewport(world_pos) {
-            if viewport_pos.x < viewport_size.0 && viewport_pos.y < viewport_size.1 {
-                let viewport_area = self.viewport_area();
-                let buffer_x = viewport_area.x + viewport_pos.x;
-                // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
-                let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
+        if let Some(viewport_pos) = self.viewport_state.world_to_viewport(world_pos)
+            && viewport_pos.x < viewport_size.0
+            && viewport_pos.y < viewport_size.1
+        {
+            let viewport_area = self.viewport_area();
+            let buffer_x = viewport_area.x + viewport_pos.x;
+            // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
+            let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
 
-                // Ensure we're within the buffer bounds
-                if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
-                    let cell = self.buffer.cell_mut((buffer_x, buffer_y)).unwrap();
-                    cell.set_char(ch);
-                    cell.set_style(style);
-                    return true;
-                }
+            // Ensure we're within the buffer bounds
+            if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
+                let cell = self.buffer.cell_mut((buffer_x, buffer_y)).unwrap();
+                cell.set_char(ch);
+                cell.set_style(style);
+                return true;
             }
         }
         false
@@ -487,10 +488,10 @@ impl<'a> WorldBuffer<'a> {
         for y in world_rect.min.y..=world_rect.max.y {
             for x in world_rect.min.x..=world_rect.max.x {
                 let world_pos = WorldPos::new(x, y);
-                if let Some(ch) = self.get_char(world_pos) {
-                    if ch != ' ' {
-                        return true;
-                    }
+                if let Some(ch) = self.get_char(world_pos)
+                    && ch != ' '
+                {
+                    return true;
                 }
             }
         }
@@ -504,10 +505,10 @@ impl<'a> WorldBuffer<'a> {
         for y in world_rect.min.y..=world_rect.max.y {
             for x in world_rect.min.x..=world_rect.max.x {
                 let world_pos = WorldPos::new(x, y);
-                if let Some(ch) = self.get_char(world_pos) {
-                    if ch != ' ' {
-                        count += 1;
-                    }
+                if let Some(ch) = self.get_char(world_pos)
+                    && ch != ' '
+                {
+                    count += 1;
                 }
             }
         }
@@ -533,18 +534,19 @@ impl<'a> WorldBuffer<'a> {
     /// Returns Some(char) if the position is within viewport bounds, None otherwise.
     pub fn get_char(&self, world_pos: WorldPos) -> Option<char> {
         let viewport_size = self.get_viewport_size();
-        if let Some(viewport_pos) = self.viewport_state.world_to_viewport(world_pos) {
-            if viewport_pos.x < viewport_size.0 && viewport_pos.y < viewport_size.1 {
-                let viewport_area = self.viewport_area();
-                let buffer_x = viewport_area.x + viewport_pos.x;
-                // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
-                let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
+        if let Some(viewport_pos) = self.viewport_state.world_to_viewport(world_pos)
+            && viewport_pos.x < viewport_size.0
+            && viewport_pos.y < viewport_size.1
+        {
+            let viewport_area = self.viewport_area();
+            let buffer_x = viewport_area.x + viewport_pos.x;
+            // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
+            let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
 
-                // Ensure we're within the buffer bounds
-                if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
-                    let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
-                    return Some(cell.symbol().chars().next().unwrap_or(' '));
-                }
+            // Ensure we're within the buffer bounds
+            if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
+                let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
+                return Some(cell.symbol().chars().next().unwrap_or(' '));
             }
         }
         None
@@ -554,19 +556,20 @@ impl<'a> WorldBuffer<'a> {
     /// Returns Some((char, Style)) if the position is within viewport bounds, None otherwise.
     pub fn get_char_styled(&self, world_pos: WorldPos) -> Option<(char, Style)> {
         let viewport_size = self.get_viewport_size();
-        if let Some(viewport_pos) = self.world_to_viewport(world_pos) {
-            if viewport_pos.x < viewport_size.0 && viewport_pos.y < viewport_size.1 {
-                let viewport_area = self.viewport_area();
-                let buffer_x = viewport_area.x + viewport_pos.x;
-                // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
-                let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
+        if let Some(viewport_pos) = self.world_to_viewport(world_pos)
+            && viewport_pos.x < viewport_size.0
+            && viewport_pos.y < viewport_size.1
+        {
+            let viewport_area = self.viewport_area();
+            let buffer_x = viewport_area.x + viewport_pos.x;
+            // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
+            let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
 
-                // Ensure we're within the buffer bounds
-                if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
-                    let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
-                    let ch = cell.symbol().chars().next().unwrap_or(' ');
-                    return Some((ch, cell.style()));
-                }
+            // Ensure we're within the buffer bounds
+            if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
+                let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
+                let ch = cell.symbol().chars().next().unwrap_or(' ');
+                return Some((ch, cell.style()));
             }
         }
         None

@@ -41,14 +41,11 @@ pub struct ViewportCursor {
     /// TODO: Replace with UQ0.64 fixed-point for precision on very large nodes
     fractional_pos: (f64, f64),
 
-    /// Whether cursor is enabled
-    enabled: bool,
+    /// Whether cursor should be rendered (does not affect cursor functionality)
+    show_cursor: bool,
 
     /// Character to render for cursor
     glyph: char,
-
-    /// Optional animation for smooth cursor jumps (in world coordinates)
-    anim: Option<Animation>,
 }
 
 impl Default for ViewportCursor {
@@ -63,9 +60,8 @@ impl ViewportCursor {
             viewport_pos: ViewportPos::ZERO,
             node_idx: None,
             fractional_pos: (0.0, 0.0),
-            enabled: false,
+            show_cursor: false,
             glyph: '█',
-            anim: None,
         }
     }
 
@@ -87,10 +83,10 @@ impl ViewportCursor {
         let node_idx = self.node_idx?;
 
         // Look up node's center position in world coordinates
-        let &node_center = viewport_graph.domain_to_world.get(&node_idx)?;
+        let &node_center = viewport_graph.node_positions.get(&node_idx)?;
 
         // Get node data (including size)
-        let node_data = viewport_graph.nodes.get(&node_center)?;
+        let node_data = viewport_graph.node_data_by_pos.get(&node_center)?;
 
         let (width, height) = node_data.size;
 
@@ -140,12 +136,12 @@ impl ViewportCursor {
         let node_idx = self.node_idx.ok_or("No node associated with cursor")?;
 
         let &node_center = viewport_graph
-            .domain_to_world
+            .node_positions
             .get(&node_idx)
             .ok_or("Node not found in viewport graph")?;
 
         let node_data = viewport_graph
-            .nodes
+            .node_data_by_pos
             .get(&node_center)
             .ok_or("Node data not found")?;
 
@@ -201,19 +197,14 @@ impl ViewportCursor {
         self.fractional_pos
     }
 
-    /// Check if cursor is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
+    /// Check if cursor should be shown (rendered)
+    pub fn show_cursor(&self) -> bool {
+        self.show_cursor
     }
 
-    /// Enable cursor
-    pub fn enable(&mut self) {
-        self.enabled = true;
-    }
-
-    /// Disable cursor
-    pub fn disable(&mut self) {
-        self.enabled = false;
+    /// Show cursor (enable rendering)
+    pub fn set_show_cursor(&mut self, show: bool) {
+        self.show_cursor = show;
     }
 
     /// Get cursor glyph
@@ -243,58 +234,48 @@ impl ViewportCursor {
         self.glyph()
     }
 
-    /// Set enabled state
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
 
-    // ==================== Animation Methods ====================
+    // ==================== Synchronization Methods ====================
 
-    /// Start a smooth animation from current position to target world position
-    pub fn animate_to(&mut self, target_world: WorldPos, duration: Duration) {
-        if let Some(current_world) = self.to_world_pos(&ViewportGraph::empty()) {
-            self.anim = Some(Animation::new(
-                current_world,
-                target_world,
-                duration,
-                tachyonfx::Interpolation::CubicOut,
-            ));
-        }
-    }
-
-    /// Update cursor animation and synchronize viewport position
+    /// Update viewport position from cursor's current world position (derived from node tracking).
+    /// This is the primary synchronization method - call this after camera movements to keep
+    /// viewport coordinates aligned with the cursor's tracked node position.
     ///
-    /// This method:
-    /// 1. Advances the animation in world coordinates
-    /// 2. Converts new world position back to fractional position within node
-    /// 3. Viewport position is NOT updated here - it gets updated by the caller
-    ///    based on camera movement and world-to-viewport conversion
-    pub fn update_animation(
+    /// # Parameters
+    /// - `viewport_graph`: Graph for deriving world position from node tracking
+    /// - `camera_rect`: The camera's visible region in world coordinates
+    ///
+    /// # Returns
+    /// - `Ok(())` if synchronization succeeded
+    /// - `Err(String)` if cursor has no valid world position (e.g., no node tracked)
+    pub fn update(
         &mut self,
-        delta: Duration,
-        viewport_graph: &ViewportGraph,
-    ) -> Option<WorldPos> {
-        // Extract animation state to avoid borrowing issues
-        let mut anim = self.anim.take()?;
+        viewport_graph: &crate::viewport_graph::ViewportGraph,
+        camera_rect: crate::geometry::BigRect<i64>,
+    ) -> Result<(), String> {
+        let world_pos = self
+            .to_world_pos(viewport_graph)
+            .ok_or("Cannot derive world position - no node tracked")?;
 
-        let new_world_pos = anim.update(delta);
-
-        // Update fractional position to match the new world position
-        if self.node_idx.is_some() {
-            let _ = self.update_fractional_from_world(new_world_pos, viewport_graph);
-        }
-
-        // Restore animation if not complete
-        if !anim.is_complete() {
-            self.anim = Some(anim);
-        }
-
-        Some(new_world_pos)
+        self.update_from_worldpos(world_pos, camera_rect);
+        Ok(())
     }
 
-    /// Check if animation is currently running
-    pub fn is_animating(&self) -> bool {
-        self.anim.is_some()
+    /// Update viewport position based on an explicit world position and camera rect.
+    /// Use this when you have a specific world position to synchronize to.
+    ///
+    /// # Parameters
+    /// - `world_pos`: The world position to synchronize to
+    /// - `camera_rect`: The camera's visible region in world coordinates
+    pub fn update_from_worldpos(
+        &mut self,
+        world_pos: WorldPos,
+        camera_rect: crate::geometry::BigRect<i64>,
+    ) {
+        // Convert world position to viewport coordinates: viewport = world - camera_origin
+        let viewport_x = (world_pos.x - camera_rect.min.x) as u16;
+        let viewport_y = (world_pos.y - camera_rect.min.y) as u16;
+        self.viewport_pos = crate::geometry::ViewportPos::new(viewport_x, viewport_y);
     }
 
     // ==================== Navigation Methods ====================
@@ -302,10 +283,11 @@ impl ViewportCursor {
     /// Move cursor horizontally within current node or to adjacent node
     ///
     /// # Algorithm
-    /// 1. Calculate new fractional position (fractional_x += direction / width)
-    /// 2. If still in bounds [0.0, 1.0], update fractional and return
-    /// 3. If out of bounds, find connected node in that direction
-    /// 4. Jump to connected node at appropriate edge
+    /// 1. Get current world position
+    /// 2. Calculate new world position (current + direction)
+    /// 3. If still within node bounds, update fractional from world and return
+    /// 4. If out of bounds, find connected node in that direction
+    /// 5. Jump to connected node at appropriate edge
     pub fn move_horizontal(
         &mut self,
         direction: i64,
@@ -313,31 +295,40 @@ impl ViewportCursor {
     ) -> Result<(), String> {
         let node_idx = self.node_idx.ok_or("No node associated with cursor")?;
 
-        // Get node info
+        // Get current world position
+        let current_world = self
+            .to_world_pos(viewport_graph)
+            .ok_or("Cannot calculate current world position")?;
+
+        // Calculate new world position (absolute movement)
+        let new_world = WorldPos::new(current_world.x + direction, current_world.y);
+
+        // Get node bounds
         let &node_center = viewport_graph
-            .domain_to_world
+            .node_positions
             .get(&node_idx)
             .ok_or("Node not found in viewport graph")?;
         let node_data = viewport_graph
-            .nodes
+            .node_data_by_pos
             .get(&node_center)
             .ok_or("Node data not found")?;
 
-        let (width, _height) = node_data.size;
-        let span_x = width.saturating_sub(1);
+        let (width, height) = node_data.size;
+        let half_width = (width as i64 - 1) / 2;
+        let half_height = (height as i64 - 1) / 2;
 
-        // Calculate new fractional position
-        let delta_frac = if span_x > 0 {
-            direction as f64 / span_x as f64
-        } else {
-            direction.signum() as f64 // For width=1, move by direction
-        };
+        let min_x = node_center.x - half_width;
+        let max_x = node_center.x + half_width;
+        let min_y = node_center.y - half_height;
+        let max_y = node_center.y + half_height;
 
-        let new_frac_x = self.fractional_pos.0 + delta_frac;
-
-        if (0.0..=1.0).contains(&new_frac_x) {
-            // Still within node bounds - update fractional position
-            self.fractional_pos.0 = new_frac_x;
+        if new_world.x >= min_x
+            && new_world.x <= max_x
+            && new_world.y >= min_y
+            && new_world.y <= max_y
+        {
+            // Still within node bounds - update fractional position to match
+            self.update_fractional_from_world(new_world, viewport_graph)?;
             Ok(())
         } else {
             // At boundary - jump to adjacent node in different layer
@@ -348,10 +339,11 @@ impl ViewportCursor {
     /// Move cursor vertically within current node or to node in same layer
     ///
     /// # Algorithm
-    /// 1. Calculate new fractional position (fractional_y += direction / height)
-    /// 2. If still in bounds [0.0, 1.0], update fractional and return
-    /// 3. If out of bounds, find node in same layer in that direction
-    /// 4. Jump to node maintaining fractional_x
+    /// 1. Get current world position
+    /// 2. Calculate new world position (current + direction)
+    /// 3. If still within node bounds, update fractional from world and return
+    /// 4. If out of bounds, find node in same layer in that direction
+    /// 5. Jump to node maintaining fractional_x
     pub fn move_vertical(
         &mut self,
         direction: i64,
@@ -359,31 +351,40 @@ impl ViewportCursor {
     ) -> Result<(), String> {
         let node_idx = self.node_idx.ok_or("No node associated with cursor")?;
 
-        // Get node info
+        // Get current world position
+        let current_world = self
+            .to_world_pos(viewport_graph)
+            .ok_or("Cannot calculate current world position")?;
+
+        // Calculate new world position (absolute movement)
+        let new_world = WorldPos::new(current_world.x, current_world.y + direction);
+
+        // Get node bounds
         let &node_center = viewport_graph
-            .domain_to_world
+            .node_positions
             .get(&node_idx)
             .ok_or("Node not found in viewport graph")?;
         let node_data = viewport_graph
-            .nodes
+            .node_data_by_pos
             .get(&node_center)
             .ok_or("Node data not found")?;
 
-        let (_width, height) = node_data.size;
-        let span_y = height.saturating_sub(1);
+        let (width, height) = node_data.size;
+        let half_width = (width as i64 - 1) / 2;
+        let half_height = (height as i64 - 1) / 2;
 
-        // Calculate new fractional position
-        let delta_frac = if span_y > 0 {
-            direction as f64 / span_y as f64
-        } else {
-            direction.signum() as f64 // For height=1, move by direction
-        };
+        let min_x = node_center.x - half_width;
+        let max_x = node_center.x + half_width;
+        let min_y = node_center.y - half_height;
+        let max_y = node_center.y + half_height;
 
-        let new_frac_y = self.fractional_pos.1 + delta_frac;
-
-        if (0.0..=1.0).contains(&new_frac_y) {
-            // Still within node bounds - update fractional position
-            self.fractional_pos.1 = new_frac_y;
+        if new_world.x >= min_x
+            && new_world.x <= max_x
+            && new_world.y >= min_y
+            && new_world.y <= max_y
+        {
+            // Still within node bounds - update fractional position to match
+            self.update_fractional_from_world(new_world, viewport_graph)?;
             Ok(())
         } else {
             // At boundary - jump to node in same layer
@@ -429,7 +430,7 @@ impl ViewportCursor {
 
         // Find adjacent connected nodes using ViewportGraph's method
         let current_world_pos = *viewport_graph
-            .domain_to_world
+            .node_positions
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
@@ -489,7 +490,7 @@ impl ViewportCursor {
     ) -> Result<(), String> {
         let node_idx = self.node_idx.ok_or("No node tracked")?;
         let current_world_pos = *viewport_graph
-            .domain_to_world
+            .node_positions
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
@@ -513,8 +514,8 @@ impl ViewportCursor {
                 }
 
                 // Get world position
-                let world_pos = *viewport_graph.domain_to_world.get(&domain_idx)?;
-                let node_data = viewport_graph.nodes.get(&world_pos)?;
+                let world_pos = *viewport_graph.node_positions.get(&domain_idx)?;
+                let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
 
                 // Filter by direction
                 let dy = world_pos.y - current_world_pos.y;
@@ -579,15 +580,14 @@ mod tests {
         let _ = controller.ensure_camera_coverage();
 
         // Rebuild viewport graph
-        let camera_rect = controller.viewport_state.camera_rect();
-        let _ = controller.rebuild_viewport_graph(camera_rect, VisualDetail::Full);
+        let _ = controller.rebuild_viewport_graph();
 
         // Extract viewport graph
         let viewport_graph = controller.get_viewport_graph().clone();
 
         // Collect known node positions for testing
         let mut known_nodes = Vec::new();
-        for (world_pos, node_data) in &viewport_graph.nodes {
+        for (world_pos, node_data) in &viewport_graph.node_data_by_pos {
             if let crate::layout::NodeRole::Data(domain_idx) = &node_data.role {
                 known_nodes.push((*domain_idx, *world_pos, node_data.size));
             }
@@ -797,7 +797,7 @@ mod tests {
         let _ = controller.ensure_camera_coverage();
 
         let camera_rect = controller.viewport_state.camera_rect();
-        let _ = controller.rebuild_viewport_graph(camera_rect, VisualDetail::Full);
+        let _ = controller.rebuild_viewport_graph();
 
         let viewport_graph = controller.get_viewport_graph();
 
@@ -842,12 +842,12 @@ mod tests {
         assert_eq!(cursor.node_idx(), Some(NodeIndex::new(5)));
         assert_eq!(cursor.fractional_pos(), (0.3, 0.7));
 
-        // Test enabled
-        assert!(!cursor.is_enabled());
-        cursor.enable();
-        assert!(cursor.is_enabled());
-        cursor.disable();
-        assert!(!cursor.is_enabled());
+        // Test show_cursor
+        assert!(!cursor.show_cursor());
+        cursor.set_show_cursor(true);
+        assert!(cursor.show_cursor());
+        cursor.set_show_cursor(false);
+        assert!(!cursor.show_cursor());
 
         // Test glyph
         assert_eq!(cursor.glyph(), '█');
@@ -892,7 +892,7 @@ mod tests {
         let _ = controller.ensure_camera_coverage();
 
         let camera_rect = controller.viewport_state.camera_rect();
-        let _ = controller.rebuild_viewport_graph(camera_rect, VisualDetail::Full);
+        let _ = controller.rebuild_viewport_graph();
 
         let viewport_graph = controller.get_viewport_graph();
 
@@ -969,7 +969,7 @@ mod tests {
         let _ = controller.ensure_camera_coverage();
 
         let camera_rect = controller.viewport_state.camera_rect();
-        let _ = controller.rebuild_viewport_graph(camera_rect, VisualDetail::Full);
+        let _ = controller.rebuild_viewport_graph();
 
         let viewport_graph = controller.get_viewport_graph();
 
@@ -977,30 +977,29 @@ mod tests {
         let node1 = NodeIndex::new(1);
 
         // Check if node1 has a layer with multiple nodes
-        if let Some(layer) = viewport_graph.find_domain_node_layer(node1) {
-            if let Some(layer_nodes) = viewport_graph.get_layer(layer) {
-                if layer_nodes.len() > 1 {
-                    // Start at one node in the layer
-                    let mut cursor = ViewportCursor::new();
-                    cursor.set_node(node1, (0.5, 1.0)); // At top edge
+        if let Some(layer) = viewport_graph.find_domain_node_layer(node1)
+            && let Some(layer_nodes) = viewport_graph.get_layer(layer)
+            && layer_nodes.len() > 1
+        {
+            // Start at one node in the layer
+            let mut cursor = ViewportCursor::new();
+            cursor.set_node(node1, (0.5, 1.0)); // At top edge
 
-                    // Try to move up - should jump to other node in same layer
-                    let result = cursor.move_vertical(1, viewport_graph);
+            // Try to move up - should jump to other node in same layer
+            let result = cursor.move_vertical(1, viewport_graph);
 
-                    match result {
-                        Ok(()) => {
-                            // Successfully moved within layer
-                            let new_node = cursor.node_idx().expect("Should have node after move");
-                            assert_ne!(new_node, node1, "Should move to different node");
-                            assert!(
-                                layer_nodes.contains(&new_node),
-                                "New node should be in same layer"
-                            );
-                        }
-                        Err(_) => {
-                            // No other node above in this layer - that's also valid
-                        }
-                    }
+            match result {
+                Ok(()) => {
+                    // Successfully moved within layer
+                    let new_node = cursor.node_idx().expect("Should have node after move");
+                    assert_ne!(new_node, node1, "Should move to different node");
+                    assert!(
+                        layer_nodes.contains(&new_node),
+                        "New node should be in same layer"
+                    );
+                }
+                Err(_) => {
+                    // No other node above in this layer - that's also valid
                 }
             }
         }

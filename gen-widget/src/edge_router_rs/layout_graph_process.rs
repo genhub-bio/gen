@@ -166,16 +166,16 @@ pub fn simplify_graph(
                 };
 
                 // Add simplified edge with preserved bundle
-                if let Some(end_node_id) = end_node_id {
-                    if critical_nodes.contains(&end_node_id) {
-                        let segment_endpoints = if start_node_id.index() < end_node_id.index() {
-                            (*start_node_id, end_node_id)
-                        } else {
-                            (end_node_id, *start_node_id)
-                        };
+                if let Some(end_node_id) = end_node_id
+                    && critical_nodes.contains(&end_node_id)
+                {
+                    let segment_endpoints = if start_node_id.index() < end_node_id.index() {
+                        (*start_node_id, end_node_id)
+                    } else {
+                        (end_node_id, *start_node_id)
+                    };
 
-                        new_edges_with_bundles.insert(segment_endpoints, segment_bundle);
-                    }
+                    new_edges_with_bundles.insert(segment_endpoints, segment_bundle);
                 }
             }
         }

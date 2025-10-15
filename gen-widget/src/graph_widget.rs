@@ -221,22 +221,21 @@ where
         // Update viewport bounds in state
         controller.viewport_state.viewport_bounds = inner_area;
 
-        // Force a rebuild if bounds changed
-        if bounds_changed {
+        // Force a rebuild if bounds changed or if we still don't have nowieence view v
+        if bounds_changed || controller.viewport_graph.graph.node_count() == 0 {
             controller.rebuild_needed = true;
         }
 
         // Sync scale if provided
-        if let Some(detail_level) = self.detail_level {
-            if controller.get_detail_level() != detail_level {
-                controller.set_detail_level(detail_level);
-            }
+        if let Some(detail_level) = self.detail_level
+            && controller.get_detail_level() != detail_level
+        {
+            controller.set_detail_level(detail_level);
         }
 
         // Enable cursor if requested and not already enabled
         if self.cursor_enabled && !controller.is_cursor_enabled() {
             controller.enable_cursor();
-            controller.initialize_cursor();
         }
 
         // Detect motion and set rebuild flag if needed
@@ -246,17 +245,14 @@ where
         // This ensures we always have the correct visible nodes/edges
         // Note: Camera and cursor adjustments for layout changes are handled by disperse/contract/set_detail_level
         if controller.rebuild_needed {
-            let world_rect = controller.viewport_state.visible_world_rect();
-            if let Err(e) =
-                controller.rebuild_viewport_graph(world_rect, controller.get_detail_level())
-            {
+            if let Err(e) = controller.rebuild_viewport_graph() {
                 log::error!("Error rebuilding viewport graph: {}", e);
             }
 
             // Re-initialize cursor if it's enabled but not tracking a node
             // (The new ViewportCursor system maintains cursor position automatically during rebuilds)
             if controller.is_cursor_enabled() && controller.cursor.get_node_idx().is_none() {
-                controller.initialize_cursor();
+                controller.initialize_cursor_and_camera();
             }
         }
 
