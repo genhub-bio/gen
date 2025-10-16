@@ -57,7 +57,7 @@ where
     loaded_partition_indices: HashSet<usize>,
     max_loaded_partitions: usize,
     original_graph: G,
-    scale_change_needs_viewport_reset: bool,
+    //scale_change_needs_viewport_reset: bool,
 
     // Vertex spacing for layout computation
     vertex_spacing: f64,
@@ -123,7 +123,7 @@ where
             loaded_partition_indices: HashSet::new(),
             max_loaded_partitions: controller_config.max_loaded_partitions,
             original_graph: graph,
-            scale_change_needs_viewport_reset: false,
+            //scale_change_needs_viewport_reset: false,
             vertex_spacing: VERTEX_SPACING_DEFAULT,
         }
     }
@@ -308,12 +308,9 @@ where
         if detail_level != self.current_detail_level {
             self.current_detail_level = detail_level;
 
-            // Signal that viewport needs to be reset for the new coordinate system
-            // Note: We don't clear layouts since each partition already has all 3 scales computed
-            self.scale_change_needs_viewport_reset = true;
-
-            // TODO: adjust origin or perform a transformation to have
-            // the cursor stay in the same position on the screen
+            // // Signal that viewport needs to be reset for the new coordinate system
+            // // Note: We don't clear layouts since each partition already has all 3 scales computed
+            // self.scale_change_needs_viewport_reset = true;
         }
     }
 
@@ -420,12 +417,12 @@ where
         self.anchor_partition_idx
     }
 
-    /// Check if viewport needs to be reset due to scale change, and clear the flag
-    pub fn check_and_clear_viewport_reset_flag(&mut self) -> bool {
-        let needs_reset = self.scale_change_needs_viewport_reset;
-        self.scale_change_needs_viewport_reset = false;
-        needs_reset
-    }
+    /// /// Check if viewport needs to be reset due to scale change, and clear the flag
+    /// pub fn check_and_clear_viewport_reset_flag(&mut self) -> bool {
+    ///     let needs_reset = self.scale_change_needs_viewport_reset;
+    ///     self.scale_change_needs_viewport_reset = false;
+    ///     needs_reset
+    /// }
 
     /// Get the number of currently loaded partitions
     pub fn loaded_partition_count(&self) -> usize {
@@ -453,14 +450,11 @@ where
         self.vertex_spacing
     }
 
-    /// Set the vertex spacing
-    pub fn set_vertex_spacing(&mut self, spacing: f64) {
-        self.vertex_spacing = spacing;
-    }
-
-    /// Increment the vertex spacing by the given amount
-    pub fn increment_vertex_spacing(&mut self, increment: f64) {
-        self.vertex_spacing += increment;
+    /// Adjust the vertex spacing safely
+    pub fn adjust_vertex_spacing(&mut self, delta: f64) {
+        if self.vertex_spacing + delta >= 0.0 {
+            self.vertex_spacing += delta;
+        }
     }
 
     /// Clear all layouts while keeping partitions and layer data

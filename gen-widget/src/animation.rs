@@ -113,10 +113,6 @@ impl ViewportState {
         cursor: &mut ViewportCursor,
         viewport_graph: &ViewportGraph,
     ) {
-        use ratatui::layout::Rect;
-
-        self.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
-
         // Advance camera animation (if present)
         if let Some(anim) = &mut self.camera_anim {
             let new_cam = anim.update(delta);
@@ -279,7 +275,6 @@ impl ViewportState {
         }
 
         // Synchronize cursor's viewport position after any camera changes
-        // Cursor is always functionally enabled, so always update
         let camera_rect = self.camera_rect();
         let _ = cursor.update(viewport_graph, camera_rect);
     }

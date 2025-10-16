@@ -1,5 +1,0 @@
-graph {
-    layout=neato;
-    overlap=false;
-    rankdir=LR;
-}

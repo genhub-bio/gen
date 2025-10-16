@@ -223,7 +223,7 @@ where
 
         // Force a rebuild if bounds changed or if we still don't have nowieence view v
         if bounds_changed || controller.viewport_graph.graph.node_count() == 0 {
-            controller.rebuild_needed = true;
+            controller.trigger_rebuild();
         }
 
         // Sync scale if provided
@@ -233,27 +233,18 @@ where
             controller.set_detail_level(detail_level);
         }
 
-        // Enable cursor if requested and not already enabled
-        if self.cursor_enabled && !controller.is_cursor_enabled() {
-            controller.enable_cursor();
-        }
-
         // Detect motion and set rebuild flag if needed
-        controller.detect_motion();
+        if controller.detect_motion() {
+            controller.trigger_rebuild();
+        }
 
         // Update ViewportGraph only if rebuild is needed
         // This ensures we always have the correct visible nodes/edges
         // Note: Camera and cursor adjustments for layout changes are handled by disperse/contract/set_detail_level
-        if controller.rebuild_needed {
-            if let Err(e) = controller.rebuild_viewport_graph() {
-                log::error!("Error rebuilding viewport graph: {}", e);
-            }
-
-            // Re-initialize cursor if it's enabled but not tracking a node
-            // (The new ViewportCursor system maintains cursor position automatically during rebuilds)
-            if controller.is_cursor_enabled() && controller.cursor.get_node_idx().is_none() {
-                controller.initialize_cursor_and_camera();
-            }
+        if controller.needs_rebuild()
+            && let Err(e) = controller.rebuild_viewport_graph()
+        {
+            log::error!("Error rebuilding viewport graph: {}", e);
         }
 
         // Render the graph using the renderer
@@ -277,8 +268,7 @@ where
             buffer_render_fn(&mut buffer_writer, &controller.viewport_state);
         }
 
-        // Render cursor if enabled
-        if controller.is_cursor_enabled() {
+        if controller.cursor.show_cursor() {
             // Get cursor world position for rendering
             if let Some(cursor_world_pos) = controller
                 .cursor

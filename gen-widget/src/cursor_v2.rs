@@ -1,9 +1,6 @@
-use std::time::Duration;
-
 use petgraph::graph::NodeIndex;
 
 use crate::{
-    animation::Animation,
     geometry::{ViewportPos, WorldPos},
     viewport_graph::ViewportGraph,
 };
@@ -233,7 +230,6 @@ impl ViewportCursor {
     pub fn get_glyph(&self) -> char {
         self.glyph()
     }
-
 
     // ==================== Synchronization Methods ====================
 
@@ -796,7 +792,6 @@ mod tests {
         controller.set_detail_level(VisualDetail::Full);
         let _ = controller.ensure_camera_coverage();
 
-        let camera_rect = controller.viewport_state.camera_rect();
         let _ = controller.rebuild_viewport_graph();
 
         let viewport_graph = controller.get_viewport_graph();
@@ -891,7 +886,6 @@ mod tests {
         controller.set_detail_level(VisualDetail::Full);
         let _ = controller.ensure_camera_coverage();
 
-        let camera_rect = controller.viewport_state.camera_rect();
         let _ = controller.rebuild_viewport_graph();
 
         let viewport_graph = controller.get_viewport_graph();
@@ -968,7 +962,6 @@ mod tests {
         controller.set_detail_level(VisualDetail::Full);
         let _ = controller.ensure_camera_coverage();
 
-        let camera_rect = controller.viewport_state.camera_rect();
         let _ = controller.rebuild_viewport_graph();
 
         let viewport_graph = controller.get_viewport_graph();

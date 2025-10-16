@@ -1,10 +1,7 @@
 use log::trace;
 
 use crate::{
-    geometry::{ViewportPos, WorldPos},
-    graph_controller::GraphController,
-    layout::{LayoutNode, NodeRole},
-    plotter::NodeSizer,
+    geometry::ViewportPos, graph_controller::GraphController, layout::NodeRole, plotter::NodeSizer,
 };
 
 /// Cursor-related methods for GraphController that adapt the new ViewportCursor system
@@ -39,10 +36,11 @@ where
     ///
     /// This method couples camera and cursor initialization:
     /// 1. Finds a data node in the anchor partition's layout
-    /// 2. Positions the camera so the node's left edge appears at a comfortable viewport position (1/4 from left, centered vertically)
+    /// 2. Positions the camera so the node's left edge appears at the left edge of the deadzone (centered vertically)
     /// 3. Sets the cursor to track that node at that viewport position
     ///
-    /// This ensures the cursor is visible and well-positioned when first enabled.
+    /// This ensures the cursor is visible and well-positioned when first enabled,
+    /// with maximum room to move right before triggering camera following.
     pub fn initialize_cursor_and_camera(&mut self) {
         let detail_level = self.get_detail_level();
         let anchor_partition = self.partition_controller.get_anchor_partition();
@@ -70,10 +68,20 @@ where
             });
 
         if let Some((domain_idx, node_world_pos)) = node_info {
-            // Calculate desired viewport position for the cursor
-            // Position it 1/4 from the left edge and vertically centered
-            let desired_viewport_x = self.viewport_state.viewport_bounds.width / 4;
-            let desired_viewport_y = self.viewport_state.viewport_bounds.height / 2;
+            // Calculate desired viewport position for the cursor at the left edge of the deadzone
+            // Deadzone center is at viewport center, deadzone radius is (viewport_size * dead_zone_fraction * 0.5)
+            let viewport_center_x = self.viewport_state.viewport_bounds.width / 2;
+            let viewport_center_y = self.viewport_state.viewport_bounds.height / 2;
+
+            // Calculate dead zone radius (fraction is already halved in animation.rs, so we apply the same here)
+            let dead_zone_fraction_x =
+                (self.viewport_state.dead_zone_fraction.0 * 0.5).clamp(0.0, 0.5);
+            let dead_zone_radius_x =
+                (self.viewport_state.viewport_bounds.width as f32 * dead_zone_fraction_x) as u16;
+
+            // Position cursor at left edge of dead zone (horizontally) and centered vertically
+            let desired_viewport_x = viewport_center_x.saturating_sub(dead_zone_radius_x);
+            let desired_viewport_y = viewport_center_y;
             let desired_viewport_pos = ViewportPos::new(desired_viewport_x, desired_viewport_y);
 
             // Update camera so the node's left edge appears at the desired viewport position
@@ -86,7 +94,7 @@ where
             self.cursor.set_viewport_pos(desired_viewport_pos);
 
             trace!(
-                "Initialized cursor and camera: node {:?}, world ({}, {}), viewport ({}, {})",
+                "Initialized cursor and camera: node {:?}, world ({}, {}), viewport ({}, {}) at left edge of deadzone",
                 domain_idx,
                 node_world_pos.x,
                 node_world_pos.y,
@@ -106,7 +114,6 @@ where
             return;
         }
 
-        // Use ViewportCursor's move_horizontal method
         match self.cursor.move_horizontal(direction, &self.viewport_graph) {
             Ok(()) => {
                 trace!("Cursor moved horizontally by {}", direction);
@@ -126,7 +133,6 @@ where
             return;
         }
 
-        // Use ViewportCursor's move_vertical method
         match self.cursor.move_vertical(direction, &self.viewport_graph) {
             Ok(()) => {
                 trace!("Cursor moved vertically by {}", direction);
@@ -185,10 +191,5 @@ where
     /// Check if cursor should be shown (visible)
     pub fn is_cursor_shown(&self) -> bool {
         self.cursor.show_cursor()
-    }
-
-    /// Check if cursor is enabled (legacy - cursor is always functionally enabled)
-    pub fn is_cursor_enabled(&self) -> bool {
-        true
     }
 }

@@ -310,11 +310,11 @@ pub fn view_block_group(
                 graph_controller.viewport_state.viewport_bounds = canvas_area;
                 graph_controller.viewport_state.focus();
 
-                // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
-                graph_controller.ensure_camera_coverage();
-                if graph_controller.rebuild_needed {
-                    graph_controller.rebuild_viewport_graph();
-                }
+                // // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
+                // graph_controller.ensure_camera_coverage();
+                // if graph_controller.rebuild_needed {
+                //     graph_controller.rebuild_viewport_graph();
+                // }
 
                 // Render the GenGraphWidget with cursor enabled and canvas background
                 let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());

@@ -1,4 +1,10 @@
-use crossterm::event::{self, Event, KeyEventKind};
+use std::{
+    io::Result,
+    panic,
+    time::{Duration, Instant},
+};
+
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_widget::{graph_controller::GraphController, layout::VisualDetail};
 use ratatui::{
@@ -7,11 +13,6 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use rusqlite::Connection;
-use std::{
-    io::Result,
-    panic,
-    time::{Duration, Instant},
-};
 
 use crate::views::gen_graph_widget::{
     GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget,
@@ -177,30 +178,13 @@ fn show_interactive_widget(
                     })?;
                 }
                 AppEvent::KeyPress(key) => {
-                    if let Some(exit_type) = state.controller.handle_key_event(key) {
-                        // Check if this was a normal exit (q/Enter) and if debug logging is enabled
-                        if exit_type && std::env::var("RUST_LOG").is_ok() {
-                            // Automatically export to DOT before exiting
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
-                            let filename = format!("graph_export_{}.dot", timestamp);
-
-                            match state.controller.export_to_dot(&filename) {
-                                Ok(()) => {
-                                    eprintln!("Exported viewport graph to {}", filename);
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to export graph: {}", e);
-                                }
-                            }
+                    // Intercept quit signal
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            break;
                         }
-
-                        if exit_type {
-                            state.is_done = true; // normal exit
-                        } else {
-                            state.is_aborted = true; // abort
+                        _ => {
+                            state.controller.handle_key_event(key);
                         }
                     }
                 }
@@ -208,14 +192,8 @@ fn show_interactive_widget(
                     // Update viewport bounds to match new terminal size
                     state.controller.viewport_state.viewport_bounds =
                         ratatui::layout::Rect::new(0, 0, w, h);
-                    // Force a viewport expansion to handle the resize gracefully
-                    let _ = state.controller.ensure_camera_coverage();
                 }
             }
-        }
-
-        if state.is_done || state.is_aborted {
-            break;
         }
     }
 
@@ -334,11 +312,11 @@ fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState
     state.controller.viewport_state.viewport_bounds = area;
     state.controller.viewport_state.focus();
 
-    // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
-    state.controller.ensure_camera_coverage();
-    if state.controller.rebuild_needed {
-        state.controller.rebuild_viewport_graph();
-    }
+    // // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
+    // state.controller.ensure_camera_coverage();
+    // if state.controller.rebuild_needed {
+    //     state.controller.rebuild_viewport_graph();
+    // }
 
     // Create the GenGraph widget with current level of detail
     let detail_level = state.controller.get_detail_level();
@@ -403,64 +381,6 @@ mod tests {
         graph.add_node(node);
 
         let state = InlineGenGraphState::new(&graph, &conn);
-
-        assert!(!state.is_done);
-        assert!(!state.is_aborted);
         assert_eq!(state.controller.get_detail_level(), VisualDetail::Minimal);
-    }
-
-    #[test]
-    fn test_key_event_handling() {
-        let conn = get_connection(None).expect("Failed to get test database connection");
-        let mut graph = DiGraphMap::new();
-
-        // Add a simple test node to avoid empty graph panic
-        let node = GraphNode {
-            block_id: 1,
-            node_id: HashId::pad_str(1),
-            sequence_start: 0,
-            sequence_end: 10,
-        };
-        graph.add_node(node);
-
-        let mut state = InlineGenGraphState::new(&graph, &conn);
-
-        // Test escape
-        let esc_key = KeyEvent::from(KeyCode::Esc);
-        if let Some(exit_type) = state.controller.handle_key_event(esc_key) {
-            if exit_type {
-                state.is_done = true; // normal exit
-            } else {
-                state.is_aborted = true; // abort
-            }
-        }
-        assert!(state.is_aborted);
-
-        // Reset and test enter
-        state.is_aborted = false;
-        let enter_key = KeyEvent::from(KeyCode::Enter);
-        if let Some(exit_type) = state.controller.handle_key_event(enter_key) {
-            if exit_type {
-                state.is_done = true; // normal exit
-            } else {
-                state.is_aborted = true; // abort
-            }
-        }
-        assert!(state.is_done);
-
-        // Reset and test scale change
-        state.is_done = false;
-        let plus_key = KeyEvent::from(KeyCode::Char('+'));
-        if let Some(exit_type) = state.controller.handle_key_event(plus_key) {
-            if exit_type {
-                state.is_done = true; // normal exit
-            } else {
-                state.is_aborted = true; // abort
-            }
-        }
-        // Scale change should not trigger exit
-        assert!(!state.is_done);
-        assert!(!state.is_aborted);
-        assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
     }
 }
