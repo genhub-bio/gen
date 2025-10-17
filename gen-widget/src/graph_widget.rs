@@ -268,7 +268,7 @@ where
             buffer_render_fn(&mut buffer_writer, &controller.viewport_state);
         }
 
-        if controller.cursor.show_cursor() {
+        if controller.cursor.is_visible() {
             // Get cursor world position for rendering
             if let Some(cursor_world_pos) = controller
                 .cursor

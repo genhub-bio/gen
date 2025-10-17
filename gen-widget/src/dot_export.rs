@@ -1,10 +1,10 @@
 use std::{collections::HashMap, fmt::Write};
 
 use crate::{
-    geometry::WorldPos, layout::NodeRole, partition::StitchSide, viewport_graph::ViewportGraph,
+    geometry::WorldPos, layout::NodeRole, partition::StitchSide, viewport_graph::CroppedGraph,
 };
 
-pub fn export_to_dot(viewport_graph: &ViewportGraph, filename: &str) -> Result<(), std::io::Error> {
+pub fn export_to_dot(viewport_graph: &CroppedGraph, filename: &str) -> Result<(), std::io::Error> {
     let mut dot = String::new();
     writeln!(&mut dot, "graph {{").unwrap();
     writeln!(&mut dot, "    layout=neato;").unwrap();

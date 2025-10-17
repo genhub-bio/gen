@@ -147,7 +147,8 @@ pub fn view_block_group(
     let node_sizer = GenGraphNodeSizer;
     let mut graph_controller = GraphController::new(&block_graph, node_sizer);
     graph_controller.set_detail_level(VisualDetail::Minimal);
-    graph_controller.enable_cursor();
+    graph_controller.initialize_cursor_and_camera();
+    graph_controller.show_cursor();
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if origin.is_some() {
@@ -309,6 +310,7 @@ pub fn view_block_group(
                 // Update viewport bounds and focus for the current canvas area
                 graph_controller.viewport_state.viewport_bounds = canvas_area;
                 graph_controller.viewport_state.focus();
+                // graph_controller.force_update
 
                 // // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
                 // graph_controller.ensure_camera_coverage();
@@ -396,7 +398,9 @@ pub fn view_block_group(
                 let node_sizer = GenGraphNodeSizer;
                 graph_controller = GraphController::new(&block_graph, node_sizer);
                 graph_controller.set_detail_level(VisualDetail::Minimal);
-                graph_controller.enable_cursor();
+                graph_controller.initialize_cursor_and_camera();
+                graph_controller.show_cursor();
+
                 is_loading = false;
             }
         }

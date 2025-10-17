@@ -15,7 +15,7 @@ use crate::{
     graph_widget::GraphWidget,
     layout::{JunctionSymbol, NodeRole, VisualDetail},
     theme::get_theme_color,
-    viewport_graph::ViewportGraph,
+    viewport_graph::CroppedGraph,
 };
 
 // # Graph Rendering Architecture
@@ -191,7 +191,7 @@ where
 ///
 /// The ViewportGraph contains only visible nodes and edges
 pub fn plot_viewport_graph<R, G>(
-    viewport_graph: &ViewportGraph,
+    viewport_graph: &CroppedGraph,
     buffer: &mut WorldBuffer<'_>,
     renderer: &mut R,
     original_graph: &G,
@@ -231,7 +231,7 @@ pub fn plot_viewport_graph<R, G>(
 }
 
 /// Compute the junction glyph for a routing node based on its connections
-fn compute_junction_glyph(viewport_graph: &ViewportGraph, pos: WorldPos) -> JunctionSymbol {
+fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> JunctionSymbol {
     let mut connections = 0u8;
 
     // Check connections in all four directions

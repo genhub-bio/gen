@@ -3,9 +3,7 @@ use std::{collections::HashSet, hash::Hash};
 use crossterm::event::{KeyCode, KeyEvent};
 use log::trace;
 use petgraph::{
-    Undirected,
     graph::NodeIndex,
-    stable_graph::StableGraph,
     visit::{
         EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
         NodeCount, NodeIndexable, Visitable,
@@ -17,14 +15,14 @@ use ratatui::style::Color;
 // Re-export the core module types
 pub use crate::viewport_state::{ViewportState, WorldBuffer};
 use crate::{
-    cursor_v2::ViewportCursor,
+    cursor::Cursor,
     geometry::{BigRect, ViewportPos, WorldPos},
-    layout::{LayoutEdge, LayoutNode, NodeRole, PartitionLayout, VisualDetail},
+    layout::{NodeRole, PartitionLayout, VisualDetail},
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
     plotter::NodeSizer,
     standalone_sugiyama::{self, VERTEX_SPACING_DEFAULT},
-    viewport_graph::ViewportGraph,
+    viewport_graph::CroppedGraph,
 };
 
 /// Combined configuration for the entire graph widget system
@@ -52,17 +50,15 @@ where
     pub viewport_state: ViewportState,
 
     /// Cursor state managing cursor position and tracking
-    pub cursor: ViewportCursor,
+    pub cursor: Cursor,
 
     /// Current detail level for visualization
     detail_level: VisualDetail,
 
     /// Partition controller for managing graph partitioning and layout (without its own viewport state)
     pub partition_controller: PartitionController<G, S>,
-    /// Set of partitions currently loaded in the unified layout
-    loaded_partitions: std::collections::HashSet<usize>,
-    /// Viewport-based graph containing only visible nodes and edges
-    pub viewport_graph: ViewportGraph,
+    /// Cropped graph containing only visible nodes and edges
+    pub viewport_graph: CroppedGraph,
     /// Camera position when viewport graph was last rebuilt
     /// (for hysteresis to control rebuild frequency)
     last_rebuild_camera_center: WorldPos,
@@ -120,23 +116,18 @@ where
         let mut controller = Self {
             graph,
             viewport_state: ViewportState::new(),
-            cursor: ViewportCursor::default(),
+            cursor: Cursor::default(),
             detail_level: VisualDetail::Truncated, // Default detail level
             partition_controller,
-            loaded_partitions: HashSet::new(),
-            viewport_graph: ViewportGraph::empty(),
+            viewport_graph: CroppedGraph::empty(),
             last_rebuild_camera_center: WorldPos::ZERO,
             rebuild_needed: true, // Start with a rebuild required
         };
 
-        // Initialize by loading the reference partition (partition 0)
-        // This ensures at least one partition is available for viewport expansion
         if let Err(e) = controller.partition_controller.set_anchor_partition(0) {
             eprintln!("Warning: Failed to initialize reference partition: {}", e);
         }
 
-        // Initialize cursor if viewport has valid dimensions
-        // This positions the cursor at the viewport center, associated with the node closest to origin
         if controller.viewport_state.viewport_bounds.width > 0
             && controller.viewport_state.viewport_bounds.height > 0
         {
@@ -153,25 +144,9 @@ where
             .get_layout(partition_idx, detail_level)
     }
 
-    /// Legacy: Get the unified layout graph that spans all partitions
-    /// This is kept temporarily for debugging but should not be used
-    #[allow(dead_code)]
-    fn get_unified_layout(&self) -> &StableGraph<LayoutNode, LayoutEdge, Undirected, u32> {
-        let detail_level = self.get_detail_level();
-        self.partition_controller
-            .partition_table
-            .get_unified_layout(detail_level)
-    }
-
     /// Export the viewport graph to DOT format for visualization
     pub fn export_to_dot(&self, filename: &str) -> Result<(), std::io::Error> {
         crate::dot_export::export_to_dot(&self.viewport_graph, filename)
-    }
-
-    /// Set the reference partition and reset coordinate system  
-    pub fn set_anchor_partition(&mut self, partition_idx: usize) -> Result<(), String> {
-        self.partition_controller
-            .set_anchor_partition(partition_idx)
     }
 
     /// Ensure a partition is loaded for rendering
@@ -232,11 +207,6 @@ where
     #[allow(clippy::type_complexity)]
     pub fn calculate_total_bounds(&mut self) -> Result<BigRect<i64>, String> {
         self.partition_controller.calculate_total_bounds()
-    }
-
-    /// Get the current reference partition index
-    pub fn get_anchor_partition(&self) -> usize {
-        self.partition_controller.get_anchor_partition()
     }
 
     /// Get the number of currently loaded partitions
@@ -351,7 +321,6 @@ where
 
     /// Increase vertex spacing and refresh layouts
     pub fn disperse(&mut self) {
-        trace!("disperse: starting");
         // Increase vertex spacing
         self.partition_controller.adjust_vertex_spacing(2.0);
         trace!(
@@ -361,10 +330,7 @@ where
 
         // Clear all layouts to force complete recalculation with new spacing
         self.partition_controller.clear_all_layouts();
-        self.loaded_partitions.clear();
         self.rebuild_needed = true;
-
-        trace!("disperse: complete");
     }
 
     /// Decrease vertex spacing and refresh layouts
@@ -383,7 +349,6 @@ where
 
         // Clear all layouts to force complete recalculation with new spacing
         self.partition_controller.clear_all_layouts();
-        self.loaded_partitions.clear();
         self.rebuild_needed = true;
     }
 
@@ -666,7 +631,7 @@ where
         );
 
         // Step 8: Build viewport graph with those partitions
-        self.viewport_graph = ViewportGraph::new(
+        self.viewport_graph = CroppedGraph::new(
             covered_rect,
             &self.partition_controller.partition_table,
             &active_partitions,
@@ -687,7 +652,7 @@ where
     }
 
     /// Get a reference to the currently available viewport graph
-    pub fn get_viewport_graph(&self) -> &ViewportGraph {
+    pub fn get_viewport_graph(&self) -> &CroppedGraph {
         &self.viewport_graph
     }
 

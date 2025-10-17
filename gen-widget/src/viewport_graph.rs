@@ -12,7 +12,7 @@ use crate::{
 /// A graph containing only the nodes and edges visible in the current viewport.
 /// Uses world coordinates as keys for natural deduplication at partition boundaries.
 #[derive(Clone)]
-pub struct ViewportGraph {
+pub struct CroppedGraph {
     /// Graph keyed by world coordinates, edges store domain node pairs
     pub graph: UnGraphMap<WorldPos, Vec<(NodeIndex, NodeIndex)>>,
 
@@ -30,7 +30,7 @@ pub struct ViewportGraph {
     pub included_nodes: HashSet<(PartitionIndex, NodeIndex<u32>)>,
 }
 
-impl ViewportGraph {
+impl CroppedGraph {
     pub fn empty() -> Self {
         debug!(
             "[DEBUG_TRACE_LAYOUT] empty: -> result=ViewportGraph{{graph_nodes=0, nodes_count=0, domain_to_world_count=0, layers_count=0, included_nodes_count=0}}"
@@ -104,6 +104,13 @@ impl ViewportGraph {
                     .cloned()
                     .collect();
 
+                trace!(
+                    "[DEBUG_TRACE_LAYOUT] new: partition_idx={}, x = {} - {}, visible_objects_count={:?}",
+                    partition_idx,
+                    local_corner_min.x,
+                    local_corner_max.x,
+                    visible_objects.len()
+                );
                 // First pass: collect nodes and track layers
                 for obj in &visible_objects {
                     if obj.is_node() {
@@ -180,6 +187,8 @@ impl ViewportGraph {
                         }
                     }
                 }
+            } else {
+                trace!("Couldn't find a layout for partition {}", partition_idx);
             }
         }
 
@@ -376,6 +385,7 @@ impl ViewportGraph {
             .position(|layer| layer.contains(&domain_idx))
     }
 
+    #[allow(dead_code)]
     /// Find all adjacent Data nodes by traversing the graph through Routing nodes.
     /// Returns each adjacent Data node along with the path taken to reach it.
     ///
@@ -587,7 +597,7 @@ impl ViewportGraph {
     }
 }
 
-impl Default for ViewportGraph {
+impl Default for CroppedGraph {
     fn default() -> Self {
         Self::empty()
     }

@@ -76,21 +76,18 @@ impl EventSource for TickEventSource {
 pub struct InlineGenGraphState<'a> {
     controller: GraphController<&'a GenGraph, GenGraphNodeSizer>,
     conn: &'a Connection,
-    is_done: bool,
-    is_aborted: bool,
 }
 
 impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &'a GenGraph, conn: &'a Connection) -> Self {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph, node_sizer);
-        graph_controller.enable_cursor();
         graph_controller.set_detail_level(VisualDetail::Minimal);
+        graph_controller.initialize_cursor_and_camera();
+        graph_controller.show_cursor();
         Self {
             controller: graph_controller,
             conn,
-            is_done: false,
-            is_aborted: false,
         }
     }
 }
@@ -229,7 +226,8 @@ pub fn plot_static(
     let renderer = GenGraphNodeRenderer::new(conn);
     let mut controller = GraphController::new(graph, node_sizer);
     controller.set_detail_level(detail_level.unwrap_or(VisualDetail::Minimal));
-    controller.enable_cursor();
+    controller.initialize_cursor_and_camera();
+    controller.show_cursor();
 
     let plot_string = plot_graph_to_string(&mut controller, renderer, detail_level, None, None);
 
@@ -342,16 +340,12 @@ fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphS
 
 #[allow(dead_code)]
 fn draw_final_message(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    let final_text = if state.is_aborted {
-        "GenGraph viewer cancelled".to_string()
-    } else {
-        format!(
-            "GenGraph viewing completed (final position: {},{} at {:?} scale)",
-            state.controller.viewport_state.camera_current.x,
-            state.controller.viewport_state.camera_current.y,
-            state.controller.get_detail_level()
-        )
-    };
+    let final_text = format!(
+        "GenGraph viewing completed (final position: {},{} at {:?} scale)",
+        state.controller.viewport_state.camera_current.x,
+        state.controller.viewport_state.camera_current.y,
+        state.controller.get_detail_level()
+    );
     let paragraph =
         ratatui::widgets::Paragraph::new(final_text).style(Style::default().fg(Color::Green));
     frame.render_widget(paragraph, area);

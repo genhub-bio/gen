@@ -53,11 +53,9 @@ where
     pub node_sizer: S,
 
     // Dynamic partition layout management
-    anchor_partition_idx: usize, // contains the origin
     loaded_partition_indices: HashSet<usize>,
     max_loaded_partitions: usize,
     original_graph: G,
-    //scale_change_needs_viewport_reset: bool,
 
     // Vertex spacing for layout computation
     vertex_spacing: f64,
@@ -119,7 +117,6 @@ where
             ),
             current_detail_level: VisualDetail::Minimal,
             node_sizer,
-            anchor_partition_idx: 0,
             loaded_partition_indices: HashSet::new(),
             max_loaded_partitions: controller_config.max_loaded_partitions,
             original_graph: graph,
@@ -134,9 +131,6 @@ where
             return Err(format!("Partition index {} out of bounds", partition_idx));
         }
         self.ensure_partition_loaded(partition_idx)?;
-        self.anchor_partition_idx = partition_idx;
-
-        // Update the partition table's anchor partition
         self.partition_table.set_anchor_partition(partition_idx)?;
 
         Ok(())
@@ -180,20 +174,26 @@ where
         let mut covered_partitions = Vec::new();
 
         // First ensure the anchor partition is loaded
-        self.ensure_partition_loaded(self.anchor_partition_idx)?;
+        log::trace!(
+            "load_for_rect w{}, Loading partition {}",
+            query_rect.width(),
+            self.get_anchor_partition()
+        );
+        self.ensure_partition_loaded(self.get_anchor_partition())?;
         let anchor_rect = self
-            .get_partition_rect(self.anchor_partition_idx)
+            .get_partition_rect(self.get_anchor_partition())
             .expect("Anchor partition was loaded");
 
         // Add anchor partition to covered list
-        covered_partitions.push(self.anchor_partition_idx);
+        covered_partitions.push(self.get_anchor_partition());
 
         // Left side: use descending pairs pattern
         // Sections (even) and bridges (odds) alternate
         // because you need bridges to join sections together
         // and you need sections to compute the bridge
-        if query_rect.left() < anchor_rect.left() && self.anchor_partition_idx > 0 {
-            for partition_idx in DescendingPartitionOrder::new(self.anchor_partition_idx) {
+        if query_rect.left() < anchor_rect.left() && self.get_anchor_partition() > 0 {
+            for partition_idx in DescendingPartitionOrder::new(self.get_anchor_partition()) {
+                log::trace!("Loading partition {}", partition_idx);
                 self.ensure_partition_loaded(partition_idx)?;
                 covered_partitions.push(partition_idx);
 
@@ -203,7 +203,13 @@ where
                     let partition_rect = self
                         .get_partition_rect(partition_idx - 1)
                         .expect("Bridges are built between sections");
-                    if partition_rect.left() <= query_rect.left() {
+                    log::trace!(
+                        "Current partition {} left: {} (query left: {})",
+                        partition_idx - 1,
+                        partition_rect.left(),
+                        query_rect.left()
+                    );
+                    if partition_rect.left() <= query_rect.left() || partition_idx - 1 == 0 {
                         log::trace!("finished expanding leftwards");
                         break;
                     }
@@ -214,8 +220,8 @@ where
         if query_rect.right() > anchor_rect.right() {
             let max_partitions = self.partition_table.partitions.len();
 
-            for partition_idx in
-                AscendingPartitionOrder::new(self.anchor_partition_idx).take_while(|&idx| {
+            for partition_idx in AscendingPartitionOrder::new(self.get_anchor_partition())
+                .take_while(|&idx| {
                     // Don't try to load partitions beyond array bounds
                     if idx >= max_partitions {
                         return false;
@@ -263,7 +269,7 @@ where
             .get_widths_tree(self.current_detail_level);
 
         // TODO make evictions use the camera or cursor to decide what to kick out
-        let reference_offset = widths.prefix_sum(self.anchor_partition_idx, 0);
+        let reference_offset = widths.prefix_sum(self.get_anchor_partition(), 0);
 
         // Find partitions furthest from reference and evict them
         let mut partitions_by_distance: Vec<_> = self
@@ -385,21 +391,21 @@ where
     /// Load all partitions with proper relative positioning using ascending partition order
     fn load_all_partitions(&mut self) -> Result<(), String> {
         // First ensure the anchor partition is loaded
-        self.ensure_partition_loaded(self.anchor_partition_idx)?;
-        log::debug!("Loaded anchor partition {}", self.anchor_partition_idx);
+        self.ensure_partition_loaded(self.get_anchor_partition())?;
+        log::debug!("Loaded anchor partition {}", self.get_anchor_partition());
 
         let total_partitions = self.partition_table.partitions.len();
 
         // Load partitions to the left of anchor using descending order
-        if self.anchor_partition_idx > 0 {
-            for partition_idx in DescendingPartitionOrder::new(self.anchor_partition_idx) {
+        if self.get_anchor_partition() > 0 {
+            for partition_idx in DescendingPartitionOrder::new(self.get_anchor_partition()) {
                 self.ensure_partition_loaded(partition_idx)?;
                 log::debug!("Ensured partition {} was loaded (left side)", partition_idx);
             }
         }
 
         // Load partitions to the right of anchor using ascending order
-        for partition_idx in AscendingPartitionOrder::new(self.anchor_partition_idx)
+        for partition_idx in AscendingPartitionOrder::new(self.get_anchor_partition())
             .take_while(|&idx| idx < total_partitions)
         {
             self.ensure_partition_loaded(partition_idx)?;
@@ -414,15 +420,8 @@ where
 
     /// Get the current anchor partition index
     pub fn get_anchor_partition(&self) -> usize {
-        self.anchor_partition_idx
+        self.partition_table.get_anchor_partition()
     }
-
-    /// /// Check if viewport needs to be reset due to scale change, and clear the flag
-    /// pub fn check_and_clear_viewport_reset_flag(&mut self) -> bool {
-    ///     let needs_reset = self.scale_change_needs_viewport_reset;
-    ///     self.scale_change_needs_viewport_reset = false;
-    ///     needs_reset
-    /// }
 
     /// Get the number of currently loaded partitions
     pub fn loaded_partition_count(&self) -> usize {
@@ -657,7 +656,7 @@ mod tests {
             "Should return covered partitions"
         );
         assert!(
-            covered_partitions.contains(&controller.anchor_partition_idx),
+            covered_partitions.contains(&controller.get_anchor_partition()),
             "Should include anchor partition"
         );
 
@@ -665,7 +664,7 @@ mod tests {
         assert!(
             controller
                 .loaded_partition_indices
-                .contains(&controller.anchor_partition_idx)
+                .contains(&controller.get_anchor_partition())
         );
     }
 
@@ -701,7 +700,7 @@ mod tests {
             "Should return covered partitions"
         );
         assert!(
-            covered_partitions.contains(&controller.anchor_partition_idx),
+            covered_partitions.contains(&controller.get_anchor_partition()),
             "Should include anchor partition"
         );
 
@@ -709,7 +708,7 @@ mod tests {
         assert!(
             controller
                 .loaded_partition_indices
-                .contains(&controller.anchor_partition_idx)
+                .contains(&controller.get_anchor_partition())
         );
     }
 
@@ -746,7 +745,7 @@ mod tests {
                 "Should return covered partitions"
             );
             assert!(
-                covered_partitions.contains(&controller.anchor_partition_idx),
+                covered_partitions.contains(&controller.get_anchor_partition()),
                 "Should include anchor partition"
             );
 
@@ -809,7 +808,7 @@ mod tests {
         assert!(
             controller
                 .loaded_partition_indices
-                .contains(&controller.anchor_partition_idx),
+                .contains(&controller.get_anchor_partition()),
             "Anchor partition should be loaded"
         );
 

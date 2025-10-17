@@ -34,15 +34,15 @@ mod tests {
 
         // Set up viewport
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 100, 50);
-        let _ = controller.ensure_camera_coverage();
-        controller.initialize_cursor();
-
+        controller.initialize_camera_and_cursor();
+        controller.rebuild_viewport_graph();
+        let viewport_graph = controller.get_viewport_graph();
         // Test that we can navigate through the layers
         let initial_pos = controller.viewport_state.cursor.current;
         println!("Initial cursor position: {:?}", initial_pos);
 
         // Move right - should jump to next layer
-        controller.move_cursor_horizontal(1);
+        controller.cursor.move_horizontal(1, &viewport_graph);
         let pos_after_right = controller.viewport_state.cursor.current;
         println!("Position after moving right: {:?}", pos_after_right);
 
@@ -53,7 +53,7 @@ mod tests {
         );
 
         // Move left - should return to previous layer
-        controller.move_cursor_horizontal(-1);
+        controller.cursor.move_horizontal(-1, &viewport_graph);
         let pos_after_left = controller.viewport_state.cursor.current;
         println!("Position after moving left: {:?}", pos_after_left);
     }
@@ -94,7 +94,7 @@ mod tests {
 
         // Move right multiple times to traverse through potential routing nodes
         for i in 0..10 {
-            controller.move_cursor_horizontal(1);
+            controller.cursor.move_cursor_horizontal(1);
             let current_node = controller.viewport_state.cursor.node_domain_idx;
             println!("Step {}: Node {:?}", i, current_node);
 

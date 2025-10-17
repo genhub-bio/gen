@@ -171,10 +171,14 @@ impl<T> BigRect<T> {
     }
 
     /// Create from raw coordinates.
-    pub fn from_coords(min_x: T, min_y: T, max_x: T, max_y: T) -> Self {
+    /// Automatically corrects ordering if min/max values are swapped.
+    pub fn from_coords(min_x: T, min_y: T, max_x: T, max_y: T) -> Self
+    where
+        T: Ord + Copy,
+    {
         BigRect {
-            min: Point::new(min_x, min_y),
-            max: Point::new(max_x, max_y),
+            min: Point::new(min_x.min(max_x), min_y.min(max_y)),
+            max: Point::new(min_x.max(max_x), min_y.max(max_y)),
         }
     }
 }

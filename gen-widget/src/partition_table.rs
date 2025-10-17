@@ -62,6 +62,7 @@ where
         Vec<(NodeIndex<u32>, NodeIndex<u32>, EdgeIndex<u32>)>,
     >,
     metrics: Vec<UnifiedLayout>,
+    anchor_partition_idx: PartitionIndex,
 }
 
 /// Scale-specific metrics for a partition table
@@ -69,19 +70,13 @@ where
 /// - `rise` is a Fenwick tree that stores the vertical offset of each partition after layout.
 /// - `anchor_partition_idx` designates which partition's origin serves as the world coordinate system origin.
 ///   This allows coordinates to remain stable when new partitions are loaded to the left.
-/// - `layout_graph` contains the unified graph combining all loaded partitions for cursor navigation
 #[derive(Debug)]
 pub struct UnifiedLayout {
-    // TODO: rename "widths" to "run" so it matches its meaning (like
+    // TODO: rename "widths" to "run" so it matches its meaning
     // (run is to width like rise is to height)
     pub widths: FenwickTree<i64>,
     pub rise: FenwickTree<i64>,
     pub heights: Vec<i64>,
-    pub anchor_partition_idx: usize,
-    /// Unified layout graph containing all nodes from all loaded partitions
-    /// Each node stores LocalPos with partition_idx, allowing per-partition spatial index creation
-    /// by filtering nodes belonging to each partition
-    pub layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
 }
 
 impl UnifiedLayout {
@@ -90,8 +85,6 @@ impl UnifiedLayout {
             widths: FenwickTree::from_iter(vec![0i64; num_partitions]),
             rise: FenwickTree::from_iter(vec![0i64; num_partitions]),
             heights: vec![0i64; num_partitions],
-            anchor_partition_idx: 0, // Default to partition 0 as anchor
-            layout_graph: StableGraph::with_capacity(0, 0), // Empty graph, built incrementally
         }
     }
 }
@@ -325,16 +318,15 @@ where
             }
         }
 
-        // Add stitching nodes to partitions (one per side, skip the bridges)
-        // these are used to align the partitions with each other.
-        // If we had to break outside of an articulation point, we don't add
-        // more stitching nodes, but instead hook up more edges to the same stitch node.
-
         let num_partitions = all_partitions.len();
 
         assert!(num_partitions > 0, "No partitions created");
         log::trace!("{} partitions created", num_partitions);
 
+        // Add stitching nodes to partitions (one per side, skip the bridges)
+        // these are used to align the partitions with each other.
+        // If we had to break outside of an articulation point, we don't add
+        // more stitching nodes, but instead hook up more edges to the same stitch node.
         for (partition_idx, partition) in all_partitions.iter_mut().enumerate().step_by(2) {
             // Add Left Stitching node
             let left_stitch_idx = partition
@@ -518,6 +510,7 @@ where
                 UnifiedLayout::new(num_partitions), // Full
                 UnifiedLayout::new(num_partitions), // Truncated
             ],
+            anchor_partition_idx: 0,
         }
     }
 
@@ -649,6 +642,27 @@ where
         Ok(())
     }
 
+    pub fn debug_fenwick_state(&self, detail_level: VisualDetail) {
+        let metrics = &self.metrics[detail_level.as_index()];
+        log::trace!("\n=== Fenwick Tree State ({:?}) ===", detail_level);
+        for i in 0..self.partitions.len() {
+            let width = if i == 0 {
+                metrics.widths.prefix_sum(0, 0)
+            } else {
+                metrics.widths.prefix_sum(i, 0) - metrics.widths.prefix_sum(i - 1, 0)
+            };
+            let cum_x = metrics.widths.prefix_sum(i, 0);
+            let has_layout = self.has_layout(i, detail_level);
+            log::trace!(
+                "  Partition {}: width={}, cumulative_x={}, has_layout={}",
+                i,
+                width,
+                cum_x,
+                has_layout
+            );
+        }
+    }
+
     /// Compute layout for a specific partition, using a specific node sizer and spacing.
     pub fn compute_partition_layouts<S>(
         &mut self,
@@ -771,9 +785,11 @@ where
                 //     0 // First partition, no rise needed
                 // };
 
+                log::trace!("Partition {} is {} wide", partition_index, layout.width);
                 let metrics = &mut self.metrics[detail_level.as_index()];
                 metrics.widths.add_at(partition_index, layout.width);
                 metrics.heights[partition_index] = layout.height;
+                self.debug_fenwick_state(detail_level);
             }
         }
 
@@ -1020,32 +1036,6 @@ where
         self.partitions[partition_index].layouts[VisualDetail::Minimal.as_index()] = None;
         self.partitions[partition_index].layouts[VisualDetail::Full.as_index()] = None;
         self.partitions[partition_index].layouts[VisualDetail::Truncated.as_index()] = None;
-
-        // Remove nodes from this partition from all unified graphs
-        for detail_level in [
-            VisualDetail::Minimal,
-            VisualDetail::Full,
-            VisualDetail::Truncated,
-        ] {
-            let unified_graph = &mut self.metrics[detail_level.as_index()].layout_graph;
-
-            // Collect nodes to remove
-            let nodes_to_remove: Vec<NodeIndex<u32>> = unified_graph
-                .node_indices()
-                .filter(|&idx| {
-                    if let Some(node) = unified_graph.node_weight(idx) {
-                        node.partition_idx() == partition_index
-                    } else {
-                        false
-                    }
-                })
-                .collect();
-
-            // Remove nodes (which also removes their edges)
-            for node_idx in nodes_to_remove {
-                unified_graph.remove_node(node_idx);
-            }
-        }
     }
 
     /// Find a node's NodeIndex and partition index given a node identifier from the original graph
@@ -1065,6 +1055,7 @@ where
         &self.metrics[detail_level.as_index()]
     }
 
+    /// Create a BigRect that spans the partition x range and is infinitely high
     pub fn get_partition_rect(
         &self,
         partition_idx: usize,
@@ -1073,111 +1064,60 @@ where
         if partition_idx >= self.partitions.len() {
             return Err(format!("Partition index {} out of range", partition_idx));
         }
-
-        let scale_data = self.get_scale_data(detail_level);
-
-        // Get partition x bounds in absolute coordinates
-        let partition_start_x = scale_data.widths.prefix_sum(partition_idx, 0);
-        let partition_end_x = scale_data.widths.prefix_sum(partition_idx + 1, 0);
-
-        // Create rectangle with infinite Y bounds
-        Ok(BigRect::from_coords(
-            partition_start_x,
-            i64::MIN,
-            partition_end_x,
-            i64::MAX,
-        ))
-    }
-
-    /// Get the unified layout graph for the specified detail level
-    pub fn get_unified_layout(
-        &self,
-        detail_level: VisualDetail,
-    ) -> &StableGraph<LayoutNode, LayoutEdge, Undirected, u32> {
-        &self.metrics[detail_level.as_index()].layout_graph
-    }
-
-    /// Get mutable access to the unified layout graph for the specified detail level
-    pub fn get_unified_layout_mut(
-        &mut self,
-        detail_level: VisualDetail,
-    ) -> &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32> {
-        &mut self.metrics[detail_level.as_index()].layout_graph
+        let anchor_origin = self.get_partition_origin(self.anchor_partition_idx, detail_level);
+        let measurements = self.get_scale_data(detail_level);
+        let x_start = measurements.widths.prefix_sum(partition_idx, 0) - anchor_origin.x;
+        // x_end is inclusive
+        let x_end = measurements.widths.prefix_sum(partition_idx + 1, 0) - 1 - anchor_origin.x;
+        Ok(BigRect::from_coords(x_start, i64::MIN, x_end, i64::MAX))
     }
 
     /// Set the anchor partition for the coordinate system
     /// This partition's origin (0, 0) becomes the world coordinate system origin
-    pub fn set_anchor_partition(&mut self, partition_idx: usize) -> Result<(), String> {
+    pub fn set_anchor_partition(&mut self, partition_idx: PartitionIndex) -> Result<(), String> {
         if partition_idx >= self.partitions.len() {
             return Err(format!("Partition index {} out of bounds", partition_idx));
         }
-
-        // Update reference partition for all detail levels
-        for detail_level in [
-            VisualDetail::Minimal,
-            VisualDetail::Full,
-            VisualDetail::Truncated,
-        ] {
-            self.metrics[detail_level.as_index()].anchor_partition_idx = partition_idx;
-        }
+        self.anchor_partition_idx = partition_idx;
 
         Ok(())
     }
 
-    /// Convert local (within a partition) coordinates to world coordinates (across all partitions)
-    /// Flow: local → absolute → world
-    pub fn local_to_world(&self, local_pos: LocalPos, detail_level: VisualDetail) -> WorldPos {
+    pub fn get_anchor_partition(&self) -> PartitionIndex {
+        self.anchor_partition_idx
+    }
+
+    /// Get the origin of a partition in absolute coordinates (not in reference to an anchor partition)
+    fn get_partition_origin(&self, partition_idx: usize, detail_level: VisualDetail) -> WorldPos {
         let measurements = self.get_scale_data(detail_level);
 
-        // Step 1: local → absolute (position across all partitions)
-        let absolute_pos = WorldPos::new(
-            measurements.widths.prefix_sum(local_pos.partition_idx, 0) + local_pos.x,
-            measurements.rise.prefix_sum(local_pos.partition_idx, 0) + local_pos.y,
-        );
+        WorldPos::new(
+            measurements.widths.prefix_sum(partition_idx, 0),
+            measurements.rise.prefix_sum(partition_idx, 0),
+        )
+    }
 
-        // Step 2: absolute → world (relative to reference partition origin)
-        let reference_pos = WorldPos::new(
-            measurements
-                .widths
-                .prefix_sum(measurements.anchor_partition_idx, 0),
-            measurements
-                .rise
-                .prefix_sum(measurements.anchor_partition_idx, 0),
-        );
+    /// Convert local (within a partition) coordinates to world coordinates (across all partitions)
+    pub fn local_to_world(&self, input: LocalPos, detail_level: VisualDetail) -> WorldPos {
+        let partition_idx = input.partition_idx;
+        let partition_origin = self.get_partition_origin(partition_idx, detail_level);
+        let anchor_origin = self.get_partition_origin(self.anchor_partition_idx, detail_level);
 
-        absolute_pos - reference_pos
+        input.pos() + partition_origin - anchor_origin
     }
 
     /// Convert world coordinates (across all partitions) to local coordinates (within a partition)
-    /// Flow: world → absolute → local
+    /// The input coordinates are assumed to be expressed in relation to the anchor partition,
     pub fn world_to_local(
         &self,
-        world_pos: WorldPos,
+        input: WorldPos,
         detail_level: VisualDetail,
     ) -> Result<LocalPos, PartitionIdxError> {
-        let scale_data = self.get_scale_data(detail_level);
+        let partition_idx = self.find_partition_idx(input, detail_level)?;
+        let anchor_origin = self.get_partition_origin(self.anchor_partition_idx, detail_level);
+        let partition_origin = self.get_partition_origin(partition_idx, detail_level);
 
-        // Step 1: world → absolute (convert from reference-relative to raw coordinates)
-        let reference_pos = WorldPos::new(
-            scale_data
-                .widths
-                .prefix_sum(scale_data.anchor_partition_idx, 0),
-            scale_data
-                .rise
-                .prefix_sum(scale_data.anchor_partition_idx, 0),
-        );
-
-        let absolute_pos = world_pos + reference_pos;
-
-        // Step 2: absolute → local (find partition and convert to local coordinates)
-        let partition_idx = self.find_partition_idx(absolute_pos, detail_level)?;
-
-        let partition_start_pos = WorldPos::new(
-            scale_data.widths.prefix_sum(partition_idx, 0),
-            scale_data.rise.prefix_sum(partition_idx, 0),
-        );
-
-        let local_offset = absolute_pos - partition_start_pos;
+        let local_offset = input + anchor_origin - partition_origin;
 
         Ok(LocalPos::new_xy(
             partition_idx,
@@ -1189,7 +1129,7 @@ where
     /// Clamp a world position to be within the bounds of a specific partition
     pub fn clamp_to_partition(
         &self,
-        world_pos: WorldPos,
+        input: WorldPos,
         partition_idx: usize,
         detail_level: VisualDetail,
     ) -> Result<WorldPos, PartitionIdxError> {
@@ -1200,39 +1140,15 @@ where
             )));
         }
 
-        let scale_data = self.get_scale_data(detail_level);
-
-        // Convert world → absolute coordinates by uncoupling from the anchor partition origin
-        let reference_pos = WorldPos::new(
-            scale_data
-                .widths
-                .prefix_sum(scale_data.anchor_partition_idx, 0),
-            scale_data
-                .rise
-                .prefix_sum(scale_data.anchor_partition_idx, 0),
-        );
-        let absolute_pos = world_pos + reference_pos;
-
-        // Get partition bounds using the dedicated function
         let partition_rect = self
             .get_partition_rect(partition_idx, detail_level)
             .map_err(PartitionIdxError::InternalError)?;
 
-        // Clamp absolute x coordinate to partition bounds
-        let partition_max_x = if partition_rect.max.x > partition_rect.min.x {
-            partition_rect.max.x - 1
-        } else {
-            partition_rect.min.x
-        };
-        let clamped_absolute = WorldPos::new(
-            absolute_pos.x.clamp(partition_rect.min.x, partition_max_x),
-            absolute_pos.y,
-        );
-
-        // Convert absolute → world coordinates
-        let clamped_world = clamped_absolute - reference_pos;
-
-        Ok(clamped_world)
+        // Use inclusive upper bound (right edge exclusive)
+        let max_x = partition_rect.right();
+        let min_x = partition_rect.left();
+        let clamped_x = input.x.clamp(min_x, max_x);
+        Ok(WorldPos::new(clamped_x, input.y))
     }
 
     /// Clamp a world coordinates rectangle to a specific partition
@@ -1260,53 +1176,22 @@ where
         query: WorldPos,
         detail_level: VisualDetail,
     ) -> Result<usize, PartitionIdxError> {
-        let scale_data = self.get_scale_data(detail_level);
-        let tree = self.get_widths_tree(detail_level);
-        let last_partition_idx = self.partitions.len() - 1;
-
-        // WorldPos is given in relation to a reference origin (the anchor partition),
-        // convert that back to absolute coordinates (identical if anchor partition is 0)
-        // (TODO: drop the concept of anchor partitions)
-        let reference_x = tree.prefix_sum(scale_data.anchor_partition_idx, 0);
-        let absolute_x = query.x + reference_x;
-
-        if tree.is_empty() {
-            if tree.is_empty() {
-                return Err(PartitionIdxError::NoPartitionsLoaded);
-            }
-
-            // TODO: get rid of the custom error types, they're not being used anymore
-            // The outofbounds errors indicate that the position of the point cannot
-            // be determined because the layout generation hasn't caught up yet.
-            if absolute_x < 0 && !self.partitions[0].has_layout(detail_level) {
-                return Err(PartitionIdxError::OutOfBoundsLeft);
-            }
-
-            let total_width = tree.prefix_sum(self.partitions.len(), 0);
-            if absolute_x >= total_width
-                && !self.partitions[last_partition_idx].has_layout(detail_level)
-            {
-                return Err(PartitionIdxError::OutOfBoundsRight);
-            }
-
-            return Err(PartitionIdxError::NoPartitionsLoaded);
-        }
-
-        // Check bounds against loaded partitions (interpret as: )
-        if absolute_x < 0 && !self.partitions[0].has_layout(detail_level) {
-            return Err(PartitionIdxError::OutOfBoundsLeft);
-        }
-
-        let total_width = tree.prefix_sum(self.partitions.len(), 0);
-        if absolute_x >= total_width
-            && !self.partitions[last_partition_idx].has_layout(detail_level)
-        {
-            return Err(PartitionIdxError::OutOfBoundsRight);
-        }
-
-        let partition_idx = tree.index_of(absolute_x + 1).min(last_partition_idx);
-
-        Ok(partition_idx)
+        self.partitions
+            .iter()
+            .enumerate()
+            .filter(|(_, partition)| partition.has_layout(detail_level))
+            .find_map(|(idx, _)| {
+                self.get_partition_rect(idx, detail_level)
+                    .ok()
+                    .filter(|rect| rect.contains(query))
+                    .map(|_| idx)
+            })
+            .ok_or_else(|| {
+                PartitionIdxError::InternalError(format!(
+                    "Could not find partition for world position {:?}",
+                    query
+                ))
+            })
     }
 
     /// Clear all layouts while keeping partitions and layer data
@@ -1316,10 +1201,7 @@ where
             partition.layouts = [None, None, None];
         }
 
-        // Clear the unified layout graphs and reset Fenwick trees
         for scale_data in &mut self.metrics {
-            scale_data.layout_graph.clear();
-
             // Reset Fenwick trees to zero state so they can be properly recalculated
             // The idempotency check in compute_partition_layouts relies on these being zero
             for i in 0..self.partitions.len() {
@@ -1876,10 +1758,7 @@ mod tests {
         }
 
         // Reference partition is set to 0 by default
-        assert_eq!(
-            table.metrics[VisualDetail::Minimal.as_index()].anchor_partition_idx,
-            0
-        );
+        assert_eq!(table.get_anchor_partition(), 0);
 
         assert_eq!(
             table.find_partition_idx(WorldPos::new(0, 0), VisualDetail::Minimal),

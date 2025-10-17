@@ -3,10 +3,10 @@ use std::time::Duration;
 use tachyonfx::{Interpolatable, Interpolation};
 
 use crate::{
-    cursor_v2::ViewportCursor,
+    cursor::Cursor,
     geometry::{ViewportPos, WorldPos, clamp_to_bounds},
     graph_controller::ViewportState,
-    viewport_graph::ViewportGraph,
+    viewport_graph::CroppedGraph,
 };
 
 impl Interpolatable<WorldPos> for WorldPos {
@@ -110,8 +110,8 @@ impl ViewportState {
         &mut self,
         delta: Duration,
         viewport_size: (u16, u16),
-        cursor: &mut ViewportCursor,
-        viewport_graph: &ViewportGraph,
+        cursor: &mut Cursor,
+        viewport_graph: &CroppedGraph,
     ) {
         // Advance camera animation (if present)
         if let Some(anim) = &mut self.camera_anim {
@@ -320,8 +320,7 @@ mod tests {
     #[test]
     fn test_dead_zone_behavior() {
         use crate::{
-            cursor_v2::ViewportCursor, graph_controller::ViewportState,
-            viewport_graph::ViewportGraph,
+            cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
 
         let mut state = ViewportState::new();
@@ -329,11 +328,11 @@ mod tests {
         state.soft_zone_fraction = (0.4, 0.4); // 40% of viewport
 
         let viewport_size = (10_u16, 10_u16);
-        let mut cursor = ViewportCursor::new();
+        let mut cursor = Cursor::new();
         cursor.set_viewport_pos(ViewportPos::new(5, 5)); // Center of viewport
 
         let camera_before = state.camera_current;
-        let viewport_graph = ViewportGraph::empty();
+        let viewport_graph = CroppedGraph::empty();
 
         state.update(
             Duration::from_millis(16),
@@ -350,8 +349,7 @@ mod tests {
     #[test]
     fn test_soft_zone_behavior() {
         use crate::{
-            cursor_v2::ViewportCursor, graph_controller::ViewportState,
-            viewport_graph::ViewportGraph,
+            cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
 
         let mut state = ViewportState::new();
@@ -359,7 +357,7 @@ mod tests {
         state.soft_zone_fraction = (0.4, 0.4);
 
         let viewport_size = (10_u16, 10_u16);
-        let mut cursor = ViewportCursor::new();
+        let mut cursor = Cursor::new();
 
         // Viewport center in screen coords: (5, 5) == (0, 0) in world coords
         // Dead zone radius: 0.2 * 0.5 * 10 = 1, so dead zone is (4,4) to (6,6) in screen coords
@@ -367,7 +365,7 @@ mod tests {
         // Place cursor at screen coordinates (7, 5) (just outside dead zone, inside soft zone)
         cursor.set_viewport_pos(ViewportPos::new(7, 5));
 
-        let viewport_graph = ViewportGraph::empty();
+        let viewport_graph = CroppedGraph::empty();
         state.update(
             Duration::from_millis(16),
             viewport_size,
@@ -382,8 +380,7 @@ mod tests {
     #[test]
     fn test_hard_zone_behavior() {
         use crate::{
-            cursor_v2::ViewportCursor, graph_controller::ViewportState,
-            viewport_graph::ViewportGraph,
+            cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
 
         let mut state = ViewportState::new();
@@ -391,7 +388,7 @@ mod tests {
         state.soft_zone_fraction = (0.4, 0.4); // 40% of viewport
 
         let viewport_size = (10_u16, 10_u16);
-        let mut cursor = ViewportCursor::new();
+        let mut cursor = Cursor::new();
 
         // Place cursor outside soft zone (in hard zone)
         // Soft zone is (3,3) to (7,7) in screen coords
@@ -399,7 +396,7 @@ mod tests {
         cursor.set_viewport_pos(ViewportPos::new(8, 5));
         let camera_before = state.camera_current;
 
-        let viewport_graph = ViewportGraph::empty();
+        let viewport_graph = CroppedGraph::empty();
         state.update(
             Duration::from_millis(16),
             viewport_size,
@@ -415,8 +412,7 @@ mod tests {
     #[test]
     fn test_soft_zone_behavior_detailed() {
         use crate::{
-            cursor_v2::ViewportCursor, graph_controller::ViewportState,
-            viewport_graph::ViewportGraph,
+            cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
 
         let mut state = ViewportState::new();
@@ -424,7 +420,7 @@ mod tests {
         state.soft_zone_fraction = (0.4, 0.4); // 40% of viewport
 
         let viewport_size = (10_u16, 10_u16);
-        let mut cursor = ViewportCursor::new();
+        let mut cursor = Cursor::new();
 
         // Place cursor outside of dead zone, inside soft zone: viewport (7, 5)
         cursor.set_viewport_pos(ViewportPos::new(7, 5));
@@ -432,7 +428,7 @@ mod tests {
         state.camera_target = WorldPos::ZERO;
         state.camera_anim = None;
 
-        let viewport_graph = ViewportGraph::empty();
+        let viewport_graph = CroppedGraph::empty();
         state.update(
             Duration::from_millis(16),
             viewport_size,

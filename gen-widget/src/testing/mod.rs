@@ -5,7 +5,6 @@
 // - Mock infrastructure: Standardized graphs, node sizers, and renderers for consistent testing
 // - Utility functions: Common testing patterns and quick verification methods
 
-pub mod edge_label_validation_test;
 pub mod graph_validation;
 pub mod layout_tests;
 pub mod mocks;
