@@ -3,7 +3,6 @@
 
 pub mod animation;
 pub mod cursor;
-pub mod cursor_adapter;
 pub mod dot_export;
 pub mod edge_router_rs; // Rust port of edge routing
 pub mod geometry;
@@ -26,8 +25,8 @@ pub mod viewport_graph;
 // #[cfg(test)]
 // mod cursor_test;
 //
-//#[cfg(test)]
-//mod layer_navigation_test;
+#[cfg(test)]
+mod layer_navigation_test;
 //
 // #[cfg(test)]
 // mod cursor_partition_test;

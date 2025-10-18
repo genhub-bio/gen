@@ -9,13 +9,14 @@ use crate::{
 
 /// Controller for the Graph widget, managing camera and cursor positions, animations, and zones.
 pub struct ViewportState {
-    /// Dead Zone as a fraction of viewport radius (0.0 to 1.0)
-    /// 0.0 = no dead zone, 1.0 = dead zone extends to viewport edge
-    pub dead_zone_fraction: (f32, f32),
+    /// Hard Zone as number of cells from the viewport edge
+    /// Camera snaps immediately when cursor enters this zone (in # terminal cells from the sides, half cells on top and bottom)
+    pub hard_zone: u16,
 
-    /// Soft Zone as a fraction of viewport radius (0.0 to 1.0)
-    /// Must be >= dead_zone_fraction. 0.0 = no soft zone, 1.0 = soft zone extends to viewport edge
-    pub soft_zone_fraction: (f32, f32),
+    /// Soft Zone as number of cells from the viewport edge
+    /// Must be > hard_zone (further from edge). Camera follows smoothly in this zone
+    /// (hard_zone to soft_zone from edge). Dead zone is implicit (center area).
+    pub soft_zone: u16,
 
     /// Optional world boundaries: camera_current is clamped to this rect if present.
     pub world_bounds: Option<WorldRect>,
@@ -56,8 +57,8 @@ fn clamp_to_bounds(pos: WorldPos, bounds: Option<WorldRect>) -> WorldPos {
 impl ViewportState {
     pub fn new() -> Self {
         ViewportState {
-            dead_zone_fraction: (0.6, 0.6), // 60% of viewport radius for dead zone
-            soft_zone_fraction: (0.8, 0.8), // 80% of viewport radius for soft zone
+            hard_zone: 2, // Hard zone is 0-2 cells from edge
+            soft_zone: 4, // Soft zone is 2-4 cells from edge, dead zone is 4+ cells
             world_bounds: None,
             camera_current: WorldPos::ZERO,
             camera_target: WorldPos::ZERO,
@@ -227,21 +228,17 @@ impl ViewportState {
         self.panning = false;
     }
 
-    /// Set the dead zone as a fraction of viewport radius.
-    /// 0.0 = no dead zone, 1.0 = dead zone extends to viewport edge.
-    /// Values are automatically clamped to [0.0, 1.0] to prevent underflow.
-    pub fn set_dead_zone_fraction(&mut self, x_fraction: f32, y_fraction: f32) {
-        self.dead_zone_fraction = (x_fraction.clamp(0.0, 1.0), y_fraction.clamp(0.0, 1.0));
+    /// Set the hard zone as number of cells from the viewport edge.
+    /// Camera snaps immediately when cursor enters this outer zone.
+    pub fn set_hard_zone_edge_cells(&mut self, cells: u16) {
+        self.hard_zone = cells;
     }
 
-    /// Set the soft zone as a fraction of viewport radius.
-    /// 0.0 = no soft zone, 1.0 = soft zone extends to viewport edge.
-    /// Values are automatically clamped to [dead_zone_fraction, 1.0] to ensure soft >= dead.
-    pub fn set_soft_zone_fraction(&mut self, x_fraction: f32, y_fraction: f32) {
-        self.soft_zone_fraction = (
-            x_fraction.clamp(self.dead_zone_fraction.0, 1.0),
-            y_fraction.clamp(self.dead_zone_fraction.1, 1.0),
-        );
+    /// Set the soft zone as number of cells from the viewport edge.
+    /// Camera follows smoothly when cursor is in this zone (between hard zone and dead zone).
+    /// Must be greater than hard_zone_edge_cells (further from edge).
+    pub fn set_soft_zone_edge_cells(&mut self, cells: u16) {
+        self.soft_zone = cells;
     }
 }
 
@@ -401,8 +398,8 @@ impl<'a> WorldBuffer<'a> {
     /// Clear the entire visible viewport area back to default.
     /// Returns the number of cells actually cleared.
     pub fn clear_visible(&mut self) -> usize {
-        let visible_rect = self.viewport_state.visible_world_rect();
-        self.clear_rect(visible_rect)
+        let target_area = self.viewport_state.camera_rect();
+        self.clear_rect(target_area)
     }
 
     /// Set multiple characters at once with relative offsets from a base position.
@@ -652,9 +649,9 @@ mod tests {
     #[test]
     fn test_panning_behavior() {
         let mut state = ViewportState::new();
-        // Set zone fractions to enable multizone logic
-        state.set_dead_zone_fraction(0.2, 0.2);
-        state.set_soft_zone_fraction(0.4, 0.4);
+        // Set zone cells to enable multizone logic
+        state.set_hard_zone_edge_cells(2);
+        state.set_soft_zone_edge_cells(4);
 
         assert!(!state.panning);
 

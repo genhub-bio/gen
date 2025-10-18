@@ -120,15 +120,8 @@ where
     let test_viewport = ratatui::layout::Rect::new(0, 0, viewport_width, viewport_height);
     controller.viewport_state.viewport_bounds = test_viewport;
 
-    controller.initialize_cursor_and_camera();
-
     // Set detail level before the camera
     controller.set_detail_level(VisualDetail::Full);
-
-    // Then set camera position
-   // let camera_pos = WorldPos::new((test_viewport.width / 2) as i64 - 5, 0);
-    //controller.viewport_state.camera_current = camera_pos;
-    //controller.viewport_state.camera_target = camera_pos;
 
     let result = terminal.draw(|f| {
         let area = f.area();

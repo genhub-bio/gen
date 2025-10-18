@@ -29,11 +29,11 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct Cursor {
     /// Position in viewport coordinates (PRIMARY - stays stable across rebuilds)
-    viewport_pos: ViewportPos,
+    pub viewport_pos: ViewportPos,
 
     /// Domain node index that cursor is positioned on
     /// Uses petgraph::NodeIndex to match ViewportGraph's domain_to_world map
-    node_idx: Option<NodeIndex>,
+    pub node_idx: Option<NodeIndex>,
 
     /// Fractional position within the node rectangle (0.0 to 1.0)
     /// Relative to bottom-left corner: (0.0, 0.0) = bottom-left, (1.0, 1.0) = top-right
@@ -536,6 +536,7 @@ mod tests {
 
     /// Helper to create a mock ViewportGraph for testing
     /// Returns (ViewportGraph, known_node_positions)
+    #[allow(clippy::type_complexity)]
     fn create_mock_viewport_graph() -> (CroppedGraph, Vec<(NodeIndex, WorldPos, (u64, u64))>) {
         // Create a simple chain: 0 -> 1 -> 2
         let domain_graph = TestGraphs::domain_simple_chain();

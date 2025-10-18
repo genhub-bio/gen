@@ -34,16 +34,15 @@ mod tests {
 
         // Set up viewport
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 100, 50);
-        controller.initialize_camera_and_cursor();
         controller.rebuild_viewport_graph();
         let viewport_graph = controller.get_viewport_graph();
         // Test that we can navigate through the layers
-        let initial_pos = controller.viewport_state.cursor.current;
+        let initial_pos = controller.cursor.viewport_pos;
         println!("Initial cursor position: {:?}", initial_pos);
 
         // Move right - should jump to next layer
         controller.cursor.move_horizontal(1, &viewport_graph);
-        let pos_after_right = controller.viewport_state.cursor.current;
+        let pos_after_right = controller.cursor.viewport_pos;
         println!("Position after moving right: {:?}", pos_after_right);
 
         // The cursor should have moved to a different X position (next layer)
@@ -54,7 +53,7 @@ mod tests {
 
         // Move left - should return to previous layer
         controller.cursor.move_horizontal(-1, &viewport_graph);
-        let pos_after_left = controller.viewport_state.cursor.current;
+        let pos_after_left = controller.cursor.viewport_pos;
         println!("Position after moving left: {:?}", pos_after_left);
     }
 
@@ -90,12 +89,12 @@ mod tests {
         controller.initialize_cursor();
 
         // Navigate through the graph
-        let start_node = controller.viewport_state.cursor.node_domain_idx;
+        let start_node = controller.cursor.node_domain_idx;
 
         // Move right multiple times to traverse through potential routing nodes
         for i in 0..10 {
-            controller.cursor.move_cursor_horizontal(1);
-            let current_node = controller.viewport_state.cursor.node_domain_idx;
+            controller.cursor.move_horizontal(1);
+            let current_node = controller.cursor.node_domain_idx;
             println!("Step {}: Node {:?}", i, current_node);
 
             // Eventually we should reach a different data node

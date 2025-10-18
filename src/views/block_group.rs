@@ -147,7 +147,6 @@ pub fn view_block_group(
     let node_sizer = GenGraphNodeSizer;
     let mut graph_controller = GraphController::new(&block_graph, node_sizer);
     graph_controller.set_detail_level(VisualDetail::Minimal);
-    graph_controller.initialize_cursor_and_camera();
     graph_controller.show_cursor();
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
@@ -398,7 +397,6 @@ pub fn view_block_group(
                 let node_sizer = GenGraphNodeSizer;
                 graph_controller = GraphController::new(&block_graph, node_sizer);
                 graph_controller.set_detail_level(VisualDetail::Minimal);
-                graph_controller.initialize_cursor_and_camera();
                 graph_controller.show_cursor();
 
                 is_loading = false;

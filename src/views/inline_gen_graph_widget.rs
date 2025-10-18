@@ -83,7 +83,6 @@ impl<'a> InlineGenGraphState<'a> {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph, node_sizer);
         graph_controller.set_detail_level(VisualDetail::Minimal);
-        graph_controller.initialize_cursor_and_camera();
         graph_controller.show_cursor();
         Self {
             controller: graph_controller,
@@ -226,7 +225,6 @@ pub fn plot_static(
     let renderer = GenGraphNodeRenderer::new(conn);
     let mut controller = GraphController::new(graph, node_sizer);
     controller.set_detail_level(detail_level.unwrap_or(VisualDetail::Minimal));
-    controller.initialize_cursor_and_camera();
     controller.show_cursor();
 
     let plot_string = plot_graph_to_string(&mut controller, renderer, detail_level, None, None);
@@ -310,12 +308,6 @@ fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState
     state.controller.viewport_state.viewport_bounds = area;
     state.controller.viewport_state.focus();
 
-    // // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
-    // state.controller.ensure_camera_coverage();
-    // if state.controller.rebuild_needed {
-    //     state.controller.rebuild_viewport_graph();
-    // }
-
     // Create the GenGraph widget with current level of detail
     let detail_level = state.controller.get_detail_level();
     let widget = create_gen_graph_widget(state.conn)
@@ -329,7 +321,7 @@ fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState
 fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
     let camera_pos = state.controller.viewport_state.camera_current;
     let help_text = format!(
-        " Camera: ({},{}) | ←→↑↓: Navigate/Pan | +/-: Zoom | q/Enter/Esc: Exit",
+        " Camera: ({},{}) | ←→↑↓: Navigate/Pan | +/-: Zoom | q/Esc: Exit",
         camera_pos.x, camera_pos.y
     );
 

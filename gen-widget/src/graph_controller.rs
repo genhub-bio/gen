@@ -1,4 +1,4 @@
-use std::{collections::HashSet, hash::Hash};
+use std::hash::Hash;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use log::trace;
@@ -126,12 +126,6 @@ where
 
         if let Err(e) = controller.partition_controller.set_anchor_partition(0) {
             eprintln!("Warning: Failed to initialize reference partition: {}", e);
-        }
-
-        if controller.viewport_state.viewport_bounds.width > 0
-            && controller.viewport_state.viewport_bounds.height > 0
-        {
-            controller.initialize_cursor();
         }
 
         controller
@@ -357,16 +351,16 @@ where
         self.partition_controller.get_vertex_spacing()
     }
 
-    /// Initialize cursor to viewport center, associated with the node closest to origin in anchor partition
+    /// Initialize cursor at soft_zone + 1 from left edge, associated with the node closest to origin in anchor partition
     /// This should be called once when the controller is first created or when cursor needs reset
     pub fn initialize_cursor(&mut self) {
-        // Set cursor viewport position to exact center of viewport
-        // Use (width - 1) / 2 to match from_center_and_size logic
-        let viewport_center = ViewportPos::new(
-            (self.viewport_state.viewport_bounds.width.saturating_sub(1)) / 2,
-            (self.viewport_state.viewport_bounds.height.saturating_sub(1)) / 2,
-        );
-        self.cursor.set_viewport_pos(viewport_center);
+        // Position cursor at soft_zone + 1 from left edge, centered vertically
+        // This gives maximum room for rightward cursor movement before triggering camera following
+        let viewport_center_y = self.viewport_state.viewport_bounds.height / 2;
+        let desired_viewport_x = self.viewport_state.soft_zone + 1;
+        let desired_viewport_y = viewport_center_y;
+        let desired_viewport_pos = ViewportPos::new(desired_viewport_x, desired_viewport_y);
+        self.cursor.set_viewport_pos(desired_viewport_pos);
 
         // Find the node closest to partition origin (0, 0) and associate cursor with it
         if let Some(node_idx) = self.find_node_closest_to_origin() {
@@ -374,7 +368,7 @@ where
             self.cursor.set_node(node_idx, (0.0, 0.5));
             trace!(
                 "Cursor initialized: viewport={:?}, node={:?}, fractional=(0.0, 0.5)",
-                viewport_center, node_idx
+                desired_viewport_pos, node_idx
             );
         } else {
             trace!("Warning: No data nodes found in anchor partition for cursor initialization");
@@ -696,7 +690,10 @@ where
             .update(delta, viewport_size, &mut self.cursor, &self.viewport_graph);
     }
 
-    // Legacy cursor helper methods removed - now handled by ViewportCursor + camera delta adjustment
+    /// Enable cursor rendering
+    pub fn show_cursor(&mut self) {
+        self.cursor.set_visibility(true);
+    }
 }
 
 #[cfg(test)]
@@ -946,7 +943,7 @@ mod tests {
         // Try multiple times to replicate "hitting + a few times"
         for i in 1..=3 {
             println!("Attempt {} to disperse", i);
-            controller.handle_key_event(plus_key);
+            let _ = controller.handle_key_event(plus_key);
         }
 
         // If we get here without panicking, the test passes
