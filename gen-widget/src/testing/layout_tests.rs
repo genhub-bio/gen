@@ -703,8 +703,7 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
 
     controller.viewport_state.viewport_bounds =
         ratatui::layout::Rect::new(0, 0, u16::MAX / 2, u16::MAX / 2);
-    controller.initialize_cursor_and_camera();
-
+    controller.initialize_cursor();
     controller.viewport_state.camera_current = WorldPos::new(0, 0);
     controller.viewport_state.camera_target = WorldPos::new(0, 0);
 

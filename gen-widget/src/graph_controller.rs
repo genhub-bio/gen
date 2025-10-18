@@ -687,7 +687,7 @@ where
     /// - viewport_size: Current viewport dimensions (width, height)
     pub fn update_animations(&mut self, delta: std::time::Duration, viewport_size: (u16, u16)) {
         self.viewport_state
-            .update(delta, viewport_size, &mut self.cursor, &self.viewport_graph);
+            .update(delta, &mut self.cursor, &self.viewport_graph);
     }
 
     /// Enable cursor rendering
