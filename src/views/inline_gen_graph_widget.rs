@@ -166,10 +166,9 @@ fn show_interactive_widget(
                     // Draw the frame
                     terminal.draw(|frame| {
                         // Update animations with frame delta for smooth camera and cursor animations
-                        state.controller.update_animations(
-                            frame_delta,
-                            (frame.area().width, frame.area().height),
-                        );
+                        state
+                            .controller
+                            .update_animations(frame_delta, frame.area());
                         render_inline(frame, &mut state);
                     })?;
                 }

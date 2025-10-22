@@ -146,21 +146,22 @@ impl ViewportState {
 
             let cursor_viewport = cursor.viewport_pos();
 
-            // Calculate distance from each edge (in cells)
-            let dist_from_left = cursor_viewport.x;
-            let dist_from_right = width.saturating_sub(cursor_viewport.x).saturating_sub(1);
-            let dist_from_top = cursor_viewport.y;
-            let dist_from_bottom = height.saturating_sub(cursor_viewport.y).saturating_sub(1);
+            // Calculate distance from each edge (in cells) using SIGNED arithmetic
+            // This allows us to detect when cursor is beyond viewport bounds (negative distance)
+            let dist_from_left = cursor_viewport.x as i64;
+            let dist_from_right = (width as i64) - (cursor_viewport.x as i64) - 1;
+            let dist_from_top = cursor_viewport.y as i64;
+            let dist_from_bottom = (height as i64) - (cursor_viewport.y as i64) - 1;
 
-            // Find closest edge distance for each axis
+            // Find closest edge distance for each axis (can be negative if offscreen)
             let min_x_dist = dist_from_left.min(dist_from_right);
             let min_y_dist = dist_from_top.min(dist_from_bottom);
 
             // Determine zone independently for X and Y based on distance from nearest edge
             // Note: Terminal cells are ~2x taller than wide, so Y uses half the cell values
-            let x_zone = if min_x_dist >= soft_zone {
+            let x_zone = if min_x_dist >= soft_zone as i64 {
                 Zone::Dead
-            } else if min_x_dist >= hard_zone {
+            } else if min_x_dist >= hard_zone as i64 {
                 Zone::Soft
             } else {
                 Zone::Hard
@@ -169,9 +170,9 @@ impl ViewportState {
             let soft_zone_y = soft_zone / 2;
             let hard_zone_y = hard_zone / 2;
 
-            let y_zone = if min_y_dist >= soft_zone_y {
+            let y_zone = if min_y_dist >= soft_zone_y as i64 {
                 Zone::Dead
-            } else if min_y_dist >= hard_zone_y {
+            } else if min_y_dist >= hard_zone_y as i64 {
                 Zone::Soft
             } else {
                 Zone::Hard
@@ -189,9 +190,9 @@ impl ViewportState {
                 Zone::Soft => {
                     // Smooth follow: push cursor back toward dead zone
                     // Calculate how far into soft zone (0.0 = at dead boundary, 1.0 = at hard boundary)
-                    let soft_zone_width = soft_zone - hard_zone;
+                    let soft_zone_width = (soft_zone - hard_zone) as i64;
                     if soft_zone_width > 0 {
-                        let dist_into_soft = soft_zone - min_x_dist;
+                        let dist_into_soft = soft_zone as i64 - min_x_dist;
                         let progress = dist_into_soft as f64 / soft_zone_width as f64;
 
                         // Determine direction: which edge are we closest to?
@@ -208,9 +209,9 @@ impl ViewportState {
                 }
                 Zone::Hard => {
                     // Immediate snap: move cursor exactly to soft zone boundary
-                    let target_dist = soft_zone;
-                    let current_dist = min_x_dist;
-                    let snap_amount = (target_dist - current_dist) as i64;
+                    let target_dist = soft_zone as i64;
+                    let current_dist = min_x_dist; // Already i64, can be negative
+                    let snap_amount = target_dist - current_dist;
 
                     if dist_from_left < dist_from_right {
                         desired_cam.x -= snap_amount;
@@ -225,9 +226,9 @@ impl ViewportState {
             match y_zone {
                 Zone::Dead => {}
                 Zone::Soft => {
-                    let soft_zone_width = soft_zone_y - hard_zone_y;
+                    let soft_zone_width = (soft_zone_y - hard_zone_y) as i64;
                     if soft_zone_width > 0 {
-                        let dist_into_soft = soft_zone_y - min_y_dist;
+                        let dist_into_soft = soft_zone_y as i64 - min_y_dist;
                         let progress = dist_into_soft as f64 / soft_zone_width as f64;
                         let shift = (dist_into_soft as f64 * progress) as i64;
 
@@ -240,9 +241,9 @@ impl ViewportState {
                     }
                 }
                 Zone::Hard => {
-                    let target_dist = soft_zone_y;
-                    let current_dist = min_y_dist;
-                    let snap_amount = (target_dist - current_dist) as i64;
+                    let target_dist = soft_zone_y as i64;
+                    let current_dist = min_y_dist; // Already i64, can be negative
+                    let snap_amount = target_dist - current_dist;
 
                     if dist_from_top < dist_from_bottom {
                         desired_cam.y -= snap_amount;
@@ -288,6 +289,65 @@ impl ViewportState {
         // Synchronize cursor's viewport position after any camera changes
         let camera_rect = self.camera_rect();
         let _ = cursor.update(viewport_graph, camera_rect);
+
+        // Safety clamp: ensure cursor never escapes viewport bounds
+        // This is a defensive measure - the camera following logic should prevent escapes,
+        // but if it fails (e.g., due to rapid cursor movement), we forcibly snap the camera
+        if self.viewport_bounds.width > 0 && self.viewport_bounds.height > 0 {
+            let cursor_vp = cursor.viewport_pos();
+            let width = self.viewport_bounds.width;
+            let height = self.viewport_bounds.height;
+
+            let mut clamped = false;
+
+            // Clamp X axis
+            if cursor_vp.x >= width {
+                let overshoot_x = (cursor_vp.x - width + 1) as i64;
+                self.camera_current.x += overshoot_x;
+                self.camera_target.x += overshoot_x;
+                clamped = true;
+                log::warn!(
+                    "Safety clamp: cursor escaped right (x={} >= {}), moved camera right by {}",
+                    cursor_vp.x,
+                    width,
+                    overshoot_x
+                );
+            }
+
+            // Clamp Y axis
+            if cursor_vp.y >= height {
+                let overshoot_y = (cursor_vp.y - height + 1) as i64;
+                self.camera_current.y += overshoot_y;
+                self.camera_target.y += overshoot_y;
+                clamped = true;
+                log::warn!(
+                    "Safety clamp: cursor escaped bottom (y={} >= {}), moved camera down by {}",
+                    cursor_vp.y,
+                    height,
+                    overshoot_y
+                );
+            }
+
+            // If we clamped, update cursor position
+            if clamped {
+                let camera_rect = self.camera_rect();
+                let _ = cursor.update(viewport_graph, camera_rect);
+
+                log::error!(
+                    "Cursor escaped viewport! Original pos=({}, {}), viewport={}x{}, camera=({}, {}), \
+                     cursor_has_node={}, camera_anim={}, panning={}. Applied safety clamp.",
+                    cursor_vp.x,
+                    cursor_vp.y,
+                    width,
+                    height,
+                    self.camera_current.x,
+                    self.camera_current.y,
+                    cursor.node_idx().is_some(),
+                    self.camera_anim.is_some(),
+                    self.panning
+                );
+            }
+        }
     }
 }
 
@@ -333,12 +393,15 @@ mod tests {
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
+        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
         state.soft_zone = 4; // Soft zone: 4 cells from edge (dead zone is implicit)
 
         let viewport_size = (10_u16, 10_u16);
+        state.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
+
         let mut cursor = Cursor::new();
         cursor.set_viewport_pos(ViewportPos::new(5, 5)); // Center of viewport
 
@@ -357,12 +420,15 @@ mod tests {
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
+        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
         state.soft_zone = 4; // Soft zone: 4 cells from edge
 
         let viewport_size = (10_u16, 10_u16);
+        state.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
+
         let mut cursor = Cursor::new();
 
         // Viewport center in screen coords: (5, 5) == (0, 0) in world coords
@@ -383,12 +449,15 @@ mod tests {
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
+        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
         state.soft_zone = 4; // Soft zone: 4 cells from edge
 
         let viewport_size = (10_u16, 10_u16);
+        state.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
+
         let mut cursor = Cursor::new();
 
         // Place cursor outside hard zone (beyond outer boundary)
@@ -410,12 +479,15 @@ mod tests {
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
+        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
         state.soft_zone = 4; // Soft zone: 4 cells from edge
 
         let viewport_size = (10_u16, 10_u16);
+        state.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
+
         let mut cursor = Cursor::new();
 
         // Place cursor outside of soft zone, inside hard zone: viewport (7, 5)

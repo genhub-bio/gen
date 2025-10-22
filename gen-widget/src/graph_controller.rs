@@ -684,8 +684,15 @@ where
     ///
     /// # Parameters
     /// - delta: Time elapsed since last frame
-    /// - viewport_size: Current viewport dimensions (width, height)
-    pub fn update_animations(&mut self, delta: std::time::Duration, viewport_size: (u16, u16)) {
+    /// - viewport_bounds: Current viewport position and dimensions (updated each frame for terminal resize)
+    pub fn update_animations(
+        &mut self,
+        delta: std::time::Duration,
+        viewport_bounds: ratatui::layout::Rect,
+    ) {
+        // Update viewport bounds to handle terminal resizing and widget repositioning
+        self.viewport_state.viewport_bounds = viewport_bounds;
+
         self.viewport_state
             .update(delta, &mut self.cursor, &self.viewport_graph);
     }
@@ -715,21 +722,22 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         let writer = WorldBuffer::new(&mut buffer, &state);
 
-        // Test camera origin calculation
-        let origin = state.camera_origin_world();
-        assert_eq!(origin, WorldPos::new(90, 95)); // 100 - 10, 100 - 5
+        // Test camera origin calculation using correct formula: camera - ((width-1)/2, (height-1)/2)
+        let origin = state.camera_rect().min;
+        assert_eq!(origin, WorldPos::new(91, 96)); // 100 - (20-1)/2, 100 - (10-1)/2 = 100 - 9, 100 - 4
 
         // Test world to viewport conversion
         let world_pos = WorldPos::new(95, 98);
         let viewport_pos = writer.world_to_viewport(world_pos);
-        assert_eq!(viewport_pos, Some(ViewportPos::new(5, 3)));
+        // world_pos - origin = (95, 98) - (91, 96) = (4, 2)
+        assert_eq!(viewport_pos, Some(ViewportPos::new(4, 2)));
 
         // Test out of bounds
         let out_of_bounds = WorldPos::new(80, 80);
         assert_eq!(writer.world_to_viewport(out_of_bounds), None);
 
-        // Test viewport to world conversion
-        let vp = ViewportPos::new(5, 3);
+        // Test viewport to world conversion (round-trip)
+        let vp = ViewportPos::new(4, 2);
         let world = writer.viewport_to_world(vp);
         assert_eq!(world, WorldPos::new(95, 98));
     }

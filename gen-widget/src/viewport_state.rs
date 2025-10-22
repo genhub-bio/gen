@@ -96,25 +96,15 @@ impl ViewportState {
 
     /// Check if a world position is currently visible in the viewport
     pub fn is_visible(&self, world_pos: WorldPos) -> bool {
-        self.world_to_viewport(world_pos).is_some()
-    }
-
-    /// Get the world rectangle that corresponds to the current viewport
-    pub fn visible_world_rect(&self) -> WorldRect {
-        let top_left = self.viewport_to_world(ViewportPos::ZERO);
-        let bottom_right = self.viewport_to_world(ViewportPos::new(
-            self.viewport_bounds.width.saturating_sub(1),
-            self.viewport_bounds.height.saturating_sub(1),
-        ));
-
-        WorldRect::from_corners(top_left, bottom_right)
+        let camera_rect = self.camera_rect();
+        camera_rect.contains(world_pos)
     }
 
     /// Convert a world-space position to viewport coordinates (cell indices).
     /// Returns `Some(ViewportPos)` if inside [0..width) × [0..height), otherwise `None`.
     pub fn world_to_viewport(&self, world: WorldPos) -> Option<ViewportPos> {
-        // Subtract origin (1:1 mapping, no zoom scaling).
-        let origin = self.camera_origin_world();
+        // Use camera_rect().min as origin for correct calculation
+        let origin = self.camera_rect().min;
         let relative = world - origin;
 
         // Check if position is within viewport bounds
@@ -130,8 +120,8 @@ impl ViewportState {
 
     /// Inverse of `world_to_viewport`: given a viewport cell, return the corresponding world pos.
     pub fn viewport_to_world(&self, screen: ViewportPos) -> WorldPos {
-        // Add origin (1:1 mapping, no zoom scaling).
-        let origin = self.camera_origin_world();
+        // Use camera_rect().min as origin for correct calculation
+        let origin = self.camera_rect().min;
         WorldPos::new(origin.x + screen.x as i64, origin.y + screen.y as i64)
     }
 
@@ -201,18 +191,6 @@ impl ViewportState {
         crate::geometry::WorldRect::from_center_and_size(center, size)
     }
 
-    // TODO remove this function, replace calls with calls to camera_rect().min()
-    /// Returns the top-left world coordinate for viewport (0,0).
-    pub fn camera_origin_world(&self) -> WorldPos {
-        // Center of viewport in world coords = camera_current (no anchor needed)
-        // Subtract half the viewport size (1:1 mapping, no zoom scaling) to get the top-left.
-        let half_screen = WorldPos::new(
-            self.viewport_bounds.width as i64 / 2i64,
-            self.viewport_bounds.height as i64 / 2i64,
-        );
-        self.camera_current - half_screen
-    }
-
     /// Give this viewport input focus. Scroll events and key events will move the camera.
     pub fn focus(&mut self) {
         self.has_focus = true;
@@ -269,11 +247,6 @@ impl<'a> WorldBuffer<'a> {
     /// Get the viewport area from the state
     pub fn viewport_area(&self) -> Rect {
         self.viewport_state.viewport_bounds
-    }
-
-    /// Get the visible world rect from the state
-    pub fn visible_world_rect(&self) -> WorldRect {
-        self.viewport_state.visible_world_rect()
     }
 
     /// Convert a world position to a viewport position
@@ -615,16 +588,21 @@ mod tests {
         state.camera_current = WorldPos::new(100, 100);
         state.viewport_bounds = Rect::new(0, 0, 10, 10);
 
+        // Camera rect origin: (100, 100) - ((10-1)/2, (10-1)/2) = (100, 100) - (4, 4) = (96, 96)
+        let origin = state.camera_rect().min;
+        assert_eq!(origin, WorldPos::new(96, 96));
+
         // World to viewport conversion
-        // Test a position that's within the viewport bounds [0, 10) x [0, 10)
-        let world_pos = WorldPos::new(104, 103); // This will be at viewport (9, 8)
+        // world_pos - origin = (104, 103) - (96, 96) = (8, 7)
+        let world_pos = WorldPos::new(104, 103);
         let viewport_pos = state.world_to_viewport(world_pos);
-        assert_eq!(viewport_pos, Some(ViewportPos::new(9, 8)));
+        assert_eq!(viewport_pos, Some(ViewportPos::new(8, 7)));
 
         // Viewport to world conversion
+        // origin + screen_pos = (96, 96) + (5, 2) = (101, 98)
         let screen_pos = ViewportPos::new(5, 2);
         let world_pos = state.viewport_to_world(screen_pos);
-        assert_eq!(world_pos, WorldPos::new(100, 97));
+        assert_eq!(world_pos, WorldPos::new(101, 98));
 
         // Round-trip test
         let original = WorldPos::new(99, 104);
