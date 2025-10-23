@@ -65,7 +65,7 @@ jobs:
         security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
         security import certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
-        productsign --sign "MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
+        productsign --sign "$MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
     - name: Notarize package file
       env:
         PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
