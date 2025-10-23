@@ -60,10 +60,11 @@ jobs:
         MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_INSTALLER_KEYCHAIN_PWD }}
       run: |
         echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
-        security default-keychain -s build.keychain
-        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
-        security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+        security default-keychain -s install.keychain
+        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+        security import certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
         productsign --sign "MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
     - name: Notarize package file
       env:
