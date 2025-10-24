@@ -59,13 +59,21 @@ jobs:
         MACOS_CERTIFICATE_NAME: ${{ secrets.PROD_MACOS_INSTALL_CERTIFICATE_NAME }}
         MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_INSTALLER_KEYCHAIN_PWD }}
       run: |
+        echo "here1"
         echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
+        echo "here2"
         security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+        echo "here3"
         security default-keychain -s install.keychain
+        echo "here4"
         security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+        echo "here5"
         security import certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+        echo "here6"
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+        echo "here7"
         productsign --sign "$MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
+        echo "here8"
     - name: Notarize package file
       env:
         PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
