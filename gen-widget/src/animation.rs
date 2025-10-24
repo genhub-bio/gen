@@ -74,14 +74,6 @@ impl Animation {
     }
 }
 
-/// Zone classification for cursor following behavior
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Zone {
-    Dead, // Far from edges - no camera movement
-    Soft, // Medium distance - smooth following
-    Hard, // Close to edges - immediate snap
-}
-
 impl ViewportState {
     /// Update animations and camera-follow logic. Call once per frame/tick.
     ///
@@ -127,10 +119,7 @@ impl ViewportState {
         }
 
         // 3. Only if no camera animation is underway and not panning, apply three-zone following
-        if self.camera_anim.is_none()
-            && !self.panning
-            && cursor.to_world_pos(viewport_graph).is_some()
-        {
+        if self.camera_anim.is_none() && !self.panning {
             // Use the authoritative viewport bounds from state, not the parameter
             let width = self.viewport_bounds.width;
             let height = self.viewport_bounds.height;
@@ -144,112 +133,98 @@ impl ViewportState {
                 (self.soft_zone, self.hard_zone)
             };
 
-            let cursor_viewport = cursor.viewport_pos();
-
-            // Calculate distance from each edge (in cells) using SIGNED arithmetic
-            // This allows us to detect when cursor is beyond viewport bounds (negative distance)
-            let dist_from_left = cursor_viewport.x as i64;
-            let dist_from_right = (width as i64) - (cursor_viewport.x as i64) - 1;
-            let dist_from_top = cursor_viewport.y as i64;
-            let dist_from_bottom = (height as i64) - (cursor_viewport.y as i64) - 1;
-
-            // Find closest edge distance for each axis (can be negative if offscreen)
-            let min_x_dist = dist_from_left.min(dist_from_right);
-            let min_y_dist = dist_from_top.min(dist_from_bottom);
-
-            // Determine zone independently for X and Y based on distance from nearest edge
-            // Note: Terminal cells are ~2x taller than wide, so Y uses half the cell values
-            let x_zone = if min_x_dist >= soft_zone as i64 {
-                Zone::Dead
-            } else if min_x_dist >= hard_zone as i64 {
-                Zone::Soft
-            } else {
-                Zone::Hard
-            };
-
+            // Terminal cells are ~2x taller than wide, so Y uses half the cell values
             let soft_zone_y = soft_zone / 2;
             let hard_zone_y = hard_zone / 2;
 
-            let y_zone = if min_y_dist >= soft_zone_y as i64 {
-                Zone::Dead
-            } else if min_y_dist >= hard_zone_y as i64 {
-                Zone::Soft
-            } else {
-                Zone::Hard
+            // Define nested rectangles for zone boundaries
+            // Dead zone: innermost rectangle where cursor moves freely
+            let dead_zone = ratatui::layout::Rect {
+                x: soft_zone,
+                y: soft_zone_y,
+                width: width.saturating_sub(2 * soft_zone),
+                height: height.saturating_sub(2 * soft_zone_y),
             };
+
+            // Soft zone boundary: middle rectangle for smooth camera following
+            let soft_zone_rect = ratatui::layout::Rect {
+                x: hard_zone,
+                y: hard_zone_y,
+                width: width.saturating_sub(2 * hard_zone),
+                height: height.saturating_sub(2 * hard_zone_y),
+            };
+
+            let cursor_viewport = cursor.viewport_pos();
+            let cursor_point = (cursor_viewport.x, cursor_viewport.y);
+
+            // Determine which zone the cursor is in using Rect::contains
+            let in_dead_zone = dead_zone.contains(cursor_point.into());
+            let in_soft_zone = soft_zone_rect.contains(cursor_point.into());
 
             let mut desired_cam = self.camera_current;
             let mut needs_smooth_follow = false;
             let mut needs_snap = false;
 
-            // Handle X-axis
-            match x_zone {
-                Zone::Dead => {
-                    // Cursor free to move - no camera adjustment needed
-                }
-                Zone::Soft => {
-                    // Smooth follow: push cursor back toward dead zone
-                    // Calculate how far into soft zone (0.0 = at dead boundary, 1.0 = at hard boundary)
-                    let soft_zone_width = (soft_zone - hard_zone) as i64;
-                    if soft_zone_width > 0 {
-                        let dist_into_soft = soft_zone as i64 - min_x_dist;
-                        let progress = dist_into_soft as f64 / soft_zone_width as f64;
+            if in_dead_zone {
+                // Cursor is in dead zone - no camera adjustment needed
+            } else if in_soft_zone {
+                // Cursor is in soft zone (outside dead, inside soft boundary)
+                // Smooth follow: calculate exact amount to move cursor to dead zone edge
 
-                        // Determine direction: which edge are we closest to?
-                        let shift = (dist_into_soft as f64 * progress) as i64;
-                        if dist_from_left < dist_from_right {
-                            // Closer to left edge - push camera left to move cursor right in viewport
-                            desired_cam.x -= shift;
-                        } else {
-                            // Closer to right edge - push camera right to move cursor left in viewport
-                            desired_cam.x += shift;
-                        }
-                        needs_smooth_follow = true;
-                    }
+                // Handle X-axis
+                if cursor_viewport.x < dead_zone.x {
+                    // Cursor is left of dead zone - move camera left to push cursor right
+                    let distance = dead_zone.x - cursor_viewport.x;
+                    desired_cam.x -= distance as i64;
+                    needs_smooth_follow = true;
+                } else if cursor_viewport.x >= dead_zone.x + dead_zone.width {
+                    // Cursor is right of dead zone - move camera right to push cursor left
+                    let distance = cursor_viewport.x - (dead_zone.x + dead_zone.width - 1);
+                    desired_cam.x += distance as i64;
+                    needs_smooth_follow = true;
                 }
-                Zone::Hard => {
-                    // Immediate snap: move cursor exactly to soft zone boundary
-                    let target_dist = soft_zone as i64;
-                    let current_dist = min_x_dist; // Already i64, can be negative
-                    let snap_amount = target_dist - current_dist;
 
-                    if dist_from_left < dist_from_right {
-                        desired_cam.x -= snap_amount;
-                    } else {
-                        desired_cam.x += snap_amount;
-                    }
+                // Handle Y-axis
+                if cursor_viewport.y < dead_zone.y {
+                    // Cursor is above dead zone - move camera up to push cursor down
+                    let distance = dead_zone.y - cursor_viewport.y;
+                    desired_cam.y -= distance as i64;
+                    needs_smooth_follow = true;
+                } else if cursor_viewport.y >= dead_zone.y + dead_zone.height {
+                    // Cursor is below dead zone - move camera down to push cursor up
+                    let distance = cursor_viewport.y - (dead_zone.y + dead_zone.height - 1);
+                    desired_cam.y += distance as i64;
+                    needs_smooth_follow = true;
+                }
+            } else {
+                // Cursor is in hard zone (outside soft boundary) or beyond viewport
+                // Immediate snap: move cursor exactly to soft zone boundary
+
+                // Handle X-axis
+                if cursor_viewport.x < soft_zone_rect.x {
+                    // Cursor is left of soft zone - snap camera to bring cursor to left edge of soft zone
+                    let distance = soft_zone_rect.x - cursor_viewport.x;
+                    desired_cam.x -= distance as i64;
+                    needs_snap = true;
+                } else if cursor_viewport.x >= soft_zone_rect.x + soft_zone_rect.width {
+                    // Cursor is right of soft zone - snap camera to bring cursor to right edge of soft zone
+                    let distance =
+                        cursor_viewport.x - (soft_zone_rect.x + soft_zone_rect.width - 1);
+                    desired_cam.x += distance as i64;
                     needs_snap = true;
                 }
-            }
 
-            // Handle Y-axis (uses half the cell values due to aspect ratio)
-            match y_zone {
-                Zone::Dead => {}
-                Zone::Soft => {
-                    let soft_zone_width = (soft_zone_y - hard_zone_y) as i64;
-                    if soft_zone_width > 0 {
-                        let dist_into_soft = soft_zone_y as i64 - min_y_dist;
-                        let progress = dist_into_soft as f64 / soft_zone_width as f64;
-                        let shift = (dist_into_soft as f64 * progress) as i64;
-
-                        if dist_from_top < dist_from_bottom {
-                            desired_cam.y -= shift;
-                        } else {
-                            desired_cam.y += shift;
-                        }
-                        needs_smooth_follow = true;
-                    }
-                }
-                Zone::Hard => {
-                    let target_dist = soft_zone_y as i64;
-                    let current_dist = min_y_dist; // Already i64, can be negative
-                    let snap_amount = target_dist - current_dist;
-
-                    if dist_from_top < dist_from_bottom {
-                        desired_cam.y -= snap_amount;
-                    } else {
-                        desired_cam.y += snap_amount;
-                    }
+                // Handle Y-axis
+                if cursor_viewport.y < soft_zone_rect.y {
+                    // Cursor is above soft zone - snap camera to bring cursor to top edge of soft zone
+                    let distance = soft_zone_rect.y - cursor_viewport.y;
+                    desired_cam.y -= distance as i64;
+                    needs_snap = true;
+                } else if cursor_viewport.y >= soft_zone_rect.y + soft_zone_rect.height {
+                    // Cursor is below soft zone - snap camera to bring cursor to bottom edge of soft zone
+                    let distance =
+                        cursor_viewport.y - (soft_zone_rect.y + soft_zone_rect.height - 1);
+                    desired_cam.y += distance as i64;
                     needs_snap = true;
                 }
             }
@@ -390,10 +365,11 @@ mod tests {
 
     #[test]
     fn test_dead_zone_behavior() {
+        use ratatui::layout::Rect;
+
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
-        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
@@ -417,10 +393,11 @@ mod tests {
 
     #[test]
     fn test_soft_zone_behavior() {
+        use ratatui::layout::Rect;
+
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
-        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
@@ -446,10 +423,11 @@ mod tests {
 
     #[test]
     fn test_hard_zone_behavior() {
+        use ratatui::layout::Rect;
+
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
-        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
@@ -476,10 +454,11 @@ mod tests {
 
     #[test]
     fn test_soft_zone_behavior_detailed() {
+        use ratatui::layout::Rect;
+
         use crate::{
             cursor::Cursor, graph_controller::ViewportState, viewport_graph::CroppedGraph,
         };
-        use ratatui::layout::Rect;
 
         let mut state = ViewportState::new();
         state.hard_zone = 2; // Hard zone: 2 cells from edge
