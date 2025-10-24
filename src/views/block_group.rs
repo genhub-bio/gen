@@ -1,3 +1,4 @@
+use crate::test_helpers::save_graph;
 use std::{
     error::Error,
     time::{Duration, Instant},
@@ -132,46 +133,6 @@ pub fn view_block_group(
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
         block_graph = BlockGroup::get_graph(conn, &block_group.id);
-
-        // Debug trace for bug investigation
-        log::trace!(
-            "Loaded block_graph for block_group_id={}: node_count={}, edge_count={}",
-            block_group.id,
-            block_graph.node_count(),
-            block_graph.edge_count(),
-            // block_graph.nodes().collect::<Vec<_>>(),
-            // block_graph.all_edges().collect::<Vec<_>>()
-        );
-        use petgraph::dot::{Config, Dot};
-        let dot_output = Dot::with_attr_getters(
-            &block_graph,
-            &[Config::EdgeNoLabel, Config::NodeNoLabel],
-            // Edge attribute getter - edge_ref is (source_node, target_node, &edge_weight)
-            &|_, edge_ref| {
-                let edge_weight = edge_ref.2; // Vec<GraphEdge>
-                if edge_weight.is_empty() {
-                    format!("label=\"[]\"")
-                } else {
-                    let edge_indices: Vec<String> = edge_weight
-                        .iter()
-                        .map(|e| format!("{}", e.edge_id))
-                        .collect();
-                    format!("label=\"[{}]\"", edge_indices.join(", "))
-                }
-            },
-            // Node attribute getter - node_ref is (node_weight, node_index_in_iteration)
-            &|_, node_ref| {
-                let node = node_ref.0;
-                format!("label=\"{}:{}\"", node.block_id, node.node_id)
-            },
-        );
-
-        let dot_filename = format!("block_graph_{}.dot", block_group.id);
-        if let Err(e) = std::fs::write(&dot_filename, format!("{:?}", dot_output)) {
-            log::trace!("Failed to write DOT file to {}: {}", dot_filename, e);
-        } else {
-            log::trace!("Saved block_graph DOT to {}", dot_filename);
-        }
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -179,6 +140,8 @@ pub fn view_block_group(
     }
 
     bar.finish();
+
+    save_graph(&block_graph, "debugging.dot");
 
     // Create the viewer and the initial graph
     let bar = progress_bar.add(get_time_elapsed_bar());
