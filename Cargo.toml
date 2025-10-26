@@ -80,6 +80,7 @@ directories = "6.0.0"
 httparse = "1.10.1"
 capnp = "0.21.5"
 indexmap = "2.11.3"
+anyhow = { version = "1.0.100", features = ["backtrace"] }
 
 [build-dependencies]
 capnpc = "0.21.4"

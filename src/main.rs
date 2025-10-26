@@ -129,9 +129,12 @@ fn main() {
             get_or_create_gen_dir();
             println!("Gen repository initialized.");
         }
-        Some(Commands::Import(cmd)) => {
-            r#gen::commands::import::execute(&cli_context, cmd);
-        }
+        Some(Commands::Import(cmd)) => match r#gen::commands::import::execute(&cli_context, cmd) {
+            Ok(_) => {}
+            Err(err) => {
+                println!("Error importing: {err}");
+            }
+        },
         Some(Commands::Update(cmd)) => {
             r#gen::commands::update::execute(&cli_context, cmd);
         }

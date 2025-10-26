@@ -1,9 +1,11 @@
+use anyhow::Result;
 use clap::Args;
+use gen_models::errors::OperationError;
 
 use crate::{
     commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
     get_connection, get_operation_connection,
-    imports::library::import_library,
+    imports::library::{LibraryImportError, import_library},
 };
 
 /// Import Library files
@@ -26,7 +28,7 @@ pub struct Command {
     sample: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Library import called");
 
     let operation_conn = get_operation_connection(None).unwrap();
@@ -42,7 +44,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
-    import_library(
+    match import_library(
         &conn,
         &operation_conn,
         name,
@@ -50,10 +52,22 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         cmd.parts.as_deref().unwrap(),
         cmd.library.as_deref().unwrap(),
         &cmd.region_name,
-    )
-    .unwrap();
-
-    println!("Library imported.");
-    conn.execute("END TRANSACTION;", []).unwrap();
-    operation_conn.execute("END TRANSACTION;", []).unwrap();
+    ) {
+        Ok(_) => {
+            println!("Library imported.");
+            conn.execute("END TRANSACTION;", []).unwrap();
+            operation_conn.execute("END TRANSACTION;", []).unwrap();
+            Ok(())
+        }
+        Err(LibraryImportError::OperationError(OperationError::NoChanges)) => {
+            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            println!("Library already exists.");
+            Ok(())
+        }
+        Err(e) => {
+            println!("Library import failed: {}", e);
+            Err(e.into())
+        }
+    }
 }
