@@ -137,6 +137,7 @@ pub fn view_block_group(
     } else {
         block_graph = get_empty_graph();
     }
+    BlockGroup::prune_graph(&mut block_graph);
 
     bar.finish();
 
@@ -371,6 +372,7 @@ pub fn view_block_group(
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            BlockGroup::prune_graph(&mut block_graph);
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
             viewer.state.selected_block = None;
