@@ -5,15 +5,17 @@ use std::{
     str,
 };
 
+use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     edge::{Edge, EdgeData},
+    errors::OperationError,
     file_types::FileTypes,
     node::Node,
-    operations::{OperationFile, OperationInfo},
+    operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     sample::Sample,
     sequence::Sequence,
@@ -23,6 +25,17 @@ use gen_models::{
 use itertools::Itertools;
 use noodles::fasta;
 use rusqlite::Connection;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum LibraryImportError {
+    #[error("No changes were made to the library")]
+    NoChanges,
+    #[error("Failed to import library")]
+    ImportFailed(String),
+    #[error("Operation Error: {0}")]
+    OperationError(#[from] OperationError),
+}
 
 pub fn import_library<'a>(
     conn: &Connection,
@@ -32,7 +45,7 @@ pub fn import_library<'a>(
     parts_file_path: &str,
     library_file_path: &str,
     region_name: &str,
-) -> std::io::Result<()> {
+) -> Result<Operation, LibraryImportError> {
     let mut session = session_operations::start_operation(conn);
 
     if !Collection::exists(conn, collection_name) {
@@ -45,29 +58,37 @@ pub fn import_library<'a>(
     }
     let new_block_group = BlockGroup::create(conn, collection_name, sample, region_name);
 
-    let mut parts_reader = fasta::io::reader::Builder.build_from_path(parts_file_path)?;
+    let mut parts_reader = fasta::io::reader::Builder
+        .build_from_path(parts_file_path)
+        .map_err(|e| LibraryImportError::ImportFailed(e.to_string()))?;
 
     let mut sequence_hashes_by_name = HashMap::new();
     let mut sequence_lengths_by_hash = HashMap::new();
     for result in parts_reader.records() {
-        let record = result?;
+        let record = result.map_err(|e| LibraryImportError::ImportFailed(e.to_string()))?;
         let sequence = str::from_utf8(record.sequence().as_ref())
-            .unwrap()
-            .to_string();
+            .map_err(|e| LibraryImportError::ImportFailed(e.to_string()))?;
         let name = String::from_utf8(record.name().to_vec()).unwrap();
         let seq = Sequence::new()
             .sequence_type("DNA")
-            .sequence(&sequence)
+            .sequence(sequence)
             .save(conn);
 
         if sequence_hashes_by_name.contains_key(&name) {
-            panic!("Duplicate sequence name: {name}");
+            return Err(LibraryImportError::ImportFailed(format!(
+                "Duplicate sequence name: {name}"
+            )));
         }
         sequence_hashes_by_name.insert(name, seq.hash);
         sequence_lengths_by_hash.insert(seq.hash, seq.length);
     }
 
-    let library_file = File::open(library_file_path)?;
+    let library_file = File::open(library_file_path).map_err(|e| {
+        LibraryImportError::ImportFailed(format!(
+            "Failed to open library file {library_file_path}: {}",
+            e
+        ))
+    })?;
     let library_reader = BufReader::new(library_file);
 
     let mut parts_by_index = HashMap::new();
@@ -77,11 +98,15 @@ pub fn import_library<'a>(
     let mut max_index = 0;
     let mut sequence_lengths_by_node_id = HashMap::new();
     for result in library_csv_reader.records() {
-        let record = result?;
+        let record = result.map_err(|e| LibraryImportError::ImportFailed(e.to_string()))?;
         for (index, part) in record.iter().enumerate() {
             if !part.is_empty() {
-                let part_hash = sequence_hashes_by_name.get(part).unwrap();
-                let seq_length = sequence_lengths_by_hash.get(part_hash).unwrap();
+                let part_hash = sequence_hashes_by_name.get(part).ok_or_else(|| {
+                    LibraryImportError::ImportFailed(format!("Part {part} missing."))
+                })?;
+                let seq_length = sequence_lengths_by_hash.get(part_hash).ok_or_else(|| {
+                    LibraryImportError::ImportFailed(format!("Part hash {part_hash} missing."))
+                })?;
                 let part_node_id = Node::create(
                     conn,
                     part_hash,
@@ -107,11 +132,17 @@ pub fn import_library<'a>(
 
     let mut parts_list = vec![];
     for index in 0..max_index {
-        parts_list.push(parts_by_index.get(&index).unwrap());
+        parts_list.push(
+            parts_by_index.get(&index).ok_or_else(|| {
+                LibraryImportError::ImportFailed(format!("Missing index {index}."))
+            })?,
+        );
     }
 
     let mut new_edges = HashSet::new();
-    let start_parts = parts_list.first().unwrap();
+    let start_parts = parts_list
+        .first()
+        .ok_or_else(|| LibraryImportError::ImportFailed("No parts found.".to_string()))?;
     for start_part in *start_parts {
         let edge = EdgeData {
             source_node_id: PATH_START_NODE_ID,
@@ -124,9 +155,13 @@ pub fn import_library<'a>(
         new_edges.insert(edge);
     }
 
-    let end_parts = parts_list.last().unwrap();
+    let end_parts = parts_list
+        .last()
+        .ok_or_else(|| LibraryImportError::ImportFailed("No parts found.".to_string()))?;
     for end_part in *end_parts {
-        let end_part_source_coordinate = sequence_lengths_by_node_id.get(end_part).unwrap();
+        let end_part_source_coordinate = sequence_lengths_by_node_id
+            .get(end_part)
+            .ok_or_else(|| LibraryImportError::ImportFailed(format!("Part {end_part} missing.")))?;
         let edge = EdgeData {
             source_node_id: *end_part,
             source_coordinate: *end_part_source_coordinate,
@@ -143,7 +178,10 @@ pub fn import_library<'a>(
         path_changes_count *= parts1.len();
         for part1 in *parts1 {
             for part2 in *parts2 {
-                let part1_source_coordinate = sequence_lengths_by_node_id.get(part1).unwrap();
+                let part1_source_coordinate =
+                    sequence_lengths_by_node_id.get(part1).ok_or_else(|| {
+                        LibraryImportError::ImportFailed(format!("Part {part1} missing."))
+                    })?;
                 let edge = EdgeData {
                     source_node_id: *part1,
                     source_coordinate: *part1_source_coordinate,
@@ -201,7 +239,7 @@ pub fn import_library<'a>(
     );
 
     let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
-    session_operations::end_operation(
+    let op = session_operations::end_operation(
         conn,
         operation_conn,
         &mut session,
@@ -214,12 +252,11 @@ pub fn import_library<'a>(
         },
         &summary_str,
         None,
-    )
-    .unwrap();
+    )?;
 
     println!("Imported library file {library_file_path} and parts file {parts_file_path}");
 
-    Ok(())
+    Ok(op)
 }
 
 #[cfg(test)]

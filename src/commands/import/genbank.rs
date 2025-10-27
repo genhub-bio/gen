@@ -1,5 +1,6 @@
 use std::fs::File;
 
+use anyhow::Result;
 use clap::Args;
 use gen_models::{
     file_types::FileTypes,
@@ -26,7 +27,7 @@ pub struct Command {
     sample: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Genbank import called");
 
     let operation_conn = get_operation_connection(None).unwrap();
@@ -66,11 +67,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
             println!("GenBank imported.");
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
+            Ok(())
         }
         Err(err) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed: {err:?}");
+            println!("Import failed: {err:?}");
+            Err(err.into())
         }
     }
 }

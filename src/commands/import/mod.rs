@@ -1,3 +1,4 @@
+use anyhow;
 use clap::{Args, Subcommand};
 use clap_nested_commands::generate_sync_commands;
 
@@ -15,4 +16,4 @@ pub struct Command {
     pub command: Commands,
 }
 
-generate_sync_commands!(fasta, genbank, gfa, library);
+generate_sync_commands!(return_type = Result<(), anyhow::Error>; fasta, genbank, gfa, library);

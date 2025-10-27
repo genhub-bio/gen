@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use anyhow::Result;
 use clap::Args;
 use gen_models::errors::OperationError;
 
@@ -23,7 +24,7 @@ pub struct Command {
     sample: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA import called");
 
     let operation_conn = get_operation_connection(None).unwrap();
@@ -50,16 +51,19 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
             println!("GFA imported.");
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
+            Ok(())
         }
         Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("GFA already exists.")
+            println!("GFA already exists.");
+            Ok(())
         }
-        Err(_) => {
+        Err(e) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed.");
+            println!("Import failed.");
+            Err(e.into())
         }
     }
 }

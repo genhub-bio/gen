@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clap::Args;
 use gen_models::errors::OperationError;
 
@@ -25,7 +26,7 @@ pub struct Command {
     sample: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Fasta import called");
 
     let operation_conn = get_operation_connection(None).unwrap();
@@ -53,16 +54,18 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
             println!("Fasta imported.");
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
+            Ok(())
         }
         Err(FastaError::OperationError(OperationError::NoChanges)) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("Fasta contents already exist.")
+            println!("Fasta contents already exist.");
+            Ok(())
         }
-        Err(_) => {
+        Err(e) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed.");
+            Err(e.into())
         }
     }
 }
