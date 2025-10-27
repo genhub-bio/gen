@@ -9,7 +9,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_core::{HashId, PATH_START_NODE_ID};
-use gen_graph::{GenGraph, GraphNode};
+use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, node::Node, path::Path, traits::Query};
 use log::warn;
 use ratatui::{
@@ -137,6 +137,8 @@ pub fn view_block_group(
     } else {
         block_graph = get_empty_graph();
     }
+
+    connect_all_boundary_edges(&mut block_graph);
 
     bar.finish();
 
@@ -371,6 +373,7 @@ pub fn view_block_group(
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            connect_all_boundary_edges(&mut block_graph);
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
             viewer.state.selected_block = None;

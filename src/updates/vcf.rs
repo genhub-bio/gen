@@ -32,7 +32,7 @@ use noodles::{
     },
 };
 use regex::{self, Regex};
-use rusqlite::{self, Connection, types::Value as SQLValue};
+use rusqlite::{self, Connection, params};
 use thiserror::Error;
 
 use crate::{
@@ -486,7 +486,7 @@ pub fn update_with_vcf<'a>(
             let sequence_string = sequence.get_sequence(None, None);
 
             let parent_path_id = parent_block_groups.entry((collection_name, vcf_entry.path.id)).or_insert_with(|| {
-                let parent_bg = BlockGroup::query(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null and name = ?2", rusqlite::params!(SQLValue::from(collection_name.to_string()), SQLValue::from(vcf_entry.path.name.clone())));
+                let parent_bg = BlockGroup::query(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null and name = ?2", params![collection_name, &vcf_entry.path.name]);
                 if parent_bg.is_empty() {
                     vcf_entry.path.id
                 } else {
@@ -1115,7 +1115,7 @@ mod tests {
             Accession::query(
                 conn,
                 "select * from accessions where name = ?1;",
-                rusqlite::params!(SQLValue::from("del1".to_string())),
+                params!["del1"],
             )
             .len(),
             1
@@ -1125,7 +1125,7 @@ mod tests {
             Accession::query(
                 conn,
                 "select * from accessions where name = ?1;",
-                rusqlite::params!(SQLValue::from("lp1".to_string())),
+                params!["lp1"],
             )
             .len(),
             1
@@ -1172,7 +1172,7 @@ mod tests {
             Accession::query(
                 conn,
                 "select * from accessions where name = ?1",
-                rusqlite::params!(SQLValue::from("lp1".to_string()))
+                params!["lp1"]
             )
             .len(),
             1
