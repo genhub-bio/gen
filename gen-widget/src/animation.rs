@@ -161,6 +161,20 @@ impl ViewportState {
             let in_dead_zone = dead_zone.contains(cursor_point.into());
             let in_soft_zone = soft_zone_rect.contains(cursor_point.into());
 
+            log::trace!(
+                "zone_follow: cursor=({}, {}), dead_zone=(x:{},y:{},w:{},h:{}), in_dead={}, in_soft={}, camera=({}, {})",
+                cursor_viewport.x,
+                cursor_viewport.y,
+                dead_zone.x,
+                dead_zone.y,
+                dead_zone.width,
+                dead_zone.height,
+                in_dead_zone,
+                in_soft_zone,
+                self.camera_current.x,
+                self.camera_current.y
+            );
+
             let mut desired_cam = self.camera_current;
             let mut needs_smooth_follow = false;
             let mut needs_snap = false;
@@ -238,6 +252,15 @@ impl ViewportState {
                     desired_cam
                 };
 
+                log::trace!(
+                    "zone_follow: moving camera from ({}, {}) to ({}, {}), snap={}",
+                    self.camera_current.x,
+                    self.camera_current.y,
+                    clamped.x,
+                    clamped.y,
+                    needs_snap
+                );
+
                 if needs_snap {
                     // Hard zone - immediate snap (no animation)
                     self.camera_current = clamped;
@@ -262,8 +285,25 @@ impl ViewportState {
         }
 
         // Synchronize cursor's viewport position after any camera changes
+        log::trace!(
+            "before cursor.update: camera_current=({}, {})",
+            self.camera_current.x,
+            self.camera_current.y
+        );
         let camera_rect = self.camera_rect();
+        let cursor_vp_before = cursor.viewport_pos();
         let _ = cursor.update(viewport_graph, camera_rect);
+        let cursor_vp_after = cursor.viewport_pos();
+        if cursor_vp_before != cursor_vp_after {
+            log::trace!(
+                "viewport_state.update: cursor viewport changed from ({}, {}) to ({}, {}) after cursor.update(), camera_rect.min.y={}",
+                cursor_vp_before.x,
+                cursor_vp_before.y,
+                cursor_vp_after.x,
+                cursor_vp_after.y,
+                camera_rect.min.y
+            );
+        }
 
         // Safety clamp: ensure cursor never escapes viewport bounds
         // This is a defensive measure - the camera following logic should prevent escapes,

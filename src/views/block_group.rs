@@ -198,9 +198,6 @@ pub fn view_block_group(
 
         // Draw the UI
         terminal.draw(|frame| {
-            // Update animations with frame delta for smooth camera and cursor animations
-            graph_controller.update_animations(frame_delta, frame.area());
-
             let status_bar_height: u16 = 1;
 
             // The outer layout is a vertical split between the status bar and everything else
@@ -232,6 +229,12 @@ pub fn view_block_group(
             } else {
                 sidebar_layout[1]
             };
+
+            // Set viewport bounds to the actual canvas area before updating animations
+            graph_controller.viewport_state.viewport_bounds = canvas_area;
+
+            // Update animations with frame delta for smooth camera and cursor animations
+            graph_controller.update_animations(frame_delta);
 
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;
@@ -305,8 +308,7 @@ pub fn view_block_group(
                 frame.render_widget(Clear, canvas_area); // Clear the canvas area first
                 frame.render_widget(loading_para, loading_area);
             } else {
-                // Update viewport bounds and focus for the current canvas area
-                graph_controller.viewport_state.viewport_bounds = canvas_area;
+                // Set focus for the canvas area
                 graph_controller.viewport_state.focus();
                 // graph_controller.force_update
 

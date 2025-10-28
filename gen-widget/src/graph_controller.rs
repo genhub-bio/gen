@@ -16,7 +16,7 @@ use ratatui::style::Color;
 pub use crate::viewport_state::{ViewportState, WorldBuffer};
 use crate::{
     cursor::Cursor,
-    geometry::{BigRect, ViewportPos, WorldPos},
+    geometry::{BigRect, ViewportPos, WorldPos, WorldRect},
     layout::{NodeRole, PartitionLayout, VisualDetail},
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
@@ -354,11 +354,9 @@ where
     /// Initialize cursor at soft_zone + 1 from left edge, associated with the node closest to origin in anchor partition
     /// This should be called once when the controller is first created or when cursor needs reset
     pub fn initialize_cursor(&mut self) {
-        // Position cursor at soft_zone + 1 from left edge, centered vertically
-        // This gives maximum room for rightward cursor movement before triggering camera following
-        let viewport_center_y = self.viewport_state.viewport_bounds.height / 2;
+        let viewport_center_y = self.viewport_state.viewport_bounds.height as i64 / 2;
         let desired_viewport_x = self.viewport_state.soft_zone + 1;
-        let desired_viewport_y = viewport_center_y;
+        let desired_viewport_y = viewport_center_y as u16;
         let desired_viewport_pos = ViewportPos::new(desired_viewport_x, desired_viewport_y);
         self.cursor.set_viewport_pos(desired_viewport_pos);
 
@@ -484,6 +482,9 @@ where
     pub fn rebuild_viewport_graph(&mut self) -> Result<(), String> {
         let detail_level = self.detail_level;
 
+        // Capture viewport bounds at start to ensure consistency throughout rebuild
+        let viewport_bounds_snapshot = self.viewport_state.viewport_bounds;
+
         trace!("rebuild_viewport_graph: starting cursor-anchored rebuild");
 
         // Step 1: Initialize cursor if it has no node association
@@ -579,11 +580,16 @@ where
 
         // Step 5: Get cursor viewport position and viewport center
         let cursor_viewport = self.cursor.viewport_pos();
-        // Use (width - 1) / 2 to match from_center_and_size logic
-        // This ensures consistency with how camera_rect() calculates the viewport bounds
-        let viewport_center = ViewportPos::new(
-            (self.viewport_state.viewport_bounds.width.saturating_sub(1)) / 2,
-            (self.viewport_state.viewport_bounds.height.saturating_sub(1)) / 2,
+        let half_width = (viewport_bounds_snapshot.width as i64 - 1) / 2;
+        let half_height = (viewport_bounds_snapshot.height as i64 - 1) / 2;
+        let viewport_center = ViewportPos::new(half_width as u16, half_height as u16);
+
+        trace!(
+            "rebuild_viewport_graph: viewport dimensions width={}, height={}, half_width={}, half_height={}",
+            viewport_bounds_snapshot.width,
+            viewport_bounds_snapshot.height,
+            half_width,
+            half_height
         );
 
         trace!(
@@ -592,14 +598,30 @@ where
         );
 
         // Step 6: Camera positioning formula
-        // camera_center = (viewport_center - cursor_viewport_pos) + cursor_world_pos
         let camera = WorldPos::new(
-            (viewport_center.x as i64 - cursor_viewport.x as i64) + cursor_world.x,
-            (viewport_center.y as i64 - cursor_viewport.y as i64) + cursor_world.y,
+            cursor_world.x - cursor_viewport.x as i64 + half_width,
+            cursor_world.y - cursor_viewport.y as i64 + half_height,
+        );
+
+        trace!(
+            "rebuild_viewport_graph: camera formula: cursor_world.y={} - cursor_viewport.y={} + half_height={} = camera.y={}",
+            cursor_world.y, cursor_viewport.y, half_height, camera.y
         );
 
         self.viewport_state.camera_current = camera;
         self.viewport_state.camera_target = camera;
+
+        let camera_rect = WorldRect::from_center_and_size(
+            camera,
+            (
+                viewport_bounds_snapshot.width as u64,
+                viewport_bounds_snapshot.height as u64,
+            ),
+        );
+        trace!(
+            "rebuild_viewport_graph: camera_rect from_center_and_size: center.y={}, height={}, rect.min.y={}, rect.max.y={}",
+            camera.y, viewport_bounds_snapshot.height, camera_rect.min.y, camera_rect.max.y
+        );
 
         trace!(
             "rebuild_viewport_graph: camera positioned at ({}, {})",
@@ -636,10 +658,16 @@ where
         self.last_rebuild_camera_center = self.viewport_state.camera_current;
         self.rebuild_needed = false;
 
+        // Note: We don't update cursor viewport position here because cursor-anchored rebuilding
+        // relies on preserving the cursor's viewport position to calculate the camera
+        // self.cursor.update(&self.viewport_graph, camera_rect)?;
+
         trace!(
-            "rebuild_viewport_graph: complete - {} nodes, {} edges",
+            "rebuild_viewport_graph: complete - {} nodes, {} edges, cursor viewport ({}, {})",
             self.viewport_graph.node_count(),
-            self.viewport_graph.edge_count()
+            self.viewport_graph.edge_count(),
+            self.cursor.viewport_pos().x,
+            self.cursor.viewport_pos().y
         );
 
         Ok(())
@@ -663,8 +691,8 @@ where
     /// - focal_world: World position of the point we want to keep stable
     /// - focal_viewport: Viewport position where we want the focal point to appear
     pub fn update_camera(&mut self, focal_world: WorldPos, focal_viewport: ViewportPos) {
-        let half_width = self.viewport_state.viewport_bounds.width as i64 / 2;
-        let half_height = self.viewport_state.viewport_bounds.height as i64 / 2;
+        let half_width = (self.viewport_state.viewport_bounds.width as i64 - 1) / 2;
+        let half_height = (self.viewport_state.viewport_bounds.height as i64 - 1) / 2;
 
         let camera_x = focal_world.x - focal_viewport.x as i64 + half_width;
         let camera_y = focal_world.y - focal_viewport.y as i64 + half_height;
@@ -684,15 +712,11 @@ where
     ///
     /// # Parameters
     /// - delta: Time elapsed since last frame
-    /// - viewport_bounds: Current viewport position and dimensions (updated each frame for terminal resize)
-    pub fn update_animations(
-        &mut self,
-        delta: std::time::Duration,
-        viewport_bounds: ratatui::layout::Rect,
-    ) {
-        // Update viewport bounds to handle terminal resizing and widget repositioning
-        self.viewport_state.viewport_bounds = viewport_bounds;
-
+    ///
+    /// # Note
+    /// viewport_bounds must be set on viewport_state BEFORE calling this method,
+    /// as it's needed for coordinate calculations during animation updates.
+    pub fn update_animations(&mut self, delta: std::time::Duration) {
         self.viewport_state
             .update(delta, &mut self.cursor, &self.viewport_graph);
     }

@@ -165,10 +165,21 @@ fn show_interactive_widget(
 
                     // Draw the frame
                     terminal.draw(|frame| {
+                        // Calculate the actual widget area first
+                        let area = frame.area();
+                        let main_layout = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Min(0), Constraint::Length(1)])
+                            .split(area);
+                        let block = Block::default().borders(Borders::ALL);
+                        let inner_area = block.inner(main_layout[0]);
+
+                        // Set viewport bounds to the actual inner area before updating animations
+                        state.controller.viewport_state.viewport_bounds = inner_area;
+
                         // Update animations with frame delta for smooth camera and cursor animations
-                        state
-                            .controller
-                            .update_animations(frame_delta, frame.area());
+                        state.controller.update_animations(frame_delta);
+
                         render_inline(frame, &mut state);
                     })?;
                 }
@@ -272,8 +283,9 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
         .split(area);
 
     let block = Block::default().borders(Borders::ALL);
-
     let inner_area = block.inner(main_layout[0]);
+
+    // Render the border and content
     frame.render_widget(block, main_layout[0]);
     draw_gen_graph(frame, inner_area, state);
     draw_controls_help(frame, main_layout[1], state);
@@ -303,7 +315,7 @@ fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
 }
 
 fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    // Update viewport bounds for the current area
+    // Set viewport bounds and focus for the current area
     state.controller.viewport_state.viewport_bounds = area;
     state.controller.viewport_state.focus();
 

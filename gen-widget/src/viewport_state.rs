@@ -188,7 +188,17 @@ impl ViewportState {
             self.viewport_bounds.width as u64,
             self.viewport_bounds.height as u64,
         );
-        crate::geometry::WorldRect::from_center_and_size(center, size)
+        let rect = crate::geometry::WorldRect::from_center_and_size(center, size);
+        log::trace!(
+            "camera_rect: center=({}, {}), size=({}, {}), result.min=({}, {})",
+            center.x,
+            center.y,
+            size.0,
+            size.1,
+            rect.min.x,
+            rect.min.y
+        );
+        rect
     }
 
     /// Give this viewport input focus. Scroll events and key events will move the camera.
@@ -662,13 +672,13 @@ mod tests {
 
         // Write at world position (15, 12)
         // Camera is at (10, 10) with viewport 20x10
-        // Origin = (10, 10) - (10, 5) = (0, 5)
-        // So world (15, 12) - origin (0, 5) = viewport (15, 7)
+        // Origin = (10, 10) - ((20-1)/2, (10-1)/2) = (10, 10) - (9, 4) = (1, 6)
+        // So world (15, 12) - origin (1, 6) = viewport (14, 6)
         writer.set_char(WorldPos::new(15, 12), 'X');
 
         // Verify it was written correctly
-        // The Y-axis is flipped: viewport y=7 becomes buffer y = 10-1-7 = 2
-        assert_eq!(buffer[(15, 2)].symbol(), "X");
+        // The Y-axis is flipped: viewport y=6 becomes buffer y = 10-1-6 = 3
+        assert_eq!(buffer[(14, 3)].symbol(), "X");
     }
 
     #[test]

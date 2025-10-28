@@ -234,11 +234,26 @@ impl Cursor {
         viewport_graph: &crate::viewport_graph::CroppedGraph,
         camera_rect: crate::geometry::BigRect<i64>,
     ) -> Result<(), String> {
+        let viewport_before = self.viewport_pos;
         let world_pos = self
             .to_world_pos(viewport_graph)
             .ok_or("Cannot derive world position - no node tracked")?;
 
         self.update_from_worldpos(world_pos, camera_rect);
+
+        if self.viewport_pos != viewport_before {
+            log::trace!(
+                "cursor.update: viewport changed from ({}, {}) to ({}, {}), world=({}, {}), camera_rect.min=({}, {})",
+                viewport_before.x,
+                viewport_before.y,
+                self.viewport_pos.x,
+                self.viewport_pos.y,
+                world_pos.x,
+                world_pos.y,
+                camera_rect.min.x,
+                camera_rect.min.y
+            );
+        }
         Ok(())
     }
 
