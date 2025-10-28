@@ -77,21 +77,22 @@ jobs:
         PROD_MACOS_NOTARIZATION_PWD: ${{ secrets.PROD_MACOS_NOTARIZATION_PWD }}
       run: |
         echo "here1"
-        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" notarize.keychain
         echo "here2"
-        security default-keychain -s build.keychain
+        security default-keychain -s notarize.keychain
         echo "here3"
-        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" notarize.keychain
         echo "here4"
-        security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+        security list-keychain -d user -s notarize.keychain
         echo "here5"
         xcrun notarytool store-credentials "notarytool-profile" \
           --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
           --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
           --password "$PROD_MACOS_NOTARIZATION_PWD" \
-          --keychain build.keychain
+          --keychain notarize.keychain
         xcrun notarytool submit "./gen.macos.pkg" --keychain-profile "notarytool-profile" --wait
         xcrun stapler staple "./gen.macos.pkg"
+        security delete-keychain notarize.keychain
     - name: upload-binary
       run: |
         find . -name "gen"
