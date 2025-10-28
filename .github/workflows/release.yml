@@ -89,9 +89,12 @@ jobs:
           --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
           --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
           --password "$PROD_MACOS_NOTARIZATION_PWD" \
-          --keychain notarize.keychain
+          --keychain "/Users/runner/Library/Keychains/notarize.keychain-db"
+        echo "here6"
         xcrun notarytool submit "./gen.macos.pkg" --keychain-profile "notarytool-profile" --wait
+        echo "here7"
         xcrun stapler staple "./gen.macos.pkg"
+        echo "here8"
         security delete-keychain notarize.keychain
     - name: upload-binary
       run: |
