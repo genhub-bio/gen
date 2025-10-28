@@ -42,7 +42,7 @@ jobs:
         security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
         /usr/bin/codesign --force --timestamp -s "$MACOS_CERTIFICATE_NAME" --options runtime ./gen -v
-	security delete-keychain build.keychain
+        security delete-keychain build.keychain
     - name: Build package file
       run: |
         mkdir gen-binary
@@ -76,7 +76,7 @@ jobs:
         echo "here7"
         productsign --sign "$MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
         echo "here8"
-	security delete-keychain install.keychain
+        security delete-keychain install.keychain
     - name: Notarize package file
       env:
         PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
