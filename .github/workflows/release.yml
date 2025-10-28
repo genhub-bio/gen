@@ -64,7 +64,7 @@ jobs:
         echo $MACOS_CERTIFICATE | base64 --decode > install-certificate.p12
         echo "here2"
         security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
-	security set-keychain-settings -lut 21600 install.keychain
+        security set-keychain-settings -lut 21600 install.keychain
         echo "here3"
         security default-keychain -s install.keychain
         echo "here4"
