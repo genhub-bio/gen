@@ -76,10 +76,15 @@ jobs:
         PROD_MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_TEAM_ID }}
         PROD_MACOS_NOTARIZATION_PWD: ${{ secrets.PROD_MACOS_NOTARIZATION_PWD }}
       run: |
+        echo "here1"
         security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+        echo "here2"
         security default-keychain -s build.keychain
+        echo "here3"
         security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+        echo "here4"
         security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+        echo "here5"
         xcrun notarytool store-credentials "notarytool-profile" \
           --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
           --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
