@@ -70,7 +70,7 @@ jobs:
         echo "here4"
         security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
         echo "here5"
-        security import install-certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign -T /usr/bin/productsign
+        security import install-certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/productsign
         echo "here6"
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
         echo "here7"
