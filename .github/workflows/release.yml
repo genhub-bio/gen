@@ -76,26 +76,18 @@ jobs:
         PROD_MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_TEAM_ID }}
         PROD_MACOS_NOTARIZATION_PWD: ${{ secrets.PROD_MACOS_NOTARIZATION_PWD }}
       run: |
-        echo "here1"
-        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" notarize.keychain
-        echo "here2"
-        security default-keychain -s notarize.keychain
-        echo "here3"
-        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" notarize.keychain
-        echo "here4"
-        security list-keychain -d user -s notarize.keychain
-        echo "here5"
+        KEYCHAIN_PATH="$RUNNER_TEMP/notarize.keychain-db"
+        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+        security default-keychain -s "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+        security list-keychain -d user -s "$KEYCHAIN_PATH"
         xcrun notarytool store-credentials "notarytool-profile" \
           --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
           --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
           --password "$PROD_MACOS_NOTARIZATION_PWD" \
-          --keychain "/Users/runner/Library/Keychains/notarize.keychain-db"
-        echo "here6"
+          --keychain "$KEYCHAIN_PATH"
         xcrun notarytool submit "./gen.macos.pkg" --keychain-profile "notarytool-profile" --wait
-        echo "here7"
         xcrun stapler staple "./gen.macos.pkg"
-        echo "here8"
-        security delete-keychain notarize.keychain
     - name: upload-binary
       run: |
         find . -name "gen"
