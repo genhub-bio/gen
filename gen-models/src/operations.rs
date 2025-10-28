@@ -214,7 +214,7 @@ impl Operation {
     pub fn search_hash(conn: &Connection, op_hash: &str) -> SQLResult<Operation> {
         Operation::get(
             conn,
-            "select * from operations where hash LIKE ?1",
+            "select * from operations where hex(hash) LIKE ?1",
             params![op_hash],
         )
     }
