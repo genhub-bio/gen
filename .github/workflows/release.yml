@@ -67,7 +67,7 @@ jobs:
         security default-keychain -s install.keychain
         security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
         security import install-certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/productsign
-        security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
         echo "here2"
         productsign --sign "$MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
         echo "here3"
