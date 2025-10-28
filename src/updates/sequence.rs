@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn test_update_with_sequence() {
         /*
-        Graph after fasta update:
+        Graph after sequence update:
         AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
            \-> AAAAAAAA --/
         */
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn test_update_within_update() {
         /*
-        Graph after fasta updates:
+        Graph after sequence updates:
         AT --------------> CGA ----------------> TCGATCGATCGATCGGGAACACACAGAGA
             \-> AA -----> AA -------> AAAA --/
                    \--> TTTTTTTT --/
@@ -343,7 +343,7 @@ mod tests {
             "AAAAAAAA",
             false,
         );
-        // Second fasta update replacing part of the first update sequence
+        // Second sequence update replacing part of the first update sequence
         let _ = update_with_sequence(
             conn,
             op_conn,
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn test_update_with_two_sequences_partial_leading_overlap() {
         /*
-        Graph after fasta updates:
+        Graph after sequence updates:
         A --> T --------------> CGA ----------------> TCGATCGATCGATCGGGAACACACAGAGA
          \       \-> AAAA -------> AAAA --/
           \--> TTTTTTTT --/
@@ -411,7 +411,7 @@ mod tests {
             "AAAAAAAA",
             false,
         );
-        // Second fasta update replacing parts of both the original and first update sequences
+        // Second sequence update replacing parts of both the original and first update sequences
         let _ = update_with_sequence(
             conn,
             op_conn,
@@ -444,13 +444,13 @@ mod tests {
     #[test]
     fn test_update_with_two_sequences_partial_trailing_overlap() {
         /*
-        Graph after fasta updates:
+        Graph after sequence updates:
         A --> T --------------> CGA ----------------> TC --> GATCGATCGATCGGGAACACACAGAGA
          \       \-----> AAAAAAAA ---------/             /
           \-------------> TTTTTTTT ---------------------/
         */
         /*
-        Graph after fasta updates:
+        Graph after sequence updates:
         AT --------------> CGA ------------> TC --> GATCGATCGATCGGGAACACACAGAGA
               \-> AAAA -------> AAAA ----/        /
                            \--> TTTTTTTT --------/
@@ -485,7 +485,7 @@ mod tests {
             "AAAAAAAA",
             false,
         );
-        // Second fasta update replacing parts of both the original and first update sequences
+        // Second sequence update replacing parts of both the original and first update sequences
         let _ = update_with_sequence(
             conn,
             op_conn,
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn test_update_with_two_sequences_second_over_first() {
         /*
-        Graph after fasta updates:
+        Graph after sequence updates:
         AT --------------> CGA ------------> TC --> GATCGATCGATCGGGAACACACAGAGA
               \-> AAAA -------> AAAA ----/        /
                            \--> TTTTTTTT --------/
@@ -553,7 +553,7 @@ mod tests {
             "AAAAAAAA",
             false,
         );
-        // Second fasta update replacing parts of both the original and first update sequences
+        // Second sequence update replacing parts of both the original and first update sequences
         let _ = update_with_sequence(
             conn,
             op_conn,
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn test_update_with_same_sequence_twice() {
         /*
-        Graph after fasta updates:
+        Graph after sequence updates:
         AT --------------> CGA ----------------> TCGATCGATCGATCGGGAACACACAGAGA
             \-> AA -----> AA -------> AAAA --/
                    \--> AAAAAAAA --/
@@ -621,7 +621,7 @@ mod tests {
             "AAAAAAAA",
             false,
         );
-        // Same fasta second time
+        // Same sequence second time
         let _ = update_with_sequence(
             conn,
             op_conn,
@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn test_deletion() {
         /*
-        Graph after fasta update:
+        Graph after sequence update:
         AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
            \-> -------- --/
         */
