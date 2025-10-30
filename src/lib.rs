@@ -9,6 +9,7 @@ pub mod annotations;
 pub mod commands;
 pub mod config;
 pub mod diffs;
+pub mod errors;
 pub mod exports;
 pub mod fasta;
 pub mod genbank;

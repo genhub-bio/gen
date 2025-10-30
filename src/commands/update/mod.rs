@@ -8,6 +8,7 @@ mod gaf;
 mod genbank;
 mod gfa;
 mod library;
+mod sequence;
 mod vcf;
 
 /// Import commands
@@ -17,4 +18,4 @@ pub struct Command {
     pub command: Commands,
 }
 
-generate_sync_commands!(fasta, gaf, genbank, gfa, library, vcf);
+generate_sync_commands!(fasta, gaf, genbank, gfa, library, sequence, vcf);
