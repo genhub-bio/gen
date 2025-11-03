@@ -87,8 +87,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         let stdout = io::stdout();
         let mut handle = stdout.lock();
         let mut csv_file = File::open(csv)?;
-        transform_csv_to_fasta(&mut csv_file, &mut handle);
-        return Ok(());
+        return match transform_csv_to_fasta(&mut csv_file, &mut handle) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                eprintln!("Failed to transform CSV for GAF usage: {err}");
+                Err(err.into())
+            }
+        };
     }
     let binding = match cli.db {
         Some(db) => db,
@@ -129,14 +134,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
-        Some(Commands::Update(cmd)) => {
-            r#gen::commands::update::execute(&cli_context, cmd);
-            Ok(())
-        }
-        Some(Commands::Export(cmd)) => {
-            r#gen::commands::export::execute(&cli_context, cmd);
-            Ok(())
-        }
+        Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
+        Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),
         Some(Commands::Remote(cmd)) => Ok(handle_remote_command(&operation_conn, &cmd)?),
         Some(Commands::View {
             graph,

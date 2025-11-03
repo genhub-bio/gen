@@ -44,7 +44,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .clone()
         .unwrap_or_else(|| get_default_collection(&operation_conn));
 
-    update_with_gaf(
+    if let Err(err) = update_with_gaf(
         &conn,
         &operation_conn,
         &cmd.path,
@@ -52,7 +52,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         name,
         cmd.sample.as_deref(),
         cmd.parent_sample.as_deref(),
-    );
+    ) {
+        conn.execute("ROLLBACK TRANSACTION;", [])?;
+        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
+        return Err(err.into());
+    }
 
     conn.execute("END TRANSACTION;", [])?;
     operation_conn.execute("END TRANSACTION;", [])?;

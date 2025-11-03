@@ -3,6 +3,8 @@ use std::io::Error as IOError;
 use gen_models::errors::{OperationError, QueryError};
 use thiserror::Error;
 
+pub use crate::updates::gaf::GafUpdateError;
+
 #[derive(Debug, Error)]
 pub enum SequenceUpdateError {
     #[error("Operation Error: {0}")]
