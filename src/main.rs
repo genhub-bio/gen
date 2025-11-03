@@ -128,10 +128,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             println!("Gen repository initialized.");
             Ok(())
         }
-        Some(Commands::Import(cmd)) => {
-            r#gen::commands::import::execute(&cli_context, cmd)?;
-            Ok(())
-        }
+        Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
         Some(Commands::Update(cmd)) => {
             r#gen::commands::update::execute(&cli_context, cmd);
             Ok(())
@@ -140,10 +137,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             r#gen::commands::export::execute(&cli_context, cmd);
             Ok(())
         }
-        Some(Commands::Remote(cmd)) => {
-            handle_remote_command(&operation_conn, &cmd)?;
-            Ok(())
-        }
+        Some(Commands::Remote(cmd)) => Ok(handle_remote_command(&operation_conn, &cmd)?),
         Some(Commands::View {
             graph,
             sample,
@@ -155,14 +149,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 None => get_default_collection(&operation_conn)?,
             });
 
-            view_block_group(
+            Ok(view_block_group(
                 &conn,
                 graph.clone(),
                 sample.clone(),
                 collection_name,
                 position.clone(),
-            );
-            Ok(())
+            )?)
         }
         Some(Commands::Translate {
             bed,
@@ -179,26 +172,27 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
                 let mut bed_file = File::open(bed)?;
-                translate::bed::translate_bed(
+                Ok(translate::bed::translate_bed(
                     &conn,
                     collection_name,
                     sample.as_deref(),
                     &mut bed_file,
                     &mut handle,
-                )?;
+                )?)
             } else if let Some(gff) = gff {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
                 let mut gff_file = BufReader::new(File::open(gff)?);
-                translate::gff::translate_gff(
+                Ok(translate::gff::translate_gff(
                     &conn,
                     collection_name,
                     sample.as_deref(),
                     &mut gff_file,
                     &mut handle,
-                )?;
+                )?)
+            } else {
+                Err("No input file specified.".into())
             }
-            Ok(())
         }
         Some(Commands::Operations {
             interactive,
@@ -361,21 +355,29 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
             let current_branch = OperationState::get_current_branch(&operation_conn)
                 .ok_or("Unable to find current branch.")?;
-            operation_management::merge(
+            match operation_management::merge(
                 None,
                 &operation_conn,
                 current_branch,
                 other_branch.id,
                 None,
-            )?;
-            println!("Merge successful");
-            Ok(())
+            ) {
+                Ok(_) => {
+                    println!("Merge successful");
+                    Ok(())
+                }
+                Err(e) => Err(format!("Merge failed: {}", e).into()),
+            }
         }
         Some(Commands::Apply { hash }) => {
             let operation = Operation::search_hash(&operation_conn, &hash)?;
-            operation_management::apply(None, &operation_conn, &operation.hash, None)?;
-            println!("Operation applied");
-            Ok(())
+            match operation_management::apply(None, &operation_conn, &operation.hash, None) {
+                Ok(_) => {
+                    println!("Operation applied");
+                    Ok(())
+                }
+                Err(e) => Err(format!("Operation application failed: {}", e).into()),
+            }
         }
         Some(Commands::Checkout { branch, hash }) => {
             if let Some(name) = branch.clone() {
@@ -406,8 +408,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Reset { hash }) => {
             let operation = Operation::search_hash(&operation_conn, &hash)?;
-            operation_management::reset(None, &operation_conn, &operation.hash);
-            Ok(())
+            match operation_management::reset(None, &operation_conn, &operation.hash) {
+                Ok(_) => {
+                    println!("Operation reset");
+                    Ok(())
+                }
+                Err(e) => Err(format!("Operation reset failed: {}", e).into()),
+            }
         }
         Some(Commands::PatchCreate {
             name,
@@ -438,8 +445,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::PatchApply { patch }) => {
             let mut f = File::open(patch)?;
             let patches = patch::load_patches(&mut f);
-            patch::apply_patches(None, &operation_conn, &patches)?;
-            Ok(())
+            match patch::apply_patches(None, &operation_conn, &patches) {
+                Ok(_) => {
+                    println!("Patch applied");
+                    Ok(())
+                }
+                Err(e) => Err(format!("Patch application failed: {}", e).into()),
+            }
         }
         Some(Commands::PatchView { prefix, patch }) => {
             let patch_path = Path::new(&patch);
@@ -496,7 +508,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &to_sample,
                 &gff,
                 &output_gff,
-            );
+            )?;
 
             conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;

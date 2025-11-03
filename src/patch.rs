@@ -231,7 +231,6 @@ pub fn apply_patches(
             &patch.summary.summary,
             None,
         )?;
-        println!("Successfully applied operation.");
     }
     Ok(())
 }
