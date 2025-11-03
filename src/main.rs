@@ -6,6 +6,7 @@ use std::{
     io,
     io::{BufReader, Write},
     ops::Deref,
+    panic,
     path::{Path, PathBuf},
     str,
 };
@@ -40,15 +41,12 @@ use noodles::core::Region;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
-fn get_default_collection(conn: &Connection) -> String {
-    let mut stmt = conn
-        .prepare("select collection_name from defaults where id = 1")
-        .unwrap();
-    stmt.query_row((), |row| row.get(0))
-        .unwrap_or("default".to_string())
+fn get_default_collection(conn: &Connection) -> Result<String, rusqlite::Error> {
+    let mut stmt = conn.prepare("select collection_name from defaults where id = 1")?;
+    Ok(stmt
+        .query_row((), |row| row.get(0))
+        .unwrap_or("default".to_string()))
 }
-
-use std::panic;
 
 fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -69,18 +67,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     }) = &cli.command
     {
         if let Some(name) = database {
-            operation_conn
-                .execute("update defaults set db_name=?1 where id = 1", (name,))
-                .unwrap();
+            operation_conn.execute("update defaults set db_name=?1 where id = 1", (name,))?;
             println!("Default database set to {name}");
         }
         if let Some(name) = collection {
-            operation_conn
-                .execute(
-                    "update defaults set collection_name=?1 where id = 1",
-                    (name,),
-                )
-                .unwrap();
+            operation_conn.execute(
+                "update defaults set collection_name=?1 where id = 1",
+                (name,),
+            )?;
             println!("Default collection set to {name}");
         }
         return Ok(());
@@ -92,7 +86,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             .expect("csv for transformation not provided.");
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-        let mut csv_file = File::open(csv).unwrap();
+        let mut csv_file = File::open(csv)?;
         transform_csv_to_fasta(&mut csv_file, &mut handle);
         return Ok(());
     }
@@ -118,7 +112,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let db = binding.as_str();
-    let conn = get_connection(db).unwrap();
+    let conn = get_connection(db)?;
     let db_uuid = metadata::get_db_uuid(&conn);
 
     match track_database(&conn, &operation_conn) {
@@ -156,9 +150,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             collection,
             position,
         }) => {
-            let collection_name = &collection
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match collection {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
 
             view_block_group(
                 &conn,
@@ -175,16 +170,18 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             collection,
             sample,
         }) => {
-            let collection = &collection
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match collection {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
+
             if let Some(bed) = bed {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
                 let mut bed_file = File::open(bed)?;
                 translate::bed::translate_bed(
                     &conn,
-                    collection,
+                    collection_name,
                     sample.as_deref(),
                     &mut bed_file,
                     &mut handle,
@@ -195,7 +192,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let mut gff_file = BufReader::new(File::open(gff)?);
                 translate::gff::translate_gff(
                     &conn,
-                    collection,
+                    collection_name,
                     sample.as_deref(),
                     &mut gff_file,
                     &mut handle,
@@ -483,9 +480,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             gff,
             output_gff,
         }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
             let from_sample_name = from_sample.clone();
 
             conn.execute("BEGIN TRANSACTION", [])?;
@@ -493,7 +491,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             propagate_gff(
                 &conn,
-                name,
+                collection_name,
                 from_sample_name.as_deref(),
                 &to_sample,
                 &gff,
@@ -513,10 +511,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::ListGraphs { name, sample }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            let block_groups = Sample::get_block_groups(&conn, name, sample.as_deref());
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
+            let block_groups = Sample::get_block_groups(&conn, collection_name, sample.as_deref());
             for block_group in block_groups {
                 println!("{}", block_group.name);
             }
@@ -530,15 +529,17 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             end,
             region,
         }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            let block_groups = Sample::get_block_groups(&conn, name, sample.as_deref());
-            let formatted_sample_name = if sample.is_some() {
-                format!("sample {}", sample.clone().unwrap())
-            } else {
-                "default sample".to_string()
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
+            let block_groups = Sample::get_block_groups(&conn, collection_name, sample.as_deref());
+
+            let formatted_sample_name = match sample {
+                Some(s) => format!("sample {s}"),
+                None => "default sample".to_string(),
             };
+
             let (parsed_graph_name, start_coordinate, mut end_coordinate) =
                 if let Some(region) = region {
                     let parsed_region = region.parse::<Region>()?;
@@ -579,12 +580,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             sample2,
             gfa,
         }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
             gfa_sample_diff(
                 &conn,
-                name,
+                collection_name,
                 &PathBuf::from(gfa),
                 sample1.as_deref(),
                 sample2.as_deref(),
@@ -600,9 +602,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
             let parsed_region = region.parse::<Region>()?;
@@ -612,7 +615,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             derive_chunks(
                 &conn,
                 &operation_conn,
-                name,
+                collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
                 &parsed_region.name().to_string(),
@@ -637,16 +640,17 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
             let parsed_region = region.parse::<Region>()?;
 
             let path_length = get_path(
                 &conn,
-                name,
+                collection_name,
                 sample_name.as_deref(),
                 &parsed_region.name().to_string(),
                 backbone.as_deref(),
@@ -697,7 +701,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             derive_chunks(
                 &conn,
                 &operation_conn,
-                name,
+                collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
                 &parsed_region.name().to_string(),
@@ -717,9 +721,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(&operation_conn)?,
+            });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
 
@@ -728,7 +733,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             match make_stitch(
                 &conn,
                 &operation_conn,
-                name,
+                collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
                 &region_names,
