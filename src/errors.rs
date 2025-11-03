@@ -6,6 +6,7 @@ use thiserror::Error;
 pub use crate::{
     diffs::gfa::GfaDiffError,
     exports::{fasta::FastaExportError, genbank::GenbankExportError, gfa::GfaExportError},
+    patch::CreatePatchError,
     updates::gaf::GafUpdateError,
 };
 

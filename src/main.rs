@@ -216,7 +216,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .id,
                 );
                 if interactive {
-                    view_operations(&conn, &operation_conn, &operations);
+                    return Ok(view_operations(&conn, &operation_conn, &operations)?);
                 } else {
                     let mut indicator = "";
                     println!(
@@ -278,7 +278,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                             .to_string(),
                     ),
                     None,
-                );
+                )?;
             } else if list {
                 let current_branch = OperationState::get_current_branch(&operation_conn);
                 let mut indicator = "";
@@ -389,7 +389,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             } else if let Some(hash_name) = hash.clone() {
                 if Branch::get_by_name(&operation_conn, &hash_name).is_some() {
                     println!("Checking out branch {hash_name}");
-                    operation_management::checkout(None, &operation_conn, &Some(hash_name), None);
+                    operation_management::checkout(None, &operation_conn, &Some(hash_name), None)?;
                 } else {
                     let operation = Operation::search_hash(&operation_conn, &hash_name)?;
                     println!("Checking out operation {hash_name}");
@@ -398,7 +398,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         &operation_conn,
                         &None,
                         Some(operation.hash),
-                    );
+                    )?;
                 }
             } else {
                 println!("No branch or hash to checkout provided.");
@@ -438,7 +438,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &operation,
             );
             let mut f = File::create(format!("{name}.gz"))?;
-            patch::create_patch(&operation_conn, &operations, &mut f);
+            patch::create_patch(&operation_conn, &operations, &mut f)?;
             Ok(())
         }
         Some(Commands::PatchApply { patch }) => {
