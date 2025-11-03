@@ -47,7 +47,17 @@ fn get_default_collection(conn: &Connection) -> String {
         .unwrap_or("default".to_string())
 }
 
+use std::panic;
+
 fn main() {
+    panic::set_hook(Box::new(|info| {
+        eprintln!("❗ The application has encountered an unexpected error and must exit.");
+        eprintln!("Message: {}", info);
+        eprintln!();
+        eprintln!("👉 Please file an issue at: https://github.com/genhub-bio/gen/issues");
+        eprintln!("   Include the full output above, what you were doing, and system info.");
+    }));
+
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();
 
