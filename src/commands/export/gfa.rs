@@ -47,7 +47,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &PathBuf::from(cmd.path),
         cmd.sample.clone(),
         cmd.node_max,
-    );
+    )?;
 
     conn.execute("END TRANSACTION", [])?;
     operation_conn.execute("END TRANSACTION", [])?;

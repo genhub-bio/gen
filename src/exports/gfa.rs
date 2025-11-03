@@ -13,8 +13,15 @@ use gen_models::{
 };
 use itertools::Itertools;
 use rusqlite::Connection;
+use thiserror::Error;
 
 use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments};
+
+#[derive(Debug, Error)]
+pub enum GfaExportError {
+    #[error("I/O error while exporting GFA: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 pub fn export_gfa(
     conn: &Connection,
@@ -22,7 +29,7 @@ pub fn export_gfa(
     filename: &PathBuf,
     sample_name: Option<String>,
     max_size: impl Into<Option<i64>>,
-) {
+) -> Result<(), GfaExportError> {
     let chunk_size = max_size.into().unwrap_or(i64::MAX);
     // General note about how we encode segment IDs.  The node ID and the start coordinate in the
     // sequence are all that's needed, because the end coordinate can be inferred from the length of
@@ -61,7 +68,7 @@ pub fn export_gfa(
             .map(|(src, dest, weight)| (src, dest, weight.clone())),
     );
 
-    let file = File::create(filename).unwrap();
+    let file = File::create(filename)?;
     let mut writer = BufWriter::new(file);
 
     let mut segments = BTreeSet::new();
@@ -181,9 +188,11 @@ pub fn export_gfa(
     }
 
     let paths = get_paths(conn, collection_name, sample_name, &graph, &split_segments);
-    write_segments(&mut writer, &segments.iter().collect::<Vec<&Segment>>());
-    write_links(&mut writer, &links.iter().collect::<Vec<&Link>>());
-    write_paths(&mut writer, paths);
+    write_segments(&mut writer, &segments.iter().collect::<Vec<&Segment>>())?;
+    write_links(&mut writer, &links.iter().collect::<Vec<&Link>>())?;
+    write_paths(&mut writer, paths)?;
+
+    Ok(())
 }
 
 fn get_paths(
@@ -256,7 +265,10 @@ fn get_paths(
     path_links
 }
 
-fn write_paths(writer: &mut BufWriter<File>, path_links: HashMap<String, Vec<(String, Strand)>>) {
+fn write_paths(
+    writer: &mut BufWriter<File>,
+    path_links: HashMap<String, Vec<(String, Strand)>>,
+) -> std::io::Result<()> {
     for (name, links) in path_links.iter() {
         let mut segment_ids = vec![];
         let mut node_strands = vec![];
@@ -269,10 +281,9 @@ fn write_paths(writer: &mut BufWriter<File>, path_links: HashMap<String, Vec<(St
             segment_ids,
             node_strands,
         };
-        writer
-            .write_all(&path_line(&path).into_bytes())
-            .unwrap_or_else(|_| panic!("Error writing path {name} to GFA stream"));
+        writer.write_all(&path_line(&path).into_bytes())?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -424,7 +435,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, collection_name, &gfa_path, None, None);
+        export_gfa(conn, collection_name, &gfa_path, None, None).unwrap();
         // NOTE: Not directly checking file contents because segments are written in random order
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
@@ -454,7 +465,7 @@ mod tests {
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("split.gfa");
 
-        export_gfa(conn, "test", &gfa_path, None, 5);
+        export_gfa(conn, "test", &gfa_path, None, 5).unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
@@ -507,7 +518,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, None, None);
+        export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
@@ -538,7 +549,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, None, None);
+        export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
         let _ = import_gfa(&gfa_path, "anderson promoters 2", None, conn, op_conn);
 
         let block_group2 = Collection::get_block_groups(conn, "anderson promoters 2")
@@ -569,7 +580,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, None, None);
+        export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
@@ -659,7 +670,7 @@ mod tests {
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
-        export_gfa(conn, "test", &gfa_path, None, None);
+        export_gfa(conn, "test", &gfa_path, None, None).unwrap();
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")

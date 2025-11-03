@@ -43,7 +43,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         name,
         cmd.sample.clone().as_deref(),
         &PathBuf::from(cmd.path),
-    );
+    )?;
 
     conn.execute("END TRANSACTION", [])?;
     operation_conn.execute("END TRANSACTION", [])?;

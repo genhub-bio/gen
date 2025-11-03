@@ -601,7 +601,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &PathBuf::from(gfa),
                 sample1.as_deref(),
                 sample2.as_deref(),
-            );
+            )?;
             Ok(())
         }
         Some(Commands::DeriveSubgraph {

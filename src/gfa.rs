@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Write},
 };
 
 use convert_case::{Case, Casing};
@@ -62,30 +62,18 @@ pub fn path_line(path: &Path) -> String {
     format!("P\t{}\t{}\t*\n", path.name.to_case(Case::Train), segments)
 }
 
-pub fn write_segments(writer: &mut BufWriter<File>, segments: &[&Segment]) {
+pub fn write_segments(writer: &mut BufWriter<File>, segments: &[&Segment]) -> io::Result<()> {
     for segment in segments {
-        writer
-            .write_all(&segment_line(segment).into_bytes())
-            .unwrap_or_else(|_| {
-                panic!(
-                    "Error writing segment with sequence {} to GFA stream",
-                    segment.sequence,
-                )
-            });
+        writer.write_all(&segment_line(segment).into_bytes())?;
     }
+    Ok(())
 }
 
-pub fn write_links(writer: &mut BufWriter<File>, links: &[&Link]) {
+pub fn write_links(writer: &mut BufWriter<File>, links: &[&Link]) -> io::Result<()> {
     for link in links {
-        writer
-            .write_all(&link_line(link).into_bytes())
-            .unwrap_or_else(|_| {
-                panic!(
-                    "Error writing link from segment {:?} to {:?} to GFA stream",
-                    link.source_segment_id, link.target_segment_id,
-                )
-            });
+        writer.write_all(&link_line(link).into_bytes())?;
     }
+    Ok(())
 }
 
 pub fn bool_to_strand(direction: bool) -> Strand {
