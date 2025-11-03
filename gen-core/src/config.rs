@@ -4,7 +4,7 @@ use std::{
     sync::{LazyLock, RwLock},
 };
 
-use crate::HashId;
+use crate::{HashId, errors::ConfigError};
 
 thread_local! {
 pub static BASE_DIR: LazyLock<RwLock<PathBuf>> =
@@ -64,14 +64,10 @@ pub fn get_gen_dir() -> Option<String> {
     Some(gen_path.to_str().unwrap().to_string())
 }
 
-/// Returns the path to the gen.db file in the .gen directory.
-/// If the .gen directory is not found, it will panic.
-pub fn get_gen_db_path() -> PathBuf {
+pub fn get_gen_db_path() -> Result<PathBuf, ConfigError> {
     match get_gen_dir() {
-        Some(dir) => Path::new(&dir).join("gen.db"),
-        None => {
-            panic!("No .gen directory found. Please run 'gen init' first.")
-        }
+        Some(dir) => Ok(Path::new(&dir).join("gen.db")),
+        None => Err(ConfigError::GenDirectoryNotFound),
     }
 }
 
