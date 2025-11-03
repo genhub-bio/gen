@@ -129,7 +129,7 @@ pub fn get_operation_connection(
     let path = if let Some(s) = db_path {
         s
     } else {
-        core::config::get_gen_db_path()
+        core::config::get_gen_db_path()?
     };
     let mut conn = Connection::open(&path)?;
     rusqlite::vtab::array::load_module(&conn).unwrap();

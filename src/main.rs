@@ -10,6 +10,7 @@ use std::{
     str,
 };
 
+use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
     annotations::gff::propagate_gff,
@@ -49,30 +50,19 @@ fn get_default_collection(conn: &Connection) -> String {
 
 use std::panic;
 
-fn main() {
-    panic::set_hook(Box::new(|info| {
-        eprintln!("❗ The application has encountered an unexpected error and must exit.");
-        eprintln!("Message: {}", info);
-        eprintln!();
-        eprintln!("👉 Please file an issue at: https://github.com/genhub-bio/gen/issues");
-        eprintln!("   Include the full output above, what you were doing, and system info.");
-    }));
-
-    // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
-    env_logger::init();
-
+fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let cli_context = CliContext::from(&cli);
 
     // commands not requiring a db connection are handled here
     if let Some(Commands::Init {}) = &cli.command {
         get_or_create_gen_dir();
-        get_operation_connection(None).unwrap();
+        get_operation_connection(None)?;
         println!("Gen repository initialized.");
-        return;
+        return Ok(());
     }
 
-    let operation_conn = get_operation_connection(None).unwrap();
+    let operation_conn = get_operation_connection(None)?;
     if let Some(Commands::Defaults {
         database,
         collection,
@@ -93,7 +83,7 @@ fn main() {
                 .unwrap();
             println!("Default collection set to {name}");
         }
-        return;
+        return Ok(());
     }
 
     if let Some(Commands::Transform { format_csv_for_gaf }) = &cli.command {
@@ -104,25 +94,29 @@ fn main() {
         let mut handle = stdout.lock();
         let mut csv_file = File::open(csv).unwrap();
         transform_csv_to_fasta(&mut csv_file, &mut handle);
-        return;
+        return Ok(());
     }
+    let binding = match cli.db {
+        Some(db) => db,
+        None => {
+            let mut stmt = operation_conn.prepare("select db_name from defaults where id = 1;")?;
+            let row: Option<String> = stmt.query_row((), |row| row.get(0)).ok();
 
-    let binding = cli.db.unwrap_or_else(|| {
-        let mut stmt = operation_conn
-            .prepare("select db_name from defaults where id = 1;")
-            .unwrap();
-        let row: Option<String> = stmt.query_row((), |row| row.get(0)).unwrap();
-        row.unwrap_or_else(|| match get_gen_dir() {
-            Some(dir) => PathBuf::from(dir)
-                .join("default.db")
-                .to_str()
-                .unwrap()
-                .to_string(),
-            None => {
-                panic!("No .gen directory found. Please run 'gen init' first.")
+            match row {
+                Some(db_name) => db_name,
+                None => match get_gen_dir() {
+                    Some(dir) => PathBuf::from(dir)
+                        .join("default.db")
+                        .to_str()
+                        .ok_or("Invalid path encoding")?
+                        .to_string(),
+                    None => {
+                        return Err("No .gen directory found. Please run 'gen init' first.".into());
+                    }
+                },
             }
-        })
-    });
+        }
+    };
     let db = binding.as_str();
     let conn = get_connection(db).unwrap();
     let db_uuid = metadata::get_db_uuid(&conn);
@@ -138,27 +132,24 @@ fn main() {
         Some(Commands::Init {}) => {
             get_or_create_gen_dir();
             println!("Gen repository initialized.");
+            Ok(())
         }
-        Some(Commands::Import(cmd)) => match r#gen::commands::import::execute(&cli_context, cmd) {
-            Ok(_) => {}
-            Err(err) => {
-                println!("Error importing: {err}");
-            }
-        },
+        Some(Commands::Import(cmd)) => {
+            r#gen::commands::import::execute(&cli_context, cmd)?;
+            Ok(())
+        }
         Some(Commands::Update(cmd)) => {
             r#gen::commands::update::execute(&cli_context, cmd);
+            Ok(())
         }
         Some(Commands::Export(cmd)) => {
             r#gen::commands::export::execute(&cli_context, cmd);
+            Ok(())
         }
-        Some(Commands::Remote(cmd)) => match handle_remote_command(&operation_conn, &cmd) {
-            Ok(_) => {}
-            Err(err) => {
-                eprintln!("Remote command failed: {err}");
-                std::process::exit(1);
-            }
-        },
-
+        Some(Commands::Remote(cmd)) => {
+            handle_remote_command(&operation_conn, &cmd)?;
+            Ok(())
+        }
         Some(Commands::View {
             graph,
             sample,
@@ -169,7 +160,6 @@ fn main() {
                 .clone()
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
 
-            // view_block_group is a long-running operation that manages its own transactions
             view_block_group(
                 &conn,
                 graph.clone(),
@@ -177,6 +167,7 @@ fn main() {
                 collection_name,
                 position.clone(),
             );
+            Ok(())
         }
         Some(Commands::Translate {
             bed,
@@ -190,36 +181,27 @@ fn main() {
             if let Some(bed) = bed {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                let mut bed_file = File::open(bed).unwrap();
-                match translate::bed::translate_bed(
+                let mut bed_file = File::open(bed)?;
+                translate::bed::translate_bed(
                     &conn,
                     collection,
                     sample.as_deref(),
                     &mut bed_file,
                     &mut handle,
-                ) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("Error Translating Bed. {err}");
-                    }
-                }
+                )?;
             } else if let Some(gff) = gff {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                let mut gff_file = BufReader::new(File::open(gff).unwrap());
-                match translate::gff::translate_gff(
+                let mut gff_file = BufReader::new(File::open(gff)?);
+                translate::gff::translate_gff(
                     &conn,
                     collection,
                     sample.as_deref(),
                     &mut gff_file,
                     &mut handle,
-                ) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("Error Translating GFF. {err}");
-                    }
-                }
+                )?;
             }
+            Ok(())
         }
         Some(Commands::Operations {
             interactive,
@@ -227,17 +209,20 @@ fn main() {
         }) => {
             let current_op = OperationState::get_operation(&operation_conn);
             if let Some(current_op) = current_op {
-                let branch_name = branch.clone().unwrap_or_else(|| {
+                let branch_name = if let Some(name) = branch.clone() {
+                    name
+                } else {
                     let current_branch_id = OperationState::get_current_branch(&operation_conn)
-                        .expect("No current branch is set.");
+                        .ok_or("No current branch is set.")?;
                     Branch::get_by_id(&operation_conn, current_branch_id)
-                        .unwrap_or_else(|| panic!("No branch with id {current_branch_id}"))
+                        .ok_or_else(|| format!("No branch with id {current_branch_id}"))?
                         .name
-                });
+                };
+
                 let operations = Branch::get_operations(
                     &operation_conn,
                     Branch::get_by_name(&operation_conn, &branch_name)
-                        .unwrap_or_else(|| panic!("No branch named {branch_name}."))
+                        .ok_or_else(|| format!("No branch named {branch_name}."))?
                         .id,
                 );
                 if interactive {
@@ -265,6 +250,7 @@ fn main() {
             } else {
                 println!("No operations found.");
             }
+            Ok(())
         }
         Some(Commands::Branch {
             create,
@@ -278,18 +264,18 @@ fn main() {
             if create {
                 Branch::get_or_create(
                     &operation_conn,
-                    &branch_name
-                        .clone()
-                        .expect("Must provide a branch name to create."),
+                    branch_name
+                        .as_ref()
+                        .ok_or("Must provide a branch name to create.")?,
                 );
             } else if delete {
                 let branch = Branch::get_by_name(
                     &operation_conn,
-                    &branch_name
-                        .clone()
-                        .expect("Must provide a branch name to delete."),
+                    branch_name
+                        .as_ref()
+                        .ok_or("Must provide a branch name to delete.")?,
                 )
-                .unwrap_or_else(|| panic!("Unable to find branch {branch_name:?}."));
+                .ok_or_else(|| format!("Unable to find branch {branch_name:?}."))?;
                 Branch::delete(&operation_conn, branch.id);
             } else if checkout {
                 operation_management::checkout(
@@ -298,7 +284,7 @@ fn main() {
                     &Some(
                         branch_name
                             .clone()
-                            .expect("Must provide a branch name to checkout.")
+                            .ok_or("Must provide a branch name to checkout.")?
                             .to_string(),
                     ),
                     None,
@@ -337,27 +323,22 @@ fn main() {
                     );
                 }
             } else if merge {
-                let branch_name = branch_name.clone().expect("Branch name must be provided.");
+                let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
                 let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
-                    .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
+                    .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
                 let current_branch = OperationState::get_current_branch(&operation_conn)
-                    .expect("Unable to find current branch.");
-                match operation_management::merge(
+                    .ok_or("Unable to find current branch.")?;
+                operation_management::merge(
                     None,
                     &operation_conn,
                     current_branch,
                     other_branch.id,
                     None,
-                ) {
-                    Ok(_) => println!("Merge successful"),
-                    Err(_) => {
-                        panic!("Merge failed.");
-                    }
-                }
+                )?;
+                println!("Merge successful");
             } else if let Some(remote_name) = set_remote {
-                // Handle setting remote for current branch
                 let current_branch_id = OperationState::get_current_branch(&operation_conn)
-                    .expect("No current branch is checked out.");
+                    .ok_or("No current branch is checked out.")?;
 
                 let remote_to_set = if remote_name.is_empty() || remote_name == "null" {
                     None
@@ -365,60 +346,39 @@ fn main() {
                     Some(remote_name.as_str())
                 };
 
-                // Use the validated method for setting remote
-                match Branch::set_remote_validated(
-                    &operation_conn,
-                    current_branch_id,
-                    remote_to_set,
-                ) {
-                    Ok(_) => {
-                        if remote_to_set.is_some() {
-                            println!("Remote '{remote_name}' associated with current branch");
-                        } else {
-                            println!("Remote association cleared for current branch");
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("Error: {err}");
-                        std::process::exit(1);
-                    }
+                Branch::set_remote_validated(&operation_conn, current_branch_id, remote_to_set)?;
+
+                if remote_to_set.is_some() {
+                    println!("Remote '{remote_name}' associated with current branch");
+                } else {
+                    println!("Remote association cleared for current branch");
                 }
             } else {
                 println!("No options selected.");
             }
+            Ok(())
         }
         Some(Commands::Merge { branch_name }) => {
-            let branch_name = branch_name.clone().expect("Branch name must be provided.");
+            let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
             let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
-                .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
+                .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
             let current_branch = OperationState::get_current_branch(&operation_conn)
-                .expect("Unable to find current branch.");
-            match operation_management::merge(
+                .ok_or("Unable to find current branch.")?;
+            operation_management::merge(
                 None,
                 &operation_conn,
                 current_branch,
                 other_branch.id,
                 None,
-            ) {
-                Ok(_) => println!("Merge successful"),
-                Err(details) => {
-                    panic!("Merge failed: {details}");
-                }
-            }
+            )?;
+            println!("Merge successful");
+            Ok(())
         }
         Some(Commands::Apply { hash }) => {
-            let operation = match Operation::search_hash(&operation_conn, &hash) {
-                Ok(op) => op,
-                Err(e) => {
-                    panic!("Unable to find operation by hash {hash}");
-                }
-            };
-            match operation_management::apply(None, &operation_conn, &operation.hash, None) {
-                Ok(_) => println!("Operation applied"),
-                Err(_) => {
-                    panic!("Apply failed.");
-                }
-            }
+            let operation = Operation::search_hash(&operation_conn, &hash)?;
+            operation_management::apply(None, &operation_conn, &operation.hash, None)?;
+            println!("Operation applied");
+            Ok(())
         }
         Some(Commands::Checkout { branch, hash }) => {
             if let Some(name) = branch.clone() {
@@ -427,19 +387,13 @@ fn main() {
                     println!("Created branch {name}");
                 }
                 println!("Checking out branch {name}");
-                operation_management::checkout(None, &operation_conn, &Some(name), None).unwrap();
+                operation_management::checkout(None, &operation_conn, &Some(name), None)?;
             } else if let Some(hash_name) = hash.clone() {
-                // if the hash is a branch, check it out
                 if Branch::get_by_name(&operation_conn, &hash_name).is_some() {
                     println!("Checking out branch {hash_name}");
                     operation_management::checkout(None, &operation_conn, &Some(hash_name), None);
                 } else {
-                    let operation = match Operation::search_hash(&operation_conn, &hash_name) {
-                        Ok(op) => op,
-                        Err(err) => {
-                            panic!("Unable to find hash {hash_name}.")
-                        }
-                    };
+                    let operation = Operation::search_hash(&operation_conn, &hash_name)?;
                     println!("Checking out operation {hash_name}");
                     operation_management::checkout(
                         None,
@@ -451,15 +405,12 @@ fn main() {
             } else {
                 println!("No branch or hash to checkout provided.");
             }
+            Ok(())
         }
         Some(Commands::Reset { hash }) => {
-            let operation = match Operation::search_hash(&operation_conn, &hash) {
-                Ok(op) => op,
-                Err(err) => {
-                    panic!("Unable to find hash {hash}.")
-                }
-            };
+            let operation = Operation::search_hash(&operation_conn, &hash)?;
             operation_management::reset(None, &operation_conn, &operation.hash);
+            Ok(())
         }
         Some(Commands::PatchCreate {
             name,
@@ -468,30 +419,34 @@ fn main() {
         }) => {
             let branch = if let Some(branch_name) = branch {
                 Branch::get_by_name(&operation_conn, &branch_name)
-                    .unwrap_or_else(|| panic!("No branch with name {branch_name} found."))
+                    .ok_or_else(|| format!("No branch with name {branch_name} found."))?
             } else {
                 let current_branch_id = OperationState::get_current_branch(&operation_conn)
-                    .expect("No current branch is checked out.");
-                Branch::get_by_id(&operation_conn, current_branch_id).unwrap()
+                    .ok_or("No current branch is checked out.")?;
+                Branch::get_by_id(&operation_conn, current_branch_id)
+                    .ok_or("Unable to get current branch")?
             };
             let branch_ops = Branch::get_operations(&operation_conn, branch.id);
             let operations = parse_patch_operations(
                 &branch_ops,
-                &branch.current_operation_hash.unwrap(),
+                &branch
+                    .current_operation_hash
+                    .ok_or("Branch has no current operation")?,
                 &operation,
             );
-            let mut f = File::create(format!("{name}.gz")).unwrap();
+            let mut f = File::create(format!("{name}.gz"))?;
             patch::create_patch(&operation_conn, &operations, &mut f);
+            Ok(())
         }
         Some(Commands::PatchApply { patch }) => {
-            let mut f = File::open(patch).unwrap();
+            let mut f = File::open(patch)?;
             let patches = patch::load_patches(&mut f);
-            patch::apply_patches(None, &operation_conn, &patches)
-                .unwrap_or_else(|op| panic!("Failed to apply patch: {op:?}"));
+            patch::apply_patches(None, &operation_conn, &patches)?;
+            Ok(())
         }
         Some(Commands::PatchView { prefix, patch }) => {
             let patch_path = Path::new(&patch);
-            let mut f = File::open(patch_path).unwrap();
+            let mut f = File::open(patch_path)?;
             let patches = patch::load_patches(&mut f);
             let diagrams = view_patches(&patches);
             for (patch_hash, patch_diagrams) in diagrams.iter() {
@@ -504,29 +459,23 @@ fn main() {
                             patch_base = patch_path
                                 .with_extension("")
                                 .file_name()
-                                .unwrap()
+                                .ok_or("Invalid patch path")?
                                 .to_str()
-                                .unwrap()
+                                .ok_or("Invalid UTF-8 in path")?
                         )
                     };
-                    let mut f = File::create(path).unwrap();
-                    f.write_all(dot.as_bytes())
-                        .expect("Failed to write diagram");
+                    let mut f = File::create(path)?;
+                    f.write_all(dot.as_bytes())?;
                 }
             }
+            Ok(())
         }
-        None => {}
-        // these will never be handled by this method as we search for them earlier.
-        Some(Commands::Init {}) => {
-            get_or_create_gen_dir();
-            println!("Gen repository initialized.");
-        }
+        None => Ok(()),
         Some(Commands::Defaults {
             database,
             collection,
-        }) => {}
-
-        Some(Commands::Transform { format_csv_for_gaf }) => {}
+        }) => Ok(()),
+        Some(Commands::Transform { format_csv_for_gaf }) => Ok(()),
         Some(Commands::PropagateAnnotations {
             name,
             from_sample,
@@ -539,8 +488,8 @@ fn main() {
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
             let from_sample_name = from_sample.clone();
 
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+            conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
 
             propagate_gff(
                 &conn,
@@ -551,16 +500,17 @@ fn main() {
                 &output_gff,
             );
 
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::ListSamples {}) => {
             let sample_names = Sample::get_all_names(&conn);
-            // Null sample
             println!();
             for sample_name in sample_names {
                 println!("{sample_name}");
             }
+            Ok(())
         }
         Some(Commands::ListGraphs { name, sample }) => {
             let name = &name
@@ -570,6 +520,7 @@ fn main() {
             for block_group in block_groups {
                 println!("{}", block_group.name);
             }
+            Ok(())
         }
         Some(Commands::GetSequence {
             name,
@@ -590,16 +541,16 @@ fn main() {
             };
             let (parsed_graph_name, start_coordinate, mut end_coordinate) =
                 if let Some(region) = region {
-                    let parsed_region = region.parse::<Region>().unwrap();
+                    let parsed_region = region.parse::<Region>()?;
                     let interval = parsed_region.interval();
                     (
                         parsed_region.name().to_string(),
-                        interval.start().unwrap().get() as i64,
-                        interval.end().unwrap().get() as i64,
+                        interval.start().ok_or("Region missing start")?.get() as i64,
+                        interval.end().ok_or("Region missing end")?.get() as i64,
                     )
                 } else {
                     (
-                        graph.clone().unwrap(),
+                        graph.clone().ok_or("Graph name required")?,
                         start.unwrap_or_default(),
                         end.unwrap_or(-1),
                     )
@@ -608,9 +559,9 @@ fn main() {
             let block_group = block_groups
                 .iter()
                 .find(|bg| bg.name == parsed_graph_name)
-                .unwrap_or_else(|| {
-                    panic!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
-                });
+                .ok_or_else(|| {
+                    format!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
+                })?;
             let path = BlockGroup::get_current_path(&conn, &block_group.id);
             let sequence = path.sequence(&conn);
             if end_coordinate == -1 {
@@ -620,6 +571,7 @@ fn main() {
                 "{}",
                 &sequence[start_coordinate as usize..end_coordinate as usize]
             );
+            Ok(())
         }
         Some(Commands::Diff {
             name,
@@ -637,6 +589,7 @@ fn main() {
                 sample1.as_deref(),
                 sample2.as_deref(),
             );
+            Ok(())
         }
         Some(Commands::DeriveSubgraph {
             name,
@@ -645,18 +598,18 @@ fn main() {
             region,
             backbone,
         }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+            conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
             let name = &name
                 .clone()
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
-            let parsed_region = region.parse::<Region>().unwrap();
+            let parsed_region = region.parse::<Region>()?;
             let interval = parsed_region.interval();
-            let start_coordinate = interval.start().unwrap().get() as i64;
-            let end_coordinate = interval.end().unwrap().get() as i64;
-            match derive_chunks(
+            let start_coordinate = interval.start().ok_or("Region missing start")?.get() as i64;
+            let end_coordinate = interval.end().ok_or("Region missing end")?.get() as i64;
+            derive_chunks(
                 &conn,
                 &operation_conn,
                 name,
@@ -668,12 +621,10 @@ fn main() {
                     start: start_coordinate,
                     end: end_coordinate,
                 }],
-            ) {
-                Ok(_) => {}
-                Err(e) => panic!("Error deriving subgraph: {e}"),
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            )?;
+            conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::DeriveChunks {
             name,
@@ -684,48 +635,49 @@ fn main() {
             breakpoints,
             chunk_size,
         }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+            conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
             let name = &name
                 .clone()
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
-            let parsed_region = region.parse::<Region>().unwrap();
-            let interval = parsed_region.interval();
+            let parsed_region = region.parse::<Region>()?;
 
-            let path_length = match get_path(
+            let path_length = get_path(
                 &conn,
                 name,
                 sample_name.as_deref(),
                 &parsed_region.name().to_string(),
                 backbone.as_deref(),
-            ) {
-                Ok(path) => path.length(&conn),
-                Err(e) => panic!("Error deriving subgraph(s): {e}"),
-            };
+            )?
+            .length(&conn);
 
-            let chunk_points;
-            if let Some(breakpoints) = breakpoints {
-                chunk_points = breakpoints
+            let chunk_points = if let Some(breakpoints) = breakpoints {
+                breakpoints
                     .split(",")
-                    .map(|x| x.parse::<i64>().unwrap())
+                    .map(|x| {
+                        x.parse::<i64>()
+                            .map_err(|e| format!("Invalid breakpoint: {e}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
                     .sorted()
-                    .collect::<Vec<i64>>();
+                    .collect::<Vec<i64>>()
             } else if let Some(chunk_size) = chunk_size {
                 let chunk_count = path_length / chunk_size;
-                chunk_points = (0..chunk_count)
+                (0..chunk_count)
                     .map(|i| i * chunk_size)
-                    .collect::<Vec<i64>>();
+                    .collect::<Vec<i64>>()
             } else {
-                panic!("No chunking method specified.");
-            }
+                return Err("No chunking method specified.".into());
+            };
 
             if chunk_points.is_empty() {
-                panic!("No chunk coordinates provided.");
+                return Err("No chunk coordinates provided.".into());
             }
             if chunk_points[chunk_points.len() - 1] > path_length {
-                panic!("At least one chunk coordinate exceeds path length.");
+                return Err("At least one chunk coordinate exceeds path length.".into());
             }
 
             let mut range_start = 0;
@@ -742,7 +694,7 @@ fn main() {
                 end: path_length,
             });
 
-            match derive_chunks(
+            derive_chunks(
                 &conn,
                 &operation_conn,
                 name,
@@ -751,12 +703,10 @@ fn main() {
                 &parsed_region.name().to_string(),
                 backbone.as_deref(),
                 chunk_ranges,
-            ) {
-                Ok(_) => {}
-                Err(e) => panic!("Error deriving subgraph(s): {e}"),
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            )?;
+            conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::MakeStitch {
             name,
@@ -765,8 +715,8 @@ fn main() {
             regions,
             new_region,
         }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+            conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
             let name = &name
                 .clone()
                 .unwrap_or_else(|| get_default_collection(&operation_conn));
@@ -786,19 +736,34 @@ fn main() {
             ) {
                 Ok(_) => {}
                 Err(GraphOperationError::OperationError(OperationError::NoChanges)) => {}
-                Err(e) => panic!("Error stitching subgraphs: {e}"),
+                Err(e) => return Err(format!("Error stitching subgraphs: {e}").into()),
             }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
-        Some(Commands::Push { remote }) => match push(&operation_conn, remote.as_deref()) {
-            Ok(_) => {
-                println!("Push succeeded.");
-            }
-            Err(e) => {
-                println!("Push failed: {e}");
-            }
-        },
-        Some(Commands::Pull { remote }) => {}
+        Some(Commands::Push { remote }) => {
+            push(&operation_conn, remote.as_deref())?;
+            println!("Push succeeded.");
+            Ok(())
+        }
+        Some(Commands::Pull { remote }) => Ok(()),
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    panic::set_hook(Box::new(|info| {
+        eprintln!("❗ The application has encountered an unexpected error and must exit.");
+        eprintln!("Message: {}", info);
+        eprintln!();
+        eprintln!("👉 Please file an issue at: https://github.com/genhub-bio/gen/issues");
+        eprintln!("   Include the full output above, what you were doing, and system info.");
+    }));
+
+    // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
+    env_logger::init();
+    match call_cli() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow!("{e}").into()),
     }
 }
