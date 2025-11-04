@@ -5,7 +5,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::HashId;
+use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
@@ -95,7 +95,7 @@ pub fn view_operations(
     let mut blockgroup_graphs: Vec<(HashId, String, GenGraph)> = vec![];
     let mut selected_blockgroup_graph: usize = 0;
     empty_graph.add_node(GraphNode {
-        node_id: HashId::convert_str("1"),
+        node_id: PATH_START_NODE_ID,
         block_id: 0,
         sequence_start: 0,
         sequence_end: 1,
