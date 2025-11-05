@@ -123,14 +123,30 @@ pub enum PatchError {
     OperationError(#[from] OperationError),
 }
 
-pub fn create_patch<W>(op_conn: &Connection, operations: &[HashId], write_stream: &mut W)
+#[derive(Debug, Error)]
+pub enum CreatePatchError {
+    #[error("Operation {0} does not exist.")]
+    OperationNotFound(HashId),
+    #[error("SQL Error: {0}")]
+    SqliteError(#[from] SQLError),
+    #[error("I/O Error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Cap'n Proto error: {0}")]
+    Capnp(#[from] capnp::Error),
+}
+
+pub fn create_patch<W>(
+    op_conn: &Connection,
+    operations: &[HashId],
+    write_stream: &mut W,
+) -> Result<(), CreatePatchError>
 where
     W: Write,
 {
     let mut patches = vec![];
-    for operation in operations.iter() {
-        let operation = Operation::get_by_id(op_conn, operation)
-            .unwrap_or_else(|| panic!("Hash {operation} does not exist."));
+    for hash in operations.iter() {
+        let operation = Operation::get_by_id(op_conn, hash)
+            .ok_or_else(|| CreatePatchError::OperationNotFound(*hash))?;
         println!("Creating patch for Operation {id}", id = operation.hash);
         patches.push(OperationPatch {
             operation: operation.clone(),
@@ -139,8 +155,7 @@ where
                 op_conn,
                 "select * from operation_summaries where operation_hash = ?1",
                 params![Value::from(operation.hash)],
-            )
-            .unwrap(),
+            )?,
             dependencies: operation.get_changeset_dependencies(),
             changeset: operation.get_changeset(),
         })
@@ -155,13 +170,15 @@ where
 
     // Write the packed message to a buffer
     let mut capnp_buffer = Vec::new();
-    ::capnp::serialize_packed::write_message(&mut capnp_buffer, &message).unwrap();
+    ::capnp::serialize_packed::write_message(&mut capnp_buffer, &message)?;
 
     // Compress the Cap'n Proto data
     let mut e = GzEncoder::new(Vec::new(), Compression::default());
-    e.write_all(&capnp_buffer).unwrap();
-    let compressed = e.finish().unwrap();
-    write_stream.write_all(&compressed).unwrap();
+    e.write_all(&capnp_buffer)?;
+    let compressed = e.finish()?;
+    write_stream.write_all(&compressed)?;
+
+    Ok(())
 }
 
 pub fn load_patches<R>(reader: R) -> Vec<OperationPatch>
@@ -283,7 +300,7 @@ mod tests {
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream);
+        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
         load_patches(&write_stream[..]);
     }
 
@@ -319,7 +336,7 @@ mod tests {
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream);
+        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
         let patches = load_patches(&write_stream[..]);
         apply_patches(Some(conn2), operation_conn, &patches).unwrap();
         for bg in BlockGroup::query(conn, "select * from block_groups;", params![]).iter() {
@@ -363,7 +380,7 @@ mod tests {
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_2.hash], &mut write_stream);
+        create_patch(operation_conn, &[op_2.hash], &mut write_stream).unwrap();
 
         operation_management::checkout(Some(conn), operation_conn, &Some("main".to_string()), None)
             .unwrap();
@@ -413,7 +430,7 @@ mod tests {
 
         // Test Cap'n Proto serialization/deserialization
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream);
+        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
         let loaded_patches = load_patches(&write_stream[..]);
 
         // Verify we got the same patches back
@@ -452,7 +469,7 @@ mod tests {
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_2.hash], &mut write_stream);
+        create_patch(operation_conn, &[op_2.hash], &mut write_stream).unwrap();
 
         let patches = load_patches(&write_stream[..]);
         let fresh_db = &get_connection(None).unwrap();

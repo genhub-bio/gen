@@ -164,12 +164,18 @@ pub fn export_fasta(
 
     let name = name.unwrap_or_else(|| get_default_collection(&operation_conn));
 
-    gen_export_fasta(
+    if let Err(err) = gen_export_fasta(
         &conn,
         &name,
         sample.clone().as_deref(),
         &PathBuf::from(filename),
-    );
+    ) {
+        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+        return Err(PyRuntimeError::new_err(format!(
+            "FASTA export failed: {err}"
+        )));
+    }
 
     conn.execute("END TRANSACTION", []).unwrap();
     operation_conn.execute("END TRANSACTION", []).unwrap();

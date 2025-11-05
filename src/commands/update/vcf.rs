@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clap::Args;
 use gen_models::errors::OperationError;
 
@@ -27,17 +28,17 @@ pub struct Command {
     coordinate_frame: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with VCF called");
 
-    let operation_conn = get_operation_connection(None).unwrap();
+    let operation_conn = get_operation_connection(None)?;
     let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db).unwrap();
+    let conn = get_connection(&db)?;
 
     // initialize the selected database if needed.
 
-    conn.execute("BEGIN TRANSACTION", []).unwrap();
-    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+    conn.execute("BEGIN TRANSACTION", [])?;
+    operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let name = &cmd
         .name
@@ -54,12 +55,22 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         cmd.coordinate_frame.as_deref(),
     ) {
         Ok(_) => {
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
+            conn.execute("END TRANSACTION;", [])?;
+            operation_conn.execute("END TRANSACTION;", [])?;
         }
-        Err(VcfError::OperationError(OperationError::NoChanges)) => println!(
-            "No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."
-        ),
-        Err(e) => panic!("Error updating with vcf: {e}"),
+        Err(VcfError::OperationError(OperationError::NoChanges)) => {
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
+            operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
+            println!(
+                "No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."
+            );
+        }
+        Err(e) => {
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
+            operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
+            return Err(e.into());
+        }
     }
+
+    Ok(())
 }

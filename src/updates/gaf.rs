@@ -2,15 +2,18 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{BufReader, Read, Write},
+    num::ParseIntError,
     path::Path,
     rc::Rc,
 };
 
+use csv::Error as CsvError;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     edge::{Edge, EdgeData},
+    errors::OperationError,
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo},
@@ -20,6 +23,7 @@ use gen_models::{
 };
 use regex::Regex;
 use rusqlite::{Connection, params, types::Value};
+use thiserror::Error;
 
 use crate::read_lines;
 
@@ -33,7 +37,23 @@ struct CSVRow {
 
 const GEN_PREFIX: &str = "_gen_";
 
-pub fn transform_csv_to_fasta<R, W>(reader: R, writer: &mut W)
+#[derive(Debug, Error)]
+pub enum GafUpdateError {
+    #[error("Input csv missing headers. Headers should be id,left,sequence,right.")]
+    MissingHeaders,
+    #[error("CSV parse error: {0}")]
+    Csv(#[from] CsvError),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Operation error: {0}")]
+    Operation(#[from] OperationError),
+    #[error("Failed to parse expected number in GAF file: {0}")]
+    ParseInt(#[from] ParseIntError),
+    #[error("Line did not match expected GAF format: {0}")]
+    InvalidGafLine(String),
+}
+
+pub fn transform_csv_to_fasta<R, W>(reader: R, writer: &mut W) -> Result<(), GafUpdateError>
 where
     R: Read,
     W: Write,
@@ -43,26 +63,26 @@ where
     let mut csv_reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_reader(csv_bufreader);
-    let headers = csv_reader
-        .headers()
-        .expect("Input csv missing headers. Headers should be id,left,sequence,right.")
-        .clone();
+    let headers = match csv_reader.headers() {
+        Ok(headers) => headers.clone(),
+        Err(_) => return Err(GafUpdateError::MissingHeaders),
+    };
     for (index, result) in csv_reader.records().enumerate() {
-        let record = result.unwrap();
-        let row: CSVRow = record.deserialize(Some(&headers)).unwrap();
+        let record = result?;
+        let row: CSVRow = record.deserialize(Some(&headers))?;
         let id = row
             .id
             .clone()
             .unwrap_or_else(|| format!("{GEN_PREFIX}{index}"));
         if !row.left.is_empty() {
-            writeln!(writer, ">{id}_left\n{left}", left = row.left,)
-                .expect("Unable to write fasta entry.");
+            writeln!(writer, ">{id}_left\n{left}", left = row.left)?;
         }
         if !row.right.is_empty() {
-            writeln!(writer, ">{id}_right\n{right}", right = row.right)
-                .expect("Unable to write fasta entry.");
+            writeln!(writer, ">{id}_right\n{right}", right = row.right)?;
         }
     }
+
+    Ok(())
 }
 
 pub fn update_with_gaf<'a, P>(
@@ -73,7 +93,8 @@ pub fn update_with_gaf<'a, P>(
     collection_name: &'a str,
     sample_name: impl Into<Option<&'a str>>,
     parent_sample: impl Into<Option<&'a str>>,
-) where
+) -> Result<(), GafUpdateError>
+where
     P: AsRef<Path> + Clone,
 {
     // Given a gaf, this will incorporate the alignment into the specified graph, creating new nodes.
@@ -140,20 +161,22 @@ pub fn update_with_gaf<'a, P>(
 
     let orient_id_re = Regex::new(r"(?x)(?P<orient>[><])(?P<node>[^><]+(:\d+-\d+)?)").unwrap();
 
-    let csv_file = File::open(csv_path).unwrap();
+    let csv_file = File::open(csv_path).map_err(GafUpdateError::Io)?;
     let csv_bufreader = BufReader::new(csv_file);
 
     let mut csv_reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_reader(csv_bufreader);
-    let headers = csv_reader
-        .headers()
-        .expect("Input csv missing headers. Headers should be id,left,sequence,right.")
-        .clone();
+    let headers = match csv_reader.headers() {
+        Ok(headers) => headers.clone(),
+        Err(_) => return Err(GafUpdateError::MissingHeaders),
+    };
     let mut change_spec = HashMap::new();
     for (index, result) in csv_reader.records().enumerate() {
-        let record = result.unwrap();
-        let row: CSVRow = record.deserialize(Some(&headers)).unwrap();
+        let record = result.map_err(GafUpdateError::Csv)?;
+        let row: CSVRow = record
+            .deserialize(Some(&headers))
+            .map_err(GafUpdateError::Csv)?;
         change_spec.insert(
             row.id
                 .clone()
@@ -164,73 +187,79 @@ pub fn update_with_gaf<'a, P>(
 
     let mut gaf_changes: HashMap<String, HashMap<String, (HashId, Strand, i64)>> = HashMap::new();
 
-    if let Ok(lines) = read_lines(&gaf_path) {
-        for line in lines.map_while(Result::ok) {
-            let entry = re.captures(&line).unwrap();
-            let aln_path = &entry["path"];
-            let mut node_start: i64 = entry["path_start"].parse::<i64>().unwrap();
-            let mut segments = vec![];
-            if [">", "<"].iter().any(|s| aln_path.starts_with(*s)) {
-                // orient id
-                for sub_match in orient_id_re.captures_iter(aln_path) {
-                    let orientation = if &sub_match["orient"] == ">" {
-                        Strand::Forward
-                    } else {
-                        Strand::Reverse
-                    };
-                    let node = sub_match["node"].to_string();
-                    segments.push((orientation, node));
-                }
-            } else {
-                // we're a stable id
-                segments.push((Strand::Forward, aln_path.to_string()));
+    let lines = read_lines(gaf_path.as_ref()).map_err(GafUpdateError::Io)?;
+    for line in lines {
+        let line = line.map_err(GafUpdateError::Io)?;
+        let entry = re
+            .captures(&line)
+            .ok_or_else(|| GafUpdateError::InvalidGafLine(line.clone()))?;
+        let aln_path = &entry["path"];
+        let mut node_start: i64 = entry["path_start"]
+            .parse::<i64>()
+            .map_err(GafUpdateError::ParseInt)?;
+        let mut segments = vec![];
+        if [">", "<"].iter().any(|s| aln_path.starts_with(*s)) {
+            // orient id
+            for sub_match in orient_id_re.captures_iter(aln_path) {
+                let orientation = if &sub_match["orient"] == ">" {
+                    Strand::Forward
+                } else {
+                    Strand::Reverse
+                };
+                let node = sub_match["node"].to_string();
+                segments.push((orientation, node));
             }
-            let query = entry["query_name"].to_string();
-            if let Some(id_re) = query_re.captures(&query) {
-                let query_id = id_re["query_id"].to_string();
-                if change_spec.contains_key(&query_id) {
-                    let mut strand: Option<Strand> = None;
-                    let mut node_id: Option<_> = None;
-                    let query_key;
-                    if query.ends_with("left") {
-                        query_key = "left";
-                        let mut matches = entry["residue_match"].parse::<i64>().unwrap();
-                        for (segment_strand, segment_id) in segments.iter() {
-                            let (segment_node_id, node_length) = get_node_info(segment_id);
-                            if node_length >= matches {
-                                strand = Some(*segment_strand);
-                                node_id = Some(segment_node_id);
-                                node_start = matches;
-                                break;
-                            }
-                            matches -= node_length;
+        } else {
+            // we're a stable id
+            segments.push((Strand::Forward, aln_path.to_string()));
+        }
+        let query = entry["query_name"].to_string();
+        if let Some(id_re) = query_re.captures(&query) {
+            let query_id = id_re["query_id"].to_string();
+            if change_spec.contains_key(&query_id) {
+                let mut strand: Option<Strand> = None;
+                let mut node_id: Option<_> = None;
+                let query_key;
+                if query.ends_with("left") {
+                    query_key = "left";
+                    let mut matches = entry["residue_match"]
+                        .parse::<i64>()
+                        .map_err(GafUpdateError::ParseInt)?;
+                    for (segment_strand, segment_id) in segments.iter() {
+                        let (segment_node_id, node_length) = get_node_info(segment_id);
+                        if node_length >= matches {
+                            strand = Some(*segment_strand);
+                            node_id = Some(segment_node_id);
+                            node_start = matches;
+                            break;
                         }
-                    } else if query.ends_with("right") {
-                        query_key = "right";
-                        let (segment_strand, segment_id) = segments.first().unwrap();
-                        let (segment_node_id, _node_length) = get_node_info(segment_id);
-                        strand = Some(*segment_strand);
-                        node_id = Some(segment_node_id);
-                    } else {
-                        continue;
-                    };
-
-                    if let Some(node_id) = node_id
-                        && let Some(strand) = strand
-                    {
-                        gaf_changes
-                            .entry(query_id)
-                            .and_modify(|change| {
-                                change
-                                    .entry(query_key.to_string())
-                                    .or_insert((node_id, strand, node_start));
-                            })
-                            .or_insert_with(|| {
-                                let mut change = HashMap::new();
-                                change.insert(query_key.to_string(), (node_id, strand, node_start));
-                                change
-                            });
+                        matches -= node_length;
                     }
+                } else if query.ends_with("right") {
+                    query_key = "right";
+                    let (segment_strand, segment_id) = segments.first().unwrap();
+                    let (segment_node_id, _node_length) = get_node_info(segment_id);
+                    strand = Some(*segment_strand);
+                    node_id = Some(segment_node_id);
+                } else {
+                    continue;
+                };
+
+                if let Some(node_id) = node_id
+                    && let Some(strand) = strand
+                {
+                    gaf_changes
+                        .entry(query_id)
+                        .and_modify(|change| {
+                            change
+                                .entry(query_key.to_string())
+                                .or_insert((node_id, strand, node_start));
+                        })
+                        .or_insert_with(|| {
+                            let mut change = HashMap::new();
+                            change.insert(query_key.to_string(), (node_id, strand, node_start));
+                            change
+                        });
                 }
             }
         }
@@ -377,7 +406,9 @@ pub fn update_with_gaf<'a, P>(
         &format!("{change_count} updates."),
         None,
     )
-    .unwrap();
+    .map_err(GafUpdateError::Operation)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -402,7 +433,7 @@ mod tests {
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_insert.csv");
             let mut csv_file = File::open(path).unwrap();
             let mut buffer = Vec::new();
-            transform_csv_to_fasta(&mut csv_file, &mut buffer);
+            transform_csv_to_fasta(&mut csv_file, &mut buffer).unwrap();
             let results = String::from_utf8(buffer).unwrap();
             assert_eq!(
                 results,
@@ -426,7 +457,7 @@ mod tests {
         fn test_prefixes_entries_without_id() {
             let mut input = "id,left,sequence,right\n,aaa,ttt,ccc".as_bytes();
             let mut buffer = Vec::new();
-            transform_csv_to_fasta(&mut input, &mut buffer);
+            transform_csv_to_fasta(&mut input, &mut buffer).unwrap();
             let results = String::from_utf8(buffer).unwrap();
             assert_eq!(
                 results,
@@ -445,7 +476,7 @@ mod tests {
             let mut input =
                 "id,left,sequence,right\nextreme_left,aaa,ttt,\nextreme_right,,ccc,ggg".as_bytes();
             let mut buffer = Vec::new();
-            transform_csv_to_fasta(&mut input, &mut buffer);
+            transform_csv_to_fasta(&mut input, &mut buffer).unwrap();
             let results = String::from_utf8(buffer).unwrap();
             assert_eq!(
                 results,
@@ -476,7 +507,7 @@ mod tests {
 
         let _ = import_gfa(&gfa_path, &collection, None, conn, op_conn);
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
-        update_with_gaf(conn, op_conn, gaf_path, csv_path, "test", "child", None);
+        update_with_gaf(conn, op_conn, gaf_path, csv_path, "test", "child", None).unwrap();
         let graph = Sample::get_graph(conn, "test", "child");
 
         let query = Node::query(
@@ -544,7 +575,7 @@ mod tests {
 
         let _ = import_gfa(&gfa_path, &collection, None, conn, op_conn);
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
-        update_with_gaf(conn, op_conn, gaf_path, csv_path, "test", "child", None);
+        update_with_gaf(conn, op_conn, gaf_path, csv_path, "test", "child", None).unwrap();
         let graph = Sample::get_graph(conn, "test", "child");
 
         // we should end up with a new edge putting our insert to the beginning of the graph, which is node 3.

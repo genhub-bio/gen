@@ -9,8 +9,15 @@ use gen_core::{NodeIntervalBlock, range::Range};
 use gen_models::{block_group::BlockGroup, path::Path, sample::Sample};
 use itertools::Itertools;
 use rusqlite::Connection;
+use thiserror::Error;
 
 use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments};
+
+#[derive(Debug, Error)]
+pub enum GfaDiffError {
+    #[error("I/O error while writing GFA diff: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 pub fn gfa_sample_diff(
     conn: &Connection,
@@ -18,7 +25,7 @@ pub fn gfa_sample_diff(
     filename: &PathBuf,
     from_sample_name: Option<&str>,
     to_sample_name: Option<&str>,
-) {
+) -> Result<(), GfaDiffError> {
     /*
     Generate a GFA file that represents the differences between two samples in a collection.
 
@@ -160,16 +167,16 @@ pub fn gfa_sample_diff(
         }
     }
 
-    let file = File::create(filename).unwrap();
+    let file = File::create(filename)?;
     let mut writer = BufWriter::new(file);
-    write_segments(&mut writer, &segments.iter().collect::<Vec<&Segment>>());
-    write_links(&mut writer, &links.iter().collect::<Vec<&Link>>());
+    write_segments(&mut writer, &segments.iter().collect::<Vec<&Segment>>())?;
+    write_links(&mut writer, &links.iter().collect::<Vec<&Link>>())?;
 
     for path in paths {
-        writer
-            .write_all(&path_line(&path).into_bytes())
-            .unwrap_or_else(|_| panic!("Error writing path {} to GFA stream", path.name));
+        writer.write_all(&path_line(&path).into_bytes())?;
     }
+
+    Ok(())
 }
 
 fn segments_from_blocks(node_blocks: &Vec<NodeIntervalBlock>, sequence: &str) -> Vec<Segment> {
@@ -367,7 +374,7 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("child"));
+        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("child")).unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
@@ -432,7 +439,7 @@ mod tests {
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 10, 14, &edge6, &edge7);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("grandchild"));
+        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("grandchild")).unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 3", None, conn, op_conn);
         let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 3")
@@ -462,7 +469,8 @@ mod tests {
             &gfa_path,
             Some("child"),
             Some("grandchild"),
-        );
+        )
+        .unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 4", None, conn, op_conn);
 
@@ -554,7 +562,7 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("diff-against-nothing.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("test sample"));
+        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("test sample")).unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
@@ -651,7 +659,8 @@ mod tests {
             &gfa_path,
             Some("test sample"),
             Some("test sample"),
-        );
+        )
+        .unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
@@ -800,7 +809,8 @@ mod tests {
             &gfa_path,
             Some("sample1"),
             Some("sample2"),
-        );
+        )
+        .unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 3", None, conn, op_conn);
 
@@ -950,7 +960,8 @@ mod tests {
             &gfa_path,
             Some("sample1"),
             Some("sample2"),
-        );
+        )
+        .unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 3", None, conn, op_conn);
 
@@ -1065,7 +1076,7 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("child"));
+        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("child")).unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
 
@@ -1130,7 +1141,7 @@ mod tests {
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 4, 10, &edge5, &edge6);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("grandchild"));
+        gfa_sample_diff(conn, collection_name, &gfa_path, None, Some("grandchild")).unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 3", None, conn, op_conn);
 
@@ -1158,7 +1169,8 @@ mod tests {
             &gfa_path,
             Some("child"),
             Some("grandchild"),
-        );
+        )
+        .unwrap();
 
         let _ = import_gfa(&gfa_path, "test collection 4", None, conn, op_conn);
 
