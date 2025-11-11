@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
+    io::copy,
     path::{Path as FilePath, PathBuf},
     str,
 };
@@ -26,6 +27,8 @@ use itertools::Itertools;
 use petgraph::Direction;
 use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Connection, Error as SQLError};
+use serde::Deserialize;
+use serde_json::json;
 use thiserror::Error;
 use url_parse::core::Parser;
 
@@ -806,6 +809,400 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
             remote_url.to_string(),
         )),
     }
+}
+
+pub fn pull(operation_conn: &Connection, remote: Option<&str>) -> Result<(), RemoteOperationError> {
+    let remote_name = &remote
+        .map(str::to_owned)
+        .or_else(|| Defaults::get_default_remote(operation_conn))
+        .ok_or(RemoteOperationError::RemoteUrlNotSet)?;
+    let remote = Remote::get_by_name(operation_conn, remote_name)?;
+    let remote_url = remote.url;
+
+    let current_branch_id =
+        OperationState::get_current_branch(operation_conn).ok_or_else(|| {
+            RemoteOperationError::IOError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No current branch set",
+            ))
+        })?;
+    let branch = Branch::get_by_id(operation_conn, current_branch_id).unwrap();
+    let current_hash = branch
+        .current_operation_hash
+        .ok_or(RemoteOperationError::NoOperations)?;
+
+    let parsed_url = Parser::new(Some(port_mappings())).parse(&remote_url);
+    match parsed_url {
+        Ok(result) => {
+            if let Some(scheme) = result.scheme {
+                if scheme == "file" {
+                    pull_from_file_remote(operation_conn, &remote_url, &branch, &current_hash)
+                } else {
+                    pull_from_remote_server(
+                        operation_conn,
+                        remote_name,
+                        &remote_url,
+                        &branch,
+                        &current_hash,
+                    )
+                }
+            } else {
+                Err(RemoteOperationError::InvalidRemoteUrl(
+                    remote_url.to_string(),
+                ))
+            }
+        }
+        Err(_) => Err(RemoteOperationError::InvalidRemoteUrl(
+            remote_url.to_string(),
+        )),
+    }
+}
+
+fn pull_from_file_remote(
+    operation_conn: &Connection,
+    remote_url: &str,
+    current_branch: &Branch,
+    current_hash: &HashId,
+) -> Result<(), RemoteOperationError> {
+    let generator = ManifestGenerator::new(operation_conn);
+    let local_manifest = generator.generate_manifest(&current_branch.name, current_hash)?;
+
+    let (remote_path, ref remote_op_conn) = connect_file_remote(remote_url)?;
+    let remote_branch =
+        Branch::get_by_name(remote_op_conn, &current_branch.name).ok_or_else(|| {
+            RemoteOperationError::DoesNotExist(format!(
+                "Branch {} not found on remote",
+                current_branch.name
+            ))
+        })?;
+
+    let diff = if let Some(remote_hash) = remote_branch.current_operation_hash {
+        let remote_manifest = ManifestGenerator::new(remote_op_conn)
+            .generate_manifest(&current_branch.name, &remote_hash)?;
+        ManifestComparer::diff_manifests(&local_manifest, &remote_manifest)?
+    } else {
+        ManifestDiff {
+            missing_in_manifest2: vec![],
+            missing_in_manifest1: vec![],
+        }
+    };
+
+    if diff.missing_in_manifest1.is_empty() {
+        return Ok(());
+    }
+
+    let repo_root = get_repo_root_path()?;
+    for manifest_operation in diff.missing_in_manifest1.iter() {
+        copy_operation_from_remote_fs(
+            manifest_operation,
+            remote_path.as_path(),
+            repo_root.as_path(),
+        )?;
+        ingest_manifest_operation(operation_conn, manifest_operation, repo_root.as_path())?;
+    }
+
+    if let Some(latest_op) = diff.missing_in_manifest1.last() {
+        OperationState::set_operation(operation_conn, &latest_op.operation.hash);
+    }
+
+    Ok(())
+}
+
+fn pull_from_remote_server(
+    operation_conn: &Connection,
+    remote_name: &str,
+    remote_url: &str,
+    current_branch: &Branch,
+    current_hash: &HashId,
+) -> Result<(), RemoteOperationError> {
+    let generator = ManifestGenerator::new(operation_conn);
+    let manifest = generator.generate_manifest(&current_branch.name, current_hash)?;
+    let diff = send_manifest_to_remote(remote_name, remote_url, &manifest)?;
+
+    if diff.missing_in_manifest1.is_empty() {
+        return Ok(());
+    }
+
+    let auth_tokens = load_tokens(remote_name).map_err(|e| {
+        RemoteOperationError::AuthError(format!("Unable to load tokens: {e}. Did you login?"))
+    })?;
+    let manifest_url = {
+        let mut url = remote_url.trim_end_matches('/').to_string();
+        url.push_str("/manifest/operation");
+        url
+    };
+    let client = Client::new();
+    let repo_root = get_repo_root_path()?;
+
+    for manifest_operation in diff.missing_in_manifest1.iter() {
+        download_remote_operation_assets(
+            &client,
+            &auth_tokens.jwt,
+            &manifest_url,
+            manifest_operation,
+            repo_root.as_path(),
+        )?;
+        ingest_manifest_operation(operation_conn, manifest_operation, repo_root.as_path())?;
+    }
+
+    if let Some(latest_op) = diff.missing_in_manifest1.last() {
+        OperationState::set_operation(operation_conn, &latest_op.operation.hash);
+    }
+
+    Ok(())
+}
+
+fn ingest_manifest_operation(
+    operation_conn: &Connection,
+    manifest_operation: &ManifestOperation,
+    repo_root: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let operation = &manifest_operation.operation;
+    let changeset = operation.get_changeset();
+    let dependencies = operation.get_changeset_dependencies();
+
+    let data_db_path = repo_root.join(&changeset.db_path);
+    let new_db = !data_db_path.exists();
+    let data_conn = &get_connection(&data_db_path)?;
+    if new_db {
+        track_database(data_conn, operation_conn)?;
+    }
+    let db_uuid = get_db_uuid(data_conn);
+
+    data_conn.execute("BEGIN TRANSACTION", [])?;
+    match apply_changeset(data_conn, &changeset.changes, &dependencies) {
+        Ok(_) => {
+            data_conn.execute("COMMIT TRANSACTION", [])?;
+        }
+        Err(e) => {
+            data_conn.execute("ROLLBACK TRANSACTION", [])?;
+            return Err(RemoteOperationError::IOError(std::io::Error::other(
+                format!(
+                    "Failed to apply changeset for operation {}: {}",
+                    operation.hash, e
+                ),
+            )));
+        }
+    }
+
+    operation_conn.execute("BEGIN TRANSACTION", [])?;
+    match Operation::create_without_tracking(
+        operation_conn,
+        &operation.hash,
+        &operation.change_type,
+        operation.parent_hash,
+        Some(operation.created_on),
+    ) {
+        Ok(_) => {
+            for file_addition in &manifest_operation.file_additions {
+                let local_file_addition = FileAddition::get_or_create(
+                    operation_conn,
+                    &file_addition.file_path,
+                    file_addition.file_type,
+                )?;
+                Operation::add_file(operation_conn, &operation.hash, &local_file_addition.id)?;
+            }
+            Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
+            operation_conn.execute("COMMIT TRANSACTION", [])?;
+        }
+        Err(e) => {
+            operation_conn.execute("ROLLBACK TRANSACTION", [])?;
+            return Err(RemoteOperationError::IOError(std::io::Error::other(
+                format!(
+                    "Failed to record operation {} locally: {}",
+                    operation.hash, e
+                ),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_operation_from_remote_fs(
+    manifest_operation: &ManifestOperation,
+    remote_path: &FilePath,
+    repo_root: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let op_hash = format!("{}", manifest_operation.operation.hash);
+    let remote_changeset_dir = remote_path.join(".gen").join("changeset").join(&op_hash);
+    let remote_changeset_src = remote_changeset_dir.join("changeset");
+    let remote_dependencies_src = remote_changeset_dir.join("dependencies");
+
+    let local_changeset_dst = manifest_operation.operation.get_changeset_path();
+    if !remote_changeset_src.exists() {
+        return Err(RemoteOperationError::FileTransferError(
+            "changeset".to_string(),
+            remote_changeset_src.to_string_lossy().to_string(),
+            local_changeset_dst.to_string_lossy().to_string(),
+        ));
+    }
+    fs::copy(&remote_changeset_src, &local_changeset_dst).map_err(|_| {
+        RemoteOperationError::FileTransferError(
+            "changeset".to_string(),
+            remote_changeset_src.to_string_lossy().to_string(),
+            local_changeset_dst.to_string_lossy().to_string(),
+        )
+    })?;
+
+    let local_dependencies_dst = manifest_operation
+        .operation
+        .get_changeset_dependencies_path();
+    if !remote_dependencies_src.exists() {
+        return Err(RemoteOperationError::FileTransferError(
+            "dependencies".to_string(),
+            remote_dependencies_src.to_string_lossy().to_string(),
+            local_dependencies_dst.to_string_lossy().to_string(),
+        ));
+    }
+    fs::copy(&remote_dependencies_src, &local_dependencies_dst).map_err(|_| {
+        RemoteOperationError::FileTransferError(
+            "dependencies".to_string(),
+            remote_dependencies_src.to_string_lossy().to_string(),
+            local_dependencies_dst.to_string_lossy().to_string(),
+        )
+    })?;
+
+    for file_addition in &manifest_operation.file_additions {
+        let src_path = remote_path.join(&file_addition.file_path);
+        let dst_path = repo_root.join(&file_addition.file_path);
+        if src_path.exists() {
+            if let Some(parent) = dst_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src_path, &dst_path).map_err(|_| {
+                RemoteOperationError::FileTransferError(
+                    file_addition.file_path.clone(),
+                    src_path.to_string_lossy().to_string(),
+                    dst_path.to_string_lossy().to_string(),
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteOperationAssetResponse {
+    changeset: String,
+    dependencies: String,
+    #[serde(default)]
+    files: Vec<RemoteFileAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteFileAsset {
+    file_path: String,
+    url: String,
+}
+
+fn download_remote_operation_assets(
+    client: &Client,
+    auth_token: &str,
+    endpoint: &str,
+    manifest_operation: &ManifestOperation,
+    repo_root: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let op_hash = format!("{}", manifest_operation.operation.hash);
+    let payload = json!({ "operation_hash": op_hash });
+    let response = client
+        .post(endpoint)
+        .bearer_auth(auth_token)
+        .json(&payload)
+        .send()?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(RemoteOperationError::FileTransferError(
+            "manifest_operation".to_string(),
+            endpoint.to_string(),
+            format!("HTTP {status}"),
+        ));
+    }
+
+    let asset_response: RemoteOperationAssetResponse = response.json()?;
+    let changeset_dst = manifest_operation.operation.get_changeset_path();
+    download_binary(
+        client,
+        &asset_response.changeset,
+        changeset_dst.as_path(),
+        Some(auth_token),
+        "changeset",
+    )?;
+
+    let dependencies_dst = manifest_operation
+        .operation
+        .get_changeset_dependencies_path();
+    download_binary(
+        client,
+        &asset_response.dependencies,
+        dependencies_dst.as_path(),
+        Some(auth_token),
+        "dependencies",
+    )?;
+
+    for file in asset_response.files {
+        let destination = repo_root.join(&file.file_path);
+        download_binary(
+            client,
+            &file.url,
+            destination.as_path(),
+            Some(auth_token),
+            &file.file_path,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn download_binary(
+    client: &Client,
+    url: &str,
+    dest: &FilePath,
+    bearer_token: Option<&str>,
+    resource_name: &str,
+) -> Result<(), RemoteOperationError> {
+    let mut request = client.get(url);
+    if let Some(token) = bearer_token {
+        request = request.bearer_auth(token);
+    }
+
+    let mut response = request.send()?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(RemoteOperationError::FileTransferError(
+            resource_name.to_string(),
+            url.to_string(),
+            format!("{} (HTTP {status})", dest.to_string_lossy()),
+        ));
+    }
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::File::create(dest)?;
+    copy(&mut response, &mut file)?;
+    Ok(())
+}
+
+fn get_repo_root_path() -> Result<PathBuf, RemoteOperationError> {
+    let gen_dir = get_gen_dir().ok_or_else(|| {
+        RemoteOperationError::IOError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Gen directory not found",
+        ))
+    })?;
+    let gen_path = PathBuf::from(gen_dir);
+    let repo_root = gen_path
+        .parent()
+        .map(FilePath::to_path_buf)
+        .ok_or_else(|| {
+            RemoteOperationError::IOError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Unable to determine repository root",
+            ))
+        })?;
+    Ok(repo_root)
 }
 
 fn send_manifest_to_remote(
