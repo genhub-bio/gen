@@ -665,14 +665,14 @@ fn push_to_file_remote(
         .current_operation_hash
         .ok_or(RemoteOperationError::NoOperations)?;
 
-    let local_manifest = generator.generate_manifest(&current_branch.name, &current_hash)?;
+    let local_manifest = generator.generate_manifest(&current_branch.name, Some(&current_hash))?;
 
     let (remote_path, ref remote_op_conn) = connect_file_remote(remote_url)?;
 
     let remote_branch = Branch::get_or_create(remote_op_conn, branch_name);
     let remote_generator = ManifestGenerator::new(remote_op_conn);
     let remote_manifest = if let Some(hash) = remote_branch.current_operation_hash {
-        Some(remote_generator.generate_manifest(branch_name, &hash)?)
+        Some(remote_generator.generate_manifest(branch_name, Some(&hash))?)
     } else {
         None
     };
@@ -750,7 +750,7 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
                         Err(RemoteOperationError::NoOperations)?
                     };
                     let manifest =
-                        generator.generate_manifest(&current_branch.name, &current_hash)?;
+                        generator.generate_manifest(&current_branch.name, Some(&current_hash))?;
                     let diff = send_manifest_to_remote(remote_name, &remote_url, &manifest)?;
 
                     let auth_tokens = load_tokens(remote_name).map_err(|e| {
@@ -827,24 +827,15 @@ pub fn pull(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
             ))
         })?;
     let branch = Branch::get_by_id(operation_conn, current_branch_id).unwrap();
-    let current_hash = branch
-        .current_operation_hash
-        .ok_or(RemoteOperationError::NoOperations)?;
 
     let parsed_url = Parser::new(Some(port_mappings())).parse(&remote_url);
     match parsed_url {
         Ok(result) => {
             if let Some(scheme) = result.scheme {
                 if scheme == "file" {
-                    pull_from_file_remote(operation_conn, &remote_url, &branch, &current_hash)
+                    pull_from_file_remote(operation_conn, &remote_url, &branch)
                 } else {
-                    pull_from_remote_server(
-                        operation_conn,
-                        remote_name,
-                        &remote_url,
-                        &branch,
-                        &current_hash,
-                    )
+                    pull_from_remote_server(operation_conn, remote_name, &remote_url, &branch)
                 }
             } else {
                 Err(RemoteOperationError::InvalidRemoteUrl(
@@ -862,10 +853,12 @@ fn pull_from_file_remote(
     operation_conn: &Connection,
     remote_url: &str,
     current_branch: &Branch,
-    current_hash: &HashId,
 ) -> Result<(), RemoteOperationError> {
     let generator = ManifestGenerator::new(operation_conn);
-    let local_manifest = generator.generate_manifest(&current_branch.name, current_hash)?;
+    let local_manifest = generator.generate_manifest(
+        &current_branch.name,
+        current_branch.current_operation_hash.as_ref(),
+    )?;
 
     let (remote_path, ref remote_op_conn) = connect_file_remote(remote_url)?;
     let remote_branch =
@@ -878,7 +871,7 @@ fn pull_from_file_remote(
 
     let diff = if let Some(remote_hash) = remote_branch.current_operation_hash {
         let remote_manifest = ManifestGenerator::new(remote_op_conn)
-            .generate_manifest(&current_branch.name, &remote_hash)?;
+            .generate_manifest(&current_branch.name, Some(&remote_hash))?;
         ManifestComparer::diff_manifests(&local_manifest, &remote_manifest)?
     } else {
         ManifestDiff {
@@ -913,10 +906,12 @@ fn pull_from_remote_server(
     remote_name: &str,
     remote_url: &str,
     current_branch: &Branch,
-    current_hash: &HashId,
 ) -> Result<(), RemoteOperationError> {
     let generator = ManifestGenerator::new(operation_conn);
-    let manifest = generator.generate_manifest(&current_branch.name, current_hash)?;
+    let manifest = generator.generate_manifest(
+        &current_branch.name,
+        current_branch.current_operation_hash.as_ref(),
+    )?;
     let diff = send_manifest_to_remote(remote_name, remote_url, &manifest)?;
 
     if diff.missing_in_manifest1.is_empty() {
@@ -1104,19 +1099,14 @@ fn download_remote_operation_assets(
     manifest_operation: &ManifestOperation,
     repo_root: &FilePath,
 ) -> Result<(), RemoteOperationError> {
-    let op_hash = format!("{}", manifest_operation.operation.hash);
-    let payload = json!({ "operation_hash": op_hash });
-    let response = client
-        .post(endpoint)
-        .bearer_auth(auth_token)
-        .json(&payload)
-        .send()?;
+    let url = format!("{endpoint}/{}", manifest_operation.operation.hash);
+    let response = client.get(url).bearer_auth(auth_token).send()?;
     let status = response.status();
     if !status.is_success() {
         return Err(RemoteOperationError::FileTransferError(
             "manifest_operation".to_string(),
             endpoint.to_string(),
-            format!("HTTP {status}"),
+            format!("HTTP {status} {r:?}", r = response.bytes().unwrap()),
         ));
     }
 
@@ -2319,7 +2309,7 @@ mod tests {
 
             // Create manifest operation
             let local_manifest = ManifestGenerator::new(local_op_conn)
-                .generate_manifest("main", &local_main.current_operation_hash.unwrap())
+                .generate_manifest("main", local_main.current_operation_hash.as_ref())
                 .unwrap();
             let result =
                 apply_operations_to_remote(remote_op_conn, &local_manifest.operations, remote_path);

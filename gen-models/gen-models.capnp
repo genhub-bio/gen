@@ -208,8 +208,11 @@ struct ManifestOperation {
 struct Manifest {
   manifestVersion @0 :Text;
   branchName @1 :Text;
-  endHash @2 :List(UInt8);
-  operations @3 :List(ManifestOperation);
+  endHash :union {
+    none @2 :Void;
+    some @3 :List(UInt8);
+  }
+  operations @4 :List(ManifestOperation);
 }
 
 struct ManifestDiff {

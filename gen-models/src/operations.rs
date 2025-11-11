@@ -309,15 +309,54 @@ impl FileAddition {
         HashId(calculate_hash(&combined))
     }
 
+    fn normalize_file_paths(conn: &Connection, file_path: &str) -> (String, String) {
+        if file_path.is_empty() {
+            return (String::new(), String::new());
+        }
+
+        if let Some(db_path) = conn.path()
+            && !db_path.is_empty()
+        {
+            let db_path = PathBuf::from(db_path);
+            if let Some(gen_dir) = db_path.parent()
+                && let Some(repo_root) = gen_dir.parent()
+            {
+                let provided_path = Path::new(file_path);
+                let absolute_path = if provided_path.is_absolute() {
+                    provided_path.to_path_buf()
+                } else {
+                    repo_root.join(provided_path)
+                };
+
+                if let Ok(relative_path) = absolute_path.strip_prefix(repo_root) {
+                    let absolute = absolute_path.to_string_lossy().to_string();
+                    let relative = relative_path.to_string_lossy().to_string();
+                    return (absolute, relative);
+                }
+            }
+        }
+
+        let fallback = file_path.to_string();
+        (fallback.clone(), fallback)
+    }
+
     pub fn get_or_create(
         conn: &Connection,
         file_path: &str,
         file_type: FileTypes,
     ) -> Result<FileAddition, FileAdditionError> {
-        let checksum = if file_path.is_empty() {
+        let (absolute_file_path, relative_file_path) =
+            FileAddition::normalize_file_paths(conn, file_path);
+
+        let checksum = if relative_file_path.is_empty() {
             HashId::convert_str("empty")
         } else {
-            match calculate_file_checksum(file_path) {
+            let checksum_path = if absolute_file_path.is_empty() {
+                relative_file_path.as_str()
+            } else {
+                absolute_file_path.as_str()
+            };
+            match calculate_file_checksum(checksum_path) {
                 Ok(checksum) => checksum,
                 Err(e) => match e.kind() {
                     std::io::ErrorKind::NotFound => HashId::convert_str("non-existent"),
@@ -333,19 +372,19 @@ impl FileAddition {
             }
         };
 
-        let id = FileAddition::generate_file_addition_id(&checksum, file_path);
+        let id = FileAddition::generate_file_addition_id(&checksum, &relative_file_path);
 
         let query = "INSERT INTO file_additions (id, file_path, file_type, checksum) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
 
         let addition = FileAddition {
             id,
-            file_path: file_path.to_string(),
+            file_path: relative_file_path.clone(),
             file_type,
             checksum,
         };
 
-        match stmt.execute((&id, file_path, file_type, &checksum)) {
+        match stmt.execute((&id, &relative_file_path, file_type, &checksum)) {
             Ok(_) => Ok(addition),
             Err(err) => match &err {
                 rusqlite::Error::SqliteFailure(suberr, _details) => {
@@ -1003,7 +1042,9 @@ impl OperationState {
 mod tests {
     use std::{
         collections::HashSet,
+        fs,
         io::{Cursor, Write},
+        path::PathBuf,
     };
 
     use tempfile::NamedTempFile;
@@ -2110,49 +2151,139 @@ mod tests {
     }
 
     #[test]
-    fn test_file_addition_get_or_create() {
+    fn test_normalize_file_paths_absolute_path_in_repo() {
+        let gen_dir = setup_gen_dir();
+        let repo_root = gen_dir
+            .parent()
+            .expect("gen dir should have a parent")
+            .to_path_buf();
+        let op_db_path = gen_dir.join("normalize_absolute.db");
+        let op_db_path_str = op_db_path.to_string_lossy().to_string();
+        let conn = &get_operation_connection(Some(op_db_path_str.as_str())).unwrap();
+
+        let absolute_path = repo_root.join("inputs").join("absolute.txt");
+        fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
+        fs::write(&absolute_path, b"absolute").unwrap();
+        let absolute_string = absolute_path.to_string_lossy().to_string();
+        let relative_string = absolute_path
+            .strip_prefix(&repo_root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let (absolute, relative) =
+            FileAddition::normalize_file_paths(conn, absolute_string.as_str());
+
+        assert_eq!(absolute, absolute_string);
+        assert_eq!(relative, relative_string);
+    }
+
+    #[test]
+    fn test_normalize_file_paths_relative_path_in_repo() {
+        let gen_dir = setup_gen_dir();
+        let repo_root = gen_dir
+            .parent()
+            .expect("gen dir should have a parent")
+            .to_path_buf();
+        let op_db_path = gen_dir.join("normalize_relative.db");
+        let op_db_path_str = op_db_path.to_string_lossy().to_string();
+        let conn = &get_operation_connection(Some(op_db_path_str.as_str())).unwrap();
+
+        let relative_path = PathBuf::from("relative/path/file.txt");
+        let absolute_path = repo_root.join(&relative_path);
+        fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
+        fs::write(&absolute_path, b"relative").unwrap();
+        let relative_string = relative_path.to_string_lossy().to_string();
+        let absolute_string = absolute_path.to_string_lossy().to_string();
+
+        let (absolute, relative) =
+            FileAddition::normalize_file_paths(conn, relative_string.as_str());
+
+        assert_eq!(absolute, absolute_string);
+        assert_eq!(relative, relative_string);
+    }
+
+    #[test]
+    fn test_normalize_file_paths_outside_repo_fallbacks() {
+        let gen_dir = setup_gen_dir();
+        let op_db_path = gen_dir.join("normalize_outside.db");
+        let op_db_path_str = op_db_path.to_string_lossy().to_string();
+        let conn = &get_operation_connection(Some(op_db_path_str.as_str())).unwrap();
+
+        let outside_path = PathBuf::from("/tmp/outside_file.txt");
+        let outside_string = outside_path.to_string_lossy().to_string();
+
+        let (absolute, relative) =
+            FileAddition::normalize_file_paths(conn, outside_string.as_str());
+
+        assert_eq!(absolute, outside_string);
+        assert_eq!(relative, outside_string);
+    }
+
+    #[test]
+    fn test_normalize_file_paths_without_connection_path() {
         setup_gen_dir();
         let conn = &get_operation_connection(None).unwrap();
 
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let content = b"Test file content";
-        temp_file.write_all(content).unwrap();
-        temp_file.flush().unwrap();
+        let (absolute, relative) = FileAddition::normalize_file_paths(conn, "detached/file.txt");
+        assert_eq!(absolute, "detached/file.txt");
+        assert_eq!(relative, "detached/file.txt");
 
-        let test_file_path = temp_file.path().to_str().unwrap().to_string();
+        let (absolute_empty, relative_empty) = FileAddition::normalize_file_paths(conn, "");
+        assert_eq!(absolute_empty, "");
+        assert_eq!(relative_empty, "");
+    }
 
-        let fa1 = FileAddition::get_or_create(conn, &test_file_path, FileTypes::Fasta)
+    #[test]
+    fn test_file_addition_get_or_create() {
+        let gen_dir = setup_gen_dir();
+        let repo_root = gen_dir
+            .parent()
+            .expect("gen dir should have a parent")
+            .to_path_buf();
+        let op_db_path = gen_dir.join("gen.db");
+        let op_db_path_str = op_db_path.to_string_lossy().to_string();
+        let conn = &get_operation_connection(Some(op_db_path_str.as_str())).unwrap();
+
+        let file1_path = repo_root.join("test_file.txt");
+        fs::write(&file1_path, b"Test file content").unwrap();
+        let file1_path_str = file1_path.to_string_lossy().to_string();
+        let relative1 = file1_path
+            .strip_prefix(&repo_root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let fa1 = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
             .expect("Failed to create FileAddition");
 
+        assert_eq!(fa1.file_path, relative1);
         assert_eq!(
             fa1.id,
             FileAddition::generate_file_addition_id(
-                &calculate_file_checksum(temp_file.path()).unwrap(),
-                &test_file_path
+                &calculate_file_checksum(&file1_path_str).unwrap(),
+                &relative1
             )
         );
 
         // Second call with same file should return the same FileAddition
-        let fa2 = FileAddition::get_or_create(conn, &test_file_path, FileTypes::Fasta)
+        let fa2 = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
             .expect("Failed to get existing FileAddition");
 
         assert_eq!(fa1, fa2);
 
-        let mut temp_file2 = NamedTempFile::new().unwrap();
-        let content = b"Test file content";
-        temp_file2.write_all(content).unwrap();
-        temp_file2.flush().unwrap();
+        let file2_path = repo_root.join("nested").join("file2.txt");
+        fs::create_dir_all(file2_path.parent().unwrap()).unwrap();
+        fs::write(&file2_path, b"Test file content").unwrap();
+        let file2_path_str = file2_path.to_string_lossy().to_string();
 
-        let test_file_path2 = temp_file2.path().to_str().unwrap();
-
-        let fa3 = FileAddition::get_or_create(conn, test_file_path2, FileTypes::Fasta)
+        let fa3 = FileAddition::get_or_create(conn, &file2_path_str, FileTypes::Fasta)
             .expect("Failed to create different FileAddition");
 
         assert_ne!(fa1.id, fa3.id);
 
-        temp_file.write_all(b"new content").unwrap();
-        temp_file.flush().unwrap();
-        let fa1_new = FileAddition::get_or_create(conn, &test_file_path, FileTypes::Fasta)
+        fs::write(&file1_path, b"new content").unwrap();
+        let fa1_new = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
             .expect("Failed to create FileAddition");
 
         assert_ne!(fa1.id, fa1_new.id);
