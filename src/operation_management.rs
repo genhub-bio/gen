@@ -1131,16 +1131,17 @@ fn download_remote_operation_assets(
         "dependencies",
     )?;
 
-    for file in asset_response.files {
-        let destination = repo_root.join(&file.file_path);
-        download_binary(
-            client,
-            &file.url,
-            destination.as_path(),
-            Some(auth_token),
-            &file.file_path,
-        )?;
-    }
+    // TODO: When file uploads are finished, uncomment this out
+    // for file in asset_response.files {
+    //     let destination = repo_root.join(&file.file_path);
+    //     download_binary(
+    //         client,
+    //         &file.url,
+    //         destination.as_path(),
+    //         Some(auth_token),
+    //         &file.file_path,
+    //     )?;
+    // }
 
     Ok(())
 }
