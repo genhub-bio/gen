@@ -138,6 +138,8 @@ pub enum RemoteOperationError {
     NoOperations,
     #[error("File Addition Error: {0}")]
     FileAdditionError(#[from] FileAdditionError),
+    #[error("Branch Error: {0}")]
+    BranchError(String),
 }
 
 pub enum FileMode {
@@ -819,14 +821,13 @@ pub fn pull(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
     let remote = Remote::get_by_name(operation_conn, remote_name)?;
     let remote_url = remote.url;
 
-    let current_branch_id =
-        OperationState::get_current_branch(operation_conn).ok_or_else(|| {
-            RemoteOperationError::IOError(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "No current branch set",
-            ))
-        })?;
-    let branch = Branch::get_by_id(operation_conn, current_branch_id).unwrap();
+    let current_branch_id = OperationState::get_current_branch(operation_conn)
+        .ok_or_else(|| RemoteOperationError::BranchError("No current branch set".to_string()))?;
+    let branch = Branch::get_by_id(operation_conn, current_branch_id).ok_or_else(|| {
+        RemoteOperationError::DoesNotExist(format!(
+            "Branch {current_branch_id} not found in database."
+        ))
+    })?;
 
     let parsed_url = Parser::new(Some(port_mappings())).parse(&remote_url);
     match parsed_url {
@@ -874,6 +875,7 @@ fn pull_from_file_remote(
             .generate_manifest(&current_branch.name, Some(&remote_hash))?;
         ManifestComparer::diff_manifests(&local_manifest, &remote_manifest)?
     } else {
+        // There's nothing in the remote, so just make it empty since we have nothing to pull.
         ManifestDiff {
             missing_in_manifest2: vec![],
             missing_in_manifest1: vec![],
@@ -892,10 +894,12 @@ fn pull_from_file_remote(
             repo_root.as_path(),
         )?;
         ingest_manifest_operation(operation_conn, manifest_operation, repo_root.as_path())?;
-    }
-
-    if let Some(latest_op) = diff.missing_in_manifest1.last() {
-        OperationState::set_operation(operation_conn, &latest_op.operation.hash);
+        OperationState::set_operation(operation_conn, &manifest_operation.operation.hash);
+        Branch::set_current_operation(
+            operation_conn,
+            current_branch.id,
+            &manifest_operation.operation.hash,
+        );
     }
 
     Ok(())
@@ -938,10 +942,12 @@ fn pull_from_remote_server(
             repo_root.as_path(),
         )?;
         ingest_manifest_operation(operation_conn, manifest_operation, repo_root.as_path())?;
-    }
-
-    if let Some(latest_op) = diff.missing_in_manifest1.last() {
-        OperationState::set_operation(operation_conn, &latest_op.operation.hash);
+        OperationState::set_operation(operation_conn, &manifest_operation.operation.hash);
+        Branch::set_current_operation(
+            operation_conn,
+            current_branch.id,
+            &manifest_operation.operation.hash,
+        );
     }
 
     Ok(())

@@ -93,12 +93,7 @@ impl<'a> Capnp<'a> for Manifest {
         builder.set_branch_name(&self.branch_name);
         let mut end_hash_builder = builder.reborrow().get_end_hash();
         match &self.end_hash {
-            Some(hash) => {
-                let mut some_builder = end_hash_builder.reborrow().init_some(hash.0.len() as u32);
-                for (idx, byte) in hash.0.iter().enumerate() {
-                    some_builder.set(idx as u32, *byte);
-                }
-            }
+            Some(hash) => end_hash_builder.set_some(&hash.0).unwrap(),
             None => end_hash_builder.set_none(()),
         }
 
