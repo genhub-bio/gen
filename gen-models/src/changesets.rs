@@ -890,6 +890,7 @@ pub fn revert_changeset(
 
 pub fn get_changeset_from_path(path: PathBuf) -> DatabaseChangeset {
     use capnp::serialize_packed;
+    println!("Reading changeset from path: {:?}", path);
 
     let file = fs::File::open(path).unwrap();
     let mut reader = std::io::BufReader::new(file);

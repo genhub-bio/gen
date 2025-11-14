@@ -6,7 +6,14 @@ use std::{
     str,
 };
 
-use gen_core::{HashId, config::get_gen_dir, errors::ConnectionError, traits::Capnp};
+#[cfg(test)]
+use gen_core::config::{get_or_create_gen_dir, set_base_dir};
+use gen_core::{
+    HashId,
+    config::{get_gen_dir, get_repo_root_path},
+    errors::{ConfigError, ConnectionError},
+    traits::Capnp,
+};
 use gen_models::{
     changesets::{apply_changeset, revert_changeset},
     errors::{ChangesetError, FileAdditionError, OperationError, RemoteError},
@@ -128,6 +135,8 @@ pub enum RemoteOperationError {
     ManifestDiffError(#[from] ManifestDiffError),
     #[error("Connection Error: {0}")]
     ConnectionError(#[from] ConnectionError),
+    #[error("Config Error: {0}")]
+    ConfigError(#[from] ConfigError),
     #[error("Reqwest Error: {0}")]
     ReqwestError(#[from] reqwest::Error),
     #[error("SQLite Error: {0}")]
@@ -1180,26 +1189,6 @@ fn download_binary(
     let mut file = fs::File::create(dest)?;
     copy(&mut response, &mut file)?;
     Ok(())
-}
-
-fn get_repo_root_path() -> Result<PathBuf, RemoteOperationError> {
-    let gen_dir = get_gen_dir().ok_or_else(|| {
-        RemoteOperationError::IOError(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Gen directory not found",
-        ))
-    })?;
-    let gen_path = PathBuf::from(gen_dir);
-    let repo_root = gen_path
-        .parent()
-        .map(FilePath::to_path_buf)
-        .ok_or_else(|| {
-            RemoteOperationError::IOError(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Unable to determine repository root",
-            ))
-        })?;
-    Ok(repo_root)
 }
 
 fn send_manifest_to_remote(
@@ -2342,6 +2331,92 @@ mod tests {
                 assert!(remote_operation.is_some());
                 assert_eq!(remote_operation.unwrap().hash, operation.hash);
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod pull_from_file_remote_tests {
+        use tempfile::tempdir;
+
+        use super::*;
+
+        #[test]
+        fn test_pull_from_file_remote_transfers_operations() {
+            let local_gen_dir = setup_gen_dir();
+            let local_repo_root = local_gen_dir.parent().unwrap().to_path_buf();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            track_database(conn, op_conn).unwrap();
+
+            let remote_dir = setup_gen_dir();
+            let remote_repo_root = remote_dir.parent().unwrap();
+
+            set_base_dir(remote_repo_root);
+            let remote_conn = &get_connection(remote_dir.join("remote.db").to_str()).unwrap();
+            let remote_op_db_path = remote_dir.join("gen.db");
+            let remote_op_conn = &get_operation_connection(remote_op_db_path.to_str()).unwrap();
+            track_database(remote_conn, remote_op_conn).unwrap();
+
+            let remote_operation = create_operation(
+                remote_conn,
+                remote_op_conn,
+                "remote_file.fa",
+                FileTypes::Fasta,
+                "remote operation",
+                HashId::random_str(),
+            );
+
+            set_base_dir(local_repo_root.as_path());
+
+            let remote_url = format!("file://{}", remote_repo_root.to_string_lossy());
+            let branch = Branch::get_by_name(op_conn, "main").unwrap();
+            pull_from_file_remote(op_conn, &remote_url, &branch).unwrap();
+
+            let updated_branch = Branch::get_by_name(op_conn, "main").unwrap();
+            assert_eq!(
+                updated_branch.current_operation_hash,
+                Some(remote_operation.hash)
+            );
+
+            let changeset_dir = local_repo_root
+                .join(".gen")
+                .join("changeset")
+                .join(remote_operation.hash.to_string());
+            assert!(changeset_dir.join("changeset").exists());
+            assert!(changeset_dir.join("dependencies").exists());
+
+            let local_ops = Operation::all(op_conn);
+            let remote_ops = Operation::all(remote_op_conn);
+            assert_eq!(local_ops, remote_ops);
+        }
+
+        #[test]
+        fn test_pull_from_file_remote_missing_branch_errors() {
+            let local_gen_dir = setup_gen_dir();
+            let local_repo_root = local_gen_dir.parent().unwrap().to_path_buf();
+            let conn = &get_connection(None).unwrap();
+            let op_conn = &get_operation_connection(None).unwrap();
+            track_database(conn, op_conn).unwrap();
+
+            let remote_dir = tempdir().unwrap();
+            let remote_repo_root = remote_dir.path().to_path_buf();
+            set_base_dir(remote_repo_root.as_path());
+            let remote_gen_dir = get_or_create_gen_dir();
+            let remote_conn = &get_connection(None).unwrap();
+            let remote_op_db_path = remote_gen_dir.join("gen.db");
+            let remote_op_conn = &get_operation_connection(remote_op_db_path.to_str()).unwrap();
+            track_database(remote_conn, remote_op_conn).unwrap();
+
+            set_base_dir(local_repo_root.as_path());
+
+            let remote_url = format!("file://{}", remote_repo_root.to_string_lossy());
+            let feature_branch = Branch::create_with_remote(op_conn, "feature", None).unwrap();
+            let result = pull_from_file_remote(op_conn, &remote_url, &feature_branch);
+            assert!(matches!(
+                result,
+                Err(RemoteOperationError::DoesNotExist(branch_name))
+                    if branch_name.contains("feature")
+            ));
         }
     }
 

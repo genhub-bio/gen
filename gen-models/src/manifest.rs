@@ -1,7 +1,6 @@
 use gen_core::{HashId, traits::Capnp};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{
     gen_models_capnp::{manifest, manifest_diff, manifest_operation},
@@ -12,8 +11,6 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestOperation {
     pub operation: Operation,
-    pub changeset_hash: String,
-    pub dependencies_hash: String,
     pub file_additions: Vec<FileAddition>,
     pub operation_summary: Option<OperationSummary>,
 }
@@ -25,9 +22,6 @@ impl<'a> Capnp<'a> for ManifestOperation {
     fn write_capnp(&self, builder: &mut Self::Builder) {
         let mut operation_builder = builder.reborrow().init_operation();
         self.operation.write_capnp(&mut operation_builder);
-
-        builder.set_changeset_hash(&self.changeset_hash);
-        builder.set_dependencies_hash(&self.dependencies_hash);
 
         let mut file_additions_builder = builder
             .reborrow()
@@ -50,9 +44,6 @@ impl<'a> Capnp<'a> for ManifestOperation {
 
     fn read_capnp(reader: Self::Reader) -> Self {
         let operation = Operation::read_capnp(reader.get_operation().unwrap());
-        let changeset_hash = reader.get_changeset_hash().unwrap().to_string().unwrap();
-        let dependencies_hash = reader.get_dependencies_hash().unwrap().to_string().unwrap();
-
         let file_additions_reader = reader.get_file_additions().unwrap();
         let mut file_additions = Vec::new();
         for file_addition_reader in file_additions_reader.iter() {
@@ -68,8 +59,6 @@ impl<'a> Capnp<'a> for ManifestOperation {
 
         ManifestOperation {
             operation,
-            changeset_hash,
-            dependencies_hash,
             file_additions,
             operation_summary,
         }
@@ -207,20 +196,6 @@ impl<'a> ManifestGenerator<'a> {
 
             for hash in hashes.iter() {
                 if let Some(op) = operations_map.get(hash) {
-                    let changeset = op.get_changeset();
-                    let dependencies = op.get_changeset_dependencies();
-
-                    let changeset_hash =
-                        Sha256::digest(serde_json::to_vec(&changeset.changes).unwrap())
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect();
-                    let dependencies_hash =
-                        Sha256::digest(serde_json::to_vec(&dependencies).unwrap())
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect();
-
                     let file_additions = FileAddition::get_files_for_operation(self.conn, &op.hash);
                     let operation_summary = OperationSummary::query(
                         self.conn,
@@ -232,8 +207,6 @@ impl<'a> ManifestGenerator<'a> {
 
                     manifest_operations.push(ManifestOperation {
                         operation: op.clone(),
-                        changeset_hash,
-                        dependencies_hash,
                         file_additions,
                         operation_summary,
                     });
@@ -345,8 +318,6 @@ mod tests {
 
         let manifest_operation = ManifestOperation {
             operation: operation.clone(),
-            changeset_hash: "changeset_hash_123".to_string(),
-            dependencies_hash: "dependencies_hash_456".to_string(),
             file_additions: vec![FileAddition {
                 id: HashId([1u8; 32]),
                 file_path: "/path/to/file.fa".to_string(),
@@ -394,8 +365,6 @@ mod tests {
             end_hash: Some(operation.hash),
             operations: vec![ManifestOperation {
                 operation,
-                changeset_hash: "changeset_hash_1".to_string(),
-                dependencies_hash: "dependencies_hash_1".to_string(),
                 file_additions: vec![],
                 operation_summary: None,
             }],
@@ -431,8 +400,6 @@ mod tests {
 
         let manifest_operation = ManifestOperation {
             operation,
-            changeset_hash: "changeset_hash_1".to_string(),
-            dependencies_hash: "dependencies_hash_1".to_string(),
             file_additions: vec![],
             operation_summary: None,
         };
@@ -547,15 +514,11 @@ mod tests {
             operations: vec![
                 ManifestOperation {
                     operation: op1.clone(),
-                    changeset_hash: "ch1".to_string(),
-                    dependencies_hash: "dh1".to_string(),
                     file_additions: vec![],
                     operation_summary: None,
                 },
                 ManifestOperation {
                     operation: op2.clone(),
-                    changeset_hash: "ch2".to_string(),
-                    dependencies_hash: "dh2".to_string(),
                     file_additions: vec![],
                     operation_summary: None,
                 },
@@ -569,15 +532,11 @@ mod tests {
             operations: vec![
                 ManifestOperation {
                     operation: op2.clone(),
-                    changeset_hash: "ch2".to_string(),
-                    dependencies_hash: "dh2".to_string(),
                     file_additions: vec![],
                     operation_summary: None,
                 },
                 ManifestOperation {
                     operation: op3.clone(),
-                    changeset_hash: "ch3".to_string(),
-                    dependencies_hash: "dh3".to_string(),
                     file_additions: vec![],
                     operation_summary: None,
                 },

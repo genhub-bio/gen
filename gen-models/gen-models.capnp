@@ -196,12 +196,10 @@ struct DatabaseChangeset {
 
 struct ManifestOperation {
   operation @0 :Operation;
-  changesetHash @1 :Text;
-  dependenciesHash @2 :Text;
-  fileAdditions @3 :List(FileAddition);
+  fileAdditions @1 :List(FileAddition);
   operationSummary :union {
-    none @4 :Void;
-    some @5 :OperationSummary;
+    none @2 :Void;
+    some @3 :OperationSummary;
   }
 }
 
