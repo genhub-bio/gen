@@ -6,8 +6,6 @@ use std::{
     str,
 };
 
-#[cfg(test)]
-use gen_core::config::{get_or_create_gen_dir, set_base_dir};
 use gen_core::{
     HashId,
     config::{get_gen_dir, get_repo_root_path},
@@ -1241,6 +1239,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use gen_core::config::{get_or_create_gen_dir, set_base_dir};
     use gen_models::{
         block_group::BlockGroup,
         block_group_edge::BlockGroupEdge,
