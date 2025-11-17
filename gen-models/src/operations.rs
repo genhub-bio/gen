@@ -2210,7 +2210,7 @@ mod tests {
         let op_db_path_str = op_db_path.to_string_lossy().to_string();
         let conn = &get_operation_connection(Some(op_db_path_str.as_str())).unwrap();
 
-        let outside_path = PathBuf::from("/tmp/outside_file.txt");
+        let outside_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         let outside_string = outside_path.to_string_lossy().to_string();
 
         let (absolute, relative) =
