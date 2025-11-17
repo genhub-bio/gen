@@ -21,7 +21,7 @@ use r#gen::{
     get_connection, get_operation_connection,
     graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
     operation_management,
-    operation_management::{parse_patch_operations, push},
+    operation_management::{parse_patch_operations, pull, push},
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
     views::{block_group::view_block_group, operations::view_operations, patch::view_patches},
@@ -763,7 +763,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             println!("Push succeeded.");
             Ok(())
         }
-        Some(Commands::Pull { remote }) => Ok(()),
+        Some(Commands::Pull { remote }) => {
+            pull(&operation_conn, remote.as_deref())?;
+            Ok(())
+        }
     }
 }
 

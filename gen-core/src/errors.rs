@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("Failed to find Gen directory")]
     GenDirectoryNotFound,
+    #[error("Unable to determine repository root")]
+    RepoRootNotFound,
 }
 
 #[derive(Debug, Error, PartialEq)]

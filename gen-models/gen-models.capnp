@@ -196,20 +196,21 @@ struct DatabaseChangeset {
 
 struct ManifestOperation {
   operation @0 :Operation;
-  changesetHash @1 :Text;
-  dependenciesHash @2 :Text;
-  fileAdditions @3 :List(FileAddition);
+  fileAdditions @1 :List(FileAddition);
   operationSummary :union {
-    none @4 :Void;
-    some @5 :OperationSummary;
+    none @2 :Void;
+    some @3 :OperationSummary;
   }
 }
 
 struct Manifest {
   manifestVersion @0 :Text;
   branchName @1 :Text;
-  endHash @2 :List(UInt8);
-  operations @3 :List(ManifestOperation);
+  endHash :union {
+    none @2 :Void;
+    some @3 :List(UInt8);
+  }
+  operations @4 :List(ManifestOperation);
 }
 
 struct ManifestDiff {

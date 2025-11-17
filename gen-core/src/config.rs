@@ -64,6 +64,14 @@ pub fn get_gen_dir() -> Option<String> {
     Some(gen_path.to_str().unwrap().to_string())
 }
 
+pub fn get_repo_root_path() -> Result<PathBuf, ConfigError> {
+    let gen_dir = get_gen_dir().ok_or(ConfigError::GenDirectoryNotFound)?;
+    PathBuf::from(gen_dir)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or(ConfigError::RepoRootNotFound)
+}
+
 pub fn get_gen_db_path() -> Result<PathBuf, ConfigError> {
     match get_gen_dir() {
         Some(dir) => Ok(Path::new(&dir).join("gen.db")),
@@ -102,5 +110,25 @@ mod tests {
         set_base_dir(&tmp_dir);
         assert_eq!(tmp_dir, get_base_dir());
         assert_ne!(get_base_dir(), old_dir);
+    }
+
+    #[test]
+    fn test_get_repo_root_path() {
+        let gen_dir = setup_gen_environment();
+        let expected_root = gen_dir.parent().unwrap().to_path_buf();
+        assert_eq!(get_repo_root_path().unwrap(), expected_root);
+    }
+
+    #[test]
+    fn test_get_repo_root_path_missing_gen_dir() {
+        let tmp_dir = tempdir().unwrap().keep();
+        set_base_dir(&tmp_dir);
+        assert_eq!(Err(ConfigError::GenDirectoryNotFound), get_repo_root_path());
+    }
+
+    fn setup_gen_environment() -> PathBuf {
+        let tmp_dir = tempdir().unwrap().keep();
+        set_base_dir(&tmp_dir);
+        get_or_create_gen_dir()
     }
 }
