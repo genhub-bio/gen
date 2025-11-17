@@ -5,7 +5,7 @@ use std::{
     str,
 };
 
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
@@ -44,7 +44,7 @@ pub fn import_fasta<'a>(
     let file = std::fs::File::open(fasta)?;
 
     let reader_stream: Box<dyn BufRead> = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("gz") => Box::new(BufReader::new(GzDecoder::new(file))),
+        Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(file))),
         Some("bgz") => Box::new(bgzf::io::Reader::new(file)),
         _ => Box::new(BufReader::new(file)),
     };
@@ -235,6 +235,33 @@ mod tests {
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
+    }
+
+    #[test]
+    fn test_large_gz_fasta() {
+        setup_gen_dir();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22.fa.gz");
+        let conn = &get_connection(None).unwrap();
+        let op_conn = &get_operation_connection(None).unwrap();
+
+        track_database(conn, op_conn).unwrap();
+
+        import_fasta(
+            &fasta_path.to_str().unwrap().to_string(),
+            "test",
+            None,
+            false,
+            conn,
+            op_conn,
+        )
+        .unwrap();
+        let block_group_id = BlockGroup::get_id("test", None, "chr22");
+        let sequences = Sequence::query_by_blockgroup(conn, &block_group_id);
+        let dna = sequences
+            .iter()
+            .filter(|s| s.sequence_type == "DNA")
+            .collect::<Vec<_>>();
+        assert_eq!(dna[0].length, 51304566);
     }
 
     #[test]

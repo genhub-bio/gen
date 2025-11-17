@@ -49,7 +49,7 @@ pub trait Query {
         Value: From<T>,
     {
         let mut results = vec![];
-        for chunk in &ids.into_iter().chunks(1000) {
+        for chunk in &ids.into_iter().chunks(999) {
             let values: Vec<Value> = chunk
                 .map(|value: &'a T| Value::from(value.clone()))
                 .collect();
@@ -86,7 +86,7 @@ pub trait Query {
         Value: From<T>,
     {
         let mut results = vec![];
-        for chunk in &ids.into_iter().chunks(1000) {
+        for chunk in &ids.into_iter().chunks(999) {
             let values: Vec<Value> = chunk
                 .map(|value: &'a T| Value::from(value.clone()))
                 .collect();

@@ -132,7 +132,7 @@ impl Query for BlockGroupEdge {
 
 impl BlockGroupEdge {
     pub fn bulk_create(conn: &Connection, block_group_edges: &[BlockGroupEdgeData]) {
-        for chunk in block_group_edges.chunks(100000) {
+        for chunk in block_group_edges.chunks(166) {
             let mut sql = String::from(
                 "INSERT OR IGNORE INTO block_group_edges
                  (id, block_group_id, edge_id, chromosome_index, phased, created_on) VALUES ",

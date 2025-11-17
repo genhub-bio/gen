@@ -527,7 +527,7 @@ impl BlockGroup {
 
     pub fn insert_changes(
         conn: &Connection,
-        changes: &Vec<PathChange>,
+        changes: &[PathChange],
         cache: &mut PathCache,
         modify_blockgroup: bool,
     ) -> Result<(), ChangeError> {
