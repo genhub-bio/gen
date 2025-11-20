@@ -317,7 +317,13 @@ impl FileAddition {
         if let Some(db_path) = conn.path()
             && !db_path.is_empty()
         {
-            let db_path = PathBuf::from(db_path);
+            // This cleanup is to deal with a really stupid mac os thing, where
+            // filesystem locations that are under /tmp or /var get returned
+            // from system calls with the full path having a prefix of /private.
+            // No idea why this happens.
+            let cleaned_path = db_path.strip_prefix("/private").unwrap_or(db_path);
+            let db_path = Path::new("/").join(cleaned_path);
+
             if let Some(gen_dir) = db_path.parent()
                 && let Some(repo_root) = gen_dir.parent()
             {
