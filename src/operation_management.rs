@@ -33,7 +33,6 @@ use petgraph::Direction;
 use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Connection, Error as SQLError};
 use serde::Deserialize;
-use serde_json::json;
 use thiserror::Error;
 use url_parse::core::Parser;
 
@@ -792,13 +791,21 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
                         let part =
                             multipart::Part::bytes(encoded).mime_str("application/octet-stream")?;
 
-                        let form = multipart::Form::new()
+                        let mut form = multipart::Form::new()
                             .part("manifest_operation", part)
                             .file("files", cs_path)
                             .unwrap()
                             .file("files", dep_path)
-                            .unwrap()
-                            .text("branch", current_branch.name.clone());
+                            .unwrap();
+
+                        let operation_files =
+                            FileAddition::get_files_for_operation(operation_conn, &op.hash);
+                        for op_file in operation_files {
+                            form = form.file("files", op_file.file_path).unwrap();
+                        }
+
+                        form = form.text("branch", current_branch.name.clone());
+
                         let response = client
                             .post(&manifest_url)
                             .bearer_auth(auth_tokens.jwt.clone())
