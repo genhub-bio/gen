@@ -18,6 +18,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        rustflags: ""
     - name: Install Dependencies
       run: brew install capnp
     - name: x86 toolchain
