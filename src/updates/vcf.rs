@@ -322,7 +322,7 @@ pub fn update_with_vcf<'a>(
                             PathCache::lookup(&mut path_cache, &sample_bg_id, seq_name.clone());
                         let path_length = path_lengths
                             .entry(sample_path.id)
-                            .or_insert(sample_path.length(conn));
+                            .or_insert_with(|| sample_path.length(conn));
 
                         if ref_start > *path_length {
                             return Err(VcfError::InvalidRecord(format!(
@@ -533,19 +533,16 @@ pub fn update_with_vcf<'a>(
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
     for ((path, sample_name), path_changes) in changes {
-        BlockGroup::insert_changes(
-            conn,
-            &path_changes,
-            &mut path_cache,
-            coordinate_frame.is_some(),
-        )
-        .unwrap();
-        bar.inc(path_changes.len() as u64);
+        for chunk in path_changes.chunks(1000) {
+            BlockGroup::insert_changes(conn, chunk, &mut path_cache, coordinate_frame.is_some())
+                .unwrap();
+            bar.inc(chunk.len() as u64);
+        }
         summary
             .entry(sample_name)
             .or_default()
             .entry(path.name)
-            .or_insert(path_changes.len() as i64);
+            .or_insert_with(|| path_changes.len() as i64);
     }
     bar.finish();
     for ((path, accession_name), (acc_start, acc_end)) in accession_cache.iter() {
