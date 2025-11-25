@@ -107,7 +107,9 @@ impl PathEdge {
     }
 
     pub fn bulk_create(conn: &Connection, path_id: &HashId, edge_ids: &[HashId]) {
-        for (index1, chunk) in edge_ids.chunks(249).enumerate() {
+        let batch_size = max_rows_per_batch(conn, 4);
+
+        for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
             let mut rows_to_insert = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for (index2, edge_id) in chunk.iter().enumerate() {

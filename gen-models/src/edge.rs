@@ -248,7 +248,9 @@ impl Edge {
             }
         }
 
-        for chunk in &edges_to_insert.iter().chunks(142) {
+        let batch_size = max_rows_per_batch(conn, 7);
+
+        for chunk in &edges_to_insert.iter().chunks(batch_size) {
             let mut rows = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for edge in chunk {
