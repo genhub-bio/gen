@@ -1,4 +1,11 @@
-use std::{collections::HashSet, convert::TryInto, fs, io::Read, path::PathBuf, str};
+use std::{
+    collections::HashSet,
+    convert::TryInto,
+    fs,
+    io::Read,
+    path::{Path as StdPath, PathBuf},
+    str,
+};
 
 use gen_core::{HashId, Strand, is_terminal, traits::Capnp};
 use itertools::Itertools;
@@ -31,6 +38,23 @@ use crate::{
 pub struct DatabaseChangeset {
     pub db_path: String,
     pub changes: ChangesetModels,
+}
+
+impl DatabaseChangeset {
+    pub fn get_db_path(path: &StdPath) -> String {
+        use capnp::serialize_packed;
+
+        let file = fs::File::open(path).unwrap();
+        let mut reader = std::io::BufReader::new(file);
+
+        let message_reader =
+            serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new())
+                .unwrap();
+        let root = message_reader
+            .get_root::<database_changeset::Reader>()
+            .unwrap();
+        root.get_db_path().unwrap().to_string().unwrap()
+    }
 }
 
 impl<'a> Capnp<'a> for DatabaseChangeset {
@@ -1057,6 +1081,46 @@ mod tests {
 
         let deserialized = DatabaseChangeset::read_capnp(root.into_reader());
         assert_eq!(changeset, deserialized);
+    }
+
+    #[test]
+    fn test_database_changeset_get_db_path() {
+        use std::io::Write;
+
+        use capnp::{message::Builder, serialize_packed};
+        use tempfile::NamedTempFile;
+
+        let expected_db_path = "/tmp/test_db_path";
+        let changeset = DatabaseChangeset {
+            db_path: expected_db_path.to_string(),
+            changes: ChangesetModels {
+                collections: vec![],
+                samples: vec![],
+                sequences: vec![],
+                block_groups: vec![],
+                nodes: vec![],
+                edges: vec![],
+                block_group_edges: vec![],
+                paths: vec![],
+                path_edges: vec![],
+                accessions: vec![],
+                accession_edges: vec![],
+                accession_paths: vec![],
+            },
+        };
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_path_buf();
+
+        let mut message = Builder::new_default();
+        let mut root = message.init_root();
+        changeset.write_capnp(&mut root);
+        serialize_packed::write_message(&mut temp_file, &message).unwrap();
+        temp_file.flush().unwrap();
+
+        let db_path = DatabaseChangeset::get_db_path(path.as_path());
+
+        assert_eq!(db_path, expected_db_path);
     }
 
     #[test]
