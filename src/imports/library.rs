@@ -44,7 +44,7 @@ pub fn import_library<'a>(
     sample: impl Into<Option<&'a str>>,
     parts_file_path: &str,
     library_file_path: &str,
-    region_name: &str,
+    library_name: &str,
 ) -> Result<Operation, LibraryImportError> {
     let mut session = session_operations::start_operation(conn);
 
@@ -56,7 +56,7 @@ pub fn import_library<'a>(
     if let Some(sample_name) = sample {
         Sample::get_or_create(conn, sample_name);
     }
-    let new_block_group = BlockGroup::create(conn, collection_name, sample, region_name);
+    let new_block_group = BlockGroup::create(conn, collection_name, sample, library_name);
 
     let mut parts_reader = fasta::io::reader::Builder
         .build_from_path(parts_file_path)
@@ -111,7 +111,7 @@ pub fn import_library<'a>(
                     conn,
                     part_hash,
                     &HashId::convert_str(&format!(
-                        "{region_name}:{part}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
+                        "{library_name}:{part}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
                         ref_start = 0,
                         ref_end = seq_length,
                         sequence_hash = part_hash
@@ -233,21 +233,27 @@ pub fn import_library<'a>(
         .collect::<Vec<_>>();
     Path::create(
         conn,
-        format!("{region_name} default path").as_str(),
+        format!("{library_name} default path").as_str(),
         &new_block_group.id,
         &path_edge_ids,
     );
 
-    let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
+    let summary_str = format!("{library_name}: {path_changes_count} changes.\n");
     let op = session_operations::end_operation(
         conn,
         operation_conn,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: library_file_path.to_string(),
-                file_type: FileTypes::CSV,
-            }],
+            files: vec![
+                OperationFile {
+                    file_path: library_file_path.to_string(),
+                    file_type: FileTypes::CSV,
+                },
+                OperationFile {
+                    file_path: parts_file_path.to_string(),
+                    file_type: FileTypes::Fasta,
+                },
+            ],
             description: "library_csv_import".to_string(),
         },
         &summary_str,

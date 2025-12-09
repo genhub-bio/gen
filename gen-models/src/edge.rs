@@ -543,7 +543,7 @@ mod tests {
             target_strand: Strand::Forward,
         };
 
-        let edge_ids = Edge::bulk_create(conn, &vec![edge1, edge2, edge3]);
+        let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
         let edges = Edge::query_by_ids(conn, &edge_ids);
         assert_eq!(edges.len(), 3);
@@ -679,7 +679,7 @@ mod tests {
             target_strand: Strand::Forward,
         };
 
-        let edge_ids = Edge::bulk_create(conn, &vec![edge1, edge2, edge3]);
+        let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
         let edges = Edge::query_by_ids(conn, &edge_ids);
         assert_eq!(edges.len(), 3);
