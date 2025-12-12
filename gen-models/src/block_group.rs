@@ -28,7 +28,7 @@ use crate::{
     traits::*,
 };
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct BlockGroup {
     pub id: HashId,
     pub collection_name: String,
@@ -213,7 +213,7 @@ impl BlockGroup {
         }
     }
 
-    pub fn clone(&self, conn: &Connection, target_block_group_id: &HashId) {
+    pub fn duplicate(&self, conn: &Connection, target_block_group_id: &HashId) {
         let existing_paths = Path::query(
             conn,
             "SELECT * from paths where block_group_id = ?1;",
@@ -317,7 +317,7 @@ impl BlockGroup {
                 BlockGroup::create(conn, collection_name, Some(sample_name), group_name);
 
             // clone parent blocks/edges/path
-            parent_block_group.clone(conn, &new_block_group.id);
+            parent_block_group.duplicate(conn, &new_block_group.id);
 
             Ok(new_block_group.id)
         } else {
