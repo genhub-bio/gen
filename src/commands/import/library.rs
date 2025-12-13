@@ -11,9 +11,9 @@ use crate::{
 /// Import Library files
 #[derive(Debug, Args)]
 pub struct Command {
-    /// The name of the region
+    /// The name of the library
     #[clap(index = 1)]
-    region_name: String,
+    library_name: String,
     /// The path to the combinatorial library parts fasta file
     #[clap(index = 2)]
     parts: Option<String>,
@@ -51,7 +51,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.sample.as_deref(),
         cmd.parts.as_deref().unwrap(),
         cmd.library.as_deref().unwrap(),
-        &cmd.region_name,
+        &cmd.library_name,
     ) {
         Ok(_) => {
             println!("Library imported.");
