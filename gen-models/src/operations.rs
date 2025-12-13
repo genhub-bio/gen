@@ -443,6 +443,21 @@ impl FileAddition {
                 Ok(acc)
             })
     }
+
+    pub fn suffix(self) -> String {
+        let result = match self.file_type {
+            FileTypes::GenBank => "gb",
+            FileTypes::Fasta => "fa",
+            FileTypes::GFA => "gfa",
+            FileTypes::VCF => "vcf",
+            FileTypes::Changeset => "cs",
+            FileTypes::CSV => "csv",
+            FileTypes::GAF => "gaf",
+            FileTypes::None => "none",
+        };
+
+        result.to_string()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1300,8 +1315,8 @@ mod tests {
         let op = create_operation(
             conn,
             op_conn,
-            "something.fa",
-            FileTypes::Fasta,
+            "something",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
@@ -1322,8 +1337,8 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
@@ -1350,32 +1365,32 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -1383,48 +1398,48 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-6"),
         );
         let _branch_2_midpoint = create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-7"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-8"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-9"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-10"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-11"),
         );
@@ -1432,16 +1447,16 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-12"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-13"),
         );
@@ -1604,24 +1619,24 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
@@ -1630,16 +1645,16 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -1649,8 +1664,8 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-6"),
         );
@@ -1660,8 +1675,8 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-7"),
         );
