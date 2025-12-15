@@ -35,6 +35,7 @@ pub fn get_change_graph(
     changes: &ChangesetModels,
     dependencies: &DependencyModels,
 ) -> HashMap<HashId, GenGraph> {
+    dbg!(changes, dependencies);
     let start_node = Node::get_start_node();
     let end_node = Node::get_end_node();
     let mut bges_by_bg: HashMap<HashId, Vec<&BlockGroupEdge>> = HashMap::new();
@@ -69,7 +70,7 @@ pub fn get_change_graph(
         // There are 2 graphs created here. The first graph is our normal graph of nodes
         // and edges. This graph is then used to make our second graph representing the spans
         // of each node (blocks).
-        let mut graph: DiGraphMap<HashId, (i64, i64)> = DiGraphMap::new();
+        let mut graph: DiGraphMap<HashId, Vec<(i64, i64)>> = DiGraphMap::new();
         let mut block_graph = GenGraph::new();
         block_graph.add_node(GraphNode {
             block_id: -1,
@@ -85,11 +86,15 @@ pub fn get_change_graph(
         });
         for bg_edge in bg_edges {
             let edge = *edges_by_id.get(&bg_edge.edge_id).unwrap();
-            graph.add_edge(
-                edge.source_node_id,
-                edge.target_node_id,
-                (edge.source_coordinate, edge.target_coordinate),
-            );
+            if let Some(weights) = graph.edge_weight_mut(edge.source_node_id, edge.target_node_id) {
+                weights.push((edge.source_coordinate, edge.target_coordinate));
+            } else {
+                graph.add_edge(
+                    edge.source_node_id,
+                    edge.target_node_id,
+                    vec![(edge.source_coordinate, edge.target_coordinate)],
+                );
+            }
         }
 
         for node in graph.nodes() {
@@ -101,11 +106,15 @@ pub fn get_change_graph(
             }
             let in_ports = graph
                 .edges_directed(node, Direction::Incoming)
-                .map(|(_src, _dest, (_fp, tp))| *tp)
+                .flat_map(|(_src, _dest, weights)| {
+                    weights.iter().map(|(_, tp)| *tp).collect::<Vec<_>>()
+                })
                 .collect::<Vec<_>>();
             let out_ports = graph
                 .edges_directed(node, Direction::Outgoing)
-                .map(|(_src, _dest, (fp, _tp))| *fp)
+                .flat_map(|(_src, _dest, weights)| {
+                    weights.iter().map(|(fp, _tp)| *fp).collect::<Vec<_>>()
+                })
                 .collect::<Vec<_>>();
 
             let node_obj = *nodes_by_id.get(&node).unwrap();
@@ -157,28 +166,30 @@ pub fn get_change_graph(
             }
         }
 
-        for (src, dest, (fp, tp)) in graph.all_edges() {
-            if !(is_end_node(src) && is_start_node(dest)) {
-                let source_block = block_graph
-                    .nodes()
-                    .find(|node| node.node_id == src && node.sequence_end == *fp)
-                    .unwrap();
-                let dest_block = block_graph
-                    .nodes()
-                    .find(|node| node.node_id == dest && node.sequence_start == *tp)
-                    .unwrap();
-                block_graph.add_edge(
-                    source_block,
-                    dest_block,
-                    vec![GraphEdge {
-                        edge_id: HashId::pad_str(1),
-                        source_strand: Strand::Forward,
-                        target_strand: Forward,
-                        chromosome_index: 0,
-                        phased: 0,
-                        created_on: 0,
-                    }],
-                );
+        for (src, dest, weights) in graph.all_edges() {
+            for (fp, tp) in weights {
+                if !(is_end_node(src) && is_start_node(dest)) {
+                    let source_block = block_graph
+                        .nodes()
+                        .find(|node| node.node_id == src && node.sequence_end == *fp)
+                        .unwrap();
+                    let dest_block = block_graph
+                        .nodes()
+                        .find(|node| node.node_id == dest && node.sequence_start == *tp)
+                        .unwrap();
+                    block_graph.add_edge(
+                        source_block,
+                        dest_block,
+                        vec![GraphEdge {
+                            edge_id: HashId::pad_str(1),
+                            source_strand: Strand::Forward,
+                            target_strand: Forward,
+                            chromosome_index: 0,
+                            phased: 0,
+                            created_on: 0,
+                        }],
+                    );
+                }
             }
         }
         block_graphs.insert(*bg_id, block_graph);

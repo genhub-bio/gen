@@ -17,14 +17,17 @@ use r#gen::{
     annotations::gff::propagate_gff,
     commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
     config,
-    diffs::gfa::gfa_sample_diff,
+    diffs::{gfa::gfa_sample_diff, operations::collect_operation_diff},
     get_connection, get_operation_connection,
     graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
     operation_management,
     operation_management::{parse_patch_operations, pull, push},
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
-    views::{block_group::view_block_group, operations::view_operations, patch::view_patches},
+    views::{
+        block_group::view_block_group, diff::view_diff, operations::view_operations,
+        patch::view_patches,
+    },
 };
 use gen_core::config::{get_gen_dir, get_or_create_gen_dir};
 use gen_models::{
@@ -155,6 +158,20 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 collection_name,
                 position.clone(),
             )?)
+        }
+        Some(Commands::ViewDiff { from, to }) => {
+            let target_display = to.clone().unwrap_or_else(|| {
+                OperationState::get_operation(&operation_conn)
+                    .map(|h| format!("{h}"))
+                    .unwrap_or_else(|| "HEAD".to_string())
+            });
+            let diff = collect_operation_diff(&operation_conn, &from, to.as_deref())?;
+            if diff.block_groups.is_empty() {
+                println!("No differences found between {from} and {target_display}.");
+            } else {
+                view_diff(&conn, &diff.block_groups)?;
+            }
+            Ok(())
         }
         Some(Commands::Translate {
             bed,

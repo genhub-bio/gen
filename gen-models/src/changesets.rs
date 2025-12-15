@@ -75,7 +75,7 @@ impl<'a> Capnp<'a> for DatabaseChangeset {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct ChangesetModels {
     pub collections: Vec<crate::collection::Collection>,
     pub samples: Vec<crate::sample::Sample>,

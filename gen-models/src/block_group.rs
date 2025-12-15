@@ -28,7 +28,7 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq)]
 pub struct BlockGroup {
     pub id: HashId,
     pub collection_name: String,

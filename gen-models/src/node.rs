@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{gen_models_capnp::node, sequence::Sequence, traits::*};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
 pub struct Node {
     pub id: HashId,
     pub sequence_hash: HashId,

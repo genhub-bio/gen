@@ -131,7 +131,7 @@ pub fn attach_session(session: &mut session::Session) {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Default, Deserialize, Serialize, Debug, PartialEq)]
 pub struct DependencyModels {
     pub collections: Vec<Collection>,
     pub samples: Vec<Sample>,
