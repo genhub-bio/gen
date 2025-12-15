@@ -7,11 +7,11 @@ use noodles::{
     core::Region,
     fasta::{self, fai, io::indexed_reader::Builder as IndexBuilder},
 };
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{gen_models_capnp::sequence, traits::*};
+use crate::{db::GraphDb, gen_models_capnp::sequence, traits::*};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Sequence {
@@ -171,7 +171,8 @@ impl<'a> NewSequence<'a> {
         }
     }
 
-    pub fn save(self, conn: &Connection) -> Sequence {
+    pub fn save(self, conn: &impl GraphDb) -> Sequence {
+        let conn = conn.graph_conn();
         let mut length = 0;
         if self.sequence.is_none() && self.file_path.is_none() {
             panic!("Sequence or file_path must be set.");
@@ -345,16 +346,17 @@ impl Sequence {
         self.sequence[start..end].to_string()
     }
 
-    pub fn delete_by_hash(conn: &Connection, hash: &HashId) {
+    pub fn delete_by_hash(conn: &impl GraphDb, hash: &HashId) {
         let mut stmt = conn
+            .graph_conn()
             .prepare("delete from sequences where hash = ?1;")
             .unwrap();
         stmt.execute(params![hash]).unwrap();
     }
 
-    pub fn query_by_blockgroup(conn: &Connection, block_group_id: &HashId) -> Vec<Sequence> {
+    pub fn query_by_blockgroup(conn: &impl GraphDb, block_group_id: &HashId) -> Vec<Sequence> {
         Sequence::query(
-            conn,
+            conn.graph_conn(),
             "select sequences.* from block_group_edges bge left join edges on bge.edge_id = edges.id left join nodes on (edges.source_node_id = nodes.id or edges.target_node_id = nodes.id) left join sequences on (nodes.sequence_hash = sequences.hash) where bge.block_group_id = ?1;",
             params![block_group_id],
         )

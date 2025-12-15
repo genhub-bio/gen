@@ -2,10 +2,10 @@ use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{self, Connection, Row, params, types::Value};
+use rusqlite::{self, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 
-use crate::{edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*};
+use crate::{db::GraphDb, edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct PathEdge {
@@ -76,11 +76,12 @@ impl Query for PathEdge {
 
 impl PathEdge {
     pub fn create(
-        conn: &Connection,
+        conn: &impl GraphDb,
         path_id: &HashId,
         index_in_path: i64,
         edge_id: HashId,
     ) -> PathEdge {
+        let conn = conn.graph_conn();
         let query =
             "INSERT INTO path_edges (id, path_id, edge_id, index_in_path) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
@@ -106,7 +107,8 @@ impl PathEdge {
         }
     }
 
-    pub fn bulk_create(conn: &Connection, path_id: &HashId, edge_ids: &[HashId]) {
+    pub fn bulk_create(conn: &impl GraphDb, path_id: &HashId, edge_ids: &[HashId]) {
+        let conn = conn.graph_conn();
         let batch_size = max_rows_per_batch(conn, 4);
 
         for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
@@ -132,12 +134,14 @@ impl PathEdge {
         }
     }
 
-    pub fn delete(conn: &Connection, path_id: &HashId) {
+    pub fn delete(conn: &impl GraphDb, path_id: &HashId) {
+        let conn = conn.graph_conn();
         let statement = "DELETE from path_edges WHERE path_id = ?1;";
         conn.execute(statement, params![path_id]).unwrap();
     }
 
-    pub fn edges_for_path(conn: &Connection, path_id: &HashId) -> Vec<Edge> {
+    pub fn edges_for_path(conn: &impl GraphDb, path_id: &HashId) -> Vec<Edge> {
+        let conn = conn.graph_conn();
         let path_edges = PathEdge::query(
             conn,
             "select * from path_edges where path_id = ?1 order by index_in_path ASC",
@@ -158,7 +162,11 @@ impl PathEdge {
             .collect::<Vec<Edge>>()
     }
 
-    pub fn edges_for_paths(conn: &Connection, path_ids: Vec<HashId>) -> HashMap<HashId, Vec<Edge>> {
+    pub fn edges_for_paths(
+        conn: &impl GraphDb,
+        path_ids: Vec<HashId>,
+    ) -> HashMap<HashId, Vec<Edge>> {
+        let conn = conn.graph_conn();
         let query_path_ids = path_ids
             .iter()
             .map(|path_id| Value::from(*path_id))

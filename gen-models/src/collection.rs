@@ -1,8 +1,8 @@
 use gen_core::traits::Capnp;
-use rusqlite::{Connection, Row, params_from_iter};
+use rusqlite::{Row, params_from_iter};
 use serde::{Deserialize, Serialize};
 
-use crate::{block_group::BlockGroup, gen_models_capnp::collection, traits::*};
+use crate::{block_group::BlockGroup, db::GraphDb, gen_models_capnp::collection, traits::*};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Collection {
@@ -38,15 +38,17 @@ impl Query for Collection {
 }
 
 impl Collection {
-    pub fn exists(conn: &Connection, name: &str) -> bool {
+    pub fn exists(conn: &impl GraphDb, name: &str) -> bool {
         let mut stmt = conn
+            .graph_conn()
             .prepare("select name from collections where name = ?1")
             .unwrap();
         stmt.exists([name]).unwrap()
     }
 
-    pub fn create(conn: &Connection, name: &str) -> Collection {
+    pub fn create(conn: &impl GraphDb, name: &str) -> Collection {
         let mut stmt = conn
+            .graph_conn()
             .prepare("INSERT INTO collections (name) VALUES (?1) RETURNING *;")
             .unwrap();
 
@@ -71,7 +73,8 @@ impl Collection {
         }
     }
 
-    pub fn bulk_create(conn: &Connection, names: &Vec<String>) -> Vec<Collection> {
+    pub fn bulk_create(conn: &impl GraphDb, names: &Vec<String>) -> Vec<Collection> {
+        let conn = conn.graph_conn();
         let placeholders = names.iter().map(|_| "(?)").collect::<Vec<_>>().join(", ");
         let q = format!("INSERT INTO collections (name) VALUES {placeholders} RETURNING *",);
         let mut stmt = conn.prepare(&q).unwrap();
@@ -83,9 +86,10 @@ impl Collection {
         rows.map(|row| row.unwrap()).collect()
     }
 
-    pub fn get_block_groups(conn: &Connection, collection_name: &str) -> Vec<BlockGroup> {
+    pub fn get_block_groups(conn: &impl GraphDb, collection_name: &str) -> Vec<BlockGroup> {
         // Load all block groups that have the given collection_name
         let mut stmt = conn
+            .graph_conn()
             .prepare("SELECT * FROM block_groups WHERE collection_name = ?1 order by created_on;")
             .unwrap();
         let block_group_iter = stmt
@@ -94,8 +98,9 @@ impl Collection {
         block_group_iter.map(|bg| bg.unwrap()).collect()
     }
 
-    pub fn delete_by_name(conn: &Connection, name: &str) {
+    pub fn delete_by_name(conn: &impl GraphDb, name: &str) {
         let mut stmt = conn
+            .graph_conn()
             .prepare("delete from collections where name = ?1")
             .unwrap();
         stmt.execute([name]).unwrap();

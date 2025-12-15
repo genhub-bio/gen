@@ -2,10 +2,10 @@ use std::fmt::*;
 
 use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
-use rusqlite::{Connection, Result as SQLResult, Row, params};
+use rusqlite::{Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{block_group::BlockGroup, gen_models_capnp::sample, traits::*};
+use crate::{block_group::BlockGroup, db::GraphDb, gen_models_capnp::sample, traits::*};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
@@ -40,14 +40,15 @@ impl Query for Sample {
 }
 
 impl Sample {
-    pub fn create(conn: &Connection, name: &str) -> SQLResult<Sample> {
+    pub fn create(conn: &impl GraphDb, name: &str) -> SQLResult<Sample> {
         let mut stmt = conn
+            .graph_conn()
             .prepare("INSERT INTO samples (name) VALUES (?1) returning (name);")
             .unwrap();
         stmt.query_row((name,), |row| Ok(Sample { name: row.get(0)? }))
     }
 
-    pub fn get_or_create(conn: &Connection, name: &str) -> Sample {
+    pub fn get_or_create(conn: &impl GraphDb, name: &str) -> Sample {
         match Sample::create(conn, name) {
             Ok(sample) => sample,
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
@@ -65,13 +66,16 @@ impl Sample {
         }
     }
 
-    pub fn delete_by_name(conn: &Connection, name: &str) {
-        let mut stmt = conn.prepare("delete from samples where name = ?1").unwrap();
+    pub fn delete_by_name(conn: &impl GraphDb, name: &str) {
+        let mut stmt = conn
+            .graph_conn()
+            .prepare("delete from samples where name = ?1")
+            .unwrap();
         stmt.execute([name]).unwrap();
     }
 
     pub fn get_graph<'a>(
-        conn: &Connection,
+        conn: &impl GraphDb,
         collection: &str,
         name: impl Into<Option<&'a str>>,
     ) -> GenGraph {
@@ -79,7 +83,7 @@ impl Sample {
         let block_groups = Sample::get_block_groups(conn, collection, name);
         let mut sample_graph = GenGraph::new();
         for bg in block_groups {
-            let bg_graph = BlockGroup::get_graph(conn, &bg.id);
+            let bg_graph = BlockGroup::get_graph(conn.graph_conn(), &bg.id);
             // Add nodes and edges from block group graph to sample graph
             for node in bg_graph.nodes() {
                 sample_graph.add_node(node);
@@ -96,7 +100,7 @@ impl Sample {
     }
 
     pub fn get_or_create_child(
-        conn: &Connection,
+        conn: &impl GraphDb,
         collection_name: &str,
         sample_name: &str,
         parent_sample: Option<&str>,
@@ -104,20 +108,20 @@ impl Sample {
         if let Ok(new_sample) = Sample::create(conn, sample_name) {
             let bgs = if let Some(parent) = parent_sample {
                 BlockGroup::query(
-                    conn,
+                    conn.graph_conn(),
                     "select * from block_groups where collection_name = ?1 AND sample_name = ?2",
                     params!(collection_name, parent),
                 )
             } else {
                 BlockGroup::query(
-                    conn,
+                    conn.graph_conn(),
                     "select * from block_groups where collection_name = ?1 AND sample_name is null;",
                     params!(collection_name),
                 )
             };
             for bg in bgs.iter() {
                 BlockGroup::get_or_create_sample_block_group(
-                    conn,
+                    conn.graph_conn(),
                     collection_name,
                     &new_sample.name,
                     &bg.name,
@@ -134,33 +138,37 @@ impl Sample {
     }
 
     pub fn get_block_groups(
-        conn: &Connection,
+        conn: &impl GraphDb,
         collection_name: &str,
         sample_name: Option<&str>,
     ) -> Vec<BlockGroup> {
         if let Some(sample) = sample_name {
             BlockGroup::query(
-                conn,
+                conn.graph_conn(),
                 "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
                 params![collection_name, sample],
             )
         } else {
             BlockGroup::query(
-                conn,
+                conn.graph_conn(),
                 "select * from block_groups where collection_name = ?1 AND sample_name IS NULL;",
                 params![collection_name],
             )
         }
     }
 
-    pub fn get_all_names(conn: &Connection) -> Vec<String> {
-        let samples = Sample::query(conn, "select * from samples;", rusqlite::params!());
+    pub fn get_all_names(conn: &impl GraphDb) -> Vec<String> {
+        let samples = Sample::query(
+            conn.graph_conn(),
+            "select * from samples;",
+            rusqlite::params!(),
+        );
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
-    pub fn get_by_name(conn: &Connection, name: &str) -> SQLResult<Sample> {
+    pub fn get_by_name(conn: &impl GraphDb, name: &str) -> SQLResult<Sample> {
         Sample::get(
-            conn,
+            conn.graph_conn(),
             "select * from samples where name = ?1;",
             rusqlite::params!(name),
         )

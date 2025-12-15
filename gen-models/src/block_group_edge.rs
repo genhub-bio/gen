@@ -1,10 +1,11 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
-use rusqlite::{self, Connection, Row, params, types::Value};
+use rusqlite::{self, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    db::GraphDb,
     edge::{Edge, EdgeData},
     gen_models_capnp::block_group_edge,
     traits::*,
@@ -131,7 +132,8 @@ impl Query for BlockGroupEdge {
 }
 
 impl BlockGroupEdge {
-    pub fn bulk_create(conn: &Connection, block_group_edges: &[BlockGroupEdgeData]) {
+    pub fn bulk_create(conn: &impl GraphDb, block_group_edges: &[BlockGroupEdgeData]) {
+        let conn = conn.graph_conn();
         let batch_size = max_rows_per_batch(conn, 6);
 
         for chunk in block_group_edges.chunks(batch_size) {
@@ -160,7 +162,8 @@ impl BlockGroupEdge {
         }
     }
 
-    pub fn bulk_delete(conn: &Connection, block_group_edges: &[BlockGroupEdgeData]) {
+    pub fn bulk_delete(conn: &impl GraphDb, block_group_edges: &[BlockGroupEdgeData]) {
+        let conn = conn.graph_conn();
         let hashes = block_group_edges
             .iter()
             .map(|bge| bge.id_hash())
@@ -168,7 +171,11 @@ impl BlockGroupEdge {
         BlockGroupEdge::delete_by_ids(conn, &hashes);
     }
 
-    pub fn edges_for_block_group(conn: &Connection, block_group_id: &HashId) -> Vec<AugmentedEdge> {
+    pub fn edges_for_block_group(
+        conn: &impl GraphDb,
+        block_group_id: &HashId,
+    ) -> Vec<AugmentedEdge> {
+        let conn = conn.graph_conn();
         let block_group_edges = BlockGroupEdge::query(
             conn,
             "select * from block_group_edges where block_group_id = ?1 ORDER BY created_on DESC;",
@@ -198,10 +205,11 @@ impl BlockGroupEdge {
     }
 
     pub fn specific_edges_for_block_group(
-        conn: &Connection,
+        conn: &impl GraphDb,
         block_group_id: &HashId,
         edge_ids: &[HashId],
     ) -> Vec<AugmentedEdge> {
+        let conn = conn.graph_conn();
         let block_group_edges = BlockGroupEdge::query(
             conn,
             "SELECT * FROM block_group_edges WHERE block_group_id = ?1 AND edge_id in rarray(?2);",

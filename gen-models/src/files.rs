@@ -1,11 +1,11 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, traits::Capnp};
-use rusqlite::{Connection, Result as SQLResult, Row, params, types::Value};
+use rusqlite::{Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{gen_models_capnp::gen_database, traits::*};
+use crate::{db::OperationsDb, gen_models_capnp::gen_database, traits::*};
 
 #[derive(Debug, Error)]
 pub enum GenDatabaseError {
@@ -60,11 +60,12 @@ impl Query for GenDatabase {
 
 impl GenDatabase {
     pub fn create(
-        conn: &Connection,
+        conn: &impl OperationsDb,
         db_uuid: &str,
         name: &str,
         path: &str,
     ) -> SQLResult<GenDatabase> {
+        let conn = conn.operations_conn();
         let query = "INSERT INTO gen_databases (db_uuid, name, path) VALUES (?1, ?2, ?3);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![db_uuid, name, path])?;
@@ -75,36 +76,37 @@ impl GenDatabase {
         })
     }
 
-    pub fn delete_by_uuid(conn: &Connection, db_uuid: &str) -> SQLResult<GenDatabase> {
+    pub fn delete_by_uuid(conn: &impl OperationsDb, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
-            conn,
+            conn.operations_conn(),
             "DELETE FROM gen_databases WHERE db_uuid = ?1",
             params![db_uuid],
         )
     }
 
-    pub fn get_by_uuid(conn: &Connection, db_uuid: &str) -> SQLResult<GenDatabase> {
+    pub fn get_by_uuid(conn: &impl OperationsDb, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
-            conn,
+            conn.operations_conn(),
             "SELECT * FROM gen_databases WHERE db_uuid = ?1",
             params![db_uuid],
         )
     }
 
-    pub fn get_by_path(conn: &Connection, path: &str) -> SQLResult<GenDatabase> {
+    pub fn get_by_path(conn: &impl OperationsDb, path: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
-            conn,
+            conn.operations_conn(),
             "SELECT * FROM gen_databases WHERE path = ?1",
             params![path],
         )
     }
 
     pub fn get_or_create(
-        conn: &Connection,
+        conn: &impl OperationsDb,
         db_uuid: &str,
         name: &str,
         path: &str,
     ) -> SQLResult<GenDatabase> {
+        let conn = conn.operations_conn();
         match GenDatabase::create(conn, db_uuid, name, path) {
             Ok(new) => Ok(new),
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
@@ -128,9 +130,10 @@ impl GenDatabase {
     }
 
     pub fn query_by_operations(
-        conn: &Connection,
+        conn: &impl OperationsDb,
         operations: &[HashId],
     ) -> Result<HashMap<HashId, Vec<GenDatabase>>, GenDatabaseError> {
+        let conn = conn.operations_conn();
         let query = "select gd.*, od.operation_hash from gen_databases gd left join operation_databases od on (gd.db_uuid = od.database_uuid) where od.operation_hash in rarray(?1)";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
@@ -156,9 +159,10 @@ impl GenDatabase {
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
+    use gen_core::config::{DbContext, Workspace};
 
     use super::*;
-    use crate::test_helpers::get_operation_connection;
+    use crate::test_helpers::{get_connection, get_operation_connection};
 
     #[test]
     fn test_gen_database_capnp_serialization() {
@@ -287,5 +291,17 @@ mod tests {
         let result = GenDatabase::get_by_path(&conn, "non/existing/path.db");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_with_db_context() {
+        let graph_conn = get_connection(None).unwrap();
+        let op_conn = get_operation_connection(None).unwrap();
+        let ctx = DbContext::new(Workspace::from_current_dir(), graph_conn, op_conn);
+
+        let db = GenDatabase::create(&ctx, "ctx-uuid", "ctx_db", "path/to/ctx.db").unwrap();
+
+        assert_eq!(db.db_uuid, "ctx-uuid");
+        assert_eq!(db.name, "ctx_db");
     }
 }
