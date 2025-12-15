@@ -16,7 +16,6 @@ use clap::{Parser, Subcommand};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
-    config,
     diffs::{gfa::gfa_sample_diff, operations::collect_operation_diff},
     get_connection, get_operation_connection,
     graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
@@ -29,7 +28,7 @@ use r#gen::{
         patch::view_patches,
     },
 };
-use gen_core::config::{get_gen_dir, get_or_create_gen_dir};
+use gen_core::config::{DbContext, Workspace};
 use gen_models::{
     block_group::BlockGroup,
     errors::{OperationError, RemoteError},
@@ -54,16 +53,18 @@ fn get_default_collection(conn: &Connection) -> Result<String, rusqlite::Error> 
 fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let cli_context = CliContext::from(&cli);
+    let workspace = Workspace::from_current_dir();
+    gen_core::config::set_base_dir(workspace.base_dir());
 
     // commands not requiring a db connection are handled here
     if let Some(Commands::Init {}) = &cli.command {
-        get_or_create_gen_dir();
-        get_operation_connection(None)?;
+        workspace.ensure_gen_dir();
+        get_operation_connection(Some(workspace.gen_db_path()?))?;
         println!("Gen repository initialized.");
         return Ok(());
     }
 
-    let operation_conn = get_operation_connection(None)?;
+    let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
     if let Some(Commands::Defaults {
         database,
         collection,
@@ -106,8 +107,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             match row {
                 Some(db_name) => db_name,
-                None => match get_gen_dir() {
-                    Some(dir) => PathBuf::from(dir)
+                None => match workspace.find_gen_dir() {
+                    Some(dir) => dir
                         .join("default.db")
                         .to_str()
                         .ok_or("Invalid path encoding")?
@@ -120,10 +121,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let db = binding.as_str();
-    let conn = get_connection(db)?;
-    let db_uuid = metadata::get_db_uuid(&conn);
+    let graph_connection = get_connection(db)?;
+    let db_context = DbContext::new(workspace.clone(), graph_connection, operation_conn);
+    let operation_conn = db_context.operations().conn();
+    let graph_conn = db_context.graph().conn();
+    let db_uuid = metadata::get_db_uuid(graph_conn);
 
-    match track_database(&conn, &operation_conn) {
+    match track_database(graph_conn, operation_conn) {
         Ok(_) => {}
         Err(err) => {
             panic!("Error tracking database: {err}");
@@ -132,14 +136,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Some(Commands::Init {}) => {
-            get_or_create_gen_dir();
+            workspace.ensure_gen_dir();
             println!("Gen repository initialized.");
             Ok(())
         }
         Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
         Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
         Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),
-        Some(Commands::Remote(cmd)) => Ok(handle_remote_command(&operation_conn, &cmd)?),
+        Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
         Some(Commands::View {
             graph,
             sample,
@@ -148,11 +152,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
 
             Ok(view_block_group(
-                &conn,
+                graph_conn,
                 graph.clone(),
                 sample.clone(),
                 collection_name,
@@ -161,15 +165,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::ViewDiff { from, to }) => {
             let target_display = to.clone().unwrap_or_else(|| {
-                OperationState::get_operation(&operation_conn)
+                OperationState::get_operation(operation_conn)
                     .map(|h| format!("{h}"))
                     .unwrap_or_else(|| "HEAD".to_string())
             });
-            let diff = collect_operation_diff(&operation_conn, &from, to.as_deref())?;
+            let diff = collect_operation_diff(operation_conn, &from, to.as_deref())?;
             if diff.block_groups.is_empty() {
                 println!("No differences found between {from} and {target_display}.");
             } else {
-                view_diff(&conn, &diff.block_groups)?;
+                view_diff(graph_conn, &diff.block_groups)?;
             }
             Ok(())
         }
@@ -181,7 +185,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
 
             if let Some(bed) = bed {
@@ -189,7 +193,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let mut handle = stdout.lock();
                 let mut bed_file = File::open(bed)?;
                 Ok(translate::bed::translate_bed(
-                    &conn,
+                    graph_conn,
                     collection_name,
                     sample.as_deref(),
                     &mut bed_file,
@@ -200,7 +204,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let mut handle = stdout.lock();
                 let mut gff_file = BufReader::new(File::open(gff)?);
                 Ok(translate::gff::translate_gff(
-                    &conn,
+                    graph_conn,
                     collection_name,
                     sample.as_deref(),
                     &mut gff_file,
@@ -214,26 +218,26 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             interactive,
             branch,
         }) => {
-            let current_op = OperationState::get_operation(&operation_conn);
+            let current_op = OperationState::get_operation(operation_conn);
             if let Some(current_op) = current_op {
                 let branch_name = if let Some(name) = branch.clone() {
                     name
                 } else {
-                    let current_branch_id = OperationState::get_current_branch(&operation_conn)
+                    let current_branch_id = OperationState::get_current_branch(operation_conn)
                         .ok_or("No current branch is set.")?;
-                    Branch::get_by_id(&operation_conn, current_branch_id)
+                    Branch::get_by_id(operation_conn, current_branch_id)
                         .ok_or_else(|| format!("No branch with id {current_branch_id}"))?
                         .name
                 };
 
                 let operations = Branch::get_operations(
-                    &operation_conn,
-                    Branch::get_by_name(&operation_conn, &branch_name)
+                    operation_conn,
+                    Branch::get_by_name(operation_conn, &branch_name)
                         .ok_or_else(|| format!("No branch named {branch_name}."))?
                         .id,
                 );
                 if interactive {
-                    return Ok(view_operations(&conn, &operation_conn, &operations)?);
+                    return Ok(view_operations(graph_conn, operation_conn, &operations)?);
                 } else {
                     let mut indicator = "";
                     println!(
@@ -270,24 +274,24 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             if create {
                 Branch::get_or_create(
-                    &operation_conn,
+                    operation_conn,
                     branch_name
                         .as_ref()
                         .ok_or("Must provide a branch name to create.")?,
                 );
             } else if delete {
                 let branch = Branch::get_by_name(
-                    &operation_conn,
+                    operation_conn,
                     branch_name
                         .as_ref()
                         .ok_or("Must provide a branch name to delete.")?,
                 )
                 .ok_or_else(|| format!("Unable to find branch {branch_name:?}."))?;
-                Branch::delete(&operation_conn, branch.id);
+                Branch::delete(operation_conn, branch.id);
             } else if checkout {
                 operation_management::checkout(
                     None,
-                    &operation_conn,
+                    operation_conn,
                     &Some(
                         branch_name
                             .clone()
@@ -297,7 +301,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     None,
                 )?;
             } else if list {
-                let current_branch = OperationState::get_current_branch(&operation_conn);
+                let current_branch = OperationState::get_current_branch(operation_conn);
                 let mut indicator = "";
                 println!(
                     "{indicator:<3}{col1:<30}   {col2:<20}   {col3:<15}",
@@ -306,7 +310,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     col3 = "Remote",
                 );
                 for branch in
-                    Branch::query(&operation_conn, "select * from branch", params![]).iter()
+                    Branch::query(operation_conn, "select * from branch", params![]).iter()
                 {
                     if let Some(current_branch_id) = current_branch {
                         if current_branch_id == branch.id {
@@ -331,20 +335,20 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else if merge {
                 let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
-                let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
+                let other_branch = Branch::get_by_name(operation_conn, &branch_name)
                     .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
-                let current_branch = OperationState::get_current_branch(&operation_conn)
+                let current_branch = OperationState::get_current_branch(operation_conn)
                     .ok_or("Unable to find current branch.")?;
                 operation_management::merge(
                     None,
-                    &operation_conn,
+                    operation_conn,
                     current_branch,
                     other_branch.id,
                     None,
                 )?;
                 println!("Merge successful");
             } else if let Some(remote_name) = set_remote {
-                let current_branch_id = OperationState::get_current_branch(&operation_conn)
+                let current_branch_id = OperationState::get_current_branch(operation_conn)
                     .ok_or("No current branch is checked out.")?;
 
                 let remote_to_set = if remote_name.is_empty() || remote_name == "null" {
@@ -353,7 +357,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     Some(remote_name.as_str())
                 };
 
-                Branch::set_remote_validated(&operation_conn, current_branch_id, remote_to_set)?;
+                Branch::set_remote_validated(operation_conn, current_branch_id, remote_to_set)?;
 
                 if remote_to_set.is_some() {
                     println!("Remote '{remote_name}' associated with current branch");
@@ -367,13 +371,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Merge { branch_name }) => {
             let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
-            let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
+            let other_branch = Branch::get_by_name(operation_conn, &branch_name)
                 .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
-            let current_branch = OperationState::get_current_branch(&operation_conn)
+            let current_branch = OperationState::get_current_branch(operation_conn)
                 .ok_or("Unable to find current branch.")?;
             match operation_management::merge(
                 None,
-                &operation_conn,
+                operation_conn,
                 current_branch,
                 other_branch.id,
                 None,
@@ -386,8 +390,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Commands::Apply { hash }) => {
-            let operation = Operation::search_hash(&operation_conn, &hash)?;
-            match operation_management::apply(None, &operation_conn, &operation.hash, None) {
+            let operation = Operation::search_hash(operation_conn, &hash)?;
+            match operation_management::apply(None, operation_conn, &operation.hash, None) {
                 Ok(_) => {
                     println!("Operation applied");
                     Ok(())
@@ -397,22 +401,22 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Checkout { branch, hash }) => {
             if let Some(name) = branch.clone() {
-                if Branch::get_by_name(&operation_conn, &name).is_none() {
-                    Branch::get_or_create(&operation_conn, &name);
+                if Branch::get_by_name(operation_conn, &name).is_none() {
+                    Branch::get_or_create(operation_conn, &name);
                     println!("Created branch {name}");
                 }
                 println!("Checking out branch {name}");
-                operation_management::checkout(None, &operation_conn, &Some(name), None)?;
+                operation_management::checkout(None, operation_conn, &Some(name), None)?;
             } else if let Some(hash_name) = hash.clone() {
-                if Branch::get_by_name(&operation_conn, &hash_name).is_some() {
+                if Branch::get_by_name(operation_conn, &hash_name).is_some() {
                     println!("Checking out branch {hash_name}");
-                    operation_management::checkout(None, &operation_conn, &Some(hash_name), None)?;
+                    operation_management::checkout(None, operation_conn, &Some(hash_name), None)?;
                 } else {
-                    let operation = Operation::search_hash(&operation_conn, &hash_name)?;
+                    let operation = Operation::search_hash(operation_conn, &hash_name)?;
                     println!("Checking out operation {hash_name}");
                     operation_management::checkout(
                         None,
-                        &operation_conn,
+                        operation_conn,
                         &None,
                         Some(operation.hash),
                     )?;
@@ -423,8 +427,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::Reset { hash }) => {
-            let operation = Operation::search_hash(&operation_conn, &hash)?;
-            match operation_management::reset(None, &operation_conn, &operation.hash) {
+            let operation = Operation::search_hash(operation_conn, &hash)?;
+            match operation_management::reset(None, operation_conn, &operation.hash) {
                 Ok(_) => {
                     println!("Operation reset");
                     Ok(())
@@ -438,15 +442,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             branch,
         }) => {
             let branch = if let Some(branch_name) = branch {
-                Branch::get_by_name(&operation_conn, &branch_name)
+                Branch::get_by_name(operation_conn, &branch_name)
                     .ok_or_else(|| format!("No branch with name {branch_name} found."))?
             } else {
-                let current_branch_id = OperationState::get_current_branch(&operation_conn)
+                let current_branch_id = OperationState::get_current_branch(operation_conn)
                     .ok_or("No current branch is checked out.")?;
-                Branch::get_by_id(&operation_conn, current_branch_id)
+                Branch::get_by_id(operation_conn, current_branch_id)
                     .ok_or("Unable to get current branch")?
             };
-            let branch_ops = Branch::get_operations(&operation_conn, branch.id);
+            let branch_ops = Branch::get_operations(operation_conn, branch.id);
             let operations = parse_patch_operations(
                 &branch_ops,
                 &branch
@@ -455,13 +459,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &operation,
             );
             let mut f = File::create(format!("{name}.gz"))?;
-            patch::create_patch(&operation_conn, &operations, &mut f)?;
+            patch::create_patch(operation_conn, &operations, &mut f)?;
             Ok(())
         }
         Some(Commands::PatchApply { patch }) => {
             let mut f = File::open(patch)?;
             let patches = patch::load_patches(&mut f);
-            match patch::apply_patches(None, &operation_conn, &patches) {
+            match patch::apply_patches(None, operation_conn, &patches) {
                 Ok(_) => {
                     println!("Patch applied");
                     Ok(())
@@ -510,15 +514,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
             let from_sample_name = from_sample.clone();
 
-            conn.execute("BEGIN TRANSACTION", [])?;
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
 
             propagate_gff(
-                &conn,
+                graph_conn,
                 collection_name,
                 from_sample_name.as_deref(),
                 &to_sample,
@@ -526,12 +530,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &output_gff,
             )?;
 
-            conn.execute("END TRANSACTION", [])?;
+            graph_conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;
             Ok(())
         }
         Some(Commands::ListSamples {}) => {
-            let sample_names = Sample::get_all_names(&conn);
+            let sample_names = Sample::get_all_names(graph_conn);
             println!();
             for sample_name in sample_names {
                 println!("{sample_name}");
@@ -541,9 +545,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::ListGraphs { name, sample }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
-            let block_groups = Sample::get_block_groups(&conn, collection_name, sample.as_deref());
+            let block_groups =
+                Sample::get_block_groups(graph_conn, collection_name, sample.as_deref());
             for block_group in block_groups {
                 println!("{}", block_group.name);
             }
@@ -559,9 +564,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
-            let block_groups = Sample::get_block_groups(&conn, collection_name, sample.as_deref());
+            let block_groups =
+                Sample::get_block_groups(graph_conn, collection_name, sample.as_deref());
 
             let formatted_sample_name = match sample {
                 Some(s) => format!("sample {s}"),
@@ -591,8 +597,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| {
                     format!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
                 })?;
-            let path = BlockGroup::get_current_path(&conn, &block_group.id);
-            let sequence = path.sequence(&conn);
+            let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
+            let sequence = path.sequence(graph_conn);
             if end_coordinate == -1 {
                 end_coordinate = sequence.len() as i64;
             }
@@ -610,10 +616,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
             gfa_sample_diff(
-                &conn,
+                graph_conn,
                 collection_name,
                 &PathBuf::from(gfa),
                 sample1.as_deref(),
@@ -628,11 +634,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             region,
             backbone,
         }) => {
-            conn.execute("BEGIN TRANSACTION", [])?;
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
@@ -641,8 +647,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let start_coordinate = interval.start().ok_or("Region missing start")?.get() as i64;
             let end_coordinate = interval.end().ok_or("Region missing end")?.get() as i64;
             derive_chunks(
-                &conn,
-                &operation_conn,
+                graph_conn,
+                operation_conn,
                 collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
@@ -653,7 +659,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     end: end_coordinate,
                 }],
             )?;
-            conn.execute("END TRANSACTION", [])?;
+            graph_conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;
             Ok(())
         }
@@ -666,24 +672,24 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             breakpoints,
             chunk_size,
         }) => {
-            conn.execute("BEGIN TRANSACTION", [])?;
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
             let parsed_region = region.parse::<Region>()?;
 
             let path_length = get_path(
-                &conn,
+                graph_conn,
                 collection_name,
                 sample_name.as_deref(),
                 &parsed_region.name().to_string(),
                 backbone.as_deref(),
             )?
-            .length(&conn);
+            .length(graph_conn);
 
             let chunk_points = if let Some(breakpoints) = breakpoints {
                 breakpoints
@@ -727,8 +733,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             derive_chunks(
-                &conn,
-                &operation_conn,
+                graph_conn,
+                operation_conn,
                 collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
@@ -736,7 +742,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 backbone.as_deref(),
                 chunk_ranges,
             )?;
-            conn.execute("END TRANSACTION", [])?;
+            graph_conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;
             Ok(())
         }
@@ -747,11 +753,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             regions,
             new_region,
         }) => {
-            conn.execute("BEGIN TRANSACTION", [])?;
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(&operation_conn)?,
+                None => get_default_collection(operation_conn)?,
             });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
@@ -759,8 +765,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let region_names = regions.split(",").collect::<Vec<&str>>();
 
             match make_stitch(
-                &conn,
-                &operation_conn,
+                graph_conn,
+                operation_conn,
                 collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
@@ -771,17 +777,17 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(GraphOperationError::OperationError(OperationError::NoChanges)) => {}
                 Err(e) => return Err(format!("Error stitching subgraphs: {e}").into()),
             }
-            conn.execute("END TRANSACTION", [])?;
+            graph_conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;
             Ok(())
         }
         Some(Commands::Push { remote }) => {
-            push(&operation_conn, remote.as_deref())?;
+            push(operation_conn, remote.as_deref())?;
             println!("Push succeeded.");
             Ok(())
         }
         Some(Commands::Pull { remote }) => {
-            pull(&operation_conn, remote.as_deref())?;
+            pull(operation_conn, remote.as_deref())?;
             Ok(())
         }
     }

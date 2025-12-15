@@ -1,92 +1,193 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::{LazyLock, RwLock},
+    sync::{Arc, LazyLock, RwLock},
 };
+
+use rusqlite::Connection;
 
 use crate::{HashId, errors::ConfigError};
 
-thread_local! {
-pub static BASE_DIR: LazyLock<RwLock<PathBuf>> =
-    LazyLock::new(|| RwLock::new(env::current_dir().unwrap()));
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace {
+    base_dir: PathBuf,
 }
 
-fn ensure_dir(path: &PathBuf) {
+impl Workspace {
+    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            base_dir: base_dir.into(),
+        }
+    }
+
+    pub fn from_current_dir() -> Self {
+        Self::new(env::current_dir().unwrap())
+    }
+
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    pub fn ensure_gen_dir(&self) -> PathBuf {
+        let gen_path = self.base_dir.join(".gen");
+        ensure_dir(&gen_path);
+        gen_path
+    }
+
+    pub fn find_gen_dir(&self) -> Option<PathBuf> {
+        let mut cur_dir = self.base_dir.as_path();
+        let mut gen_path = cur_dir.join(".gen");
+        while !gen_path.is_dir() {
+            cur_dir = cur_dir.parent()?;
+            gen_path = cur_dir.join(".gen");
+        }
+        Some(gen_path)
+    }
+
+    pub fn repo_root(&self) -> Result<PathBuf, ConfigError> {
+        let gen_dir = self
+            .find_gen_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?;
+
+        gen_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or(ConfigError::RepoRootNotFound)
+    }
+
+    pub fn gen_db_path(&self) -> Result<PathBuf, ConfigError> {
+        self.find_gen_dir()
+            .map(|dir| dir.join("gen.db"))
+            .ok_or(ConfigError::GenDirectoryNotFound)
+    }
+
+    pub fn changeset_path(&self, hash: &HashId) -> PathBuf {
+        let path = self
+            .ensure_gen_dir()
+            .join("changeset")
+            .join(format!("{hash}"));
+        ensure_dir(&path);
+        path
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RepoKind {
+    Operations,
+    Graph,
+}
+
+pub struct RepoHandle {
+    workspace: Arc<Workspace>,
+    kind: RepoKind,
+    conn: Connection,
+}
+
+impl RepoHandle {
+    pub fn new(kind: RepoKind, workspace: Arc<Workspace>, conn: Connection) -> Self {
+        Self {
+            workspace,
+            kind,
+            conn,
+        }
+    }
+
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
+    pub fn workspace(&self) -> &Workspace {
+        self.workspace.as_ref()
+    }
+
+    pub fn kind(&self) -> RepoKind {
+        self.kind
+    }
+
+    pub fn path(&self) -> Option<PathBuf> {
+        self.conn.path().map(PathBuf::from)
+    }
+}
+
+pub struct DbContext {
+    workspace: Arc<Workspace>,
+    operations: RepoHandle,
+    graph: RepoHandle,
+}
+
+impl DbContext {
+    pub fn new(workspace: Workspace, graph_conn: Connection, operations_conn: Connection) -> Self {
+        let workspace = Arc::new(workspace);
+        let operations = RepoHandle::new(RepoKind::Operations, workspace.clone(), operations_conn);
+        let graph = RepoHandle::new(RepoKind::Graph, workspace.clone(), graph_conn);
+        Self {
+            workspace,
+            operations,
+            graph,
+        }
+    }
+
+    pub fn workspace(&self) -> &Workspace {
+        self.workspace.as_ref()
+    }
+
+    pub fn operations(&self) -> &RepoHandle {
+        &self.operations
+    }
+
+    pub fn graph(&self) -> &RepoHandle {
+        &self.graph
+    }
+}
+
+thread_local! {
+pub static WORKSPACE: LazyLock<RwLock<Workspace>> =
+    LazyLock::new(|| RwLock::new(Workspace::from_current_dir()));
+}
+
+fn ensure_dir(path: &Path) {
     if !path.is_dir() {
         fs::create_dir_all(path).unwrap();
     }
 }
 
 pub fn set_base_dir(d: &Path) {
-    BASE_DIR
+    WORKSPACE
         .try_with(|v| {
             let mut w = v.write().unwrap();
-            *w = d.to_path_buf()
+            *w = Workspace::new(d)
         })
         .unwrap();
 }
 
 pub fn get_base_dir() -> PathBuf {
-    BASE_DIR.with(|v| v.read().unwrap().clone())
+    WORKSPACE.with(|v| v.read().unwrap().base_dir.clone())
 }
 
-/// Looks for the .gen directory in the current directory, or in a temporary directory if setup_gen_dir()
-/// was called first.  If it doesn't exist, it will be created.
-/// Returns the path to the .gen directory.
 pub fn get_or_create_gen_dir() -> PathBuf {
-    let start_dir = get_base_dir();
-    let cur_dir = start_dir.as_path();
-    let gen_path = cur_dir.join(".gen");
-    ensure_dir(&gen_path);
-    gen_path
+    WORKSPACE.with(|v| v.read().unwrap().ensure_gen_dir())
 }
 
-// TODO: maybe just store all these things in a sqlite file too in .gen
-/// Searches for the .gen directory in the current directory and all parent directories,
-/// or in a temporary directory if setup_gen_dir() was called first.
-/// Returns the path to the .gen directory if found, otherwise returns None.
 pub fn get_gen_dir() -> Option<String> {
-    let start_dir = get_base_dir();
-    let mut cur_dir = start_dir.as_path();
-    let mut gen_path = cur_dir.join(".gen");
-    while !gen_path.is_dir() {
-        match cur_dir.parent() {
-            Some(v) => {
-                cur_dir = v;
-            }
-            None => {
-                // TODO: make gen init
-                return None;
-            }
-        };
-        gen_path = cur_dir.join(".gen");
-    }
-    Some(gen_path.to_str().unwrap().to_string())
+    WORKSPACE
+        .with(|v| v.read().unwrap().find_gen_dir())
+        .and_then(|p| p.to_str().map(|p| p.to_string()))
 }
 
 pub fn get_repo_root_path() -> Result<PathBuf, ConfigError> {
-    let gen_dir = get_gen_dir().ok_or(ConfigError::GenDirectoryNotFound)?;
-    PathBuf::from(gen_dir)
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or(ConfigError::RepoRootNotFound)
+    WORKSPACE.with(|v| v.read().unwrap().repo_root())
 }
 
 pub fn get_gen_db_path() -> Result<PathBuf, ConfigError> {
-    match get_gen_dir() {
-        Some(dir) => Ok(Path::new(&dir).join("gen.db")),
-        None => Err(ConfigError::GenDirectoryNotFound),
-    }
+    WORKSPACE.with(|v| v.read().unwrap().gen_db_path())
 }
 
 pub fn get_changeset_path(hash: &HashId) -> PathBuf {
-    let gen_dir = get_gen_dir()
-        .unwrap_or_else(|| panic!("No .gen directory found. Please run 'gen init' first."));
-    let path = Path::new(&gen_dir)
-        .join("changeset")
-        .join(format!("{hash}"));
-    ensure_dir(&path);
-    path
+    WORKSPACE.with(|v| v.read().unwrap().changeset_path(hash))
 }
 
 #[cfg(test)]
