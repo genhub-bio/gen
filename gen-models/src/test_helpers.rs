@@ -13,6 +13,7 @@ use crate::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::{GraphDb, OperationsDb},
     edge::Edge,
     file_types::FileTypes,
     migrations::{run_migrations, run_operation_migrations},
@@ -65,7 +66,7 @@ pub fn setup_gen_dir() -> PathBuf {
     get_or_create_gen_dir()
 }
 
-pub fn setup_block_group(conn: &Connection) -> (HashId, Path) {
+pub fn setup_block_group(conn: &impl GraphDb) -> (HashId, Path) {
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
@@ -191,8 +192,8 @@ where
 }
 
 pub fn create_operation(
-    conn: &Connection,
-    op_conn: &Connection,
+    conn: &impl GraphDb,
+    op_conn: &impl OperationsDb,
     file_path: &str,
     file_type: FileTypes,
     description: &str,

@@ -32,7 +32,7 @@ pub mod translate;
 pub mod updates;
 pub mod views;
 // The Python bindings are in a separate module to avoid issues with non-local impl
-#[cfg(feature = "python-bindings")]
+#[cfg(all(feature = "python-bindings", not(feature = "cli")))]
 pub mod python_api;
 
 // reexports for public api, put behind features as needed

@@ -1,7 +1,7 @@
 use std::str;
 
 use gen_core::{HashId, traits::Capnp};
-use rusqlite::{Connection, session};
+use rusqlite::session;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -10,6 +10,7 @@ use crate::{
     block_group::BlockGroup,
     changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
     collection::Collection,
+    db::{GraphDb, OperationsDb},
     edge::Edge,
     errors::OperationError,
     files::GenDatabase,
@@ -22,21 +23,23 @@ use crate::{
     sequence::Sequence,
 };
 
-pub fn start_operation(conn: &Connection) -> session::Session<'_> {
-    let mut session = session::Session::new(conn).unwrap();
+pub fn start_operation(conn: &impl GraphDb) -> session::Session<'_> {
+    let mut session = session::Session::new(conn.graph_conn()).unwrap();
     attach_session(&mut session);
     session
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn end_operation(
-    conn: &Connection,
-    operation_conn: &Connection,
+    conn: &impl GraphDb,
+    operation_conn: &impl OperationsDb,
     session: &mut session::Session,
     operation_info: &OperationInfo,
     summary_str: &str,
     force_hash: impl Into<Option<HashId>>,
 ) -> Result<Operation, OperationError> {
+    let conn = conn.graph_conn();
+    let operation_conn = operation_conn.operations_conn();
     let db_uuid = metadata::get_db_uuid(conn);
     // determine if this operation has already happened
     let mut output = Vec::new();
