@@ -817,7 +817,7 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
 
                         form = form.text("branch", current_branch.name.clone());
 
-                        let response = client
+                        client
                             .post(&manifest_url)
                             .bearer_auth(auth_tokens.jwt.clone())
                             .multipart(form)

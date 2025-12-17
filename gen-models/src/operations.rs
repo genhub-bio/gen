@@ -378,6 +378,11 @@ impl FileAddition {
             }
         };
 
+        println!("here1");
+        println!("file path: {}", file_path);
+        println!("checksum: {}", checksum);
+        println!("foo");
+        println!("bar");
         let id = FileAddition::generate_file_addition_id(&checksum, &relative_file_path);
 
         let query = "INSERT INTO file_additions (id, file_path, file_type, checksum) VALUES (?1, ?2, ?3, ?4);";
