@@ -202,7 +202,6 @@ impl Edge {
         target_coordinate: i64,
         target_strand: Strand,
     ) -> Edge {
-        let conn = conn.graph_conn();
         let hash = HashId(calculate_hash(&format!(
             "{source_node_id}:{source_coordinate}:{source_strand}:{target_node_id}:{target_coordinate}:{target_strand}"
         )));
@@ -239,7 +238,6 @@ impl Edge {
     }
 
     pub fn bulk_create(conn: &GraphConnection, edges: &[EdgeData]) -> Vec<HashId> {
-        let conn = conn.graph_conn();
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let query = Edge::query_by_ids(conn, &edge_ids);
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
@@ -310,7 +308,6 @@ impl Edge {
     }
 
     pub fn blocks_from_edges(conn: &GraphConnection, edges: &[AugmentedEdge]) -> Vec<GroupBlock> {
-        let conn = conn.graph_conn();
         let mut node_ids = IndexSet::new();
         let mut edges_by_source_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();
         let mut edges_by_target_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();

@@ -256,7 +256,6 @@ impl Accession {
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
     ) -> SQLResult<Accession> {
-        let conn = conn.graph_conn();
         let hash = HashId(calculate_hash(&format!(
             "{path_id}:{parent_accession_id:?}:{name}"
         )));
@@ -278,7 +277,6 @@ impl Accession {
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
     ) -> Accession {
-        let conn = conn.graph_conn();
         match Accession::create(conn, name, path_id, parent_accession_id) {
             Ok(accession) => accession,
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
@@ -323,7 +321,6 @@ impl Query for Accession {
 
 impl AccessionEdge {
     pub fn create(conn: &GraphConnection, edge: AccessionEdgeData) -> AccessionEdge {
-        let conn = conn.graph_conn();
         let hash = HashId(calculate_hash(&format!(
             "{}:{}:{}:{}:{}:{}:{}",
             edge.source_node_id,
@@ -366,7 +363,6 @@ impl AccessionEdge {
     }
 
     pub fn bulk_create(conn: &GraphConnection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
-        let conn = conn.graph_conn();
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let query = AccessionEdge::query_by_ids(conn, &edge_ids);
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
@@ -405,7 +401,6 @@ impl AccessionEdge {
     }
 
     pub fn bulk_delete(conn: &GraphConnection, edges: &[AccessionEdgeData]) {
-        let conn = conn.graph_conn();
         let ids = edges.iter().map(|e| e.id_hash()).collect::<Vec<_>>();
         AccessionEdge::delete_by_ids(conn, &ids);
     }
@@ -444,7 +439,6 @@ impl Query for AccessionEdge {
 
 impl AccessionPath {
     pub fn create(conn: &GraphConnection, accession_id: &HashId, edge_ids: &[HashId]) {
-        let conn = conn.graph_conn();
         let batch_size = max_rows_per_batch(conn, 4);
 
         for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {

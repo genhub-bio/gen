@@ -85,7 +85,6 @@ impl Operation {
         change_type: &str,
         hash: &HashId,
     ) -> SQLResult<Operation> {
-        let conn = conn.operations_conn();
         let current_op = OperationState::get_operation(conn);
         let current_branch_id =
             OperationState::get_current_branch(conn).expect("No branch is checked out.");
@@ -113,7 +112,6 @@ impl Operation {
         parent_hash: Option<HashId>,
         created_on: Option<i64>,
     ) -> SQLResult<Operation> {
-        let conn = conn.operations_conn();
         let timestamp = created_on.unwrap_or(chrono::Utc::now().timestamp_nanos_opt().unwrap());
         let query = "INSERT INTO operations (hash, change_type, parent_hash, created_on) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
@@ -132,7 +130,6 @@ impl Operation {
         operation_hash: &HashId,
         file_addition_id: &HashId,
     ) -> SQLResult<()> {
-        let conn = conn.operations_conn();
         let query =
             "INSERT INTO operation_files (operation_hash, file_addition_id) VALUES (?1, ?2)";
         let mut stmt = conn.prepare(query).unwrap();
@@ -145,7 +142,6 @@ impl Operation {
         operation_hash: &HashId,
         db_uuid: &str,
     ) -> SQLResult<()> {
-        let conn = conn.operations_conn();
         let query =
             "INSERT INTO operation_databases (operation_hash, database_uuid) VALUES (?1, ?2)";
         let mut stmt = conn.prepare(query).unwrap();
@@ -154,7 +150,6 @@ impl Operation {
     }
 
     pub fn get_upstream(conn: &OperationsConnection, operation_hash: &HashId) -> Vec<HashId> {
-        let conn = conn.operations_conn();
         let query = "WITH RECURSIVE r_operations(operation_hash, depth) AS ( \
         select ?1, 0 UNION \
         select parent_hash, depth + 1 from r_operations join operations ON hash=operation_hash \
@@ -167,7 +162,6 @@ impl Operation {
     }
 
     pub fn get_operation_graph(conn: &OperationsConnection) -> OperationGraph {
-        let conn = conn.operations_conn();
         let mut graph = OperationGraph::new();
         let operations = Operation::query(conn, "select * from operations;", rusqlite::params![]);
         for op in operations.iter() {
@@ -223,7 +217,6 @@ impl Operation {
     }
 
     pub fn search_hash(conn: &OperationsConnection, op_hash: &str) -> SQLResult<Operation> {
-        let conn = conn.operations_conn();
         Operation::get(
             conn,
             "select * from operations where hex(hash) LIKE ?1",
@@ -419,7 +412,6 @@ impl FileAddition {
         conn: &OperationsConnection,
         operation_hash: &HashId,
     ) -> Vec<FileAddition> {
-        let conn = conn.operations_conn();
         let query = "select fa.* from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
@@ -434,7 +426,6 @@ impl FileAddition {
         conn: &OperationsConnection,
         operations: &[HashId],
     ) -> Result<HashMap<HashId, Vec<FileAddition>>, FileAdditionError> {
-        let conn = conn.operations_conn();
         let query = "select fa.*, of.operation_hash from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash in rarray(?1)";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
@@ -490,7 +481,6 @@ impl OperationSummary {
         operation_hash: &HashId,
         summary: &str,
     ) -> OperationSummary {
-        let conn = conn.operations_conn();
         let query = "INSERT INTO operation_summaries (operation_hash, summary) VALUES (?1, ?2) RETURNING (id)";
         let mut stmt = conn.prepare(query).unwrap();
         let mut rows = stmt
@@ -506,7 +496,6 @@ impl OperationSummary {
     }
 
     pub fn set_message(conn: &OperationsConnection, id: i64, message: &str) -> SQLResult<()> {
-        let conn = conn.operations_conn();
         let query = "UPDATE operation_summaries SET summary = ?2 where id = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         stmt.execute(params![id, message])?;
@@ -517,7 +506,6 @@ impl OperationSummary {
         conn: &OperationsConnection,
         operations: &[HashId],
     ) -> Result<HashMap<HashId, Vec<Self>>, OperationSummaryError> {
-        let conn = conn.operations_conn();
         let query = "select * from operation_summaries where operation_hash in rarray(?1)";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
@@ -671,7 +659,6 @@ impl Remote {
         Self::validate_name(name)?;
         Self::validate_url(url)?;
 
-        let conn = conn.operations_conn();
         let query = "INSERT INTO remotes (name, url) VALUES (?1, ?2)";
         let mut stmt = conn.prepare(query)?;
 
@@ -691,7 +678,6 @@ impl Remote {
 
     /// Get a remote by name
     pub fn get_by_name(conn: &OperationsConnection, name: &str) -> Result<Remote, RemoteError> {
-        let conn = conn.operations_conn();
         let query = "SELECT name, url FROM remotes WHERE name = ?1";
         match Remote::get(conn, query, params![name]) {
             Ok(remote) => Ok(remote),
@@ -709,7 +695,6 @@ impl Remote {
 
     /// List all remotes
     pub fn list_all(conn: &OperationsConnection) -> Vec<Remote> {
-        let conn = conn.operations_conn();
         Remote::query(
             conn,
             "SELECT name, url FROM remotes ORDER BY name",
@@ -722,7 +707,6 @@ impl Remote {
         // Check if remote exists first
         Self::get_by_name(conn, name)?;
 
-        let conn = conn.operations_conn();
         let query = "DELETE FROM remotes WHERE name = ?1";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![name])?;
@@ -781,7 +765,6 @@ impl Branch {
         branch_name: &str,
         remote_name: Option<&str>,
     ) -> SQLResult<Branch> {
-        let conn = conn.operations_conn();
         let current_operation_hash = OperationState::get_operation(conn);
         let mut stmt = conn.prepare_cached("insert into branch (name, current_operation_hash, remote_name) values (?1, ?2, ?3) returning (id);").unwrap();
 
@@ -799,7 +782,6 @@ impl Branch {
     }
 
     pub fn delete(conn: &OperationsConnection, branch_id: i64) -> Result<(), BranchError> {
-        let conn = conn.operations_conn();
         if let Some(current_branch) = OperationState::get_current_branch(conn)
             && current_branch == branch_id
         {
@@ -812,12 +794,10 @@ impl Branch {
     }
 
     pub fn all(conn: &OperationsConnection) -> Vec<Branch> {
-        let conn = conn.operations_conn();
         Branch::query(conn, "select * from branch;", params![])
     }
 
     pub fn get_by_name(conn: &OperationsConnection, branch_name: &str) -> Option<Branch> {
-        let conn = conn.operations_conn();
         let mut branch: Option<Branch> = None;
         let results = Branch::query(
             conn,
@@ -831,7 +811,6 @@ impl Branch {
     }
 
     pub fn get_by_id(conn: &OperationsConnection, branch_id: i64) -> Option<Branch> {
-        let conn = conn.operations_conn();
         let mut branch: Option<Branch> = None;
         for result in Branch::query(
             conn,
@@ -850,7 +829,6 @@ impl Branch {
         branch_id: i64,
         operation_hash: &HashId,
     ) {
-        let conn = conn.operations_conn();
         conn.execute(
             "UPDATE branch set current_operation_hash = ?2 where id = ?1",
             params![branch_id, operation_hash],
@@ -859,7 +837,6 @@ impl Branch {
     }
 
     pub fn get_operations(conn: &OperationsConnection, branch_id: i64) -> Vec<Operation> {
-        let conn = conn.operations_conn();
         let branch = Branch::get_by_id(conn, branch_id)
             .unwrap_or_else(|| panic!("No branch with id {branch_id}."));
         if let Some(hash) = branch.current_operation_hash {
@@ -879,7 +856,6 @@ impl Branch {
         branch_id: i64,
         remote_name: Option<&str>,
     ) -> SQLResult<()> {
-        let conn = conn.operations_conn();
         let query = "UPDATE branch SET remote_name = ?1 WHERE id = ?2";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![remote_name, branch_id])?;
@@ -897,7 +873,6 @@ impl Branch {
             Remote::get_by_name(conn, name)?;
         }
 
-        let conn = conn.operations_conn();
         let query = "UPDATE branch SET remote_name = ?1 WHERE id = ?2";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![remote_name, branch_id])?;
@@ -906,7 +881,6 @@ impl Branch {
 
     /// Get the remote associated with a branch
     pub fn get_remote(conn: &OperationsConnection, branch_id: i64) -> Option<String> {
-        let conn = conn.operations_conn();
         let query = "SELECT remote_name FROM branch WHERE id = ?1";
         let mut stmt = conn.prepare(query).ok()?;
         let mut rows = stmt
@@ -955,7 +929,6 @@ impl Defaults {
             Remote::get_by_name(conn, name)?;
         }
 
-        let conn = conn.operations_conn();
         let query = "UPDATE defaults SET remote_name = ?1 WHERE id = 1";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![remote_name])?;
@@ -966,7 +939,6 @@ impl Defaults {
         conn: &OperationsConnection,
         remote_name: Option<&str>,
     ) -> SQLResult<()> {
-        let conn = conn.operations_conn();
         let query = "UPDATE defaults SET remote_name = ?1 WHERE id = 1";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![remote_name])?;
@@ -975,7 +947,6 @@ impl Defaults {
 
     /// Get the default remote name
     pub fn get_default_remote(conn: &OperationsConnection) -> Option<String> {
-        let conn = conn.operations_conn();
         let query = "SELECT remote_name FROM defaults WHERE id = 1";
         let mut stmt = conn.prepare(query).ok()?;
         let mut rows = stmt
@@ -1004,7 +975,6 @@ impl Defaults {
 
     /// Get the defaults record
     pub fn get(conn: &OperationsConnection) -> Option<Defaults> {
-        let conn = conn.operations_conn();
         let query = "SELECT id, db_name, collection_name, remote_name FROM defaults WHERE id = 1";
         Self::get_single(conn, query, params![]).ok()
     }
@@ -1015,7 +985,6 @@ impl Defaults {
         query: &str,
         params: &[&dyn rusqlite::ToSql],
     ) -> SQLResult<Defaults> {
-        let conn = conn.operations_conn();
         let mut stmt = conn.prepare(query)?;
         let mut rows = stmt.query_map(params, |row| Ok(Self::process_row(row)))?;
 
@@ -1031,7 +1000,6 @@ pub struct OperationState {}
 
 impl OperationState {
     pub fn set_operation(conn: &OperationsConnection, op_hash: &HashId) {
-        let conn = conn.operations_conn();
         let mut stmt = conn
             .prepare(
                 "INSERT INTO operation_state (id, operation_hash)
@@ -1046,7 +1014,6 @@ impl OperationState {
     }
 
     pub fn get_operation(conn: &OperationsConnection) -> Option<HashId> {
-        let conn = conn.operations_conn();
         let mut hash: Option<HashId> = None;
         let mut stmt = conn
             .prepare("SELECT operation_hash from operation_state where id = 1;")
@@ -1059,7 +1026,6 @@ impl OperationState {
     }
 
     pub fn set_branch(conn: &OperationsConnection, branch_name: &str) {
-        let conn = conn.operations_conn();
         let branch = Branch::get_by_name(conn, branch_name)
             .unwrap_or_else(|| panic!("No branch named {branch_name}."));
         let mut stmt = conn
@@ -1081,7 +1047,6 @@ impl OperationState {
     }
 
     pub fn get_current_branch(conn: &OperationsConnection) -> Option<i64> {
-        let conn = conn.operations_conn();
         let mut id: Option<i64> = None;
         let mut stmt = conn
             .prepare("SELECT branch_id from operation_state where id = 1;")

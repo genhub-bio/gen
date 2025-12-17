@@ -180,7 +180,6 @@ impl Path {
         block_group_id: &HashId,
         edge_ids: &[HashId],
     ) -> Path {
-        let conn = conn.graph_conn();
         Path::validate_edges(conn, edge_ids, block_group_id);
         let hash = HashId(calculate_hash(&format!("{block_group_id}:{name}")));
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
@@ -221,7 +220,6 @@ impl Path {
     }
 
     pub fn delete(conn: &GraphConnection, name: &str, block_group_id: &HashId) {
-        let conn = conn.graph_conn();
         let path = Path::get(
             conn,
             "select * from paths where name = ?1 and block_group_id = ?2",
@@ -236,12 +234,10 @@ impl Path {
     }
 
     pub fn get_by_id(conn: &GraphConnection, path_id: &HashId) -> Path {
-        let conn = conn.graph_conn();
         Path::get(conn, "select * from paths where id = ?1;", params![path_id]).unwrap()
     }
 
     pub fn query_for_collection(conn: &GraphConnection, collection_name: &str) -> Vec<Path> {
-        let conn = conn.graph_conn();
         let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
         Path::query(conn, query, params![collection_name])
     }
@@ -251,7 +247,6 @@ impl Path {
         collection_name: &str,
         sample_name: Option<String>,
     ) -> Vec<Path> {
-        let conn = conn.graph_conn();
         if let Some(actual_sample_name) = sample_name {
             let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
             Path::query(conn, query, params![collection_name, actual_sample_name])
@@ -688,7 +683,6 @@ impl Path {
         deletion_start: i64,
         deletion_end: i64,
     ) -> Result<Path, QueryError> {
-        let conn = conn.graph_conn();
         // Creates a new path from the current one by replacing all edges between deletion_start and
         // deletion_end with a single edge spanning the deletion.
         let tree = self.intervaltree(conn);

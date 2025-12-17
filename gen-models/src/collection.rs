@@ -76,7 +76,6 @@ impl Collection {
     }
 
     pub fn bulk_create(conn: &GraphConnection, names: &Vec<String>) -> Vec<Collection> {
-        let conn = conn.graph_conn();
         let placeholders = names.iter().map(|_| "(?)").collect::<Vec<_>>().join(", ");
         let q = format!("INSERT INTO collections (name) VALUES {placeholders} RETURNING *",);
         let mut stmt = conn.prepare(&q).unwrap();

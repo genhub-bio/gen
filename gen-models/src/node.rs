@@ -56,7 +56,6 @@ impl Query for Node {
 
 impl Node {
     pub fn create(conn: &GraphConnection, sequence_hash: &HashId, node_hash: &HashId) -> HashId {
-        let conn = conn.graph_conn();
         let insert_statement = "INSERT INTO nodes (id, sequence_hash) VALUES (?1, ?2);";
         let mut stmt = conn.prepare_cached(insert_statement).unwrap();
         match stmt.execute(params![node_hash, sequence_hash]) {
@@ -78,7 +77,6 @@ impl Node {
         conn: &GraphConnection,
         node_ids: &[HashId],
     ) -> HashMap<HashId, Sequence> {
-        let conn = conn.graph_conn();
         let nodes = Node::query_by_ids(conn, node_ids);
         let sequence_hashes_by_node_id = nodes
             .iter()

@@ -65,7 +65,6 @@ impl GenDatabase {
         name: &str,
         path: &str,
     ) -> SQLResult<GenDatabase> {
-        let conn = conn.operations_conn();
         let query = "INSERT INTO gen_databases (db_uuid, name, path) VALUES (?1, ?2, ?3);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![db_uuid, name, path])?;
@@ -106,7 +105,6 @@ impl GenDatabase {
         name: &str,
         path: &str,
     ) -> SQLResult<GenDatabase> {
-        let conn = conn.operations_conn();
         match GenDatabase::create(conn, db_uuid, name, path) {
             Ok(new) => Ok(new),
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
@@ -133,7 +131,6 @@ impl GenDatabase {
         conn: &OperationsConnection,
         operations: &[HashId],
     ) -> Result<HashMap<HashId, Vec<GenDatabase>>, GenDatabaseError> {
-        let conn = conn.operations_conn();
         let query = "select gd.*, od.operation_hash from gen_databases gd left join operation_databases od on (gd.db_uuid = od.database_uuid) where od.operation_hash in rarray(?1)";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt

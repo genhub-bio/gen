@@ -172,7 +172,6 @@ impl<'a> NewSequence<'a> {
     }
 
     pub fn save(self, conn: &GraphConnection) -> Sequence {
-        let conn = conn.graph_conn();
         let mut length = 0;
         if self.sequence.is_none() && self.file_path.is_none() {
             panic!("Sequence or file_path must be set.");

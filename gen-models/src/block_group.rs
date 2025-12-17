@@ -157,7 +157,6 @@ impl BlockGroup {
         sample_name: Option<&str>,
         name: &str,
     ) -> BlockGroup {
-        let conn = conn.graph_conn();
         let hash = HashId(calculate_hash(&format!(
             "{collection_name}:{sample_name:?}:{name}"
         )));
@@ -192,7 +191,6 @@ impl BlockGroup {
         sample_name: Option<&str>,
         name: &str,
     ) {
-        let conn = conn.graph_conn();
         if let Some(n) = sample_name {
             let query = "delete from block_groups where collection_name = ?1 and sample_name = ?2 and name = ?3;";
             conn.execute(
@@ -211,7 +209,6 @@ impl BlockGroup {
     }
 
     pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> BlockGroup {
-        let conn = conn.graph_conn();
         let query = "SELECT * FROM block_groups WHERE id = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         match stmt.query_row([id], |row| Ok(Self::process_row(row))) {
@@ -224,7 +221,6 @@ impl BlockGroup {
     }
 
     pub fn duplicate(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
-        let conn = conn.graph_conn();
         let existing_paths = Path::query(
             conn,
             "SELECT * from paths where block_group_id = ?1;",
@@ -297,7 +293,6 @@ impl BlockGroup {
         group_name: &str,
         parent_sample: Option<&str>,
     ) -> Result<HashId, QueryError> {
-        let conn = conn.graph_conn();
         let binding = BlockGroup::query(
             conn,
             "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
@@ -353,7 +348,6 @@ impl BlockGroup {
     }
 
     pub fn get_graph(conn: &GraphConnection, block_group_id: &HashId) -> GenGraph {
-        let conn = conn.graph_conn();
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
         let blocks = Edge::blocks_from_edges(conn, &edges);
         let (graph, _) = Edge::build_graph(&edges, &blocks);
@@ -413,7 +407,6 @@ impl BlockGroup {
         block_group_id: &HashId,
         _prune: bool,
     ) -> HashSet<String> {
-        let conn = conn.graph_conn();
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
         let blocks = Edge::blocks_from_edges(conn, &edges);
 
@@ -469,7 +462,6 @@ impl BlockGroup {
         end: i64,
         cache: &mut PathCache,
     ) -> Accession {
-        let conn = conn.graph_conn();
         let tree = PathCache::get_intervaltree(cache, path).unwrap();
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(start).map(|x| &x.value).collect();
@@ -546,7 +538,6 @@ impl BlockGroup {
         cache: &mut PathCache,
         modify_blockgroup: bool,
     ) -> Result<(), ChangeError> {
-        let conn = conn.graph_conn();
         let mut new_augmented_edges_by_block_group =
             HashMap::<&HashId, Vec<AugmentedEdgeData>>::new();
         let mut new_accession_edges = HashMap::new();
@@ -633,7 +624,6 @@ impl BlockGroup {
         change: &PathChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
     ) -> Result<(), ChangeError> {
-        let conn = conn.graph_conn();
         let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
         let new_edges = new_augmented_edges
             .iter()
@@ -886,7 +876,6 @@ impl BlockGroup {
     }
 
     pub fn get_current_path(conn: &GraphConnection, block_group_id: &HashId) -> Path {
-        let conn = conn.graph_conn();
         let paths = Path::query(
             conn,
             "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
@@ -900,7 +889,6 @@ impl BlockGroup {
         block_group_id: &HashId,
         path_name: &str,
     ) -> Option<Path> {
-        let conn = conn.graph_conn();
         let paths = Path::query(
             conn,
             "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
@@ -928,7 +916,6 @@ impl BlockGroup {
         end_node_coordinate: i64,
         target_block_group_id: &HashId,
     ) -> HashMap<HashId, HashId> {
-        let conn = conn.graph_conn();
         let current_graph = BlockGroup::get_graph(conn, source_block_group_id);
         let start_node = current_graph
             .nodes()

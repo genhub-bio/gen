@@ -133,7 +133,6 @@ impl Query for BlockGroupEdge {
 
 impl BlockGroupEdge {
     pub fn bulk_create(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
-        let conn = conn.graph_conn();
         let batch_size = max_rows_per_batch(conn, 6);
 
         for chunk in block_group_edges.chunks(batch_size) {
@@ -163,7 +162,6 @@ impl BlockGroupEdge {
     }
 
     pub fn bulk_delete(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
-        let conn = conn.graph_conn();
         let hashes = block_group_edges
             .iter()
             .map(|bge| bge.id_hash())
@@ -175,7 +173,6 @@ impl BlockGroupEdge {
         conn: &GraphConnection,
         block_group_id: &HashId,
     ) -> Vec<AugmentedEdge> {
-        let conn = conn.graph_conn();
         let block_group_edges = BlockGroupEdge::query(
             conn,
             "select * from block_group_edges where block_group_id = ?1 ORDER BY created_on DESC;",
@@ -209,7 +206,6 @@ impl BlockGroupEdge {
         block_group_id: &HashId,
         edge_ids: &[HashId],
     ) -> Vec<AugmentedEdge> {
-        let conn = conn.graph_conn();
         let block_group_edges = BlockGroupEdge::query(
             conn,
             "SELECT * FROM block_group_edges WHERE block_group_id = ?1 AND edge_id in rarray(?2);",
