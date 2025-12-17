@@ -1,8 +1,7 @@
 use std::{fmt::Debug, fs, io::Write, ops::Add, path::PathBuf};
 
 use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand,
-    config::{get_or_create_gen_dir, set_base_dir},
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
     errors::ConnectionError,
 };
 use gen_graph::GenGraph;
@@ -10,6 +9,7 @@ use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::{DbContext, GraphConnection, OperationsConnection},
     edge::Edge,
     file_types::FileTypes,
     migrations::{run_migrations, run_operation_migrations},
@@ -26,7 +26,7 @@ use tempfile::tempdir;
 
 pub fn get_connection<'a>(
     db_path: impl Into<Option<&'a str>>,
-) -> Result<Connection, ConnectionError> {
+) -> Result<GraphConnection, ConnectionError> {
     let path: Option<&str> = db_path.into();
     let mut conn;
     if let Some(v) = path {
@@ -39,12 +39,12 @@ pub fn get_connection<'a>(
     }
     rusqlite::vtab::array::load_module(&conn)?;
     run_migrations(&mut conn);
-    Ok(conn)
+    Ok(GraphConnection(conn))
 }
 
 pub fn get_operation_connection<'a>(
     db_path: impl Into<Option<&'a str>>,
-) -> Result<Connection, ConnectionError> {
+) -> Result<OperationsConnection, ConnectionError> {
     let path: Option<&str> = db_path.into();
     let mut conn;
     if let Some(v) = path {
@@ -57,16 +57,44 @@ pub fn get_operation_connection<'a>(
     }
     rusqlite::vtab::array::load_module(&conn)?;
     run_operation_migrations(&mut conn);
-    Ok(conn)
+    Ok(OperationsConnection(conn))
 }
 
 pub fn setup_gen_dir() -> PathBuf {
     let tmp_dir = tempdir().unwrap().keep();
-    set_base_dir(&tmp_dir);
-    get_or_create_gen_dir()
+    let workspace = Workspace::new(tmp_dir);
+    workspace.ensure_gen_dir()
 }
 
-pub fn setup_block_group(conn: &Connection) -> (HashId, Path) {
+pub fn setup_gen() -> DbContext {
+    let tmp_dir = tempdir().unwrap().keep();
+    let workspace = Workspace::new(tmp_dir);
+    workspace.ensure_gen_dir();
+    let graph_conn = get_connection(None).expect("unable to open graph connection");
+    let operation_conn =
+        get_operation_connection(None).expect("unable to open operations connection");
+    DbContext::new(workspace, graph_conn, operation_conn)
+}
+
+pub fn setup_gen_on_disk() -> DbContext {
+    let tmp_dir = tempdir().unwrap().keep();
+    let workspace = Workspace::new(tmp_dir);
+    workspace.ensure_gen_dir();
+    let graph_conn = get_connection(
+        workspace
+            .ensure_gen_dir()
+            .join("default.db")
+            .to_str()
+            .unwrap(),
+    )
+    .expect("unable to open graph connection");
+    let operation_conn =
+        get_operation_connection(workspace.ensure_gen_dir().join("gen.db").to_str().unwrap())
+            .expect("unable to open operations connection");
+    DbContext::new(workspace, graph_conn, operation_conn)
+}
+
+pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
@@ -237,7 +265,7 @@ where
 }
 
 pub fn get_sample_bg<'a>(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     sample_name: impl Into<Option<&'a str>>,
 ) -> BlockGroup {
@@ -247,17 +275,15 @@ pub fn get_sample_bg<'a>(
 }
 
 pub fn create_operation(
-    conn: &Connection,
-    op_conn: &Connection,
+    context: &DbContext,
     file_path: &str,
     file_type: FileTypes,
     description: &str,
     hash: impl Into<Option<HashId>>,
 ) -> Operation {
-    let mut session = start_operation(conn);
+    let mut session = start_operation(context.graph().conn());
     end_operation(
-        conn,
-        op_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {

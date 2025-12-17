@@ -8,11 +8,10 @@ use std::{
 use gen_core::{HashId, is_terminal, strand::Strand};
 use gen_graph::{GenGraph, project_path};
 use gen_models::{
-    block_group::BlockGroup, block_group_edge::BlockGroupEdge, collection::Collection, edge::Edge,
-    path::Path, sample::Sample,
+    block_group::BlockGroup, block_group_edge::BlockGroupEdge, collection::Collection,
+    db::GraphConnection, edge::Edge, path::Path, sample::Sample,
 };
 use itertools::Itertools;
-use rusqlite::Connection;
 use thiserror::Error;
 
 use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments};
@@ -24,7 +23,7 @@ pub enum GfaExportError {
 }
 
 pub fn export_gfa(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     filename: &PathBuf,
     sample_name: Option<String>,
@@ -196,7 +195,7 @@ pub fn export_gfa(
 }
 
 fn get_paths(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     sample_name: Option<String>,
     graph: &GenGraph,
@@ -303,18 +302,16 @@ mod tests {
     use super::*;
     use crate::{
         imports::gfa::import_gfa,
-        test_helpers::{
-            get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
-        },
+        test_helpers::{setup_block_group, setup_gen},
         track_database,
     };
 
     #[test]
     fn test_simple_export() {
         // Sets up a basic graph and then exports it to a GFA file
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -437,7 +434,7 @@ mod tests {
 
         export_gfa(conn, collection_name, &gfa_path, None, None).unwrap();
         // NOTE: Not directly checking file contents because segments are written in random order
-        let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, "test collection 2", None);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -453,9 +450,9 @@ mod tests {
 
     #[test]
     fn test_splits_nodes() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -467,7 +464,7 @@ mod tests {
 
         export_gfa(conn, "test", &gfa_path, None, 5).unwrap();
 
-        let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, "test collection 2", None);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -500,16 +497,16 @@ mod tests {
 
     #[test]
     fn test_simple_round_trip() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/simple.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
@@ -519,7 +516,7 @@ mod tests {
         gfa_path.push("intermediate.gfa");
 
         export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
-        let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, "test collection 2", None);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -531,16 +528,16 @@ mod tests {
 
     #[test]
     fn test_anderson_round_trip() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/anderson_promoters.gfa");
         let collection_name = "anderson promoters".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
@@ -550,7 +547,7 @@ mod tests {
         gfa_path.push("intermediate.gfa");
 
         export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
-        let _ = import_gfa(&gfa_path, "anderson promoters 2", None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, "anderson promoters 2", None);
 
         let block_group2 = Collection::get_block_groups(conn, "anderson promoters 2")
             .pop()
@@ -562,16 +559,16 @@ mod tests {
 
     #[test]
     fn test_reverse_strand_round_trip() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/reverse_strand.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
@@ -581,7 +578,7 @@ mod tests {
         gfa_path.push("intermediate.gfa");
 
         export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
-        let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, "test collection 2", None);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -596,9 +593,9 @@ mod tests {
         // Confirm that if edges are added to or from a sequence, that results in the sequence being
         // split into multiple segments in the exported GFA, and that the multiple segments are
         // re-imported as multiple sequences
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -671,7 +668,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
         export_gfa(conn, "test", &gfa_path, None, None).unwrap();
-        let _ = import_gfa(&gfa_path, "test collection 2", None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, "test collection 2", None);
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()

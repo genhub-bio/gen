@@ -1,10 +1,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock, RwLock},
 };
-
-use rusqlite::Connection;
 
 use crate::{HashId, errors::ConfigError};
 
@@ -31,6 +28,8 @@ impl Workspace {
     pub fn ensure_gen_dir(&self) -> PathBuf {
         let gen_path = self.base_dir.join(".gen");
         ensure_dir(&gen_path);
+        let changesets = gen_path.join("changesets");
+        ensure_dir(&changesets);
         gen_path
     }
 
@@ -71,165 +70,94 @@ impl Workspace {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum RepoKind {
-    Operations,
-    Graph,
-}
-
-pub struct RepoHandle {
-    workspace: Arc<Workspace>,
-    kind: RepoKind,
-    conn: Connection,
-}
-
-impl RepoHandle {
-    pub fn new(kind: RepoKind, workspace: Arc<Workspace>, conn: Connection) -> Self {
-        Self {
-            workspace,
-            kind,
-            conn,
-        }
-    }
-
-    pub fn conn(&self) -> &Connection {
-        &self.conn
-    }
-
-    pub fn conn_mut(&mut self) -> &mut Connection {
-        &mut self.conn
-    }
-
-    pub fn workspace(&self) -> &Workspace {
-        self.workspace.as_ref()
-    }
-
-    pub fn kind(&self) -> RepoKind {
-        self.kind
-    }
-
-    pub fn path(&self) -> Option<PathBuf> {
-        self.conn.path().map(PathBuf::from)
-    }
-}
-
-pub struct DbContext {
-    workspace: Arc<Workspace>,
-    operations: RepoHandle,
-    graph: RepoHandle,
-}
-
-impl DbContext {
-    pub fn new(workspace: Workspace, graph_conn: Connection, operations_conn: Connection) -> Self {
-        let workspace = Arc::new(workspace);
-        let operations = RepoHandle::new(RepoKind::Operations, workspace.clone(), operations_conn);
-        let graph = RepoHandle::new(RepoKind::Graph, workspace.clone(), graph_conn);
-        Self {
-            workspace,
-            operations,
-            graph,
-        }
-    }
-
-    pub fn workspace(&self) -> &Workspace {
-        self.workspace.as_ref()
-    }
-
-    pub fn operations(&self) -> &RepoHandle {
-        &self.operations
-    }
-
-    pub fn graph(&self) -> &RepoHandle {
-        &self.graph
-    }
-}
-
-thread_local! {
-pub static WORKSPACE: LazyLock<RwLock<Workspace>> =
-    LazyLock::new(|| RwLock::new(Workspace::from_current_dir()));
-}
-
 fn ensure_dir(path: &Path) {
     if !path.is_dir() {
         fs::create_dir_all(path).unwrap();
     }
 }
 
-pub fn set_base_dir(d: &Path) {
-    WORKSPACE
-        .try_with(|v| {
-            let mut w = v.write().unwrap();
-            *w = Workspace::new(d)
-        })
-        .unwrap();
-}
-
-pub fn get_base_dir() -> PathBuf {
-    WORKSPACE.with(|v| v.read().unwrap().base_dir.clone())
-}
-
-pub fn get_or_create_gen_dir() -> PathBuf {
-    WORKSPACE.with(|v| v.read().unwrap().ensure_gen_dir())
-}
-
-pub fn get_gen_dir() -> Option<String> {
-    WORKSPACE
-        .with(|v| v.read().unwrap().find_gen_dir())
-        .and_then(|p| p.to_str().map(|p| p.to_string()))
-}
-
-pub fn get_repo_root_path() -> Result<PathBuf, ConfigError> {
-    WORKSPACE.with(|v| v.read().unwrap().repo_root())
-}
-
-pub fn get_gen_db_path() -> Result<PathBuf, ConfigError> {
-    WORKSPACE.with(|v| v.read().unwrap().gen_db_path())
-}
-
-pub fn get_changeset_path(hash: &HashId) -> PathBuf {
-    WORKSPACE.with(|v| v.read().unwrap().changeset_path(hash))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::tempdir;
 
     use super::*;
 
     #[test]
-    fn test_finds_gen_dir() {
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        get_or_create_gen_dir();
-        assert!(get_gen_dir().is_some());
+    fn ensure_gen_dir_creates_directory() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+
+        let gen_dir = workspace.ensure_gen_dir();
+
+        assert_eq!(gen_dir, tmp_dir_path.join(".gen"));
+        assert!(gen_dir.is_dir());
     }
 
     #[test]
-    fn test_set_base_dir() {
-        let old_dir = get_base_dir();
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        assert_eq!(tmp_dir, get_base_dir());
-        assert_ne!(get_base_dir(), old_dir);
+    fn find_gen_dir_walks_up_tree() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let root_workspace = Workspace::new(&tmp_dir_path);
+        let gen_dir = root_workspace.ensure_gen_dir();
+
+        let nested_dir = tmp_dir_path.join("nested").join("deep");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let nested_workspace = Workspace::new(&nested_dir);
+
+        assert_eq!(nested_workspace.find_gen_dir(), Some(gen_dir));
     }
 
     #[test]
-    fn test_get_repo_root_path() {
-        let gen_dir = setup_gen_environment();
-        let expected_root = gen_dir.parent().unwrap().to_path_buf();
-        assert_eq!(get_repo_root_path().unwrap(), expected_root);
+    fn repo_root_returns_parent_of_gen_dir() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+        workspace.ensure_gen_dir();
+
+        assert_eq!(workspace.repo_root().unwrap(), tmp_dir_path);
     }
 
     #[test]
-    fn test_get_repo_root_path_missing_gen_dir() {
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        assert_eq!(Err(ConfigError::GenDirectoryNotFound), get_repo_root_path());
+    fn repo_root_errors_when_missing_gen_dir() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+
+        assert_eq!(
+            Err(ConfigError::GenDirectoryNotFound),
+            workspace.repo_root()
+        );
     }
 
-    fn setup_gen_environment() -> PathBuf {
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        get_or_create_gen_dir()
+    #[test]
+    fn gen_db_path_resolves_inside_gen_dir() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+        let gen_dir = workspace.ensure_gen_dir();
+
+        assert_eq!(workspace.gen_db_path().unwrap(), gen_dir.join("gen.db"));
+    }
+
+    #[test]
+    fn changeset_path_creates_directory_for_hash() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+        let hash = HashId([0; 32]);
+
+        let path = workspace.changeset_path(&hash);
+
+        assert_eq!(
+            path,
+            tmp_dir_path
+                .join(".gen")
+                .join("changeset")
+                .join(format!("{hash}"))
+        );
+        assert!(path.is_dir());
     }
 }

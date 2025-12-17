@@ -5,7 +5,7 @@ use rusqlite::{Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{db::OperationsDb, gen_models_capnp::gen_database, traits::*};
+use crate::{db::OperationsConnection, gen_models_capnp::gen_database, traits::*};
 
 #[derive(Debug, Error)]
 pub enum GenDatabaseError {
@@ -60,7 +60,7 @@ impl Query for GenDatabase {
 
 impl GenDatabase {
     pub fn create(
-        conn: &impl OperationsDb,
+        conn: &OperationsConnection,
         db_uuid: &str,
         name: &str,
         path: &str,
@@ -76,7 +76,7 @@ impl GenDatabase {
         })
     }
 
-    pub fn delete_by_uuid(conn: &impl OperationsDb, db_uuid: &str) -> SQLResult<GenDatabase> {
+    pub fn delete_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn.operations_conn(),
             "DELETE FROM gen_databases WHERE db_uuid = ?1",
@@ -84,7 +84,7 @@ impl GenDatabase {
         )
     }
 
-    pub fn get_by_uuid(conn: &impl OperationsDb, db_uuid: &str) -> SQLResult<GenDatabase> {
+    pub fn get_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn.operations_conn(),
             "SELECT * FROM gen_databases WHERE db_uuid = ?1",
@@ -92,7 +92,7 @@ impl GenDatabase {
         )
     }
 
-    pub fn get_by_path(conn: &impl OperationsDb, path: &str) -> SQLResult<GenDatabase> {
+    pub fn get_by_path(conn: &OperationsConnection, path: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn.operations_conn(),
             "SELECT * FROM gen_databases WHERE path = ?1",
@@ -101,7 +101,7 @@ impl GenDatabase {
     }
 
     pub fn get_or_create(
-        conn: &impl OperationsDb,
+        conn: &OperationsConnection,
         db_uuid: &str,
         name: &str,
         path: &str,
@@ -130,7 +130,7 @@ impl GenDatabase {
     }
 
     pub fn query_by_operations(
-        conn: &impl OperationsDb,
+        conn: &OperationsConnection,
         operations: &[HashId],
     ) -> Result<HashMap<HashId, Vec<GenDatabase>>, GenDatabaseError> {
         let conn = conn.operations_conn();
@@ -159,10 +159,9 @@ impl GenDatabase {
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
-    use gen_core::config::{DbContext, Workspace};
 
     use super::*;
-    use crate::test_helpers::{get_connection, get_operation_connection};
+    use crate::test_helpers::{get_operation_connection, setup_gen};
 
     #[test]
     fn test_gen_database_capnp_serialization() {
@@ -295,11 +294,10 @@ mod tests {
 
     #[test]
     fn test_create_with_db_context() {
-        let graph_conn = get_connection(None).unwrap();
-        let op_conn = get_operation_connection(None).unwrap();
-        let ctx = DbContext::new(Workspace::from_current_dir(), graph_conn, op_conn);
+        let ctx = setup_gen();
+        let op_conn = ctx.operations().conn();
 
-        let db = GenDatabase::create(&ctx, "ctx-uuid", "ctx_db", "path/to/ctx.db").unwrap();
+        let db = GenDatabase::create(op_conn, "ctx-uuid", "ctx_db", "path/to/ctx.db").unwrap();
 
         assert_eq!(db.db_uuid, "ctx-uuid");
         assert_eq!(db.name, "ctx_db");

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node, is_terminal};
 use gen_graph::{GenGraph, GraphNode, project_path};
-use gen_models::{node::Node, path::Path, sequence::Sequence};
+use gen_models::{db::GraphConnection, node::Node, path::Path, sequence::Sequence};
 use log::{info, warn};
 use petgraph::{Direction, graphmap::DiGraphMap};
 use ratatui::{
@@ -16,7 +16,6 @@ use ratatui::{
         canvas::{Canvas, Line, Points},
     },
 };
-use rusqlite::Connection;
 
 use crate::{
     config::get_theme_color,
@@ -255,7 +254,7 @@ impl Default for State {
 
 pub struct Viewer<'a> {
     pub block_graph: &'a GenGraph,
-    pub conn: &'a Connection,
+    pub conn: &'a GraphConnection,
     pub base_layout: BaseLayout,
     pub scaled_layout: ScaledLayout,
     pub node_sequences: HashMap<HashId, Sequence>,
@@ -270,7 +269,7 @@ pub struct Viewer<'a> {
 impl<'a> Viewer<'a> {
     pub fn new(
         block_graph: &'a GenGraph,
-        conn: &'a Connection,
+        conn: &'a GraphConnection,
         plot_parameters: PlotParameters,
     ) -> Viewer<'a> {
         let mut new_viewer = Self::with_origin(
@@ -293,7 +292,7 @@ impl<'a> Viewer<'a> {
 
     pub fn with_origin(
         block_graph: &'a GenGraph,
-        conn: &'a Connection,
+        conn: &'a GraphConnection,
         plot_parameters: PlotParameters,
         origin: (Node, i64),
     ) -> Viewer<'a> {

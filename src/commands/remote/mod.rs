@@ -1,7 +1,9 @@
 use clap::Subcommand;
-use gen_models::operations::{Defaults, Remote};
+use gen_models::{
+    db::OperationsConnection,
+    operations::{Defaults, Remote},
+};
 use reqwest::{blocking::Client, redirect::Policy};
-use rusqlite::Connection;
 
 pub mod server;
 pub mod utils;
@@ -38,7 +40,7 @@ pub enum RemoteCommand {
 
 /// Handle remote management commands with comprehensive error handling
 pub fn handle_remote_command(
-    conn: &Connection,
+    conn: &OperationsConnection,
     command: &RemoteCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
@@ -174,7 +176,7 @@ pub fn handle_remote_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{get_operation_connection, setup_gen_dir};
+    use crate::test_helpers::setup_gen;
 
     #[cfg(test)]
     mod remote {
@@ -182,8 +184,8 @@ mod tests {
 
         #[test]
         fn test_remote_add_command() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Test successful add
             let cmd = RemoteCommand::Add {
@@ -207,8 +209,8 @@ mod tests {
 
         #[test]
         fn test_remote_add_validation_errors() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Test invalid name
             let cmd_invalid_name = RemoteCommand::Add {
@@ -241,8 +243,8 @@ mod tests {
 
         #[test]
         fn test_remote_list_command() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Test list with no remotes
             let cmd_list = RemoteCommand::List;
@@ -258,8 +260,8 @@ mod tests {
 
         #[test]
         fn test_remote_remove_command() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Add a remote first
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -282,8 +284,8 @@ mod tests {
 
         #[test]
         fn test_remote_remove_clears_default() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Add a remote and set it as default
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -307,8 +309,8 @@ mod tests {
 
         #[test]
         fn test_remote_set_default_command() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Add a remote first
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -334,8 +336,8 @@ mod tests {
 
         #[test]
         fn test_remote_get_default_command() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Test get default when none is set
             let cmd_get_default = RemoteCommand::GetDefault;

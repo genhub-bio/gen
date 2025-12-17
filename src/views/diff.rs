@@ -5,7 +5,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_models::traits::Query;
+use gen_models::{db::GraphConnection, traits::Query};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -14,7 +14,6 @@ use ratatui::{
     text::Text,
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
-use rusqlite::Connection;
 
 use crate::{
     core::HashId,
@@ -78,7 +77,7 @@ fn split_connected_components(graph: &gen_graph::GenGraph) -> Vec<gen_graph::Gen
     components
 }
 
-fn choose_origin(conn: &Connection, graph: &gen_graph::GenGraph) -> (Node, i64) {
+fn choose_origin(conn: &GraphConnection, graph: &gen_graph::GenGraph) -> (Node, i64) {
     if let Some(start_block) = graph
         .nodes()
         .find(|n| n.node_id == gen_core::PATH_START_NODE_ID)
@@ -103,7 +102,7 @@ fn choose_origin(conn: &Connection, graph: &gen_graph::GenGraph) -> (Node, i64) 
 }
 
 fn make_viewer<'a>(
-    conn: &'a Connection,
+    conn: &'a GraphConnection,
     graph: &'a gen_graph::GenGraph,
     params: PlotParameters,
 ) -> Viewer<'a> {
@@ -127,7 +126,7 @@ fn block_group_label(diff: &BlockGroupDiff) -> String {
     }
 }
 
-pub fn view_diff(conn: &Connection, graphs: &[BlockGroupDiff]) -> Result<(), io::Error> {
+pub fn view_diff(conn: &GraphConnection, graphs: &[BlockGroupDiff]) -> Result<(), io::Error> {
     let mut components: Vec<DiffComponent> = vec![];
     for diff in graphs {
         let parts = split_connected_components(&diff.graph);

@@ -7,10 +7,9 @@ use std::{
     str,
 };
 
-use gen_core::{HashId, Strand, is_terminal, traits::Capnp};
+use gen_core::{HashId, Strand, config::Workspace, is_terminal, traits::Capnp};
 use itertools::Itertools;
 use rusqlite::{
-    Connection,
     session::{ChangesetItem, ChangesetIter},
     types::FromSql,
 };
@@ -21,6 +20,7 @@ use crate::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::GraphConnection,
     edge::{Edge, EdgeData},
     errors::ChangesetError,
     gen_models_capnp::{changeset_models, database_changeset},
@@ -347,7 +347,7 @@ pub fn parse_maybe_number(item: &ChangesetItem, col: usize) -> Option<i64> {
 }
 
 pub fn process_changesetiter(
-    conn: &Connection,
+    conn: &GraphConnection,
     mut changes: &[u8],
 ) -> (ChangesetModels, DependencyModels) {
     use fallible_streaming_iterator::FallibleStreamingIterator;
@@ -679,7 +679,7 @@ pub fn process_changesetiter(
 }
 
 pub fn apply_changeset(
-    conn: &Connection,
+    conn: &GraphConnection,
     changeset: &ChangesetModels,
     dependencies: &DependencyModels,
 ) -> Result<(), ChangesetError> {
@@ -818,7 +818,7 @@ pub fn apply_changeset(
 }
 
 pub fn revert_changeset(
-    conn: &Connection,
+    conn: &GraphConnection,
     changeset: &ChangesetModels,
 ) -> Result<(), ChangesetError> {
     AccessionPath::delete_by_ids(
@@ -914,7 +914,6 @@ pub fn revert_changeset(
 
 pub fn get_changeset_from_path(path: PathBuf) -> DatabaseChangeset {
     use capnp::serialize_packed;
-
     let file = fs::File::open(path).unwrap();
     let mut reader = std::io::BufReader::new(file);
 
@@ -940,14 +939,15 @@ pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
 }
 
 pub fn write_changeset(
+    workspace: &Workspace,
     operation: &Operation,
     changes: DatabaseChangeset,
     dependencies: &DependencyModels,
 ) {
     use capnp::{message::Builder, serialize_packed};
 
-    let change_path = operation.get_changeset_path();
-    let dependency_path = operation.get_changeset_dependencies_path();
+    let change_path = operation.get_changeset_path(workspace);
+    let dependency_path = operation.get_changeset_dependencies_path(workspace);
 
     // Write dependencies using capnp
     let mut dependency_file = fs::File::create_new(&dependency_path)
@@ -975,9 +975,7 @@ mod tests {
         file_types::FileTypes,
         operations::{OperationFile, OperationInfo},
         session_operations::{end_operation, start_operation},
-        test_helpers::{
-            get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
-        },
+        test_helpers::{setup_block_group, setup_gen},
         traits::Query,
     };
 
@@ -1227,9 +1225,9 @@ mod tests {
 
         #[test]
         fn test_tracks_nodes_and_sequences_from_previous_block_group_edges() {
-            setup_gen_dir();
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             let db_uuid = crate::metadata::get_db_uuid(conn);
             crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")
@@ -1253,8 +1251,7 @@ mod tests {
                 }],
             );
             let operation = end_operation(
-                conn,
-                op_conn,
+                &context,
                 &mut session,
                 &OperationInfo {
                     files: vec![],
@@ -1265,7 +1262,7 @@ mod tests {
             )
             .unwrap();
 
-            let dependencies = operation.get_changeset_dependencies();
+            let dependencies = operation.get_changeset_dependencies(context.workspace());
             assert_eq!(dependencies.nodes[0].id, shared_edge.target_node_id);
             assert_eq!(dependencies.nodes.len(), 1);
             let nodes = Node::query_by_ids(conn, &[shared_edge.target_node_id]);
@@ -1275,9 +1272,9 @@ mod tests {
 
         #[test]
         fn test_records_patch_dependencies() {
-            setup_gen_dir();
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             let db_uuid = crate::metadata::get_db_uuid(conn);
             crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")
@@ -1319,8 +1316,7 @@ mod tests {
             };
             BlockGroupEdge::bulk_create(conn, &[block_group_edge]);
             let operation = end_operation(
-                conn,
-                op_conn,
+                &context,
                 &mut session,
                 &OperationInfo {
                     files: vec![OperationFile {
@@ -1334,7 +1330,7 @@ mod tests {
             )
             .unwrap();
 
-            let dependencies = operation.get_changeset_dependencies();
+            let dependencies = operation.get_changeset_dependencies(context.workspace());
             assert_eq!(dependencies.sequences.len(), 1);
             assert_eq!(
                 dependencies.block_group[0].collection_name,

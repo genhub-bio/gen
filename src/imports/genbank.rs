@@ -6,6 +6,7 @@ use gen_models::{
     block_group::{BlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::DbContext,
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
@@ -14,7 +15,6 @@ use gen_models::{
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
 };
-use rusqlite::Connection;
 
 use crate::{
     genbank::{EditType, GenBankError, process_sequence},
@@ -22,8 +22,7 @@ use crate::{
 };
 
 pub fn import_genbank<'a, R>(
-    conn: &Connection,
-    op_conn: &Connection,
+    context: &DbContext,
     data: R,
     collection: impl Into<Option<&'a str>>,
     sample: impl Into<Option<&'a str>>,
@@ -32,6 +31,7 @@ pub fn import_genbank<'a, R>(
 where
     R: Read,
 {
+    let conn = context.graph().conn();
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
     let reader = reader::SeqReader::new(data);
@@ -187,8 +187,7 @@ where
     bar.finish();
     let bar = add_saving_operation_bar(&progress_bar);
     let op = end_operation(
-        conn,
-        op_conn,
+        context,
         &mut session,
         &operation_info,
         &format!(
@@ -215,10 +214,7 @@ mod tests {
     use noodles::fasta;
 
     use super::*;
-    use crate::{
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{test_helpers::setup_gen, track_database};
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -232,16 +228,15 @@ mod tests {
 
     #[test]
     fn test_error_on_invalid_file() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         assert_eq!(
             import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new("this is not valid".as_bytes()),
                 None,
                 None,
@@ -262,9 +257,9 @@ mod tests {
 
     #[test]
     fn test_records_operation() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -272,8 +267,7 @@ mod tests {
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
         let operation = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             None,
@@ -294,9 +288,9 @@ mod tests {
 
     #[test]
     fn test_creates_sample() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -304,8 +298,7 @@ mod tests {
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
         let _ = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             "new-sample",
@@ -330,10 +323,10 @@ mod tests {
 
         #[test]
         fn test_parses_insertion() {
-            setup_gen_dir();
             // this file has an insertion from 1426-2220
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
 
@@ -341,8 +334,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,
@@ -369,10 +361,10 @@ mod tests {
 
         #[test]
         fn test_parses_deletion() {
-            setup_gen_dir();
             // this file has a deletion from 765-766
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
 
@@ -380,8 +372,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/deletion.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,
@@ -426,9 +417,9 @@ mod tests {
 
         #[test]
         fn test_parses_deletion_and_insertion() {
-            setup_gen_dir();
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
 
@@ -436,8 +427,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,
@@ -486,11 +476,11 @@ mod tests {
 
         #[test]
         fn test_parses_substitution() {
-            setup_gen_dir();
             // replacing a sequence ends up with the same result as doing a compound delete + insert
             // in the above test.
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
 
@@ -498,8 +488,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/substitution.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,
@@ -548,9 +537,9 @@ mod tests {
 
         #[test]
         fn test_parses_multiple_changes() {
-            setup_gen_dir();
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
 
@@ -558,8 +547,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,

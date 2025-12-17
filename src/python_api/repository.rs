@@ -33,7 +33,7 @@ impl PyRepository {
     // while still ensuring proper connection management
     pub fn with_connection<F, T>(&self, op: F) -> T
     where
-        F: FnOnce(&Connection) -> T,
+        F: FnOnce(&GraphConnection) -> T,
     {
         let mut conn_guard = self.conn.lock().unwrap();
         if conn_guard.is_none() {
@@ -281,7 +281,7 @@ mod python_tests {
                 r#"
                 # Create a repository in the present working directory
                 repo = repository()
-                
+
                 # Test that the repository was created successfully
                 assert hasattr(repo, "gen_dir")
                 assert hasattr(repo, "db_path")

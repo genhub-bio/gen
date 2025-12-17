@@ -3,30 +3,31 @@ use std::collections::{HashMap, HashSet};
 use gen_core::{
     HashId,
     Strand::{self, Forward},
+    config::Workspace,
     is_end_node, is_start_node, is_terminal,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{
-    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, edge::Edge,
-    errors::OperationError, node::Node, operations::Operation, sequence::Sequence,
+    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, db::OperationsConnection,
+    edge::Edge, errors::OperationError, node::Node, operations::Operation, sequence::Sequence,
     session_operations::DependencyModels, traits::Query,
 };
 use html_escape;
 use itertools::Itertools;
 use petgraph::{Direction, graphmap::DiGraphMap};
-use rusqlite::Connection;
 
 use crate::patch::OperationPatch;
 
 pub fn get_change_graph_from_hash(
-    conn: &Connection,
+    conn: &OperationsConnection,
     hash: &HashId,
 ) -> Result<HashMap<HashId, GenGraph>, OperationError> {
     let operation =
         Operation::get_by_id(conn, hash).ok_or(OperationError::NoOperation(format!("{hash}")))?;
 
-    let changeset = operation.get_changeset();
-    let dependencies = operation.get_changeset_dependencies();
+    let workspace = Workspace::from_current_dir();
+    let changeset = operation.get_changeset(&workspace);
+    let dependencies = operation.get_changeset_dependencies(&workspace);
 
     Ok(get_change_graph(&changeset.changes, &dependencies))
 }
@@ -35,7 +36,6 @@ pub fn get_change_graph(
     changes: &ChangesetModels,
     dependencies: &DependencyModels,
 ) -> HashMap<HashId, GenGraph> {
-    dbg!(changes, dependencies);
     let start_node = Node::get_start_node();
     let end_node = Node::get_end_node();
     let mut bges_by_bg: HashMap<HashId, Vec<&BlockGroupEdge>> = HashMap::new();
@@ -197,7 +197,10 @@ pub fn get_change_graph(
     block_graphs
 }
 
-pub fn view_patches(patches: &[OperationPatch]) -> HashMap<HashId, HashMap<HashId, String>> {
+pub fn view_patches(
+    workspace: &Workspace,
+    patches: &[OperationPatch],
+) -> HashMap<HashId, HashMap<HashId, String>> {
     // For each blockgroup in a patch, a .dot file is generated showing how the base sequence
     // has been updated.
     let mut diagrams: HashMap<HashId, HashMap<HashId, String>> = HashMap::new();
@@ -208,8 +211,8 @@ pub fn view_patches(patches: &[OperationPatch]) -> HashMap<HashId, HashMap<HashI
         let mut bg_dots: HashMap<HashId, String> = HashMap::new();
 
         let op_info = &patch.operation;
-        let changeset = op_info.get_changeset();
-        let dependencies = op_info.get_changeset_dependencies();
+        let changeset = op_info.get_changeset(workspace);
+        let dependencies = op_info.get_changeset_dependencies(workspace);
 
         let block_graphs = get_change_graph(&changeset.changes, &dependencies);
 

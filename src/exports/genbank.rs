@@ -4,7 +4,7 @@ use std::{collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, 
 use gb_io::{self, QualifierKey, seq::Location};
 use gen_core::{is_terminal, path::PathBlock};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
-use gen_models::{block_group::BlockGroup, node::Node, sample::Sample};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, sample::Sample};
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};
 use rusqlite::{self, Connection};
@@ -119,7 +119,7 @@ fn get_path_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode>
 }
 
 pub fn export_genbank(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     sample_name: Option<&str>,
     filename: &PathBuf,
@@ -313,11 +313,7 @@ mod tests {
     use tempfile;
 
     use super::*;
-    use crate::{
-        imports::genbank::import_genbank,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{imports::genbank::import_genbank, test_helpers::setup_gen, track_database};
 
     fn compare_genbanks(a: &PathBuf, b: &PathBuf) {
         let a = reader::parse_file(a).unwrap();
@@ -374,10 +370,9 @@ mod tests {
 
     #[test]
     fn test_import_then_export_insertion() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -385,8 +380,7 @@ mod tests {
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
         let operation = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             None,
@@ -407,10 +401,9 @@ mod tests {
 
     #[test]
     fn test_import_then_export_replacement() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -418,8 +411,7 @@ mod tests {
             .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
         let file = File::open(&path).unwrap();
         let operation = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             None,
@@ -440,10 +432,9 @@ mod tests {
 
     #[test]
     fn test_import_then_export_multiple_operations() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -451,8 +442,7 @@ mod tests {
             .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
         let file = File::open(&path).unwrap();
         let operation = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             None,

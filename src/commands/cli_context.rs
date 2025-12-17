@@ -1,12 +1,5 @@
-use crate::commands::Cli;
+use gen_models::db::DbContext;
 
-#[derive(Debug)]
-pub struct CliContext {
-    pub db: Option<String>,
-}
-
-impl<'a> From<&'a Cli> for CliContext {
-    fn from(cli: &'a Cli) -> Self {
-        CliContext { db: cli.db.clone() }
-    }
+pub struct CliContext<'a> {
+    pub context: &'a DbContext,
 }

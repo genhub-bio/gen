@@ -1,7 +1,7 @@
 use gen_core::traits::Capnp;
 use rusqlite::Row;
 
-use crate::{db::GraphDb, gen_models_capnp::metadata, traits::*};
+use crate::{db::GraphConnection, gen_models_capnp::metadata, traits::*};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Metadata {
@@ -35,7 +35,7 @@ impl Query for Metadata {
 }
 
 impl Metadata {
-    pub fn get_db_uuid(conn: &impl GraphDb) -> String {
+    pub fn get_db_uuid(conn: &GraphConnection) -> String {
         let metadata = Metadata::get(
             conn.graph_conn(),
             "SELECT db_uuid FROM gen_metadata LIMIT 1",
@@ -45,13 +45,13 @@ impl Metadata {
         metadata.db_uuid
     }
 
-    pub fn get_all(conn: &impl GraphDb) -> Vec<Metadata> {
+    pub fn get_all(conn: &GraphConnection) -> Vec<Metadata> {
         Metadata::query(conn.graph_conn(), "SELECT db_uuid FROM gen_metadata", [])
     }
 }
 
 // Keep the old function for backwards compatibility
-pub fn get_db_uuid(conn: &impl GraphDb) -> String {
+pub fn get_db_uuid(conn: &GraphConnection) -> String {
     Metadata::get_db_uuid(conn)
 }
 
@@ -59,10 +59,9 @@ pub fn get_db_uuid(conn: &impl GraphDb) -> String {
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use capnp::message::TypedBuilder;
-    use gen_core::config::{DbContext, Workspace};
 
     use super::*;
-    use crate::test_helpers::{get_connection, get_operation_connection};
+    use crate::test_helpers::{get_connection, setup_gen};
 
     #[test]
     fn test_metadata_capnp_serialization() {
@@ -86,11 +85,10 @@ mod tests {
 
     #[test]
     fn test_sets_uuid_with_db_context() {
-        let graph_conn = get_connection(None).unwrap();
-        let op_conn = get_operation_connection(None).unwrap();
-        let ctx = DbContext::new(Workspace::from_current_dir(), graph_conn, op_conn);
+        let ctx = setup_gen();
+        let conn = ctx.graph().conn();
 
-        assert!(!get_db_uuid(&ctx).is_empty());
+        assert!(!get_db_uuid(conn).is_empty());
     }
 
     #[test]

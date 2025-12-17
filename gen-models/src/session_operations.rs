@@ -10,7 +10,7 @@ use crate::{
     block_group::BlockGroup,
     changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
     collection::Collection,
-    db::{GraphDb, OperationsDb},
+    db::{DbContext, GraphConnection},
     edge::Edge,
     errors::OperationError,
     files::GenDatabase,
@@ -23,7 +23,7 @@ use crate::{
     sequence::Sequence,
 };
 
-pub fn start_operation(conn: &impl GraphDb) -> session::Session<'_> {
+pub fn start_operation(conn: &GraphConnection) -> session::Session<'_> {
     let mut session = session::Session::new(conn.graph_conn()).unwrap();
     attach_session(&mut session);
     session
@@ -31,15 +31,14 @@ pub fn start_operation(conn: &impl GraphDb) -> session::Session<'_> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn end_operation(
-    conn: &impl GraphDb,
-    operation_conn: &impl OperationsDb,
+    context: &DbContext,
     session: &mut session::Session,
     operation_info: &OperationInfo,
     summary_str: &str,
     force_hash: impl Into<Option<HashId>>,
 ) -> Result<Operation, OperationError> {
-    let conn = conn.graph_conn();
-    let operation_conn = operation_conn.operations_conn();
+    let conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
     let db_uuid = metadata::get_db_uuid(conn);
     // determine if this operation has already happened
     let mut output = Vec::new();
@@ -67,6 +66,7 @@ pub fn end_operation(
         Ok(operation) => {
             for op_file in operation_info.files.iter() {
                 let fa = match FileAddition::get_or_create(
+                    context.workspace(),
                     operation_conn,
                     &op_file.file_path,
                     op_file.file_type,
@@ -83,6 +83,7 @@ pub fn end_operation(
             let db_uuid = get_db_uuid(conn);
             let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid).unwrap();
             write_changeset(
+                context.workspace(),
                 &operation,
                 DatabaseChangeset {
                     db_path: gen_db.path,

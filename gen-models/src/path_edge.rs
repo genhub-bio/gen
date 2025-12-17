@@ -5,7 +5,9 @@ use itertools::Itertools;
 use rusqlite::{self, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 
-use crate::{db::GraphDb, edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*};
+use crate::{
+    db::GraphConnection, edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*,
+};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct PathEdge {
@@ -76,7 +78,7 @@ impl Query for PathEdge {
 
 impl PathEdge {
     pub fn create(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         path_id: &HashId,
         index_in_path: i64,
         edge_id: HashId,
@@ -107,7 +109,7 @@ impl PathEdge {
         }
     }
 
-    pub fn bulk_create(conn: &impl GraphDb, path_id: &HashId, edge_ids: &[HashId]) {
+    pub fn bulk_create(conn: &GraphConnection, path_id: &HashId, edge_ids: &[HashId]) {
         let conn = conn.graph_conn();
         let batch_size = max_rows_per_batch(conn, 4);
 
@@ -134,13 +136,13 @@ impl PathEdge {
         }
     }
 
-    pub fn delete(conn: &impl GraphDb, path_id: &HashId) {
+    pub fn delete(conn: &GraphConnection, path_id: &HashId) {
         let conn = conn.graph_conn();
         let statement = "DELETE from path_edges WHERE path_id = ?1;";
         conn.execute(statement, params![path_id]).unwrap();
     }
 
-    pub fn edges_for_path(conn: &impl GraphDb, path_id: &HashId) -> Vec<Edge> {
+    pub fn edges_for_path(conn: &GraphConnection, path_id: &HashId) -> Vec<Edge> {
         let conn = conn.graph_conn();
         let path_edges = PathEdge::query(
             conn,
@@ -163,7 +165,7 @@ impl PathEdge {
     }
 
     pub fn edges_for_paths(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         path_ids: Vec<HashId>,
     ) -> HashMap<HashId, Vec<Edge>> {
         let conn = conn.graph_conn();

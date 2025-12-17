@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     block_group_edge::AugmentedEdge,
-    db::GraphDb,
+    db::GraphConnection,
     gen_models_capnp::edge,
     node::Node,
     sequence::{Sequence, cached_sequence},
@@ -194,7 +194,7 @@ impl Query for Edge {
 impl Edge {
     #[allow(clippy::too_many_arguments)]
     pub fn create(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         source_node_id: HashId,
         source_coordinate: i64,
         source_strand: Strand,
@@ -238,7 +238,7 @@ impl Edge {
         }
     }
 
-    pub fn bulk_create(conn: &impl GraphDb, edges: &[EdgeData]) -> Vec<HashId> {
+    pub fn bulk_create(conn: &GraphConnection, edges: &[EdgeData]) -> Vec<HashId> {
         let conn = conn.graph_conn();
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let query = Edge::query_by_ids(conn, &edge_ids);
@@ -309,7 +309,7 @@ impl Edge {
             .collect::<Vec<i64>>()
     }
 
-    pub fn blocks_from_edges(conn: &impl GraphDb, edges: &[AugmentedEdge]) -> Vec<GroupBlock> {
+    pub fn blocks_from_edges(conn: &GraphConnection, edges: &[AugmentedEdge]) -> Vec<GroupBlock> {
         let conn = conn.graph_conn();
         let mut node_ids = IndexSet::new();
         let mut edges_by_source_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();

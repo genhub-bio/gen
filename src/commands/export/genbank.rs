@@ -4,9 +4,8 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::{
-    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
+    commands::{cli_context::CliContext, get_default_collection},
     exports::genbank::export_genbank,
-    get_connection, get_operation_connection,
 };
 
 /// Export a GenBank file
@@ -25,9 +24,9 @@ pub struct Command {
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA export called");
-    let operation_conn = get_operation_connection(None)?;
-    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db)?;
+    let context = cli_context.context;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
 
     // initialize the selected database if needed.
 
@@ -37,9 +36,9 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(&operation_conn));
+        .unwrap_or_else(|| get_default_collection(operation_conn));
     export_genbank(
-        &conn,
+        conn,
         name,
         cmd.sample.clone().as_deref(),
         &PathBuf::from(cmd.path),

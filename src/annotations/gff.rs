@@ -2,14 +2,14 @@ use std::{collections::HashMap, fs::File, io, io::BufReader};
 
 use gen_models::{
     block_group::BlockGroup,
+    db::GraphConnection,
     path::{Annotation, Path},
     sample::Sample,
 };
 use noodles::{core::Position, gff};
-use rusqlite::Connection;
 
 pub fn propagate_gff(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     from_sample_name: Option<&str>,
     to_sample_name: &str,
@@ -98,39 +98,35 @@ mod tests {
 
     use super::*;
     use crate::{
-        imports::fasta::import_fasta,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
+        imports::fasta::import_fasta, test_helpers::setup_gen, track_database,
         updates::fasta::update_with_fasta,
     };
 
     #[test]
     fn test_simple_propagate() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aa.fa");
         let mut gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gff_path.push("fixtures/simple.gff");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             "test",
             None,
             "child sample",

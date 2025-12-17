@@ -12,6 +12,7 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    db::DbContext,
     edge::{Edge, EdgeData},
     errors::OperationError,
     file_types::FileTypes,
@@ -22,7 +23,7 @@ use gen_models::{
     traits::*,
 };
 use regex::Regex;
-use rusqlite::{Connection, params, types::Value};
+use rusqlite::{params, types::Value};
 use thiserror::Error;
 
 use crate::read_lines;
@@ -86,8 +87,7 @@ where
 }
 
 pub fn update_with_gaf<'a, P>(
-    conn: &Connection,
-    op_conn: &Connection,
+    context: &DbContext,
     gaf_path: P,
     csv_path: P,
     collection_name: &'a str,
@@ -99,6 +99,7 @@ where
 {
     // Given a gaf, this will incorporate the alignment into the specified graph, creating new nodes.
 
+    let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
     let parent_sample = parent_sample.into();
@@ -393,8 +394,7 @@ where
     }
 
     gen_models::session_operations::end_operation(
-        conn,
-        op_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -420,11 +420,7 @@ mod tests {
     use petgraph::Direction;
 
     use super::*;
-    use crate::{
-        imports::gfa::import_gfa,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{imports::gfa::import_gfa, test_helpers::setup_gen, track_database};
 
     mod test_transform {
         use super::*;
@@ -494,9 +490,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_insertion_from_gaf() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -505,9 +501,9 @@ mod tests {
         let gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gfa");
         let csv_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_insert.csv");
 
-        let _ = import_gfa(&gfa_path, &collection, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection, None);
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
-        update_with_gaf(conn, op_conn, gaf_path, csv_path, "test", "child", None).unwrap();
+        update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
         let graph = Sample::get_graph(conn, "test", "child");
 
         let query = Node::query(
@@ -562,9 +558,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_insertion_from_gaf_extremes() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -573,9 +569,9 @@ mod tests {
         let gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gfa");
         let csv_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_insert.csv");
 
-        let _ = import_gfa(&gfa_path, &collection, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection, None);
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
-        update_with_gaf(conn, op_conn, gaf_path, csv_path, "test", "child", None).unwrap();
+        update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
         let graph = Sample::get_graph(conn, "test", "child");
 
         // we should end up with a new edge putting our insert to the beginning of the graph, which is node 3.

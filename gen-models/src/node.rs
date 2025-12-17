@@ -4,7 +4,7 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, calculate_hash, tra
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{db::GraphDb, gen_models_capnp::node, sequence::Sequence, traits::*};
+use crate::{db::GraphConnection, gen_models_capnp::node, sequence::Sequence, traits::*};
 
 #[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
 pub struct Node {
@@ -55,7 +55,7 @@ impl Query for Node {
 }
 
 impl Node {
-    pub fn create(conn: &impl GraphDb, sequence_hash: &HashId, node_hash: &HashId) -> HashId {
+    pub fn create(conn: &GraphConnection, sequence_hash: &HashId, node_hash: &HashId) -> HashId {
         let conn = conn.graph_conn();
         let insert_statement = "INSERT INTO nodes (id, sequence_hash) VALUES (?1, ?2);";
         let mut stmt = conn.prepare_cached(insert_statement).unwrap();
@@ -75,7 +75,7 @@ impl Node {
     }
 
     pub fn get_sequences_by_node_ids(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         node_ids: &[HashId],
     ) -> HashMap<HashId, Sequence> {
         let conn = conn.graph_conn();

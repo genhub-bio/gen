@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
-    db::GraphDb,
+    db::GraphConnection,
     edge::{Edge, EdgeData, GroupBlock},
     errors::{ChangeError, QueryError},
     gen_models_capnp::block_group,
@@ -106,11 +106,11 @@ pub struct PathChange {
 pub struct PathCache<'a> {
     pub cache: HashMap<PathData, Path>,
     pub intervaltree_cache: HashMap<Path, IntervalTree<i64, NodeIntervalBlock>>,
-    pub conn: &'a dyn GraphDb,
+    pub conn: &'a GraphConnection,
 }
 
 impl<'a> PathCache<'a> {
-    pub fn new(conn: &'a impl GraphDb) -> PathCache<'a> {
+    pub fn new(conn: &'a GraphConnection) -> PathCache<'a> {
         PathCache {
             cache: HashMap::<PathData, Path>::new(),
             intervaltree_cache: HashMap::<Path, IntervalTree<i64, NodeIntervalBlock>>::new(),
@@ -152,7 +152,7 @@ impl<'a> PathCache<'a> {
 
 impl BlockGroup {
     pub fn create(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: Option<&str>,
         name: &str,
@@ -187,7 +187,7 @@ impl BlockGroup {
     }
 
     pub fn delete(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: Option<&str>,
         name: &str,
@@ -210,7 +210,7 @@ impl BlockGroup {
         }
     }
 
-    pub fn get_by_id(conn: &impl GraphDb, id: &HashId) -> BlockGroup {
+    pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> BlockGroup {
         let conn = conn.graph_conn();
         let query = "SELECT * FROM block_groups WHERE id = ?1";
         let mut stmt = conn.prepare(query).unwrap();
@@ -223,7 +223,7 @@ impl BlockGroup {
         }
     }
 
-    pub fn duplicate(&self, conn: &impl GraphDb, target_block_group_id: &HashId) {
+    pub fn duplicate(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
         let conn = conn.graph_conn();
         let existing_paths = Path::query(
             conn,
@@ -291,7 +291,7 @@ impl BlockGroup {
     }
 
     pub fn get_or_create_sample_block_group(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
         group_name: &str,
@@ -352,7 +352,7 @@ impl BlockGroup {
         )))
     }
 
-    pub fn get_graph(conn: &impl GraphDb, block_group_id: &HashId) -> GenGraph {
+    pub fn get_graph(conn: &GraphConnection, block_group_id: &HashId) -> GenGraph {
         let conn = conn.graph_conn();
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
         let blocks = Edge::blocks_from_edges(conn, &edges);
@@ -409,7 +409,7 @@ impl BlockGroup {
     }
 
     pub fn get_all_sequences(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         _prune: bool,
     ) -> HashSet<String> {
@@ -462,7 +462,7 @@ impl BlockGroup {
     }
 
     pub fn add_accession(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         path: &Path,
         name: &str,
         start: i64,
@@ -541,7 +541,7 @@ impl BlockGroup {
     }
 
     pub fn insert_changes(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         changes: &[PathChange],
         cache: &mut PathCache,
         modify_blockgroup: bool,
@@ -629,7 +629,7 @@ impl BlockGroup {
     #[allow(clippy::ptr_arg)]
     #[allow(clippy::needless_late_init)]
     pub fn insert_change(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         change: &PathChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
     ) -> Result<(), ChangeError> {
@@ -875,7 +875,7 @@ impl BlockGroup {
     }
 
     pub fn intervaltree_for(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         remove_ambiguous_positions: bool,
     ) -> IntervalTree<i64, NodeIntervalBlock> {
@@ -885,7 +885,7 @@ impl BlockGroup {
         flatten_to_interval_tree(&graph, remove_ambiguous_positions)
     }
 
-    pub fn get_current_path(conn: &impl GraphDb, block_group_id: &HashId) -> Path {
+    pub fn get_current_path(conn: &GraphConnection, block_group_id: &HashId) -> Path {
         let conn = conn.graph_conn();
         let paths = Path::query(
             conn,
@@ -896,7 +896,7 @@ impl BlockGroup {
     }
 
     pub fn get_path_by_name(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         path_name: &str,
     ) -> Option<Path> {
@@ -918,7 +918,7 @@ impl BlockGroup {
 
     #[allow(clippy::too_many_arguments)]
     pub fn derive_subgraph(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection_name: &str,
         child_sample_name: &str,
         source_block_group_id: &HashId,

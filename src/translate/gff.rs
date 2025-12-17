@@ -6,13 +6,12 @@ use std::{
 
 use gen_core::{HashId, Strand, is_terminal};
 use gen_graph::{GraphNode, connect_all_boundary_edges, project_path};
-use gen_models::{block_group::BlockGroup, sample::Sample};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
 use interavl::IntervalTree;
 use noodles::{core::Position, gff};
-use rusqlite::Connection;
 
 pub fn translate_gff<'a, R, W>(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection: &str,
     sample: impl Into<Option<&'a str>>,
     reader: R,
@@ -92,17 +91,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-        translate::test_helpers::get_simple_sequence,
+        test_helpers::setup_gen, track_database, translate::test_helpers::get_simple_sequence,
         updates::vcf::update_with_vcf,
     };
 
     #[test]
     fn translates_coordinates_to_nodes() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -116,8 +113,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
+            &context,
             None,
         )
         .unwrap();

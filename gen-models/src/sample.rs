@@ -5,7 +5,7 @@ use gen_graph::GenGraph;
 use rusqlite::{Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{block_group::BlockGroup, db::GraphDb, gen_models_capnp::sample, traits::*};
+use crate::{block_group::BlockGroup, db::GraphConnection, gen_models_capnp::sample, traits::*};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
@@ -40,7 +40,7 @@ impl Query for Sample {
 }
 
 impl Sample {
-    pub fn create(conn: &impl GraphDb, name: &str) -> SQLResult<Sample> {
+    pub fn create(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
         let mut stmt = conn
             .graph_conn()
             .prepare("INSERT INTO samples (name) VALUES (?1) returning (name);")
@@ -48,7 +48,7 @@ impl Sample {
         stmt.query_row((name,), |row| Ok(Sample { name: row.get(0)? }))
     }
 
-    pub fn get_or_create(conn: &impl GraphDb, name: &str) -> Sample {
+    pub fn get_or_create(conn: &GraphConnection, name: &str) -> Sample {
         match Sample::create(conn, name) {
             Ok(sample) => sample,
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
@@ -66,7 +66,7 @@ impl Sample {
         }
     }
 
-    pub fn delete_by_name(conn: &impl GraphDb, name: &str) {
+    pub fn delete_by_name(conn: &GraphConnection, name: &str) {
         let mut stmt = conn
             .graph_conn()
             .prepare("delete from samples where name = ?1")
@@ -75,7 +75,7 @@ impl Sample {
     }
 
     pub fn get_graph<'a>(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection: &str,
         name: impl Into<Option<&'a str>>,
     ) -> GenGraph {
@@ -100,7 +100,7 @@ impl Sample {
     }
 
     pub fn get_or_create_child(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
         parent_sample: Option<&str>,
@@ -138,7 +138,7 @@ impl Sample {
     }
 
     pub fn get_block_groups(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: Option<&str>,
     ) -> Vec<BlockGroup> {
@@ -157,7 +157,7 @@ impl Sample {
         }
     }
 
-    pub fn get_all_names(conn: &impl GraphDb) -> Vec<String> {
+    pub fn get_all_names(conn: &GraphConnection) -> Vec<String> {
         let samples = Sample::query(
             conn.graph_conn(),
             "select * from samples;",
@@ -166,7 +166,7 @@ impl Sample {
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
-    pub fn get_by_name(conn: &impl GraphDb, name: &str) -> SQLResult<Sample> {
+    pub fn get_by_name(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
         Sample::get(
             conn.graph_conn(),
             "select * from samples where name = ?1;",

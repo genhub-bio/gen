@@ -19,7 +19,7 @@ impl Factory {
     }
 
     // Convert a BlockGroup to a dictionary representation
-    pub fn to_dict(&self, conn: &Connection, block_group_id: &HashId) -> PyResult<PyObject> {
+    pub fn to_dict(&self, conn: &GraphConnection, block_group_id: &HashId) -> PyResult<PyObject> {
         let graph = BlockGroup::get_graph(conn, block_group_id);
 
         // Convert the graph to a Python dictionary
@@ -71,7 +71,11 @@ impl Factory {
     }
 
     // Convert a BlockGroup to a rustworkx graph representation
-    pub fn to_rustworkx(&self, conn: &Connection, block_group_id: &HashId) -> PyResult<PyObject> {
+    pub fn to_rustworkx(
+        &self,
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+    ) -> PyResult<PyObject> {
         let graph = BlockGroup::get_graph(conn, block_group_id);
 
         Python::with_gil(|py| {
@@ -132,7 +136,11 @@ impl Factory {
     }
 
     // Convert a BlockGroup to a NetworkX graph representation
-    pub fn to_networkx(&self, conn: &Connection, block_group_id: &HashId) -> PyResult<PyObject> {
+    pub fn to_networkx(
+        &self,
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+    ) -> PyResult<PyObject> {
         let graph = BlockGroup::get_graph(conn, block_group_id);
 
         Python::with_gil(|py| {

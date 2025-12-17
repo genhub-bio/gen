@@ -28,9 +28,10 @@ use r#gen::{
         patch::view_patches,
     },
 };
-use gen_core::config::{DbContext, Workspace};
+use gen_core::config::Workspace;
 use gen_models::{
     block_group::BlockGroup,
+    db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
     file_types::FileTypes,
     metadata,
@@ -43,7 +44,7 @@ use noodles::core::Region;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
-fn get_default_collection(conn: &Connection) -> Result<String, rusqlite::Error> {
+fn get_default_collection(conn: &OperationsConnection) -> Result<String, rusqlite::Error> {
     let mut stmt = conn.prepare("select collection_name from defaults where id = 1")?;
     Ok(stmt
         .query_row((), |row| row.get(0))
@@ -52,9 +53,7 @@ fn get_default_collection(conn: &Connection) -> Result<String, rusqlite::Error> 
 
 fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let cli_context = CliContext::from(&cli);
     let workspace = Workspace::from_current_dir();
-    gen_core::config::set_base_dir(workspace.base_dir());
 
     // commands not requiring a db connection are handled here
     if let Some(Commands::Init {}) = &cli.command {
@@ -126,6 +125,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     let operation_conn = db_context.operations().conn();
     let graph_conn = db_context.graph().conn();
     let db_uuid = metadata::get_db_uuid(graph_conn);
+    let cli_context = CliContext {
+        context: &db_context,
+    };
 
     match track_database(graph_conn, operation_conn) {
         Ok(_) => {}
@@ -169,7 +171,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|h| format!("{h}"))
                     .unwrap_or_else(|| "HEAD".to_string())
             });
-            let diff = collect_operation_diff(operation_conn, &from, to.as_deref())?;
+            let diff = collect_operation_diff(&db_context, &from, to.as_deref())?;
             if diff.block_groups.is_empty() {
                 println!("No differences found between {from} and {target_display}.");
             } else {
@@ -290,8 +292,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Branch::delete(operation_conn, branch.id);
             } else if checkout {
                 operation_management::checkout(
-                    None,
-                    operation_conn,
+                    &db_context,
                     &Some(
                         branch_name
                             .clone()
@@ -339,13 +340,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
                 let current_branch = OperationState::get_current_branch(operation_conn)
                     .ok_or("Unable to find current branch.")?;
-                operation_management::merge(
-                    None,
-                    operation_conn,
-                    current_branch,
-                    other_branch.id,
-                    None,
-                )?;
+                operation_management::merge(&db_context, current_branch, other_branch.id, None)?;
                 println!("Merge successful");
             } else if let Some(remote_name) = set_remote {
                 let current_branch_id = OperationState::get_current_branch(operation_conn)
@@ -375,13 +370,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
             let current_branch = OperationState::get_current_branch(operation_conn)
                 .ok_or("Unable to find current branch.")?;
-            match operation_management::merge(
-                None,
-                operation_conn,
-                current_branch,
-                other_branch.id,
-                None,
-            ) {
+            match operation_management::merge(&db_context, current_branch, other_branch.id, None) {
                 Ok(_) => {
                     println!("Merge successful");
                     Ok(())
@@ -391,7 +380,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Apply { hash }) => {
             let operation = Operation::search_hash(operation_conn, &hash)?;
-            match operation_management::apply(None, operation_conn, &operation.hash, None) {
+            match operation_management::apply(&db_context, &operation.hash, None) {
                 Ok(_) => {
                     println!("Operation applied");
                     Ok(())
@@ -406,20 +395,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Created branch {name}");
                 }
                 println!("Checking out branch {name}");
-                operation_management::checkout(None, operation_conn, &Some(name), None)?;
+                operation_management::checkout(&db_context, &Some(name), None)?;
             } else if let Some(hash_name) = hash.clone() {
                 if Branch::get_by_name(operation_conn, &hash_name).is_some() {
                     println!("Checking out branch {hash_name}");
-                    operation_management::checkout(None, operation_conn, &Some(hash_name), None)?;
+                    operation_management::checkout(&db_context, &Some(hash_name), None)?;
                 } else {
                     let operation = Operation::search_hash(operation_conn, &hash_name)?;
                     println!("Checking out operation {hash_name}");
-                    operation_management::checkout(
-                        None,
-                        operation_conn,
-                        &None,
-                        Some(operation.hash),
-                    )?;
+                    operation_management::checkout(&db_context, &None, Some(operation.hash))?;
                 }
             } else {
                 println!("No branch or hash to checkout provided.");
@@ -428,7 +412,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Reset { hash }) => {
             let operation = Operation::search_hash(operation_conn, &hash)?;
-            match operation_management::reset(None, operation_conn, &operation.hash) {
+            match operation_management::reset(&db_context, &operation.hash) {
                 Ok(_) => {
                     println!("Operation reset");
                     Ok(())
@@ -459,13 +443,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &operation,
             );
             let mut f = File::create(format!("{name}.gz"))?;
-            patch::create_patch(operation_conn, &operations, &mut f)?;
+            patch::create_patch(&db_context, &operations, &mut f)?;
             Ok(())
         }
         Some(Commands::PatchApply { patch }) => {
             let mut f = File::open(patch)?;
             let patches = patch::load_patches(&mut f);
-            match patch::apply_patches(None, operation_conn, &patches) {
+            match patch::apply_patches(&db_context, &patches) {
                 Ok(_) => {
                     println!("Patch applied");
                     Ok(())
@@ -477,7 +461,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let patch_path = Path::new(&patch);
             let mut f = File::open(patch_path)?;
             let patches = patch::load_patches(&mut f);
-            let diagrams = view_patches(&patches);
+            let diagrams = view_patches(&workspace, &patches);
             for (patch_hash, patch_diagrams) in diagrams.iter() {
                 for (bg_id, dot) in patch_diagrams.iter() {
                     let path = if let Some(ref p) = prefix {
@@ -647,8 +631,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let start_coordinate = interval.start().ok_or("Region missing start")?.get() as i64;
             let end_coordinate = interval.end().ok_or("Region missing end")?.get() as i64;
             derive_chunks(
-                graph_conn,
-                operation_conn,
+                &db_context,
                 collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
@@ -733,8 +716,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             derive_chunks(
-                graph_conn,
-                operation_conn,
+                &db_context,
                 collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
@@ -765,8 +747,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let region_names = regions.split(",").collect::<Vec<&str>>();
 
             match make_stitch(
-                graph_conn,
-                operation_conn,
+                &db_context,
                 collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
@@ -782,12 +763,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::Push { remote }) => {
-            push(operation_conn, remote.as_deref())?;
+            push(&db_context, remote.as_deref())?;
             println!("Push succeeded.");
             Ok(())
         }
         Some(Commands::Pull { remote }) => {
-            pull(operation_conn, remote.as_deref())?;
+            pull(&db_context, remote.as_deref())?;
             Ok(())
         }
     }

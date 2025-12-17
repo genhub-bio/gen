@@ -5,13 +5,14 @@ use gen_graph::{GenGraph, connect_all_boundary_edges};
 use gen_models::{
     block_group::BlockGroup,
     changesets::ChangesetModels,
+    db::{DbContext, OperationsConnection},
     errors::OperationError,
     operations::{Branch, Operation, OperationState},
     session_operations::DependencyModels,
     traits::Query,
 };
 use petgraph::Direction;
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use thiserror::Error;
 
 use crate::views::patch::get_change_graph;
@@ -56,10 +57,12 @@ pub struct OperationDiff {
 }
 
 pub fn collect_operation_diff(
-    op_conn: &Connection,
+    context: &DbContext,
     from_ref: &str,
     to_ref: Option<&str>,
 ) -> Result<OperationDiff, OperationDiffError> {
+    let op_conn = context.operations().conn();
+
     let target_hash = if let Some(to_ref) = to_ref {
         resolve_ref(op_conn, to_ref)?
     } else {
@@ -102,12 +105,13 @@ pub fn collect_operation_diff(
     let mut dep_edges = HashSet::new();
     let mut dep_nodes = HashSet::new();
     let mut dep_sequences = HashSet::new();
+    let workspace = context.workspace();
 
     for op_hash in &operations_to_merge {
         let operation = Operation::get_by_id(op_conn, op_hash)
             .ok_or_else(|| OperationDiffError::OperationNotFound(op_hash.to_string()))?;
-        let changeset = operation.get_changeset().changes;
-        let dependencies = operation.get_changeset_dependencies();
+        let changeset = operation.get_changeset(workspace).changes;
+        let dependencies = operation.get_changeset_dependencies(workspace);
 
         for block_group in changeset
             .block_groups
@@ -184,7 +188,7 @@ pub fn collect_operation_diff(
     })
 }
 
-fn resolve_ref(conn: &Connection, reference: &str) -> Result<HashId, OperationDiffError> {
+fn resolve_ref(conn: &OperationsConnection, reference: &str) -> Result<HashId, OperationDiffError> {
     if reference.starts_with("HEAD") {
         let branch_id =
             OperationState::get_current_branch(conn).ok_or(OperationDiffError::NoCurrentBranch)?;
@@ -240,12 +244,12 @@ mod tests {
         changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
         edge::Edge,
         node::Node,
-        operations::{Branch, Operation, OperationState},
+        operations::Operation,
         sequence::{NewSequence, Sequence},
     };
 
     use super::*;
-    use crate::test_helpers::{get_operation_connection, setup_gen_dir};
+    use crate::test_helpers::setup_gen;
 
     fn base_dependencies(start_node: &Node, end_node: &Node) -> DependencyModels {
         let mut start_sequence = Sequence::new()
@@ -271,14 +275,6 @@ mod tests {
             accessions: vec![],
             accession_edges: vec![],
         }
-    }
-
-    fn init_branch() -> Connection {
-        setup_gen_dir();
-        let op_conn = get_operation_connection(None).unwrap();
-        Branch::get_or_create(&op_conn, "main");
-        OperationState::set_branch(&op_conn, "main");
-        op_conn
     }
 
     fn simple_changeset(
@@ -346,12 +342,13 @@ mod tests {
 
     #[test]
     fn diff_with_single_operation_uses_current_as_default_target() {
-        let op_conn = init_branch();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
         let start_node = Node::get_start_node();
         let end_node = Node::get_end_node();
 
         let base_op =
-            Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
+            Operation::create(op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
 
         let seq_one = NewSequence::new()
             .sequence_type("dna")
@@ -369,11 +366,13 @@ mod tests {
             name: "bg".to_string(),
             created_on: 0,
         };
+        let workspace = context.workspace();
 
-        let head = Operation::create(&op_conn, "add", &HashId::pad_str(2)).expect("create op");
+        let head = Operation::create(op_conn, "add", &HashId::pad_str(2)).expect("create op");
         let (changeset, dependencies) =
             simple_changeset(&block_group, &node_one, &seq_one, &start_node, &end_node);
         write_changeset(
+            workspace,
             &head,
             DatabaseChangeset {
                 db_path: "diff.db".to_string(),
@@ -382,7 +381,7 @@ mod tests {
             &dependencies,
         );
 
-        let diff = collect_operation_diff(&op_conn, "HEAD~1", None).expect("diff");
+        let diff = collect_operation_diff(&context, "HEAD~1", None).expect("diff");
         assert_eq!(diff.operations, vec![head.hash]);
         assert_eq!(diff.block_groups.len(), 1);
         let graph = &diff.block_groups[0].graph;
@@ -394,11 +393,12 @@ mod tests {
 
     #[test]
     fn diff_merges_multiple_operations() {
-        let op_conn = init_branch();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
         let start_node = Node::get_start_node();
         let end_node = Node::get_end_node();
 
-        let op1 = Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
+        let op1 = Operation::create(op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
 
         let bg_one = BlockGroup {
             id: HashId::pad_str(3),
@@ -416,10 +416,12 @@ mod tests {
             id: HashId::pad_str(10),
             sequence_hash: seq_one.hash,
         };
-        let op2 = Operation::create(&op_conn, "add", &HashId::pad_str(2)).expect("create op2");
+        let workspace = context.workspace();
+        let op2 = Operation::create(op_conn, "add", &HashId::pad_str(2)).expect("create op2");
         let (changeset_one, dependencies_one) =
             simple_changeset(&bg_one, &node_one, &seq_one, &start_node, &end_node);
         write_changeset(
+            workspace,
             &op2,
             DatabaseChangeset {
                 db_path: "diff.db".to_string(),
@@ -444,10 +446,11 @@ mod tests {
             id: HashId::pad_str(11),
             sequence_hash: seq_two.hash,
         };
-        let op3 = Operation::create(&op_conn, "add", &HashId::pad_str(3)).expect("create op3");
+        let op3 = Operation::create(op_conn, "add", &HashId::pad_str(3)).expect("create op3");
         let (changeset_two, dependencies_two) =
             simple_changeset(&bg_two, &node_two, &seq_two, &start_node, &end_node);
         write_changeset(
+            workspace,
             &op3,
             DatabaseChangeset {
                 db_path: "diff.db".to_string(),
@@ -457,7 +460,7 @@ mod tests {
         );
 
         let diff = collect_operation_diff(
-            &op_conn,
+            &context,
             &format!("{}", op1.hash),
             Some(&format!("{}", op3.hash)),
         )
@@ -471,11 +474,12 @@ mod tests {
 
     #[test]
     fn diff_merges_nested_changes_in_same_block_group() {
-        let op_conn = init_branch();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
         let start_node = Node::get_start_node();
         let end_node = Node::get_end_node();
 
-        let op1 = Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
+        let op1 = Operation::create(op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
 
         let block_group = BlockGroup {
             id: HashId::pad_str(5),
@@ -494,11 +498,13 @@ mod tests {
             id: HashId::pad_str(12),
             sequence_hash: seq_one.hash,
         };
-        let op2 = Operation::create(&op_conn, "add", &HashId::pad_str(2)).expect("create op2");
+        let op2 = Operation::create(op_conn, "add", &HashId::pad_str(2)).expect("create op2");
         let (changeset_one, mut dependencies_one) =
             simple_changeset(&block_group, &node_one, &seq_one, &start_node, &end_node);
         dependencies_one.block_group.push(block_group.clone());
+        let workspace = context.workspace();
         write_changeset(
+            workspace,
             &op2,
             DatabaseChangeset {
                 db_path: "diff.db".to_string(),
@@ -516,11 +522,12 @@ mod tests {
             id: HashId::pad_str(13),
             sequence_hash: seq_two.hash,
         };
-        let op3 = Operation::create(&op_conn, "add", &HashId::pad_str(3)).expect("create op3");
+        let op3 = Operation::create(op_conn, "add", &HashId::pad_str(3)).expect("create op3");
         let (changeset_two, mut dependencies_two) =
             simple_changeset(&block_group, &node_two, &seq_two, &start_node, &end_node);
         dependencies_two.block_group.push(block_group.clone());
         write_changeset(
+            workspace,
             &op3,
             DatabaseChangeset {
                 db_path: "diff.db".to_string(),
@@ -530,7 +537,7 @@ mod tests {
         );
 
         let diff = collect_operation_diff(
-            &op_conn,
+            &context,
             &format!("{}", op1.hash),
             Some(&format!("{}", op3.hash)),
         )
@@ -544,11 +551,11 @@ mod tests {
 
     #[test]
     fn diff_against_itself_is_empty() {
-        let op_conn = init_branch();
-        let base =
-            Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
+        let base = Operation::create(op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
         let diff = collect_operation_diff(
-            &op_conn,
+            &context,
             &format!("{}", base.hash),
             Some(&format!("{}", base.hash)),
         )

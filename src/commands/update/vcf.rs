@@ -3,8 +3,7 @@ use clap::Args;
 use gen_models::errors::OperationError;
 
 use crate::{
-    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
-    get_connection, get_operation_connection,
+    commands::{cli_context::CliContext, get_default_collection},
     updates::vcf::{VcfError, update_with_vcf},
 };
 
@@ -31,11 +30,9 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with VCF called");
 
-    let operation_conn = get_operation_connection(None)?;
-    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db)?;
-
-    // initialize the selected database if needed.
+    let context = cli_context.context;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;
@@ -43,15 +40,14 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(&operation_conn));
+        .unwrap_or_else(|| get_default_collection(operation_conn));
 
     match update_with_vcf(
         &cmd.path,
         name,
         cmd.genotype.clone().unwrap_or("".to_string()),
         cmd.sample.clone().unwrap_or("".to_string()),
-        &conn,
-        &operation_conn,
+        context,
         cmd.coordinate_frame.as_deref(),
     ) {
         Ok(_) => {

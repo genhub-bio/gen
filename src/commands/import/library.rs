@@ -3,8 +3,7 @@ use clap::Args;
 use gen_models::errors::OperationError;
 
 use crate::{
-    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
-    get_connection, get_operation_connection,
+    commands::{cli_context::CliContext, get_default_collection},
     imports::library::{LibraryImportError, import_library},
 };
 
@@ -31,11 +30,9 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Library import called");
 
-    let operation_conn = get_operation_connection(None).unwrap();
-    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db).unwrap();
-
-    // initialize the selected database if needed.
+    let context = cli_context.context;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
@@ -43,10 +40,9 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(&operation_conn));
+        .unwrap_or_else(|| get_default_collection(operation_conn));
     match import_library(
-        &conn,
-        &operation_conn,
+        context,
         name,
         cmd.sample.as_deref(),
         cmd.parts.as_deref().unwrap(),

@@ -111,16 +111,16 @@ pub enum FileAdditionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{get_operation_connection, setup_gen_dir};
 
     mod remote_error_tests {
-        use rusqlite::Connection;
-
         use super::*;
-        use crate::operations::{Branch, Defaults, Remote};
+        use crate::{
+            db::OperationsConnection,
+            operations::{Branch, Defaults, Remote},
+            test_helpers::get_operation_connection,
+        };
 
-        fn setup_test_db() -> Connection {
-            setup_gen_dir();
+        fn setup_test_db() -> OperationsConnection {
             get_operation_connection(None).unwrap()
         }
 

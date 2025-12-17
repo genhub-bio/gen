@@ -5,7 +5,7 @@ use rusqlite::{self, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    db::GraphDb,
+    db::GraphConnection,
     edge::{Edge, EdgeData},
     gen_models_capnp::block_group_edge,
     traits::*,
@@ -132,7 +132,7 @@ impl Query for BlockGroupEdge {
 }
 
 impl BlockGroupEdge {
-    pub fn bulk_create(conn: &impl GraphDb, block_group_edges: &[BlockGroupEdgeData]) {
+    pub fn bulk_create(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
         let conn = conn.graph_conn();
         let batch_size = max_rows_per_batch(conn, 6);
 
@@ -162,7 +162,7 @@ impl BlockGroupEdge {
         }
     }
 
-    pub fn bulk_delete(conn: &impl GraphDb, block_group_edges: &[BlockGroupEdgeData]) {
+    pub fn bulk_delete(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
         let conn = conn.graph_conn();
         let hashes = block_group_edges
             .iter()
@@ -172,7 +172,7 @@ impl BlockGroupEdge {
     }
 
     pub fn edges_for_block_group(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         block_group_id: &HashId,
     ) -> Vec<AugmentedEdge> {
         let conn = conn.graph_conn();
@@ -205,7 +205,7 @@ impl BlockGroupEdge {
     }
 
     pub fn specific_edges_for_block_group(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         edge_ids: &[HashId],
     ) -> Vec<AugmentedEdge> {

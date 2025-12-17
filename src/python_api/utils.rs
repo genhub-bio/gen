@@ -21,7 +21,7 @@ pub fn path_to_py_path(py: Python, path: &Path) -> PyResult<PyObject> {
 }
 
 /// Helper function return sqlite query results as a list of lists of Python objects
-pub fn py_query(conn: &Connection, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
+pub fn py_query(conn: &GraphConnection, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
     let mut stmt = conn.prepare(query).map_err(sqlite_err_to_pyerr)?;
     let column_count = stmt.column_count();
     let mut rows = Vec::new();

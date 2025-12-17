@@ -9,6 +9,7 @@ use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
+    db::{GraphConnection, OperationsConnection},
     operations::{Operation, OperationSummary},
     traits::Query,
 };
@@ -21,7 +22,7 @@ use ratatui::{
     style::Modifier,
     widgets::{Block, Borders, Paragraph, Row, Table},
 };
-use rusqlite::{Connection, params, types::Value};
+use rusqlite::{params, types::Value};
 use tui_textarea::TextArea;
 
 use crate::views::{
@@ -49,8 +50,8 @@ fn restore_terminal() {
 }
 
 pub fn view_operations(
-    conn: &Connection,
-    op_conn: &Connection,
+    conn: &GraphConnection,
+    op_conn: &OperationsConnection,
     operations: &[Operation],
 ) -> Result<(), io::Error> {
     std::panic::set_hook(Box::new(|info| {

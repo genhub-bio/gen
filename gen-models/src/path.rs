@@ -13,7 +13,7 @@ use rusqlite::{Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    block_group_edge::BlockGroupEdge, db::GraphDb, edge::Edge, errors::QueryError,
+    block_group_edge::BlockGroupEdge, db::GraphConnection, edge::Edge, errors::QueryError,
     gen_models_capnp::path as PathCapnp, node::Node, path_edge::PathEdge, sequence::Sequence,
     traits::*,
 };
@@ -107,7 +107,7 @@ pub struct Annotation {
 }
 
 impl Path {
-    pub fn validate_edges(conn: &impl GraphDb, edge_ids: &[HashId], block_group_id: &HashId) {
+    pub fn validate_edges(conn: &GraphConnection, edge_ids: &[HashId], block_group_id: &HashId) {
         let edge_id_set = edge_ids.iter().copied().collect::<HashSet<HashId>>();
 
         // No duplicate edges allowed
@@ -175,7 +175,7 @@ impl Path {
     }
 
     pub fn create(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         name: &str,
         block_group_id: &HashId,
         edge_ids: &[HashId],
@@ -220,7 +220,7 @@ impl Path {
         path
     }
 
-    pub fn delete(conn: &impl GraphDb, name: &str, block_group_id: &HashId) {
+    pub fn delete(conn: &GraphConnection, name: &str, block_group_id: &HashId) {
         let conn = conn.graph_conn();
         let path = Path::get(
             conn,
@@ -235,19 +235,19 @@ impl Path {
             .unwrap();
     }
 
-    pub fn get_by_id(conn: &impl GraphDb, path_id: &HashId) -> Path {
+    pub fn get_by_id(conn: &GraphConnection, path_id: &HashId) -> Path {
         let conn = conn.graph_conn();
         Path::get(conn, "select * from paths where id = ?1;", params![path_id]).unwrap()
     }
 
-    pub fn query_for_collection(conn: &impl GraphDb, collection_name: &str) -> Vec<Path> {
+    pub fn query_for_collection(conn: &GraphConnection, collection_name: &str) -> Vec<Path> {
         let conn = conn.graph_conn();
         let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
         Path::query(conn, query, params![collection_name])
     }
 
     pub fn query_for_collection_and_sample(
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: Option<String>,
     ) -> Vec<Path> {
@@ -261,7 +261,7 @@ impl Path {
         }
     }
 
-    pub fn sequence(&self, conn: &impl GraphDb) -> String {
+    pub fn sequence(&self, conn: &GraphConnection) -> String {
         let blocks = self.blocks(conn);
         blocks
             .into_iter()
@@ -270,7 +270,7 @@ impl Path {
             .join("")
     }
 
-    pub fn length(&self, conn: &impl GraphDb) -> i64 {
+    pub fn length(&self, conn: &GraphConnection) -> i64 {
         let blocks = self.blocks(conn);
         let end_block = blocks.last().unwrap();
         // the last block is the terminal node, which starts at the end of the path
@@ -310,7 +310,7 @@ impl Path {
         }
     }
 
-    pub fn blocks(&self, conn: &impl GraphDb) -> Vec<PathBlock> {
+    pub fn blocks(&self, conn: &GraphConnection) -> Vec<PathBlock> {
         let edges = PathEdge::edges_for_path(conn, &self.id);
 
         let mut sequence_node_ids = HashSet::new();
@@ -373,7 +373,7 @@ impl Path {
         blocks
     }
 
-    pub fn intervaltree(&self, conn: &impl GraphDb) -> IntervalTree<i64, NodeIntervalBlock> {
+    pub fn intervaltree(&self, conn: &GraphConnection) -> IntervalTree<i64, NodeIntervalBlock> {
         let blocks = self.blocks(conn);
         let tree: IntervalTree<i64, NodeIntervalBlock> = blocks
             .into_iter()
@@ -395,7 +395,11 @@ impl Path {
         tree
     }
 
-    pub fn find_block_mappings(&self, conn: &impl GraphDb, other_path: &Path) -> Vec<RangeMapping> {
+    pub fn find_block_mappings(
+        &self,
+        conn: &GraphConnection,
+        other_path: &Path,
+    ) -> Vec<RangeMapping> {
         // Given two paths, find the overlapping parts of common nodes/blocks and return a list af
         // mappings from subranges of one path to corresponding shared subranges of the other path
         let our_blocks = self.blocks(conn);
@@ -590,7 +594,7 @@ impl Path {
 
     pub fn get_mapping_tree(
         &self,
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         path: &Path,
     ) -> IntervalTree<i64, RangeMapping> {
         let mappings = self.find_block_mappings(conn, path);
@@ -607,7 +611,7 @@ impl Path {
 
     pub fn propagate_annotations(
         &self,
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         path: &Path,
         annotations: Vec<Annotation>,
     ) -> Vec<Annotation> {
@@ -624,7 +628,7 @@ impl Path {
 
     pub fn new_path_with(
         &self,
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         path_start: i64,
         path_end: i64,
         edge_to_new_node: &Edge,
@@ -680,7 +684,7 @@ impl Path {
 
     pub fn new_path_with_deletion(
         &self,
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         deletion_start: i64,
         deletion_end: i64,
     ) -> Result<Path, QueryError> {
@@ -839,7 +843,7 @@ impl Path {
 
     pub fn node_block_partition(
         &self,
-        conn: &impl GraphDb,
+        conn: &GraphConnection,
         ranges: Vec<Range>,
     ) -> Vec<NodeIntervalBlock> {
         let intervaltree = self.intervaltree(conn);
