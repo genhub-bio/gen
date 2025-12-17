@@ -91,12 +91,13 @@ pub fn end_operation(
                 Operation::add_file(operation_conn, &operation.hash, &fa.id)
                     .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
-                    let asset_destination_path =
-                        assets_dir.join(format!("{}.{}", fa.checksum.clone(), &fa.suffix()));
-                    match fs::copy(&op_file.file_path, asset_destination_path) {
-                        Ok(result) => result,
-                        Err(_) => return Err(OperationError::IOError),
-                    };
+                    let asset_destination_path = assets_dir.join(fa.asset_filename());
+                    if !asset_destination_path.exists() {
+                        match fs::copy(&op_file.file_path, asset_destination_path) {
+                            Ok(result) => result,
+                            Err(_) => return Err(OperationError::IOError),
+                        };
+                    }
                 }
             }
             Operation::add_database(operation_conn, &operation.hash, &db_uuid)

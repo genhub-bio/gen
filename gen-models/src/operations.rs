@@ -357,10 +357,10 @@ impl FileAddition {
         let checksum = if relative_file_path.is_empty() {
             HashId::convert_str("empty")
         } else {
-            let checksum_path = if absolute_file_path.is_empty() {
-                relative_file_path.as_str()
-            } else {
+            let checksum_path = if relative_file_path.is_empty() {
                 absolute_file_path.as_str()
+            } else {
+                relative_file_path.as_str()
             };
             match calculate_file_checksum(checksum_path) {
                 Ok(checksum) => checksum,
@@ -444,7 +444,7 @@ impl FileAddition {
             })
     }
 
-    pub fn suffix(self) -> String {
+    fn suffix(self) -> String {
         let result = match self.file_type {
             FileTypes::GenBank => "gb",
             FileTypes::Fasta => "fa",
@@ -457,6 +457,10 @@ impl FileAddition {
         };
 
         result.to_string()
+    }
+
+    pub fn asset_filename(self) -> String {
+        format!("{}.{}", self.checksum.clone(), &self.suffix())
     }
 }
 

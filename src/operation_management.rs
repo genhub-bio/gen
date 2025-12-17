@@ -805,7 +805,14 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
                         let operation_files =
                             FileAddition::get_files_for_operation(operation_conn, &op.hash);
                         for op_file in operation_files {
-                            form = form.file("files", op_file.file_path).unwrap();
+                            form = form
+                                .file(
+                                    "assets",
+                                    FilePath::new(".gen")
+                                        .join("assets")
+                                        .join(op_file.asset_filename()),
+                                )
+                                .unwrap();
                         }
 
                         form = form.text("branch", current_branch.name.clone());
@@ -815,7 +822,6 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
                             .bearer_auth(auth_tokens.jwt.clone())
                             .multipart(form)
                             .send()?;
-                        println!("response: {}", response.text()?);
                     }
                     Ok(())
                 }
@@ -1112,6 +1118,7 @@ struct RemoteOperationAssetResponse {
 
 #[derive(Debug, Deserialize)]
 struct RemoteFileAsset {
+    asset_path: String,
     file_path: String,
     url: String,
 }
@@ -1155,17 +1162,24 @@ fn download_remote_operation_assets(
         "dependencies",
     )?;
 
-    // TODO: When file uploads are finished, uncomment this out
-    // for file in asset_response.files {
-    //     let destination = repo_root.join(&file.file_path);
-    //     download_binary(
-    //         client,
-    //         &file.url,
-    //         destination.as_path(),
-    //         Some(auth_token),
-    //         &file.file_path,
-    //     )?;
-    // }
+    let gen_dir = get_gen_dir().unwrap();
+    let gen_path = FilePath::new(&gen_dir);
+    for file in asset_response.files {
+        let destination = gen_path.join("assets").join(&file.asset_path);
+        let user_destination = repo_root.join(&file.file_path);
+        if !destination.exists() {
+            download_binary(
+                client,
+                &file.url,
+                destination.as_path(),
+                Some(auth_token),
+                &file.file_path,
+            )?;
+        }
+        if !user_destination.exists() {
+            std::fs::copy(destination.as_path(), user_destination.as_path())?;
+        }
+    }
 
     Ok(())
 }
