@@ -42,7 +42,6 @@ impl Query for Collection {
 impl Collection {
     pub fn exists(conn: &GraphConnection, name: &str) -> bool {
         let mut stmt = conn
-            .graph_conn()
             .prepare("select name from collections where name = ?1")
             .unwrap();
         stmt.exists([name]).unwrap()
@@ -50,7 +49,6 @@ impl Collection {
 
     pub fn create(conn: &GraphConnection, name: &str) -> Collection {
         let mut stmt = conn
-            .graph_conn()
             .prepare("INSERT INTO collections (name) VALUES (?1) RETURNING *;")
             .unwrap();
 
@@ -90,7 +88,6 @@ impl Collection {
     pub fn get_block_groups(conn: &GraphConnection, collection_name: &str) -> Vec<BlockGroup> {
         // Load all block groups that have the given collection_name
         let mut stmt = conn
-            .graph_conn()
             .prepare("SELECT * FROM block_groups WHERE collection_name = ?1 order by created_on;")
             .unwrap();
         let block_group_iter = stmt
@@ -101,7 +98,6 @@ impl Collection {
 
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {
         let mut stmt = conn
-            .graph_conn()
             .prepare("delete from collections where name = ?1")
             .unwrap();
         stmt.execute([name]).unwrap();

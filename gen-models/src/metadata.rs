@@ -36,17 +36,13 @@ impl Query for Metadata {
 
 impl Metadata {
     pub fn get_db_uuid(conn: &GraphConnection) -> String {
-        let metadata = Metadata::get(
-            conn.graph_conn(),
-            "SELECT db_uuid FROM gen_metadata LIMIT 1",
-            [],
-        )
-        .expect("Failed to get database UUID from metadata");
+        let metadata = Metadata::get(conn, "SELECT db_uuid FROM gen_metadata LIMIT 1", [])
+            .expect("Failed to get database UUID from metadata");
         metadata.db_uuid
     }
 
     pub fn get_all(conn: &GraphConnection) -> Vec<Metadata> {
-        Metadata::query(conn.graph_conn(), "SELECT db_uuid FROM gen_metadata", [])
+        Metadata::query(conn, "SELECT db_uuid FROM gen_metadata", [])
     }
 }
 

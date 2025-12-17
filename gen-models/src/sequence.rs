@@ -347,7 +347,6 @@ impl Sequence {
 
     pub fn delete_by_hash(conn: &GraphConnection, hash: &HashId) {
         let mut stmt = conn
-            .graph_conn()
             .prepare("delete from sequences where hash = ?1;")
             .unwrap();
         stmt.execute(params![hash]).unwrap();
@@ -355,7 +354,7 @@ impl Sequence {
 
     pub fn query_by_blockgroup(conn: &GraphConnection, block_group_id: &HashId) -> Vec<Sequence> {
         Sequence::query(
-            conn.graph_conn(),
+            conn,
             "select sequences.* from block_group_edges bge left join edges on bge.edge_id = edges.id left join nodes on (edges.source_node_id = nodes.id or edges.target_node_id = nodes.id) left join sequences on (nodes.sequence_hash = sequences.hash) where bge.block_group_id = ?1;",
             params![block_group_id],
         )

@@ -127,7 +127,7 @@ impl<'a> PathCache<'a> {
         if let Some(path) = path_lookup {
             path.clone()
         } else {
-            let conn = path_cache.conn.graph_conn();
+            let conn = path_cache.conn;
             let new_path = Path::query(
                 conn,
                 "select * from paths where block_group_id = ?1 AND name = ?2",

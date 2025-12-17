@@ -77,7 +77,7 @@ impl GenDatabase {
 
     pub fn delete_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
-            conn.operations_conn(),
+            conn,
             "DELETE FROM gen_databases WHERE db_uuid = ?1",
             params![db_uuid],
         )
@@ -85,7 +85,7 @@ impl GenDatabase {
 
     pub fn get_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
-            conn.operations_conn(),
+            conn,
             "SELECT * FROM gen_databases WHERE db_uuid = ?1",
             params![db_uuid],
         )
@@ -93,7 +93,7 @@ impl GenDatabase {
 
     pub fn get_by_path(conn: &OperationsConnection, path: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
-            conn.operations_conn(),
+            conn,
             "SELECT * FROM gen_databases WHERE path = ?1",
             params![path],
         )

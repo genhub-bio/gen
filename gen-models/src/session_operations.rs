@@ -24,7 +24,7 @@ use crate::{
 };
 
 pub fn start_operation(conn: &GraphConnection) -> session::Session<'_> {
-    let mut session = session::Session::new(conn.graph_conn()).unwrap();
+    let mut session = session::Session::new(conn).unwrap();
     attach_session(&mut session);
     session
 }

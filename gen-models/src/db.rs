@@ -6,17 +6,12 @@ use rusqlite::Connection;
 #[derive(Debug)]
 pub struct GraphConnection(pub Connection);
 
+/// The Deref lets us use GraphConnection any place a &Connection is expected, such as the generic traits for query
 impl Deref for GraphConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl GraphConnection {
-    pub fn graph_conn(&self) -> &Self {
-        self
     }
 }
 
@@ -28,12 +23,6 @@ impl Deref for OperationsConnection {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl OperationsConnection {
-    pub fn operations_conn(&self) -> &Self {
-        self
     }
 }
 
@@ -54,21 +43,6 @@ impl<C> DbHandle<C> {
 
     pub fn conn(&self) -> &C {
         self.conn.as_ref()
-    }
-
-    pub fn conn_rc(&self) -> Rc<C> {
-        self.conn.clone()
-    }
-
-    pub fn path(&self) -> Option<&Path>
-    where
-        C: Deref<Target = Connection>,
-    {
-        self.conn.path().map(Path::new)
-    }
-
-    pub fn ensure_gen_dir(&self) -> std::path::PathBuf {
-        self.workspace.ensure_gen_dir()
     }
 }
 
