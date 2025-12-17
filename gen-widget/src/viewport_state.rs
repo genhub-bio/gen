@@ -180,25 +180,14 @@ impl ViewportState {
         }
     }
 
-    // TODO: this should replace visible_world_rect
     /// Returns the area the camera sees, i.e. the viewport in world coordinates
-    pub fn camera_rect(&self) -> crate::geometry::WorldRect {
+    pub fn camera_rect(&self) -> WorldRect {
         let center = self.camera_current;
         let size = (
             self.viewport_bounds.width as u64,
             self.viewport_bounds.height as u64,
         );
-        let rect = crate::geometry::WorldRect::from_center_and_size(center, size);
-        log::trace!(
-            "camera_rect: center=({}, {}), size=({}, {}), result.min=({}, {})",
-            center.x,
-            center.y,
-            size.0,
-            size.1,
-            rect.min.x,
-            rect.min.y
-        );
-        rect
+        WorldRect::from_center_and_size(center, size)
     }
 
     /// Give this viewport input focus. Scroll events and key events will move the camera.

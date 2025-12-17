@@ -161,20 +161,6 @@ impl ViewportState {
             let in_dead_zone = dead_zone.contains(cursor_point.into());
             let in_soft_zone = soft_zone_rect.contains(cursor_point.into());
 
-            log::trace!(
-                "zone_follow: cursor=({}, {}), dead_zone=(x:{},y:{},w:{},h:{}), in_dead={}, in_soft={}, camera=({}, {})",
-                cursor_viewport.x,
-                cursor_viewport.y,
-                dead_zone.x,
-                dead_zone.y,
-                dead_zone.width,
-                dead_zone.height,
-                in_dead_zone,
-                in_soft_zone,
-                self.camera_current.x,
-                self.camera_current.y
-            );
-
             let mut desired_cam = self.camera_current;
             let mut needs_smooth_follow = false;
             let mut needs_snap = false;
@@ -252,15 +238,6 @@ impl ViewportState {
                     desired_cam
                 };
 
-                log::trace!(
-                    "zone_follow: moving camera from ({}, {}) to ({}, {}), snap={}",
-                    self.camera_current.x,
-                    self.camera_current.y,
-                    clamped.x,
-                    clamped.y,
-                    needs_snap
-                );
-
                 if needs_snap {
                     // Hard zone - immediate snap (no animation)
                     self.camera_current = clamped;
@@ -285,11 +262,6 @@ impl ViewportState {
         }
 
         // Synchronize cursor's viewport position after any camera changes
-        log::trace!(
-            "before cursor.update: camera_current=({}, {})",
-            self.camera_current.x,
-            self.camera_current.y
-        );
         let camera_rect = self.camera_rect();
         let cursor_vp_before = cursor.viewport_pos();
         let _ = cursor.update(viewport_graph, camera_rect);
@@ -347,20 +319,6 @@ impl ViewportState {
             if clamped {
                 let camera_rect = self.camera_rect();
                 let _ = cursor.update(viewport_graph, camera_rect);
-
-                log::error!(
-                    "Cursor escaped viewport! Original pos=({}, {}), viewport={}x{}, camera=({}, {}), \
-                     cursor_has_node={}, camera_anim={}, panning={}. Applied safety clamp.",
-                    cursor_vp.x,
-                    cursor_vp.y,
-                    width,
-                    height,
-                    self.camera_current.x,
-                    self.camera_current.y,
-                    cursor.node_idx().is_some(),
-                    self.camera_anim.is_some(),
-                    self.panning
-                );
             }
         }
     }
