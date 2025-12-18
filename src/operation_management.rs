@@ -818,11 +818,12 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
 
                         form = form.text("branch", current_branch.name.clone());
 
-                        client
+                        let response = client
                             .post(&manifest_url)
                             .bearer_auth(auth_tokens.jwt.clone())
                             .multipart(form)
                             .send()?;
+                        println!("response: {}", response.text()?);
                     }
                     Ok(())
                 }
@@ -1303,16 +1304,16 @@ mod tests {
             let op_1 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/empty.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1"),
             );
             let op_2 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2"),
             );
@@ -1323,16 +1324,16 @@ mod tests {
             let op_3 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aaaaaaaa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-3"),
             );
             let op_4 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/tttttttt.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-4"),
             );
@@ -1340,16 +1341,16 @@ mod tests {
             let op_5 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/parts.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-5"),
             );
             let op_6 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/affix_parts.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-6"),
             );
@@ -1398,24 +1399,24 @@ mod tests {
             let _op_1 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/empty.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1"),
             );
             let op_2 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2"),
             );
             let op_3 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aaaaaaaa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-3"),
             );
@@ -1443,24 +1444,24 @@ mod tests {
             let _op_1 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/empty.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1-abc-123"),
             );
             let op_2 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2-abc-123"),
             );
             let op_3 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aaaaaaaa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-3-abc-13"),
             );
@@ -1499,24 +1500,24 @@ mod tests {
             let _op_1 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/empty.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1-abc-123"),
             );
             let op_2 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2-abc-123"),
             );
             let op_3 = create_operation(
                 conn,
                 op_conn,
-                "fixtures/aaaaaaaa.fa",
-                FileTypes::Fasta,
+                "foo",
+                FileTypes::None,
                 "vcf_addition",
                 // some random string i found to collide with prefix of above
                 HashId::convert_str("AXf5SuLvAM"),
@@ -2009,16 +2010,16 @@ mod tests {
         let op_1 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
         let op_2 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
@@ -2028,24 +2029,24 @@ mod tests {
         let op_3 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
         let op_4 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
         let op_5 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -2054,24 +2055,24 @@ mod tests {
         let op_6 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-6"),
         );
         let op_7 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-7"),
         );
         let op_8 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-8"),
         );
@@ -2082,8 +2083,8 @@ mod tests {
         let op_9 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-9"),
         );
@@ -2092,8 +2093,8 @@ mod tests {
         let op_10 = create_operation(
             conn,
             operation_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-10"),
         );
@@ -2163,24 +2164,24 @@ mod tests {
         let op_1 = create_operation(
             conn,
             op_conn,
-            "fixtures/empty.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
         let op_2 = create_operation(
             conn,
             op_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
         let _op_3 = create_operation(
             conn,
             op_conn,
-            "fixtures/aa.fa",
-            FileTypes::Fasta,
+            "foo",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
