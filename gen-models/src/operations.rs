@@ -350,12 +350,13 @@ impl FileAddition {
         conn: &Connection,
         file_path: &str,
         file_type: FileTypes,
+        checksum_override: Option<HashId>,
     ) -> Result<FileAddition, FileAdditionError> {
         let (absolute_file_path, relative_file_path) =
             FileAddition::normalize_file_paths(conn, file_path);
 
-        let checksum = if relative_file_path.is_empty() {
-            HashId::convert_str("empty")
+        let checksum = if let Some(checksum_override) = checksum_override {
+            checksum_override
         } else {
             let checksum_path = if relative_file_path.is_empty() {
                 absolute_file_path.as_str()
@@ -378,11 +379,6 @@ impl FileAddition {
             }
         };
 
-        println!("here1");
-        println!("file path: {}", file_path);
-        println!("checksum: {}", checksum);
-        println!("foo");
-        println!("bar");
         let id = FileAddition::generate_file_addition_id(&checksum, &relative_file_path);
 
         let query = "INSERT INTO file_additions (id, file_path, file_type, checksum) VALUES (?1, ?2, ?3, ?4);";
@@ -1072,7 +1068,7 @@ impl OperationState {
 mod tests {
     use std::{
         collections::HashSet,
-        fs,
+        env, fs,
         io::{Cursor, Write},
         path::PathBuf,
     };
@@ -2275,45 +2271,50 @@ mod tests {
         let op_db_path_str = op_db_path.to_string_lossy().to_string();
         let conn = &get_operation_connection(Some(op_db_path_str.as_str())).unwrap();
 
+        // NOTE: The file checksums are calculated based on relative path, so
+        // change working directory to the repo root so that they are correctly
+        // calculated
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(&repo_root).unwrap();
+
         let file1_path = repo_root.join("test_file.txt");
         fs::write(&file1_path, b"Test file content").unwrap();
-        let file1_path_str = file1_path.to_string_lossy().to_string();
         let relative1 = file1_path
             .strip_prefix(&repo_root)
             .unwrap()
             .to_string_lossy()
             .to_string();
 
-        let fa1 = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
+        let fa1 = FileAddition::get_or_create(conn, &relative1, FileTypes::Fasta, None)
             .expect("Failed to create FileAddition");
 
         assert_eq!(fa1.file_path, relative1);
-        assert_eq!(
-            fa1.id,
-            FileAddition::generate_file_addition_id(
-                &calculate_file_checksum(&file1_path_str).unwrap(),
-                &relative1
-            )
-        );
+
+        let checksum = calculate_file_checksum(&relative1).unwrap();
+        let relative1_id = FileAddition::generate_file_addition_id(&checksum, &relative1);
+
+        assert_eq!(fa1.id, relative1_id);
 
         // Second call with same file should return the same FileAddition
-        let fa2 = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
+        let fa2 = FileAddition::get_or_create(conn, &relative1, FileTypes::Fasta, None)
             .expect("Failed to get existing FileAddition");
 
         assert_eq!(fa1, fa2);
+
+        env::set_current_dir(original_dir).unwrap();
 
         let file2_path = repo_root.join("nested").join("file2.txt");
         fs::create_dir_all(file2_path.parent().unwrap()).unwrap();
         fs::write(&file2_path, b"Test file content").unwrap();
         let file2_path_str = file2_path.to_string_lossy().to_string();
 
-        let fa3 = FileAddition::get_or_create(conn, &file2_path_str, FileTypes::Fasta)
+        let fa3 = FileAddition::get_or_create(conn, &file2_path_str, FileTypes::Fasta, None)
             .expect("Failed to create different FileAddition");
 
         assert_ne!(fa1.id, fa3.id);
 
         fs::write(&file1_path, b"new content").unwrap();
-        let fa1_new = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
+        let fa1_new = FileAddition::get_or_create(conn, &relative1, FileTypes::Fasta, None)
             .expect("Failed to create FileAddition");
 
         assert_ne!(fa1.id, fa1_new.id);

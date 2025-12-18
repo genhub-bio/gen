@@ -638,6 +638,7 @@ fn apply_operations_to_remote(
                         remote_op_conn,
                         &file_addition.file_path,
                         file_addition.file_type,
+                        None,
                     )?;
                     Operation::add_file(remote_op_conn, &operation.hash, &remote_file_addition.id)?;
                 }
@@ -1024,6 +1025,7 @@ fn ingest_manifest_operation(
                     operation_conn,
                     &file_addition.file_path,
                     file_addition.file_type,
+                    None,
                 )?;
                 Operation::add_file(operation_conn, &operation.hash, &local_file_addition.id)?;
             }
