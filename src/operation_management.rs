@@ -2011,7 +2011,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
@@ -2019,7 +2019,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
@@ -2030,7 +2030,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
@@ -2038,7 +2038,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
@@ -2046,7 +2046,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -2056,7 +2056,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-6"),
         );
@@ -2064,7 +2064,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-7"),
         );
@@ -2072,7 +2072,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-8"),
         );
@@ -2084,7 +2084,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-9"),
         );
@@ -2094,7 +2094,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-10"),
         );
@@ -2189,7 +2189,7 @@ mod tests {
             conn,
             op_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
@@ -2199,7 +2199,7 @@ mod tests {
             conn,
             op_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
