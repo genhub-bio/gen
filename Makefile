@@ -1,5 +1,5 @@
 python: venv
-	VIRTUAL_ENV=.venv maturin develop --release --no-default-features --features "models python-bindings extension-module"
+	VIRTUAL_ENV=.venv maturin develop --release --features python-bindings  --features extension-module
 clean:
 	cargo clean
 build:
