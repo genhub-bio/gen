@@ -109,11 +109,11 @@ mod tests {
 
         get_simple_sequence(conn);
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();

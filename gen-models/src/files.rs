@@ -288,15 +288,4 @@ mod tests {
 
         assert!(result.is_err());
     }
-
-    #[test]
-    fn test_create_with_db_context() {
-        let ctx = setup_gen();
-        let op_conn = ctx.operations().conn();
-
-        let db = GenDatabase::create(op_conn, "ctx-uuid", "ctx_db", "path/to/ctx.db").unwrap();
-
-        assert_eq!(db.db_uuid, "ctx-uuid");
-        assert_eq!(db.name, "ctx_db");
-    }
 }

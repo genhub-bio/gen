@@ -1,4 +1,4 @@
-use std::{ops::Deref, path::Path, rc::Rc, sync::Arc};
+use std::{ops::Deref, rc::Rc, sync::Arc};
 
 use gen_core::{config::Workspace, errors::ConfigError};
 use rusqlite::Connection;
@@ -26,10 +26,18 @@ impl Deref for OperationsConnection {
     }
 }
 
-#[derive(Clone)]
 pub struct DbHandle<C> {
     workspace: Arc<Workspace>,
     conn: Rc<C>,
+}
+
+impl<C> Clone for DbHandle<C> {
+    fn clone(&self) -> Self {
+        Self {
+            workspace: self.workspace.clone(),
+            conn: self.conn.clone(),
+        }
+    }
 }
 
 impl<C> DbHandle<C> {
@@ -42,6 +50,7 @@ impl<C> DbHandle<C> {
     }
 
     pub fn conn(&self) -> &C {
+        // We don't use &self.conn here to get rid of the Rc
         self.conn.as_ref()
     }
 }
@@ -49,6 +58,7 @@ impl<C> DbHandle<C> {
 pub type GraphHandle = DbHandle<GraphConnection>;
 pub type OperationsHandle = DbHandle<OperationsConnection>;
 
+#[derive(Clone)]
 pub struct DbContext {
     workspace: Arc<Workspace>,
     graph: GraphHandle,
@@ -69,6 +79,10 @@ impl DbContext {
             graph,
             operations,
         }
+    }
+
+    pub fn set_graph(&mut self, graph_conn: GraphConnection) {
+        self.graph = DbHandle::new(self.workspace.clone(), graph_conn.into());
     }
 
     pub fn workspace(&self) -> &Workspace {

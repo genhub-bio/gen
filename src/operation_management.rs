@@ -172,16 +172,6 @@ pub fn get_file(path: &PathBuf, mode: FileMode) -> fs::File {
     file.unwrap()
 }
 
-// fn workspace_from_operation_conn(operation_conn: &OperationsConnection) -> Workspace {
-//     if let Some(path) = operation_conn.path() {
-//         let path = PathBuf::from(path);
-//         if let Some(parent) = path.parent().and_then(|p| p.parent()) {
-//             return Workspace::new(parent);
-//         }
-//     }
-//     Workspace::from_current_dir()
-// }
-
 pub fn reset(context: &DbContext, op_hash: &HashId) -> Result<(), ResetError> {
     let operation_conn = context.operations().conn();
     let dest_operation = Operation::get_by_id(operation_conn, op_hash)
@@ -194,9 +184,9 @@ pub fn apply(
     context: &DbContext,
     op_hash: &HashId,
     force_hash: impl Into<Option<HashId>>,
+    use_changeset_db: bool,
 ) -> Result<Operation, OperationError> {
     let operation_conn = context.operations().conn();
-    let conn = context.graph().conn();
     let workspace = context.workspace();
 
     let operation = Operation::get_by_id(operation_conn, op_hash)
@@ -204,11 +194,19 @@ pub fn apply(
 
     let changeset = operation.get_changeset(workspace);
     let dependencies = operation.get_changeset_dependencies(workspace);
+    let mut change_context = context.clone();
+    if use_changeset_db {
+        let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
+        let data_db_path = repo_root.join(&changeset.db_path);
+        let graph_conn = get_connection(&data_db_path)?;
+        change_context.set_graph(graph_conn);
+    }
+    let conn = change_context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;
 
-    let mut session = start_operation(context.graph().conn());
+    let mut session = start_operation(conn);
     match apply_changeset(conn, &changeset.changes, &dependencies) {
         Ok(_) => {}
         Err(e) => {
@@ -219,7 +217,7 @@ pub fn apply(
     }
     let full_op_hash = operation.hash;
     match end_operation(
-        context,
+        &change_context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -278,9 +276,10 @@ pub fn merge<'a>(
                     context,
                     &operation.hash,
                     HashId::convert_str(format!("{hash}-{index}").as_str()),
+                    true,
                 )?
             } else {
-                apply(context, &operation.hash, None)?
+                apply(context, &operation.hash, None, true)?
             };
             new_operations.push(new_op);
         }
@@ -291,7 +290,6 @@ pub fn merge<'a>(
 pub fn move_to(context: &DbContext, operation: &Operation) -> Result<(), MoveError> {
     let operation_conn = context.operations().conn();
     let workspace = context.workspace();
-    let conn = context.graph().conn();
 
     let current_op_hash = OperationState::get_operation(operation_conn)
         .ok_or(OperationError::NoOperation("No operation set".to_string()))?;
@@ -312,6 +310,12 @@ pub fn move_to(context: &DbContext, operation: &Operation) -> Result<(), MoveErr
                 let op_to_apply = Operation::get_by_id(operation_conn, operation_hash)
                     .ok_or(OperationError::NoOperation(format!("{operation_hash}")))?;
                 let changeset = op_to_apply.get_changeset(workspace);
+                let mut change_context = context.clone();
+                let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
+                let data_db_path = repo_root.join(&changeset.db_path);
+                let graph_conn = get_connection(&data_db_path)?;
+                change_context.set_graph(graph_conn);
+                let conn = change_context.graph().conn();
 
                 conn.execute("BEGIN TRANSACTION", []).unwrap();
 
@@ -331,6 +335,14 @@ pub fn move_to(context: &DbContext, operation: &Operation) -> Result<(), MoveErr
                     .ok_or(OperationError::NoOperation(format!("{operation_hash}")))?;
                 let changeset = op_to_apply.get_changeset(workspace);
                 let dependencies = op_to_apply.get_changeset_dependencies(workspace);
+
+                let mut change_context = context.clone();
+                let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
+                let data_db_path = repo_root.join(&changeset.db_path);
+                let graph_conn = get_connection(&data_db_path)?;
+                change_context.set_graph(graph_conn);
+                let conn = change_context.graph().conn();
+
                 conn.execute("BEGIN TRANSACTION", [])?;
                 match apply_changeset(conn, &changeset.changes, &dependencies) {
                     Ok(_) => {
@@ -1103,15 +1115,15 @@ struct RemoteOperationAssetResponse {
     changeset: String,
     dependencies: String,
     #[serde(default)]
-    #[expect(dead_code, reason = "File downloads from remotes are not wired yet")]
+    #[expect(dead_code, reason = "Used by apis")]
     files: Vec<RemoteFileAsset>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RemoteFileAsset {
-    #[expect(dead_code, reason = "File downloads from remotes are not wired yet")]
+    #[expect(dead_code, reason = "Used by apis")]
     file_path: String,
-    #[expect(dead_code, reason = "File downloads from remotes are not wired yet")]
+    #[expect(dead_code, reason = "Used by apis")]
     url: String,
 }
 
@@ -1264,7 +1276,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{create_operation, setup_gen},
+        test_helpers::{create_operation, setup_gen, setup_gen_on_disk},
         track_database,
         updates::vcf::update_with_vcf,
     };
@@ -1276,7 +1288,7 @@ mod tests {
 
         #[test]
         fn test_merges() {
-            let context = setup_gen();
+            let context = setup_gen_on_disk();
             let conn = context.graph().conn();
             let op_conn = context.operations().conn();
 
@@ -1542,11 +1554,11 @@ mod tests {
         assert_eq!(sample_count, 0);
         assert_eq!(op_count, 1);
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1637,7 +1649,7 @@ mod tests {
 
     #[test]
     fn test_cross_branch_patch() {
-        let context = setup_gen();
+        let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
         let fasta_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
@@ -1661,11 +1673,11 @@ mod tests {
         checkout(&context, &Some("branch-1".to_string()), None).unwrap();
 
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1693,11 +1705,11 @@ mod tests {
 
         checkout(&context, &Some("branch-2".to_string()), None).unwrap();
         let _op_3 = update_with_vcf(
+            &context,
             &vcf2_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         );
 
@@ -1717,7 +1729,7 @@ mod tests {
         );
 
         // apply changes from branch-1, it will be operation id 2
-        apply(&context, &op_2.hash, None).unwrap();
+        apply(&context, &op_2.hash, None, false).unwrap();
 
         let foo_bg_id = BlockGroup::get_id(&collection, Some("foo"), "m123");
         let patch_2_seqs = HashSet::from_iter(vec!["ATCATCGATCGAGATCGGGAACACACAGAGA".to_string()]);
@@ -1792,11 +1804,11 @@ mod tests {
         );
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1839,11 +1851,11 @@ mod tests {
 
         // apply vcf2
         update_with_vcf(
+            &context,
             &vcf2_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1887,21 +1899,14 @@ mod tests {
 
     fn test_reset_with_branches() {
         // Our setup is like this:
-
         //          -> 3 -> 4 -> 5 -> 10  branch a
-
         //        /                \
-
         //   1-> 2 -> 6 -> 7 -> 8    -> 9 branch b
-
         //
-
         // We want to make sure if we reset branch a to 3 that branch b will still show its operations
 
         let context = setup_gen();
-
         let conn = context.graph().conn();
-
         let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();

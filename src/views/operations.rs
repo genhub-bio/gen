@@ -9,7 +9,7 @@ use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
-    db::{GraphConnection, OperationsConnection},
+    db::{DbContext, GraphConnection, OperationsConnection},
     operations::{Operation, OperationSummary},
     traits::Query,
 };
@@ -49,11 +49,9 @@ fn restore_terminal() {
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
 }
 
-pub fn view_operations(
-    conn: &GraphConnection,
-    op_conn: &OperationsConnection,
-    operations: &[Operation],
-) -> Result<(), io::Error> {
+pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<(), io::Error> {
+    let conn = context.graph().conn();
+    let op_conn = context.operations().conn();
     std::panic::set_hook(Box::new(|info| {
         restore_terminal();
         eprintln!("Application crashed: {info}");
@@ -384,7 +382,7 @@ pub fn view_operations(
                         };
                         panel_focus = focus_rotation[focus_index];
                         let hash = &operation_summaries[selected].operation.hash;
-                        let graphs = get_change_graph_from_hash(op_conn, hash).unwrap();
+                        let graphs = get_change_graph_from_hash(context, hash).unwrap();
                         blockgroup_graphs.clear();
                         let bg_info = BlockGroup::query_by_ids(
                             conn,

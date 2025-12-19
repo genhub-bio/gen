@@ -239,7 +239,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .id,
                 );
                 if interactive {
-                    return Ok(view_operations(graph_conn, operation_conn, &operations)?);
+                    return Ok(view_operations(&db_context, &operations)?);
                 } else {
                     let mut indicator = "";
                     println!(
@@ -380,7 +380,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Apply { hash }) => {
             let operation = Operation::search_hash(operation_conn, &hash)?;
-            match operation_management::apply(&db_context, &operation.hash, None) {
+            match operation_management::apply(&db_context, &operation.hash, None, true) {
                 Ok(_) => {
                     println!("Operation applied");
                     Ok(())

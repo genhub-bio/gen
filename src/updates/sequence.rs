@@ -28,8 +28,7 @@ pub fn update_with_sequence(
     disable_reference_path_update: bool,
 ) -> Result<Operation, SequenceUpdateError> {
     let conn = context.graph().conn();
-    let _operation_conn = context.operations().conn();
-    let mut session = gen_models::session_operations::start_operation(context.graph().conn());
+    let mut session = gen_models::session_operations::start_operation(conn);
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);

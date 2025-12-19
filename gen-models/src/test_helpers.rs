@@ -59,12 +59,6 @@ pub fn get_operation_connection<'a>(
     Ok(OperationsConnection(conn))
 }
 
-pub fn setup_gen_dir() -> PathBuf {
-    let tmp_dir = tempdir().unwrap().keep();
-    let workspace = Workspace::new(tmp_dir);
-    workspace.ensure_gen_dir()
-}
-
 pub fn setup_gen() -> DbContext {
     let tmp_dir = tempdir().unwrap().keep();
     let workspace = Workspace::new(tmp_dir);

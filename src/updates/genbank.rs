@@ -31,7 +31,6 @@ where
     R: Read,
 {
     let conn = context.graph().conn();
-    let _op_conn = context.operations().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let reader = reader::SeqReader::new(data);
     let collection = Collection::create(conn, collection.into().unwrap_or_default());
@@ -244,8 +243,10 @@ mod tests {
     #[test]
     fn test_error_on_invalid_file() {
         let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
-        track_database(context.graph().conn(), context.operations().conn()).unwrap();
+        track_database(conn, op_conn).unwrap();
         assert_eq!(
             update_with_genbank(
                 &context,
@@ -270,8 +271,10 @@ mod tests {
     #[test]
     fn test_records_operation() {
         let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
-        track_database(context.graph().conn(), context.operations().conn()).unwrap();
+        track_database(conn, op_conn).unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
@@ -290,7 +293,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Operation::get_by_id(context.operations().conn(), &operation.hash).unwrap(),
+            Operation::get_by_id(op_conn, &operation.hash).unwrap(),
             operation
         );
     }
@@ -307,8 +310,10 @@ mod tests {
             // This tests that we are able to take a genbank that has been further modified
             // and update it, mimicking a workflow of going between gen <-> 3rd party tool <-> gen
             let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
-            track_database(context.graph().conn(), context.operations().conn()).unwrap();
+            track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
@@ -347,7 +352,7 @@ mod tests {
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", None, "insertion");
             let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(context.graph().conn(), &block_group_id, false)
+                BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
                     .map(|s| s.to_lowercase())
                     .collect();
@@ -361,8 +366,10 @@ mod tests {
             // This tests that we are able to take a genbank that has been further modified
             // and includes new sequences and update it.
             let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
-            track_database(context.graph().conn(), context.operations().conn()).unwrap();
+            track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
@@ -400,7 +407,7 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let block_group_id = BlockGroup::get_id("", None, "insertion");
             let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(context.graph().conn(), &block_group_id, false)
+                BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
                     .map(|s| s.to_lowercase())
                     .collect();
@@ -413,7 +420,7 @@ mod tests {
             // has a deletion in it.
             let block_group_id = BlockGroup::get_id("", None, "deletion");
             let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(context.graph().conn(), &block_group_id, false)
+                BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
                     .map(|s| s.to_lowercase())
                     .collect();
@@ -427,8 +434,10 @@ mod tests {
             // This tests that if a genbank file has sequences we are missing, it's an error. This
             // is an attempt to avoid updating the database with the wrong file.
             let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
-            track_database(context.graph().conn(), context.operations().conn()).unwrap();
+            track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();

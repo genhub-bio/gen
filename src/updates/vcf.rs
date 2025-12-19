@@ -192,15 +192,14 @@ pub enum VcfError {
 }
 
 pub fn update_with_vcf<'a>(
+    context: &DbContext,
     vcf_path: &String,
     collection_name: &'a str,
     fixed_genotype: String,
     fixed_sample: String,
-    context: &DbContext,
     coordinate_frame: impl Into<Option<&'a str>>,
 ) -> Result<Operation, VcfError> {
     let conn = context.graph().conn();
-    let _operation_conn = context.operations().conn();
     let progress_bar = get_handler();
     let coordinate_frame = coordinate_frame.into();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
@@ -624,11 +623,11 @@ mod tests {
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -669,11 +668,11 @@ mod tests {
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -721,11 +720,11 @@ mod tests {
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
             "sample 1".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -774,11 +773,11 @@ mod tests {
         )
         .unwrap();
         let res = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
             "sample 1".to_string(),
-            &context,
             None,
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
@@ -806,11 +805,11 @@ mod tests {
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -851,11 +850,11 @@ mod tests {
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -891,11 +890,11 @@ mod tests {
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -933,11 +932,11 @@ mod tests {
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -947,11 +946,11 @@ mod tests {
 
         assert_eq!(
             update_with_vcf(
+                &context,
                 &vcf_path.to_str().unwrap().to_string(),
                 &collection,
                 "".to_string(),
                 "".to_string(),
-                &context,
                 None,
             ),
             Err(VcfError::OperationError(OperationError::NoChanges))
@@ -987,11 +986,11 @@ mod tests {
         );
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1001,11 +1000,11 @@ mod tests {
 
         assert_eq!(
             update_with_vcf(
+                &context,
                 &vcf_path.to_str().unwrap().to_string(),
                 &collection,
                 "".to_string(),
                 "".to_string(),
-                &context,
                 None,
             ),
             Err(VcfError::OperationError(OperationError::NoChanges))
@@ -1038,11 +1037,11 @@ mod tests {
 
         let s = time::Instant::now();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0|1".to_string(),
             "test".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1077,11 +1076,11 @@ mod tests {
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1131,11 +1130,11 @@ mod tests {
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1155,11 +1154,11 @@ mod tests {
         vcf_path.push("fixtures/accession_2_invalid.vcf");
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -1192,31 +1191,31 @@ mod tests {
         .unwrap();
 
         update_with_vcf(
+            &context,
             &f0_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &f1_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             "f1",
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &f2_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             "f2",
         )
         .unwrap();

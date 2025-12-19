@@ -41,8 +41,7 @@ pub fn update_with_gfa(
     for the unmatched path within the same block group as the existing path.
     */
     let conn = context.graph().conn();
-    let _operation_conn = context.operations().conn();
-    let mut session = session_operations::start_operation(context.graph().conn());
+    let mut session = session_operations::start_operation(conn);
 
     let _new_sample =
         Sample::get_or_create_child(conn, collection_name, new_sample_name, parent_sample_name);

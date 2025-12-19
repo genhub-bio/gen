@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
 use gen_graph::GraphNode;
-use gen_models::block_group::BlockGroup;
+use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use pyo3::{prelude::*, types::PyDict};
-use rusqlite::Connection;
 
 use super::node_key::PyNodeKey;
 use crate::core::HashId;

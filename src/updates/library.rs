@@ -36,7 +36,6 @@ pub fn update_with_library(
     library_file_path: &str,
 ) -> std::io::Result<()> {
     let conn = context.graph().conn();
-    let _operation_conn = context.operations().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
     let mut parts_reader = fasta::io::reader::Builder.build_from_path(parts_file_path)?;

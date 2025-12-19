@@ -32,7 +32,7 @@ pub mod translate;
 pub mod updates;
 pub mod views;
 // The Python bindings are in a separate module to avoid issues with non-local impl
-#[cfg(all(feature = "python-bindings", not(feature = "cli")))]
+#[cfg(feature = "python-bindings")]
 pub mod python_api;
 
 // reexports for public api, put behind features as needed
@@ -211,7 +211,7 @@ mod tests {
     use gen_models::{db::DbContext, files::GenDatabase, metadata::get_db_uuid, traits::Query};
 
     use super::*;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
+    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen};
 
     #[cfg(test)]
     mod test_normalize_string {
@@ -305,11 +305,14 @@ mod tests {
     #[test]
     fn test_database_tracking_integration() {
         // Assert that connecting to the database triggers database tracking
-
-        let gen_dir = setup_gen_dir();
-        let db_path = gen_dir.parent().unwrap().join("test_tracking.db");
+        let context = setup_gen();
+        let db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("test_tracking.db");
         let context = DbContext::new(
-            Workspace::from_current_dir(),
+            context.workspace().clone(),
             get_connection(db_path.to_str()).unwrap(),
             get_operation_connection(None).unwrap(),
         );
@@ -339,10 +342,14 @@ mod tests {
 
     #[test]
     fn test_path_conflict_detection_different_path() {
-        let gen_dir = setup_gen_dir();
-        let db_path = gen_dir.parent().unwrap().join("original_location.db");
+        let context = setup_gen();
+        let db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("original_location.db");
         let context = DbContext::new(
-            Workspace::from_current_dir(),
+            context.workspace().clone(),
             crate::get_connection(&db_path).unwrap(),
             get_operation_connection(None).unwrap(),
         );
@@ -355,7 +362,11 @@ mod tests {
             .unwrap();
 
         // Move database to different location within .gen directory
-        let moved_db_path = gen_dir.parent().unwrap().join("moved_location.db");
+        let moved_db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("moved_location.db");
         fs::copy(&db_path, &moved_db_path).unwrap();
 
         // Try to access from moved location - should detect path conflict
@@ -373,10 +384,14 @@ mod tests {
 
     #[test]
     fn test_path_conflict_detection_uuid_mismatch() {
-        let gen_dir = setup_gen_dir();
-        let db_path = gen_dir.parent().unwrap().join("original_location.db");
+        let context = setup_gen();
+        let db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("original_location.db");
         let context = DbContext::new(
-            Workspace::from_current_dir(),
+            context.workspace().clone(),
             crate::get_connection(db_path.clone()).unwrap(),
             get_operation_connection(None).unwrap(),
         );
@@ -388,7 +403,7 @@ mod tests {
             .unwrap();
         let db_uuid1 = get_db_uuid(conn);
 
-        let new_db_path = gen_dir.parent().unwrap().join("new.db");
+        let new_db_path = context.workspace().repo_root().unwrap().join("new.db");
         let conn = &crate::get_connection(new_db_path.clone()).unwrap();
         track_database(conn, op_conn).unwrap();
         conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")

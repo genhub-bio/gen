@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs, io::Write, ops::Add, path::PathBuf};
+use std::{fmt::Debug, fs, io::Write, ops::Add};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
@@ -58,12 +58,6 @@ pub fn get_operation_connection<'a>(
     rusqlite::vtab::array::load_module(&conn)?;
     run_operation_migrations(&mut conn);
     Ok(OperationsConnection(conn))
-}
-
-pub fn setup_gen_dir() -> PathBuf {
-    let tmp_dir = tempdir().unwrap().keep();
-    let workspace = Workspace::new(tmp_dir);
-    workspace.ensure_gen_dir()
 }
 
 pub fn setup_gen() -> DbContext {

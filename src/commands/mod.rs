@@ -335,22 +335,6 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-pub fn get_db_for_command(db: Option<String>, operation_conn: &OperationsConnection) -> String {
-    db.clone().unwrap_or_else(|| {
-        let mut stmt = operation_conn
-            .prepare("select db_name from defaults where id = 1;")
-            .unwrap();
-        let row: Option<String> = stmt.query_row((), |row| row.get(0)).unwrap();
-        row.unwrap_or_else(|| {
-            let workspace = Workspace::from_current_dir();
-            match workspace.find_gen_dir() {
-                Some(dir) => dir.join("default.db").to_str().unwrap().to_string(),
-                None => panic!("No .gen directory found. Please run 'gen init' first."),
-            }
-        })
-    })
-}
-
 pub fn get_default_collection(conn: &OperationsConnection) -> String {
     let mut stmt = conn
         .prepare("select collection_name from defaults where id = 1")

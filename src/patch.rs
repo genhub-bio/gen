@@ -14,7 +14,10 @@ use rusqlite::{Error as SQLError, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::gen_schema_capnp::{operation_patch, operation_patches};
+use crate::{
+    gen_schema_capnp::{operation_patch, operation_patches},
+    get_connection,
+};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct OperationPatch {
@@ -203,11 +206,18 @@ where
 }
 
 pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<(), PatchError> {
-    let conn = context.graph().conn();
+    let workspace = context.workspace();
     for patch in patches.iter() {
         let changeset = &patch.changeset;
         let dependencies = &patch.dependencies;
-        let mut session = start_operation(context.graph().conn());
+        let mut change_context = context.clone();
+        let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
+        let data_db_path = repo_root.join(&changeset.db_path);
+        let graph_conn = get_connection(&data_db_path)?;
+        change_context.set_graph(graph_conn);
+
+        let conn = change_context.graph().conn();
+        let mut session = start_operation(conn);
 
         conn.execute("BEGIN TRANSACTION", [])?;
         match apply_changeset(conn, &changeset.changes, dependencies) {
@@ -221,7 +231,7 @@ pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<
         }
 
         end_operation(
-            context,
+            &change_context,
             &mut session,
             &OperationInfo {
                 files: patch
@@ -275,11 +285,11 @@ mod tests {
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -307,11 +317,11 @@ mod tests {
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &source_context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &source_context,
             None,
         )
         .unwrap();
@@ -358,11 +368,11 @@ mod tests {
         let _branch = Branch::get_or_create(operation_conn, "new-branch");
         OperationState::set_branch(operation_conn, "new-branch");
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -403,11 +413,11 @@ mod tests {
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();
@@ -442,11 +452,11 @@ mod tests {
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            &context,
             None,
         )
         .unwrap();

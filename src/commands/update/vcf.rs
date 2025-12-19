@@ -43,11 +43,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .unwrap_or_else(|| get_default_collection(operation_conn));
 
     match update_with_vcf(
+        context,
         &cmd.path,
         name,
         cmd.genotype.clone().unwrap_or("".to_string()),
         cmd.sample.clone().unwrap_or("".to_string()),
-        context,
         cmd.coordinate_frame.as_deref(),
     ) {
         Ok(_) => {

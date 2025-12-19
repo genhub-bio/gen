@@ -8,9 +8,16 @@ use gen_core::{
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{
-    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, db::OperationsConnection,
-    edge::Edge, errors::OperationError, node::Node, operations::Operation, sequence::Sequence,
-    session_operations::DependencyModels, traits::Query,
+    block_group_edge::BlockGroupEdge,
+    changesets::ChangesetModels,
+    db::{DbContext, OperationsConnection},
+    edge::Edge,
+    errors::OperationError,
+    node::Node,
+    operations::Operation,
+    sequence::Sequence,
+    session_operations::DependencyModels,
+    traits::Query,
 };
 use html_escape;
 use itertools::Itertools;
@@ -19,15 +26,16 @@ use petgraph::{Direction, graphmap::DiGraphMap};
 use crate::patch::OperationPatch;
 
 pub fn get_change_graph_from_hash(
-    conn: &OperationsConnection,
+    context: &DbContext,
     hash: &HashId,
 ) -> Result<HashMap<HashId, GenGraph>, OperationError> {
-    let operation =
-        Operation::get_by_id(conn, hash).ok_or(OperationError::NoOperation(format!("{hash}")))?;
+    let op_conn = context.operations().conn();
+    let operation = Operation::get_by_id(op_conn, hash)
+        .ok_or(OperationError::NoOperation(format!("{hash}")))?;
 
-    let workspace = Workspace::from_current_dir();
-    let changeset = operation.get_changeset(&workspace);
-    let dependencies = operation.get_changeset_dependencies(&workspace);
+    let workspace = context.workspace();
+    let changeset = operation.get_changeset(workspace);
+    let dependencies = operation.get_changeset_dependencies(workspace);
 
     Ok(get_change_graph(&changeset.changes, &dependencies))
 }

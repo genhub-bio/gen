@@ -80,14 +80,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sets_uuid_with_db_context() {
-        let ctx = setup_gen();
-        let conn = ctx.graph().conn();
-
-        assert!(!get_db_uuid(conn).is_empty());
-    }
-
-    #[test]
     fn test_table_name_constants() {
         use crate::{
             accession::{Accession, AccessionEdge, AccessionPath},
