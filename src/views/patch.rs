@@ -8,16 +8,9 @@ use gen_core::{
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{
-    block_group_edge::BlockGroupEdge,
-    changesets::ChangesetModels,
-    db::{DbContext, OperationsConnection},
-    edge::Edge,
-    errors::OperationError,
-    node::Node,
-    operations::Operation,
-    sequence::Sequence,
-    session_operations::DependencyModels,
-    traits::Query,
+    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, db::DbContext, edge::Edge,
+    errors::OperationError, node::Node, operations::Operation, sequence::Sequence,
+    session_operations::DependencyModels, traits::Query,
 };
 use html_escape;
 use itertools::Itertools;

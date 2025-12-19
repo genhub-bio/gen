@@ -9,7 +9,7 @@ use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
-    db::{DbContext, GraphConnection, OperationsConnection},
+    db::DbContext,
     operations::{Operation, OperationSummary},
     traits::Query,
 };

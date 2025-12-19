@@ -158,7 +158,7 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
-    use crate::test_helpers::{get_operation_connection, setup_gen};
+    use crate::test_helpers::get_operation_connection;
 
     #[test]
     fn test_gen_database_capnp_serialization() {

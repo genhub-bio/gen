@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use gen_core::config::Workspace;
 use gen_models::db::OperationsConnection;
 
 pub mod cli_context;

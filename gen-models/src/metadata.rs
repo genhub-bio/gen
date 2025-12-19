@@ -57,7 +57,7 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
-    use crate::test_helpers::{get_connection, setup_gen};
+    use crate::test_helpers::get_connection;
 
     #[test]
     fn test_metadata_capnp_serialization() {

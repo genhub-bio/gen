@@ -207,7 +207,6 @@ pub fn normalize_string(s: &str) -> String {
 mod tests {
     use std::fs;
 
-    use gen_core::config::Workspace;
     use gen_models::{db::DbContext, files::GenDatabase, metadata::get_db_uuid, traits::Query};
 
     use super::*;
