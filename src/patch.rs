@@ -262,8 +262,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        imports::fasta::import_fasta, operation_management, test_helpers::setup_gen,
-        track_database, updates::vcf::update_with_vcf,
+        imports::fasta::import_fasta,
+        operation_management,
+        test_helpers::{setup_gen, setup_gen_on_disk},
+        track_database,
+        updates::vcf::update_with_vcf,
     };
 
     #[test]
@@ -300,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_cross_db_patches() {
-        let source_context = setup_gen();
+        let source_context = setup_gen_on_disk();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = source_context.graph().conn();
@@ -329,7 +332,7 @@ mod tests {
         create_patch(&source_context, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
         let patches = load_patches(&write_stream[..]);
 
-        let target_context = setup_gen();
+        let target_context = setup_gen_on_disk();
         let target_conn = target_context.graph().conn();
         let target_operation_conn = target_context.operations().conn();
         track_database(target_conn, target_operation_conn).unwrap();
@@ -347,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_cross_branch_patches() {
-        let context = setup_gen();
+        let context = setup_gen_on_disk();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = context.graph().conn();
@@ -434,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_patch_empty_db() {
-        let context = setup_gen();
+        let context = setup_gen_on_disk();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = context.graph().conn();
@@ -464,7 +467,7 @@ mod tests {
         create_patch(&context, &[op_2.hash], &mut write_stream).unwrap();
 
         let patches = load_patches(&write_stream[..]);
-        let fresh_context = setup_gen();
+        let fresh_context = setup_gen_on_disk();
         track_database(
             fresh_context.graph().conn(),
             fresh_context.operations().conn(),

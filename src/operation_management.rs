@@ -1762,7 +1762,7 @@ mod tests {
 
     #[test]
     fn test_branch_movement() {
-        let context = setup_gen();
+        let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
         let fasta_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
