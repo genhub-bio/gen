@@ -1,9 +1,8 @@
-use pyo3::{prelude::*, types::PyDict};
-
-use crate::views::{
+use r#gen::views::{
     block_group_viewer::PlotParameters,
     block_layout::{BaseLayout, ScaledLayout},
 };
+use pyo3::{prelude::*, types::PyDict};
 
 // BaseLayout class for visualization
 #[pyclass]
@@ -40,7 +39,7 @@ impl PyBaseLayout {
             label_width,
             scale,
             aspect_ratio: 1.0,
-            edge_style: crate::views::block_group_viewer::EdgeStyle::Straight,
+            edge_style: r#gen::views::block_group_viewer::EdgeStyle::Straight,
         };
 
         let scaled = ScaledLayout::from_base_layout(&self.layout, &params);

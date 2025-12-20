@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+use r#gen::core::HashId;
 use gen_graph::GraphNode;
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use pyo3::{prelude::*, types::PyDict};
 
 use super::node_key::PyNodeKey;
-use crate::core::HashId;
 
 // Private factory struct for BlockGroup transformations
 // Not exposed to Python, only used internally by the Repository

@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Mutex};
 
+use r#gen::{core::HashId, get_connection, views::block_layout::BaseLayout};
 use gen_core::config::Workspace;
 use gen_models::{block_group::BlockGroup, db::GraphConnection, traits::Query};
 use pyo3::{prelude::*, types::PyModule};
@@ -10,7 +11,6 @@ use super::{
     layouts::PyBaseLayout,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
-use crate::{core::HashId, get_connection, views::block_layout::BaseLayout};
 
 /// The main entry point for the gen Python module.
 ///
@@ -263,9 +263,10 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
+    use r#gen::test_helpers::setup_gen;
     use pyo3::{prelude::*, py_run};
 
-    use crate::{python_api::repository::PyRepository, test_helpers::setup_gen};
+    use crate::python_api::repository::PyRepository;
 
     #[test]
     fn test_repository_creation() {

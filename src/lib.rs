@@ -31,9 +31,6 @@ pub mod test_helpers;
 pub mod translate;
 pub mod updates;
 pub mod views;
-// The Python bindings are in a separate module to avoid issues with non-local impl
-#[cfg(feature = "python-bindings")]
-pub mod python_api;
 
 // reexports for public api, put behind features as needed
 pub use gen_core as core;

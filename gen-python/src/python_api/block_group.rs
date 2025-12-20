@@ -1,6 +1,5 @@
+use r#gen::core::HashId;
 use pyo3::prelude::*;
-
-use crate::core::HashId;
 
 /// Exposes a BlockGroup to Python.
 #[pyclass]

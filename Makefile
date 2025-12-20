@@ -1,5 +1,5 @@
 python: venv
-	VIRTUAL_ENV=.venv maturin develop --release --features python-bindings  --features extension-module
+	VIRTUAL_ENV=.venv maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module
 clean:
 	cargo clean
 build:

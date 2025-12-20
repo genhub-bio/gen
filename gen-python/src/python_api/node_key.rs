@@ -1,6 +1,5 @@
+use r#gen::core::HashId;
 use pyo3::prelude::*;
-
-use crate::core::HashId;
 
 /// A Python-friendly representation of a graph node key
 /// Used to ensure consistent hashing when used as dictionary keys in Python
