@@ -29,3 +29,6 @@ features = []
 
 [build-dependencies]
 pyo3-build-config = "0.26.0"
+
+[workspace]
+members = ["."]

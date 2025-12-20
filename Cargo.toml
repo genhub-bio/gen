@@ -19,6 +19,7 @@ path = "src/main.rs"
 [workspace]
 members = [".", "gen-core", "gen-models", "gen-graph"]
 default-members = [".", "gen-core", "gen-models", "gen-graph"]
+exclude = ["gen-python"]
 
 [features]
 benchmark = []
