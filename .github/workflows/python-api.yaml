@@ -37,9 +37,10 @@ jobs:
           manylinux: auto
           container: quay.io/pypa/manylinux_2_28_x86_64:latest
           before-script-linux: |
-            yum install -y clang llvm-devel sqlite-devel capnproto pkgconfig
+            yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig
           working-directory: .
         env:
+          CAPNP: /usr/bin/capnp
           LIBCLANG_PATH: /usr/lib64
       - name: Build wheels (macOS, Windows)
         if: runner.os != 'Linux'
