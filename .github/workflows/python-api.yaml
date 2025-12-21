@@ -2,7 +2,7 @@ name: Python API Wheels
 
 on:
   push:
-    branches: ["main"]
+    branches: ["**"]
   pull_request:
     branches: ["main"]
 
