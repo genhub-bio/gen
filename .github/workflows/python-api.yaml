@@ -41,9 +41,13 @@ jobs:
             cargo install capnpc
             export PATH="/root/.cargo/bin:${PATH}"
             export CAPNPC_RUST="/root/.cargo/bin/capnpc-rust"
+            mkdir -p gen-core/src/generated gen-models/src/generated src/generated
             capnp compile -I . -orust:gen-core/src/generated gen-core/gen-core.capnp
             capnp compile -I . -orust:gen-models/src/generated gen-models/gen-models.capnp
             capnp compile -I . -orust:src/generated gen-schema.capnp
+            ls -la gen-core/src/generated
+            ls -la gen-models/src/generated
+            ls -la src/generated
           working-directory: .
         env:
           CAPNP: /usr/bin/capnp
