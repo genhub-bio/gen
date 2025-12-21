@@ -35,8 +35,9 @@ jobs:
           command: build
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
           manylinux: auto
+          container: quay.io/pypa/manylinux_2_28_x86_64:latest
           before-script-linux: |
-            yum install -y clang llvm-devel capnproto
+            yum install -y clang llvm-devel sqlite-devel capnproto pkgconfig
           working-directory: .
         env:
           LIBCLANG_PATH: /usr/lib64
