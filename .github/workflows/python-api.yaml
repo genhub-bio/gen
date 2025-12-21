@@ -45,6 +45,7 @@ jobs:
             (cd gen-core && capnp compile -I .. -orust:src/generated gen-core.capnp)
             (cd gen-models && capnp compile -I .. -orust:src/generated gen-models.capnp)
             capnp compile -I . -orust:src/generated gen-schema.capnp
+            # For some reason these files get generated in a subdirectory for this manylinux image
             if [ -d gen-core/src/generated/gen-core ]; then mv gen-core/src/generated/gen-core/*.rs gen-core/src/generated/ && rmdir gen-core/src/generated/gen-core; fi
             if [ -d gen-models/src/generated/gen-models ]; then mv gen-models/src/generated/gen-models/*.rs gen-models/src/generated/ && rmdir gen-models/src/generated/gen-models; fi
             ls -la gen-core/src/generated
