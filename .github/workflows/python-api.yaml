@@ -33,7 +33,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
+          args: --release --manifest-path gen-python/Cargo.toml -vv --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
           manylinux: auto
           container: quay.io/pypa/manylinux_2_28_x86_64:latest
           before-script-linux: |
