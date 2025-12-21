@@ -24,7 +24,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install capnp (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto libclang-dev
       - name: Install capnp (macOS)
         if: runner.os == 'macOS'
         run: brew install capnp
