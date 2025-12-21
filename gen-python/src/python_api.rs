@@ -9,12 +9,19 @@ pub mod repository;
 pub mod utils;
 
 // Re-export components for use in the main module
-use crate::python_api::{
-    block_group::PyBlockGroup,
-    layouts::{PyBaseLayout, PyScaledLayout},
-    node_key::PyNodeKey,
-    repository::PyRepository,
-    utils::get_gen_dir_py,
+use crate::{
+    PyDbContext,
+    exports::export_fasta,
+    imports::import_fasta,
+    init,
+    python_api::{
+        block_group::PyBlockGroup,
+        layouts::{PyBaseLayout, PyScaledLayout},
+        node_key::PyNodeKey,
+        repository::PyRepository,
+        utils::get_gen_dir_py,
+    },
+    updates::update_with_fasta,
 };
 
 /// Adds functions and classes to the Python module.
@@ -22,6 +29,11 @@ use crate::python_api::{
 /// to expose them to the user.
 #[pymodule]
 pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyDbContext>()?;
+    m.add_function(wrap_pyfunction!(init, m)?)?;
+    m.add_function(wrap_pyfunction!(import_fasta, m)?)?;
+    m.add_function(wrap_pyfunction!(update_with_fasta, m)?)?;
+    m.add_function(wrap_pyfunction!(export_fasta, m)?)?;
     m.add_function(wrap_pyfunction!(get_gen_dir_py, m)?)?;
 
     m.add_class::<PyRepository>()?;
