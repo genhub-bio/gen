@@ -33,11 +33,14 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --manifest-path gen-python/Cargo.toml -vv --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
+          args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
           manylinux: auto
           container: quay.io/pypa/manylinux_2_28_x86_64:latest
           before-script-linux: |
             yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig
+            capnp compile -I . -orust:gen-core/src/generated gen-core/gen-core.capnp
+            capnp compile -I . -orust:gen-models/src/generated gen-models/gen-models.capnp
+            capnp compile -I . -orust:src/generated gen-schema.capnp
           working-directory: .
         env:
           CAPNP: /usr/bin/capnp
