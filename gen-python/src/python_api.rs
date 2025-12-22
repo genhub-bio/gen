@@ -11,8 +11,8 @@ pub mod utils;
 // Re-export components for use in the main module
 use crate::{
     PyDbContext,
-    exports::export_fasta,
-    imports::import_fasta,
+    exports::{export_fasta, export_genbank, export_gfa},
+    imports::{import_fasta, import_genbank, import_gfa, import_library},
     init,
     python_api::{
         block_group::PyBlockGroup,
@@ -21,7 +21,10 @@ use crate::{
         repository::PyRepository,
         utils::get_gen_dir_py,
     },
-    updates::update_with_fasta,
+    updates::{
+        update_with_fasta, update_with_gaf, update_with_genbank, update_with_gfa,
+        update_with_library, update_with_sequence, update_with_vcf,
+    },
 };
 
 /// Adds functions and classes to the Python module.
@@ -32,8 +35,19 @@ pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDbContext>()?;
     m.add_function(wrap_pyfunction!(init, m)?)?;
     m.add_function(wrap_pyfunction!(import_fasta, m)?)?;
+    m.add_function(wrap_pyfunction!(import_gfa, m)?)?;
+    m.add_function(wrap_pyfunction!(import_genbank, m)?)?;
+    m.add_function(wrap_pyfunction!(import_library, m)?)?;
     m.add_function(wrap_pyfunction!(update_with_fasta, m)?)?;
+    m.add_function(wrap_pyfunction!(update_with_gfa, m)?)?;
+    m.add_function(wrap_pyfunction!(update_with_gaf, m)?)?;
+    m.add_function(wrap_pyfunction!(update_with_vcf, m)?)?;
+    m.add_function(wrap_pyfunction!(update_with_genbank, m)?)?;
+    m.add_function(wrap_pyfunction!(update_with_library, m)?)?;
+    m.add_function(wrap_pyfunction!(update_with_sequence, m)?)?;
     m.add_function(wrap_pyfunction!(export_fasta, m)?)?;
+    m.add_function(wrap_pyfunction!(export_gfa, m)?)?;
+    m.add_function(wrap_pyfunction!(export_genbank, m)?)?;
     m.add_function(wrap_pyfunction!(get_gen_dir_py, m)?)?;
 
     m.add_class::<PyRepository>()?;

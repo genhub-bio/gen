@@ -13,10 +13,21 @@ try:
         PyBaseLayout,
         PyScaledLayout,
         export_fasta,
+        export_genbank,
+        export_gfa,
         get_gen_dir,
         import_fasta,
+        import_genbank,
+        import_gfa,
+        import_library,
         init,
         update_with_fasta,
+        update_with_gaf,
+        update_with_genbank,
+        update_with_gfa,
+        update_with_library,
+        update_with_sequence,
+        update_with_vcf,
     )
 
     # Through Python (helpers.py), currently not used
@@ -30,10 +41,21 @@ try:
         "PyBaseLayout",
         "PyScaledLayout",
         "export_fasta",
+        "export_genbank",
+        "export_gfa",
         "get_gen_dir",
         "import_fasta",
+        "import_genbank",
+        "import_gfa",
+        "import_library",
         "init",
         "update_with_fasta",
+        "update_with_gaf",
+        "update_with_genbank",
+        "update_with_gfa",
+        "update_with_library",
+        "update_with_sequence",
+        "update_with_vcf",
     ]
 
 except ImportError as e:
