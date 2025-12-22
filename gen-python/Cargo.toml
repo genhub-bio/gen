@@ -17,6 +17,7 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+flate2 = "1.1.5"
 gen = { path = ".." }
 gen-core = { path = "../gen-core", features = ["python-bindings"] }
 gen-graph = { path = "../gen-graph" }
