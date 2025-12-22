@@ -3,8 +3,6 @@ name: Python API Wheels
 on:
   push:
     branches: ["main"]
-  pull_request:
-    branches: ["**"]
 
 jobs:
   build-wheels:
