@@ -33,7 +33,6 @@ use petgraph::Direction;
 use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Connection, Error as SQLError};
 use serde::Deserialize;
-use serde_json::json;
 use thiserror::Error;
 use url_parse::core::Parser;
 
@@ -577,8 +576,12 @@ fn apply_operations_to_remote(
         })?;
 
         for file_addition in &manifest_op.file_additions {
-            let src_path = gen_dir.join(&file_addition.file_path);
+            let src_path = FilePath::new(&gen_dir)
+                .parent()
+                .unwrap()
+                .join(&file_addition.file_path);
             let dst_path = remote_path.join(&file_addition.file_path);
+
             // we do a conditional transfer because users may be making tmp files to just add nodes/etc. and don't actually
             // care about keeping those files around
             if src_path.exists() {
@@ -635,6 +638,7 @@ fn apply_operations_to_remote(
                         remote_op_conn,
                         &file_addition.file_path,
                         file_addition.file_type,
+                        None,
                     )?;
                     Operation::add_file(remote_op_conn, &operation.hash, &remote_file_addition.id)?;
                 }
@@ -792,13 +796,28 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
                         let part =
                             multipart::Part::bytes(encoded).mime_str("application/octet-stream")?;
 
-                        let form = multipart::Form::new()
+                        let mut form = multipart::Form::new()
                             .part("manifest_operation", part)
                             .file("files", cs_path)
                             .unwrap()
                             .file("files", dep_path)
-                            .unwrap()
-                            .text("branch", current_branch.name.clone());
+                            .unwrap();
+
+                        let operation_files =
+                            FileAddition::get_files_for_operation(operation_conn, &op.hash);
+                        for op_file in operation_files {
+                            form = form
+                                .file(
+                                    "assets",
+                                    FilePath::new(".gen")
+                                        .join("assets")
+                                        .join(op_file.hashed_filename()),
+                                )
+                                .unwrap();
+                        }
+
+                        form = form.text("branch", current_branch.name.clone());
+
                         let response = client
                             .post(&manifest_url)
                             .bearer_auth(auth_tokens.jwt.clone())
@@ -1007,6 +1026,7 @@ fn ingest_manifest_operation(
                     operation_conn,
                     &file_addition.file_path,
                     file_addition.file_type,
+                    None,
                 )?;
                 Operation::add_file(operation_conn, &operation.hash, &local_file_addition.id)?;
             }
@@ -1101,6 +1121,7 @@ struct RemoteOperationAssetResponse {
 
 #[derive(Debug, Deserialize)]
 struct RemoteFileAsset {
+    asset_path: String,
     file_path: String,
     url: String,
 }
@@ -1144,17 +1165,24 @@ fn download_remote_operation_assets(
         "dependencies",
     )?;
 
-    // TODO: When file uploads are finished, uncomment this out
-    // for file in asset_response.files {
-    //     let destination = repo_root.join(&file.file_path);
-    //     download_binary(
-    //         client,
-    //         &file.url,
-    //         destination.as_path(),
-    //         Some(auth_token),
-    //         &file.file_path,
-    //     )?;
-    // }
+    let gen_dir = get_gen_dir().unwrap();
+    let gen_path = FilePath::new(&gen_dir);
+    for file in asset_response.files {
+        let destination = gen_path.join("assets").join(&file.asset_path);
+        let user_destination = repo_root.join(&file.file_path);
+        if !destination.exists() {
+            download_binary(
+                client,
+                &file.url,
+                destination.as_path(),
+                Some(auth_token),
+                &file.file_path,
+            )?;
+        }
+        if !user_destination.exists() {
+            std::fs::copy(destination.as_path(), user_destination.as_path())?;
+        }
+    }
 
     Ok(())
 }
@@ -1236,6 +1264,7 @@ fn send_manifest_to_remote(
 mod tests {
     use std::{
         collections::HashSet,
+        env,
         path::{Path, PathBuf},
     };
 
@@ -1276,7 +1305,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1"),
             );
@@ -1284,7 +1313,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2"),
             );
@@ -1296,7 +1325,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-3"),
             );
@@ -1304,7 +1333,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-4"),
             );
@@ -1313,7 +1342,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-5"),
             );
@@ -1321,7 +1350,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-6"),
             );
@@ -1371,7 +1400,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1"),
             );
@@ -1379,7 +1408,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2"),
             );
@@ -1387,7 +1416,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-3"),
             );
@@ -1416,7 +1445,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1-abc-123"),
             );
@@ -1424,7 +1453,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2-abc-123"),
             );
@@ -1432,7 +1461,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "vcf_addition",
                 HashId::convert_str("op-3-abc-13"),
             );
@@ -1472,7 +1501,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-1-abc-123"),
             );
@@ -1480,7 +1509,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "fasta_addition",
                 HashId::convert_str("op-2-abc-123"),
             );
@@ -1488,7 +1517,7 @@ mod tests {
                 conn,
                 op_conn,
                 "foo",
-                FileTypes::Fasta,
+                FileTypes::None,
                 "vcf_addition",
                 // some random string i found to collide with prefix of above
                 HashId::convert_str("AXf5SuLvAM"),
@@ -1982,7 +2011,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
@@ -1990,7 +2019,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
@@ -2001,7 +2030,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
@@ -2009,7 +2038,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
@@ -2017,7 +2046,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -2027,7 +2056,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-6"),
         );
@@ -2035,7 +2064,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-7"),
         );
@@ -2043,7 +2072,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-8"),
         );
@@ -2055,7 +2084,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-9"),
         );
@@ -2065,7 +2094,7 @@ mod tests {
             conn,
             operation_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-10"),
         );
@@ -2136,7 +2165,7 @@ mod tests {
             conn,
             op_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
@@ -2144,7 +2173,7 @@ mod tests {
             conn,
             op_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
@@ -2152,7 +2181,7 @@ mod tests {
             conn,
             op_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
@@ -2160,7 +2189,7 @@ mod tests {
             conn,
             op_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
@@ -2170,7 +2199,7 @@ mod tests {
             conn,
             op_conn,
             "test.fasta",
-            FileTypes::Fasta,
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -2253,6 +2282,7 @@ mod tests {
         #[test]
         fn test_apply_operations_to_remote() {
             let local_gen_dir = setup_gen_dir();
+            let local_dir = local_gen_dir.parent().unwrap();
             let local_conn = &get_connection(None).unwrap();
             let local_op_conn = &get_operation_connection(None).unwrap();
             track_database(local_conn, local_op_conn).unwrap();
@@ -2265,13 +2295,24 @@ mod tests {
                 // Make some actual changes to trigger changeset creation
                 Collection::create(local_conn, &format!("test_collection_{i}"));
 
+                let file_path = format!("test_file_{i}.fa");
                 let op_info = OperationInfo {
                     files: vec![OperationFile {
-                        file_path: format!("test_file_{i}.fa"),
+                        file_path: file_path.clone(),
                         file_type: FileTypes::Fasta,
                     }],
                     description: format!("Test operation {i}"),
                 };
+
+                // Create the file addition we're transferring
+                fs::write(
+                    FilePath::new(local_dir).join(file_path),
+                    "test file content",
+                )
+                .unwrap();
+
+                let previous_dir = env::current_dir().unwrap();
+                env::set_current_dir(local_dir).unwrap();
                 end_operation(
                     local_conn,
                     local_op_conn,
@@ -2281,13 +2322,7 @@ mod tests {
                     None,
                 )
                 .unwrap();
-
-                // Create the file addition we're transferring
-                fs::write(
-                    local_gen_dir.join(format!("test_file_{i}.fa")),
-                    "test file content",
-                )
-                .unwrap();
+                env::set_current_dir(previous_dir).unwrap();
             }
 
             let local_main = Branch::get_by_name(local_op_conn, "main").unwrap();
@@ -2306,6 +2341,7 @@ mod tests {
             let local_manifest = ManifestGenerator::new(local_op_conn)
                 .generate_manifest("main", local_main.current_operation_hash.as_ref())
                 .unwrap();
+
             let result =
                 apply_operations_to_remote(remote_op_conn, &local_manifest.operations, remote_path);
 
@@ -2359,7 +2395,7 @@ mod tests {
             let remote_operation = create_operation(
                 remote_conn,
                 remote_op_conn,
-                "remote_file.fa",
+                "fixtures/empty.fa",
                 FileTypes::Fasta,
                 "remote operation",
                 HashId::random_str(),
@@ -2493,7 +2529,7 @@ mod tests {
             create_operation(
                 conn,
                 op_conn,
-                "foo.fa",
+                "fixtures/simple.fa",
                 FileTypes::Fasta,
                 "local",
                 HashId::random_str(),
@@ -2512,7 +2548,7 @@ mod tests {
             create_operation(
                 remote_conn,
                 remote_op_conn,
-                "remote_foo.fa",
+                "fixtures/aa.fa",
                 FileTypes::Fasta,
                 "remote",
                 HashId::random_str(),

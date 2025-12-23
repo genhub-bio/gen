@@ -11,7 +11,7 @@ pub static BASE_DIR: LazyLock<RwLock<PathBuf>> =
     LazyLock::new(|| RwLock::new(env::current_dir().unwrap()));
 }
 
-fn ensure_dir(path: &PathBuf) {
+pub fn ensure_dir(path: &PathBuf) {
     if !path.is_dir() {
         fs::create_dir_all(path).unwrap();
     }
@@ -38,6 +38,8 @@ pub fn get_or_create_gen_dir() -> PathBuf {
     let cur_dir = start_dir.as_path();
     let gen_path = cur_dir.join(".gen");
     ensure_dir(&gen_path);
+    let asset_path = gen_path.join("assets");
+    ensure_dir(&asset_path);
     gen_path
 }
 

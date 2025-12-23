@@ -317,7 +317,19 @@ impl FileAddition {
         if let Some(db_path) = conn.path()
             && !db_path.is_empty()
         {
-            let db_path = PathBuf::from(db_path);
+            #[cfg(target_os = "macos")]
+            let db_path: PathBuf = {
+                // This handles a really stupid mac os thing, where filesystem
+                // locations that are under /tmp or /var get returned from
+                // system calls with the full path having a prefix of /private.
+                // No idea why this happens.
+                let cleaned_path = db_path.strip_prefix("/private").unwrap_or(db_path);
+                Path::new("/").join(cleaned_path)
+            };
+
+            #[cfg(not(target_os = "macos"))]
+            let db_path: PathBuf = { PathBuf::from(db_path) };
+
             if let Some(gen_dir) = db_path.parent()
                 && let Some(repo_root) = gen_dir.parent()
             {
@@ -344,17 +356,19 @@ impl FileAddition {
         conn: &Connection,
         file_path: &str,
         file_type: FileTypes,
+        checksum_override: Option<HashId>,
     ) -> Result<FileAddition, FileAdditionError> {
         let (absolute_file_path, relative_file_path) =
             FileAddition::normalize_file_paths(conn, file_path);
 
-        let checksum = if relative_file_path.is_empty() {
-            HashId::convert_str("empty")
+        // TODO: Verify checksum_override actually matches the file's checksum?
+        let checksum = if let Some(checksum_override) = checksum_override {
+            checksum_override
         } else {
-            let checksum_path = if absolute_file_path.is_empty() {
-                relative_file_path.as_str()
-            } else {
+            let checksum_path = if relative_file_path.is_empty() {
                 absolute_file_path.as_str()
+            } else {
+                relative_file_path.as_str()
             };
             match calculate_file_checksum(checksum_path) {
                 Ok(checksum) => checksum,
@@ -436,6 +450,14 @@ impl FileAddition {
                 acc.entry(hash).or_default().push(item);
                 Ok(acc)
             })
+    }
+
+    pub fn hashed_filename(self) -> String {
+        format!(
+            "{}.{}",
+            self.checksum.clone(),
+            &FileTypes::suffix(self.file_type)
+        )
     }
 }
 
@@ -1042,7 +1064,7 @@ impl OperationState {
 mod tests {
     use std::{
         collections::HashSet,
-        fs,
+        env, fs,
         io::{Cursor, Write},
         path::PathBuf,
     };
@@ -1294,8 +1316,8 @@ mod tests {
         let op = create_operation(
             conn,
             op_conn,
-            "something.fa",
-            FileTypes::Fasta,
+            "something",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
@@ -1316,8 +1338,8 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
@@ -1344,32 +1366,32 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -1377,48 +1399,48 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-6"),
         );
         let _branch_2_midpoint = create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-7"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-8"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-9"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-10"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-11"),
         );
@@ -1426,16 +1448,16 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-12"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-13"),
         );
@@ -1598,24 +1620,24 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-1"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-2"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-3"),
         );
@@ -1624,16 +1646,16 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-4"),
         );
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-5"),
         );
@@ -1643,8 +1665,8 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-6"),
         );
@@ -1654,8 +1676,8 @@ mod tests {
         create_operation(
             conn,
             op_conn,
-            "test.fasta",
-            FileTypes::Fasta,
+            "test",
+            FileTypes::None,
             "foo",
             HashId::convert_str("op-7"),
         );
@@ -2245,45 +2267,50 @@ mod tests {
         let op_db_path_str = op_db_path.to_string_lossy().to_string();
         let conn = &get_operation_connection(Some(op_db_path_str.as_str())).unwrap();
 
+        // NOTE: The file checksums are calculated based on relative path, so
+        // change working directory to the repo root so that they are correctly
+        // calculated
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(&repo_root).unwrap();
+
         let file1_path = repo_root.join("test_file.txt");
         fs::write(&file1_path, b"Test file content").unwrap();
-        let file1_path_str = file1_path.to_string_lossy().to_string();
         let relative1 = file1_path
             .strip_prefix(&repo_root)
             .unwrap()
             .to_string_lossy()
             .to_string();
 
-        let fa1 = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
+        let fa1 = FileAddition::get_or_create(conn, &relative1, FileTypes::Fasta, None)
             .expect("Failed to create FileAddition");
 
         assert_eq!(fa1.file_path, relative1);
-        assert_eq!(
-            fa1.id,
-            FileAddition::generate_file_addition_id(
-                &calculate_file_checksum(&file1_path_str).unwrap(),
-                &relative1
-            )
-        );
+
+        let checksum = calculate_file_checksum(&relative1).unwrap();
+        let relative1_id = FileAddition::generate_file_addition_id(&checksum, &relative1);
+
+        assert_eq!(fa1.id, relative1_id);
 
         // Second call with same file should return the same FileAddition
-        let fa2 = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
+        let fa2 = FileAddition::get_or_create(conn, &relative1, FileTypes::Fasta, None)
             .expect("Failed to get existing FileAddition");
 
         assert_eq!(fa1, fa2);
+
+        env::set_current_dir(original_dir).unwrap();
 
         let file2_path = repo_root.join("nested").join("file2.txt");
         fs::create_dir_all(file2_path.parent().unwrap()).unwrap();
         fs::write(&file2_path, b"Test file content").unwrap();
         let file2_path_str = file2_path.to_string_lossy().to_string();
 
-        let fa3 = FileAddition::get_or_create(conn, &file2_path_str, FileTypes::Fasta)
+        let fa3 = FileAddition::get_or_create(conn, &file2_path_str, FileTypes::Fasta, None)
             .expect("Failed to create different FileAddition");
 
         assert_ne!(fa1.id, fa3.id);
 
         fs::write(&file1_path, b"new content").unwrap();
-        let fa1_new = FileAddition::get_or_create(conn, &file1_path_str, FileTypes::Fasta)
+        let fa1_new = FileAddition::get_or_create(conn, &relative1, FileTypes::Fasta, None)
             .expect("Failed to create FileAddition");
 
         assert_ne!(fa1.id, fa1_new.id);
