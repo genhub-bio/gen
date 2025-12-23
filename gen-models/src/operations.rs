@@ -361,6 +361,7 @@ impl FileAddition {
         let (absolute_file_path, relative_file_path) =
             FileAddition::normalize_file_paths(conn, file_path);
 
+        // TODO: Verify checksum_override actually matches the file's checksum?
         let checksum = if let Some(checksum_override) = checksum_override {
             checksum_override
         } else {
