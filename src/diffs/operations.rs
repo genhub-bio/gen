@@ -3,37 +3,21 @@ use std::collections::{HashMap, HashSet};
 use gen_core::HashId;
 use gen_graph::{GenGraph, connect_all_boundary_edges};
 use gen_models::{
-    block_group::BlockGroup,
-    changesets::ChangesetModels,
-    errors::OperationError,
-    operations::{Branch, Operation, OperationState},
-    session_operations::DependencyModels,
-    traits::Query,
+    block_group::BlockGroup, changesets::ChangesetModels, errors::OperationError,
+    operations::Operation, session_operations::DependencyModels, traits::Query,
 };
 use petgraph::Direction;
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use thiserror::Error;
 
 use crate::views::patch::get_change_graph;
 
 #[derive(Debug, Error)]
 pub enum OperationDiffError {
-    #[error("No current branch is checked out.")]
-    NoCurrentBranch,
     #[error("No current operation is checked out.")]
     NoCurrentOperation,
-    #[error("Branch '{0}' not found.")]
-    BranchNotFound(String),
-    #[error("Branch '{0}' has no operations.")]
-    EmptyBranch(String),
-    #[error("Reference '{0}' is not a valid HEAD shorthand.")]
-    InvalidHead(String),
-    #[error("HEAD offset {0} is out of range for the current branch.")]
-    HeadOffsetOutOfRange(usize),
-    #[error("Reference '{0}' did not match any operation.")]
-    OperationNotFound(String),
-    #[error("Reference '{0}' matches multiple operations.")]
-    OperationAmbiguous(String),
+    #[error("Operation {0} not found.")]
+    OperationMissing(HashId),
     #[error("Unable to find path between {0} and {1}.")]
     PathNotFound(HashId, HashId),
     #[error("Missing changeset data for operation {0}.")]
@@ -57,26 +41,19 @@ pub struct OperationDiff {
 
 pub fn collect_operation_diff(
     op_conn: &Connection,
-    from_ref: &str,
-    to_ref: Option<&str>,
+    from_hash: HashId,
+    to_hash: HashId,
 ) -> Result<OperationDiff, OperationDiffError> {
-    let target_hash = if let Some(to_ref) = to_ref {
-        resolve_ref(op_conn, to_ref)?
-    } else {
-        OperationState::get_operation(op_conn).ok_or(OperationDiffError::NoCurrentOperation)?
-    };
-    let from_hash = resolve_ref(op_conn, from_ref)?;
-
-    if from_hash == target_hash {
+    if from_hash == to_hash {
         return Ok(OperationDiff {
             operations: vec![],
             block_groups: vec![],
         });
     }
 
-    let path = Operation::get_path_between(op_conn, from_hash, target_hash);
+    let path = Operation::get_path_between(op_conn, from_hash, to_hash);
     if path.is_empty() {
-        return Err(OperationDiffError::PathNotFound(from_hash, target_hash));
+        return Err(OperationDiffError::PathNotFound(from_hash, to_hash));
     }
 
     let mut operations_to_merge = vec![];
@@ -105,7 +82,7 @@ pub fn collect_operation_diff(
 
     for op_hash in &operations_to_merge {
         let operation = Operation::get_by_id(op_conn, op_hash)
-            .ok_or_else(|| OperationDiffError::OperationNotFound(op_hash.to_string()))?;
+            .ok_or_else(|| OperationDiffError::OperationMissing(*op_hash))?;
         let changeset = operation.get_changeset().changes;
         let dependencies = operation.get_changeset_dependencies();
 
@@ -182,53 +159,6 @@ pub fn collect_operation_diff(
         operations: operations_to_merge,
         block_groups,
     })
-}
-
-fn resolve_ref(conn: &Connection, reference: &str) -> Result<HashId, OperationDiffError> {
-    if reference.starts_with("HEAD") {
-        let branch_id =
-            OperationState::get_current_branch(conn).ok_or(OperationDiffError::NoCurrentBranch)?;
-        let branch = Branch::get_by_id(conn, branch_id)
-            .ok_or_else(|| OperationDiffError::BranchNotFound(branch_id.to_string()))?;
-        let operations = Branch::get_operations(conn, branch.id);
-        if operations.is_empty() {
-            return Err(OperationDiffError::EmptyBranch(branch.name));
-        }
-        return if reference == "HEAD" {
-            Ok(operations.last().unwrap().hash)
-        } else if let Some(offset) = reference.strip_prefix("HEAD~") {
-            let offset: usize = offset
-                .parse()
-                .map_err(|_| OperationDiffError::InvalidHead(reference.to_string()))?;
-            let head_index = operations.len() - 1;
-            if offset > head_index {
-                return Err(OperationDiffError::HeadOffsetOutOfRange(offset));
-            }
-            Ok(operations[head_index - offset].hash)
-        } else {
-            Err(OperationDiffError::InvalidHead(reference.to_string()))
-        };
-    }
-
-    if let Some(branch) = Branch::get_by_name(conn, reference) {
-        if let Some(hash) = branch.current_operation_hash {
-            return Ok(hash);
-        }
-        return Err(OperationDiffError::EmptyBranch(branch.name));
-    }
-
-    let operations = Operation::query(conn, "select * from operations", params![]);
-    let matches = operations
-        .iter()
-        .filter(|op| op.hash.starts_with(reference))
-        .collect::<Vec<_>>();
-    match matches.len() {
-        0 => Err(OperationDiffError::OperationNotFound(reference.to_string())),
-        1 => Ok(matches[0].hash),
-        _ => Err(OperationDiffError::OperationAmbiguous(
-            reference.to_string(),
-        )),
-    }
 }
 
 #[cfg(test)]
@@ -382,7 +312,7 @@ mod tests {
             &dependencies,
         );
 
-        let diff = collect_operation_diff(&op_conn, "HEAD~1", None).expect("diff");
+        let diff = collect_operation_diff(&op_conn, base_op.hash, head.hash).expect("diff");
         assert_eq!(diff.operations, vec![head.hash]);
         assert_eq!(diff.block_groups.len(), 1);
         let graph = &diff.block_groups[0].graph;
@@ -456,12 +386,7 @@ mod tests {
             &dependencies_two,
         );
 
-        let diff = collect_operation_diff(
-            &op_conn,
-            &format!("{}", op1.hash),
-            Some(&format!("{}", op3.hash)),
-        )
-        .expect("diff");
+        let diff = collect_operation_diff(&op_conn, op1.hash, op3.hash).expect("diff");
         assert_eq!(diff.operations, vec![op2.hash, op3.hash]);
         assert_eq!(diff.block_groups.len(), 2);
         for bg in diff.block_groups {
@@ -529,12 +454,7 @@ mod tests {
             &dependencies_two,
         );
 
-        let diff = collect_operation_diff(
-            &op_conn,
-            &format!("{}", op1.hash),
-            Some(&format!("{}", op3.hash)),
-        )
-        .expect("diff");
+        let diff = collect_operation_diff(&op_conn, op1.hash, op3.hash).expect("diff");
         assert_eq!(diff.operations, vec![op2.hash, op3.hash]);
         assert_eq!(diff.block_groups.len(), 1);
         let graph = &diff.block_groups[0].graph;
@@ -547,12 +467,7 @@ mod tests {
         let op_conn = init_branch();
         let base =
             Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
-        let diff = collect_operation_diff(
-            &op_conn,
-            &format!("{}", base.hash),
-            Some(&format!("{}", base.hash)),
-        )
-        .expect("diff");
+        let diff = collect_operation_diff(&op_conn, base.hash, base.hash).expect("diff");
         assert!(diff.operations.is_empty());
         assert!(diff.block_groups.is_empty());
     }

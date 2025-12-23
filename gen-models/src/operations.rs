@@ -78,6 +78,30 @@ impl<'a> Capnp<'a> for Operation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HashRange {
+    pub from: Option<HashId>,
+    pub to: Option<HashId>,
+}
+
+#[derive(Debug, Error)]
+pub enum HashParseError {
+    #[error("No current branch is checked out.")]
+    NoCurrentBranch,
+    #[error("Branch '{0}' not found.")]
+    BranchNotFound(String),
+    #[error("Branch '{0}' has no operations.")]
+    EmptyBranch(String),
+    #[error("Reference '{0}' is not a valid HEAD shorthand.")]
+    InvalidHead(String),
+    #[error("HEAD offset {0} is out of range for the current branch.")]
+    HeadOffsetOutOfRange(usize),
+    #[error("Reference '{0}' did not match any operation.")]
+    OperationNotFound(String),
+    #[error("Reference '{0}' matches multiple operations.")]
+    OperationAmbiguous(String),
+}
+
 impl Operation {
     pub fn create(conn: &Connection, change_type: &str, hash: &HashId) -> SQLResult<Operation> {
         let current_op = OperationState::get_operation(conn);
@@ -211,11 +235,20 @@ impl Operation {
         patch_path
     }
 
-    pub fn search_hash(conn: &Connection, op_hash: &str) -> SQLResult<Operation> {
-        Operation::get(
+    pub fn search_hash(conn: &Connection, op_hash: &str) -> Result<Operation, HashParseError> {
+        let matches = Operation::search_hashes(conn, op_hash);
+        match matches.len() {
+            0 => Err(HashParseError::OperationNotFound(op_hash.to_string())),
+            1 => Ok(matches[0].clone()),
+            _ => Err(HashParseError::OperationAmbiguous(op_hash.to_string())),
+        }
+    }
+
+    pub fn search_hashes(conn: &Connection, op_hash: &str) -> Vec<Operation> {
+        Operation::query(
             conn,
             "select * from operations where hex(hash) LIKE ?1",
-            params![op_hash],
+            params![format!("{op_hash}%")],
         )
     }
 
@@ -236,6 +269,65 @@ impl Operation {
         let path = get_changeset_path(&self.hash).join("dependencies");
         get_changeset_dependencies_from_path(path)
     }
+}
+
+pub fn parse_hash(conn: &Connection, input: &str) -> Result<HashRange, HashParseError> {
+    if input.contains("..") {
+        let mut it = input.split("..");
+        let from_ref = it.next().unwrap_or_default();
+        let to_ref = it.next().unwrap_or_default();
+        return Ok(HashRange {
+            from: Some(resolve_reference(conn, from_ref)?),
+            to: Some(resolve_reference(conn, to_ref)?),
+        });
+    }
+
+    Ok(HashRange {
+        from: None,
+        to: Some(resolve_reference(conn, input)?),
+    })
+}
+
+fn resolve_reference(conn: &Connection, reference: &str) -> Result<HashId, HashParseError> {
+    if reference.starts_with("HEAD") {
+        return resolve_head(conn, reference);
+    }
+
+    if let Some(branch) = Branch::get_by_name(conn, reference) {
+        if let Some(hash) = branch.current_operation_hash {
+            return Ok(hash);
+        }
+        return Err(HashParseError::EmptyBranch(branch.name));
+    }
+
+    let operation = Operation::search_hash(conn, reference)?;
+    Ok(operation.hash)
+}
+
+fn resolve_head(conn: &Connection, reference: &str) -> Result<HashId, HashParseError> {
+    let branch_id =
+        OperationState::get_current_branch(conn).ok_or(HashParseError::NoCurrentBranch)?;
+    let branch = Branch::get_by_id(conn, branch_id)
+        .ok_or_else(|| HashParseError::BranchNotFound(branch_id.to_string()))?;
+    let operations = Branch::get_operations(conn, branch.id);
+    if operations.is_empty() {
+        return Err(HashParseError::EmptyBranch(branch.name));
+    }
+    if reference == "HEAD" {
+        return Ok(operations.last().unwrap().hash);
+    }
+    if let Some(offset) = reference.strip_prefix("HEAD~") {
+        let offset: usize = offset
+            .parse()
+            .map_err(|_| HashParseError::InvalidHead(reference.to_string()))?;
+        let head_index = operations.len() - 1;
+        let target_index = head_index
+            .checked_sub(offset)
+            .ok_or(HashParseError::HeadOffsetOutOfRange(offset))?;
+        return Ok(operations[target_index].hash);
+    }
+
+    Err(HashParseError::InvalidHead(reference.to_string()))
 }
 
 impl Query for Operation {
@@ -1280,6 +1372,92 @@ mod tests {
             let branch_from_db = Branch::get_by_id(op_conn, branch.id);
             assert!(branch_from_db.is_some());
             assert_eq!(branch_from_db.unwrap().remote_name, None);
+        }
+    }
+
+    mod parse_hash {
+        use super::*;
+
+        #[test]
+        fn test_parse_hash_head_and_range() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_1 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-1-abc-123")).unwrap();
+            let op_2 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-2-abc-123")).unwrap();
+
+            let head = parse_hash(op_conn, "HEAD").unwrap();
+            assert_eq!(
+                head,
+                HashRange {
+                    from: None,
+                    to: Some(op_2.hash),
+                }
+            );
+
+            let range = parse_hash(op_conn, "HEAD~1..HEAD").unwrap();
+            assert_eq!(
+                range,
+                HashRange {
+                    from: Some(op_1.hash),
+                    to: Some(op_2.hash),
+                }
+            );
+        }
+
+        #[test]
+        fn test_parse_hash_branch_and_partial() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_1 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-1-xyz-123")).unwrap();
+            let op_2 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-2-xyz-123")).unwrap();
+
+            let branch_ref = parse_hash(op_conn, "main").unwrap();
+            assert_eq!(
+                branch_ref,
+                HashRange {
+                    from: None,
+                    to: Some(op_2.hash),
+                }
+            );
+
+            let partial = format!("{}", op_1.hash);
+            let prefix = &partial[..6];
+            let resolved = parse_hash(op_conn, prefix).unwrap();
+            assert_eq!(
+                resolved,
+                HashRange {
+                    from: None,
+                    to: Some(op_1.hash),
+                }
+            );
+        }
+
+        #[test]
+        fn test_parse_hash_head_offset_out_of_range() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
+            let result = parse_hash(op_conn, "HEAD~1");
+            assert!(matches!(
+                result,
+                Err(HashParseError::HeadOffsetOutOfRange(1))
+            ));
         }
     }
 

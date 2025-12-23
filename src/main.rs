@@ -35,7 +35,9 @@ use gen_models::{
     errors::{OperationError, RemoteError},
     file_types::FileTypes,
     metadata,
-    operations::{Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState},
+    operations::{
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
+    },
     sample::Sample,
     traits::Query,
 };
@@ -160,14 +162,24 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             )?)
         }
         Some(Commands::ViewDiff { from, to }) => {
-            let target_display = to.clone().unwrap_or_else(|| {
+            let to_ref = to.clone().unwrap_or_else(|| {
                 OperationState::get_operation(&operation_conn)
                     .map(|h| format!("{h}"))
                     .unwrap_or_else(|| "HEAD".to_string())
             });
-            let diff = collect_operation_diff(&operation_conn, &from, to.as_deref())?;
+            let from_range = parse_hash(&operation_conn, &from)?;
+            let from_hash = from_range
+                .from
+                .or(from_range.to)
+                .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
+            let to_range = parse_hash(&operation_conn, &to_ref)?;
+            let to_hash = to_range
+                .to
+                .or(to_range.from)
+                .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
+            let diff = collect_operation_diff(&operation_conn, from_hash, to_hash)?;
             if diff.block_groups.is_empty() {
-                println!("No differences found between {from} and {target_display}.");
+                println!("No differences found between {from} and {to_ref}.");
             } else {
                 view_diff(&conn, &diff.block_groups)?;
             }
@@ -447,13 +459,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("Unable to get current branch")?
             };
             let branch_ops = Branch::get_operations(&operation_conn, branch.id);
-            let operations = parse_patch_operations(
-                &branch_ops,
-                &branch
-                    .current_operation_hash
-                    .ok_or("Branch has no current operation")?,
-                &operation,
-            );
+            let operations = parse_patch_operations(&operation_conn, &branch_ops, &operation)?;
             let mut f = File::create(format!("{name}.gz"))?;
             patch::create_patch(&operation_conn, &operations, &mut f)?;
             Ok(())
