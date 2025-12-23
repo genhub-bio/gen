@@ -317,12 +317,18 @@ impl FileAddition {
         if let Some(db_path) = conn.path()
             && !db_path.is_empty()
         {
-            // This cleanup is to deal with a really stupid mac os thing, where
-            // filesystem locations that are under /tmp or /var get returned
-            // from system calls with the full path having a prefix of /private.
-            // No idea why this happens.
-            let cleaned_path = db_path.strip_prefix("/private").unwrap_or(db_path);
-            let db_path = Path::new("/").join(cleaned_path);
+            #[cfg(target_os = "macos")]
+            let db_path: PathBuf = {
+                // This handles a really stupid mac os thing, where filesystem
+                // locations that are under /tmp or /var get returned from
+                // system calls with the full path having a prefix of /private.
+                // No idea why this happens.
+                let cleaned_path = db_path.strip_prefix("/private").unwrap_or(db_path);
+                Path::new("/").join(cleaned_path)
+            };
+
+            #[cfg(not(target_os = "macos"))]
+            let db_path: PathBuf = { PathBuf::from(db_path) };
 
             if let Some(gen_dir) = db_path.parent()
                 && let Some(repo_root) = gen_dir.parent()
@@ -445,23 +451,12 @@ impl FileAddition {
             })
     }
 
-    fn suffix(self) -> String {
-        let result = match self.file_type {
-            FileTypes::GenBank => "gb",
-            FileTypes::Fasta => "fa",
-            FileTypes::GFA => "gfa",
-            FileTypes::VCF => "vcf",
-            FileTypes::Changeset => "cs",
-            FileTypes::CSV => "csv",
-            FileTypes::GAF => "gaf",
-            FileTypes::None => "none",
-        };
-
-        result.to_string()
-    }
-
-    pub fn asset_filename(self) -> String {
-        format!("{}.{}", self.checksum.clone(), &self.suffix())
+    pub fn hashed_filename(self) -> String {
+        format!(
+            "{}.{}",
+            self.checksum.clone(),
+            &FileTypes::suffix(self.file_type)
+        )
     }
 }
 

@@ -811,7 +811,7 @@ pub fn push(operation_conn: &Connection, remote: Option<&str>) -> Result<(), Rem
                                     "assets",
                                     FilePath::new(".gen")
                                         .join("assets")
-                                        .join(op_file.asset_filename()),
+                                        .join(op_file.hashed_filename()),
                                 )
                                 .unwrap();
                         }

@@ -95,3 +95,20 @@ impl From<gen_models_capnp::FileType> for FileTypes {
         }
     }
 }
+
+impl FileTypes {
+    pub fn suffix(file_type: FileTypes) -> String {
+        let result = match file_type {
+            FileTypes::GenBank => "gb",
+            FileTypes::Fasta => "fa",
+            FileTypes::GFA => "gfa",
+            FileTypes::VCF => "vcf",
+            FileTypes::Changeset => "cs",
+            FileTypes::CSV => "csv",
+            FileTypes::GAF => "gaf",
+            FileTypes::None => "none",
+        };
+
+        result.to_string()
+    }
+}

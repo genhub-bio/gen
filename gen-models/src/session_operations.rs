@@ -92,7 +92,7 @@ pub fn end_operation(
                 Operation::add_file(operation_conn, &operation.hash, &fa.id)
                     .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
-                    let asset_destination_path = assets_dir.join(fa.asset_filename());
+                    let asset_destination_path = assets_dir.join(fa.hashed_filename());
                     if !asset_destination_path.exists() {
                         match fs::copy(&op_file.file_path, asset_destination_path) {
                             Ok(result) => result,
