@@ -32,7 +32,6 @@ use petgraph::Direction;
 use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Connection, Error as SQLError};
 use serde::Deserialize;
-use serde_json::json;
 use thiserror::Error;
 use url_parse::core::Parser;
 
