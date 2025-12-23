@@ -1545,6 +1545,101 @@ mod tests {
         }
     }
 
+    mod resolve_reference {
+        use super::*;
+
+        #[test]
+        fn test_resolve_reference_branch_and_hash() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_unique = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "def0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+
+            let branch_hash = resolve_reference(op_conn, "main").unwrap();
+            assert_eq!(branch_hash, op_unique.hash);
+
+            let hash_ref = resolve_reference(op_conn, "def").unwrap();
+            assert_eq!(hash_ref, op_unique.hash);
+        }
+
+        #[test]
+        fn test_resolve_reference_ambiguous() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op_1 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_2 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000002",
+                ),
+            )
+            .unwrap();
+
+            let result = resolve_reference(op_conn, "abc");
+            assert!(matches!(result, Err(HashParseError::OperationAmbiguous(_))));
+        }
+    }
+
+    mod resolve_head {
+        use super::*;
+
+        #[test]
+        fn test_resolve_head_variants() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_1 = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
+            let op_2 = Operation::create(op_conn, "add", &HashId::convert_str("op-2")).unwrap();
+
+            let head = resolve_head(op_conn, "HEAD").unwrap();
+            assert_eq!(head, op_2.hash);
+
+            let head_prev = resolve_head(op_conn, "HEAD~1").unwrap();
+            assert_eq!(head_prev, op_1.hash);
+        }
+
+        #[test]
+        fn test_resolve_head_invalid() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
+            let result = resolve_head(op_conn, "HEAD~2");
+            assert!(matches!(
+                result,
+                Err(HashParseError::HeadOffsetOutOfRange(2))
+            ));
+        }
+    }
+
     #[test]
     fn test_create_operation_adds_database() {
         setup_gen_dir();
