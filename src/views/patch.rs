@@ -35,7 +35,6 @@ pub fn get_change_graph(
     changes: &ChangesetModels,
     dependencies: &DependencyModels,
 ) -> HashMap<HashId, GenGraph> {
-    dbg!(changes, dependencies);
     let start_node = Node::get_start_node();
     let end_node = Node::get_end_node();
     let mut bges_by_bg: HashMap<HashId, Vec<&BlockGroupEdge>> = HashMap::new();

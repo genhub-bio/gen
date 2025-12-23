@@ -18,7 +18,7 @@ use rusqlite::Connection;
 
 use crate::{
     core::HashId,
-    diffs::operations::BlockGroupDiff,
+    diffs::operations::{BlockGroupDiff, OperationDiff},
     graph::connect_all_boundary_edges,
     models::node::Node,
     views::block_group_viewer::{PlotParameters, Viewer},
@@ -31,6 +31,7 @@ struct DiffComponent {
     block_group: String,
     part_label: Option<String>,
     graph: gen_graph::GenGraph,
+    change_label: &'static str,
 }
 
 fn split_connected_components(graph: &gen_graph::GenGraph) -> Vec<gen_graph::GenGraph> {
@@ -127,51 +128,10 @@ fn block_group_label(diff: &BlockGroupDiff) -> String {
     }
 }
 
-pub fn view_diff(conn: &Connection, graphs: &[BlockGroupDiff]) -> Result<(), io::Error> {
+pub fn view_diff(conn: &Connection, diff: &OperationDiff) -> Result<(), io::Error> {
     let mut components: Vec<DiffComponent> = vec![];
-    for diff in graphs {
-        let parts = split_connected_components(&diff.graph);
-        let (collection, sample, block_group) = if let Some(bg) = &diff.block_group {
-            (
-                bg.collection_name.clone(),
-                bg.sample_name
-                    .clone()
-                    .unwrap_or_else(|| "Reference".to_string()),
-                bg.name.clone(),
-            )
-        } else {
-            (
-                String::from("Unknown"),
-                String::from("Unknown"),
-                String::from("Unknown"),
-            )
-        };
-        if parts.len() <= 1 {
-            let mut graph = diff.graph.clone();
-            connect_all_boundary_edges(&mut graph);
-            components.push(DiffComponent {
-                title: block_group_label(diff),
-                collection,
-                sample,
-                block_group,
-                part_label: None,
-                graph,
-            });
-        } else {
-            let total = parts.len();
-            for (idx, mut graph) in parts.into_iter().enumerate() {
-                connect_all_boundary_edges(&mut graph);
-                components.push(DiffComponent {
-                    title: format!("{} (part {}/{})", block_group_label(diff), idx + 1, total),
-                    collection: collection.clone(),
-                    sample: sample.clone(),
-                    block_group: block_group.clone(),
-                    part_label: Some(format!("part {}/{}", idx + 1, total)),
-                    graph,
-                });
-            }
-        }
-    }
+    collect_components(&diff.added_block_groups, "Add", &mut components);
+    collect_components(&diff.removed_block_groups, "Remove", &mut components);
 
     if components.is_empty() {
         println!("No differences to display.");
@@ -211,7 +171,8 @@ pub fn view_diff(conn: &Connection, graphs: &[BlockGroupDiff]) -> Result<(), io:
                             .map(|p| format!(" | {p}"))
                             .unwrap_or_default();
                         let content = format!(
-                            "{collection} | {sample} | {bg}{part}",
+                            "{change} | {collection} | {sample} | {bg}{part}",
+                            change = c.change_label,
                             collection = c.collection,
                             sample = c.sample,
                             bg = c.block_group,
@@ -315,4 +276,61 @@ pub fn view_diff(conn: &Connection, graphs: &[BlockGroupDiff]) -> Result<(), io:
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     result
+}
+
+fn collect_components(
+    graphs: &[BlockGroupDiff],
+    change_label: &'static str,
+    components: &mut Vec<DiffComponent>,
+) {
+    for graph_diff in graphs {
+        let parts = split_connected_components(&graph_diff.graph);
+        let (collection, sample, block_group) = if let Some(bg) = &graph_diff.block_group {
+            (
+                bg.collection_name.clone(),
+                bg.sample_name
+                    .clone()
+                    .unwrap_or_else(|| "Reference".to_string()),
+                bg.name.clone(),
+            )
+        } else {
+            (
+                String::from("Unknown"),
+                String::from("Unknown"),
+                String::from("Unknown"),
+            )
+        };
+        if parts.len() <= 1 {
+            let mut graph = graph_diff.graph.clone();
+            connect_all_boundary_edges(&mut graph);
+            components.push(DiffComponent {
+                title: format!("{change_label} {}", block_group_label(graph_diff)),
+                collection,
+                sample,
+                block_group,
+                part_label: None,
+                graph,
+                change_label,
+            });
+        } else {
+            let total = parts.len();
+            for (idx, mut graph) in parts.into_iter().enumerate() {
+                connect_all_boundary_edges(&mut graph);
+                components.push(DiffComponent {
+                    title: format!(
+                        "{change_label} {} (part {}/{})",
+                        block_group_label(graph_diff),
+                        idx + 1,
+                        total
+                    ),
+                    collection: collection.clone(),
+                    sample: sample.clone(),
+                    block_group: block_group.clone(),
+                    part_label: Some(format!("part {}/{}", idx + 1, total)),
+                    graph,
+                    change_label,
+                });
+            }
+        }
+    }
 }

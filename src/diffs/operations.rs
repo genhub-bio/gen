@@ -36,7 +36,8 @@ pub struct BlockGroupDiff {
 #[derive(Clone, Debug)]
 pub struct OperationDiff {
     pub operations: Vec<HashId>,
-    pub block_groups: Vec<BlockGroupDiff>,
+    pub added_block_groups: Vec<BlockGroupDiff>,
+    pub removed_block_groups: Vec<BlockGroupDiff>,
 }
 
 pub fn collect_operation_diff(
@@ -47,7 +48,8 @@ pub fn collect_operation_diff(
     if from_hash == to_hash {
         return Ok(OperationDiff {
             operations: vec![],
-            block_groups: vec![],
+            added_block_groups: vec![],
+            removed_block_groups: vec![],
         });
     }
 
@@ -56,16 +58,41 @@ pub fn collect_operation_diff(
         return Err(OperationDiffError::PathNotFound(from_hash, to_hash));
     }
 
-    let mut operations_to_merge = vec![];
-    let mut seen = HashSet::new();
+    let mut operations_in_order = vec![];
+    let mut added_ops = vec![];
+    let mut removed_ops = vec![];
     for (src, direction, dest) in path {
         let op_hash = match direction {
             Direction::Outgoing => dest,
             Direction::Incoming => src,
         };
-        if seen.insert(op_hash) {
-            operations_to_merge.push(op_hash);
+        operations_in_order.push(op_hash);
+        match direction {
+            Direction::Outgoing => {
+                added_ops.push(op_hash);
+            }
+            Direction::Incoming => {
+                removed_ops.push(op_hash);
+            }
         }
+    }
+
+    let added_graphs = build_block_group_diffs(op_conn, &added_ops)?;
+    let removed_graphs = build_block_group_diffs(op_conn, &removed_ops)?;
+
+    Ok(OperationDiff {
+        operations: operations_in_order,
+        added_block_groups: added_graphs,
+        removed_block_groups: removed_graphs,
+    })
+}
+
+fn build_block_group_diffs(
+    op_conn: &Connection,
+    operations: &[HashId],
+) -> Result<Vec<BlockGroupDiff>, OperationDiffError> {
+    if operations.is_empty() {
+        return Ok(vec![]);
     }
 
     let mut block_group_info: HashMap<HashId, BlockGroup> = HashMap::new();
@@ -80,7 +107,7 @@ pub fn collect_operation_diff(
     let mut dep_nodes = HashSet::new();
     let mut dep_sequences = HashSet::new();
 
-    for op_hash in &operations_to_merge {
+    for op_hash in operations {
         let operation = Operation::get_by_id(op_conn, op_hash)
             .ok_or_else(|| OperationDiffError::OperationMissing(*op_hash))?;
         let changeset = operation.get_changeset().changes;
@@ -155,10 +182,7 @@ pub fn collect_operation_diff(
         }
     });
 
-    Ok(OperationDiff {
-        operations: operations_to_merge,
-        block_groups,
-    })
+    Ok(block_groups)
 }
 
 #[cfg(test)]
@@ -314,8 +338,9 @@ mod tests {
 
         let diff = collect_operation_diff(&op_conn, base_op.hash, head.hash).expect("diff");
         assert_eq!(diff.operations, vec![head.hash]);
-        assert_eq!(diff.block_groups.len(), 1);
-        let graph = &diff.block_groups[0].graph;
+        assert_eq!(diff.added_block_groups.len(), 1);
+        assert!(diff.removed_block_groups.is_empty());
+        let graph = &diff.added_block_groups[0].graph;
         assert_eq!(graph.nodes().count(), 3);
         assert_eq!(graph.all_edges().count(), 2);
 
@@ -388,8 +413,8 @@ mod tests {
 
         let diff = collect_operation_diff(&op_conn, op1.hash, op3.hash).expect("diff");
         assert_eq!(diff.operations, vec![op2.hash, op3.hash]);
-        assert_eq!(diff.block_groups.len(), 2);
-        for bg in diff.block_groups {
+        assert_eq!(diff.added_block_groups.len(), 2);
+        for bg in &diff.added_block_groups {
             assert_eq!(bg.graph.all_edges().count(), 2);
         }
     }
@@ -456,8 +481,8 @@ mod tests {
 
         let diff = collect_operation_diff(&op_conn, op1.hash, op3.hash).expect("diff");
         assert_eq!(diff.operations, vec![op2.hash, op3.hash]);
-        assert_eq!(diff.block_groups.len(), 1);
-        let graph = &diff.block_groups[0].graph;
+        assert_eq!(diff.added_block_groups.len(), 1);
+        let graph = &diff.added_block_groups[0].graph;
         assert_eq!(graph.nodes().count(), 4);
         assert_eq!(graph.all_edges().count(), 4);
     }
@@ -469,6 +494,94 @@ mod tests {
             Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
         let diff = collect_operation_diff(&op_conn, base.hash, base.hash).expect("diff");
         assert!(diff.operations.is_empty());
-        assert!(diff.block_groups.is_empty());
+        assert!(diff.added_block_groups.is_empty());
+        assert!(diff.removed_block_groups.is_empty());
+    }
+
+    #[test]
+    fn diff_populates_removed_block_groups_on_branch_change() {
+        let op_conn = init_branch();
+        let start_node = Node::get_start_node();
+        let end_node = Node::get_end_node();
+
+        let base = Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("base op");
+
+        let main_block_group = BlockGroup {
+            id: HashId::pad_str(20),
+            collection_name: "c".to_string(),
+            sample_name: Some("s".to_string()),
+            name: "main".to_string(),
+            created_on: 0,
+        };
+        let main_seq = NewSequence::new()
+            .sequence_type("dna")
+            .sequence("AAAAA")
+            .name("main")
+            .build();
+        let main_node = Node {
+            id: HashId::pad_str(21),
+            sequence_hash: main_seq.hash,
+        };
+        let op_main = Operation::create(&op_conn, "add", &HashId::pad_str(2)).expect("main op");
+        let (main_changeset, main_deps) = simple_changeset(
+            &main_block_group,
+            &main_node,
+            &main_seq,
+            &start_node,
+            &end_node,
+        );
+        write_changeset(
+            &op_main,
+            DatabaseChangeset {
+                db_path: "diff.db".to_string(),
+                changes: main_changeset,
+            },
+            &main_deps,
+        );
+
+        let feature_branch = Branch::create_with_remote(&op_conn, "feature", None).unwrap();
+        OperationState::set_branch(&op_conn, &feature_branch.name);
+        OperationState::set_operation(&op_conn, &base.hash);
+
+        let feature_block_group = BlockGroup {
+            id: HashId::pad_str(30),
+            collection_name: "c".to_string(),
+            sample_name: Some("s".to_string()),
+            name: "feature".to_string(),
+            created_on: 0,
+        };
+        let feature_seq = NewSequence::new()
+            .sequence_type("dna")
+            .sequence("CCCCC")
+            .name("feature")
+            .build();
+        let feature_node = Node {
+            id: HashId::pad_str(31),
+            sequence_hash: feature_seq.hash,
+        };
+        let op_feature =
+            Operation::create(&op_conn, "add", &HashId::pad_str(3)).expect("feature op");
+        let (feature_changeset, feature_deps) = simple_changeset(
+            &feature_block_group,
+            &feature_node,
+            &feature_seq,
+            &start_node,
+            &end_node,
+        );
+        write_changeset(
+            &op_feature,
+            DatabaseChangeset {
+                db_path: "diff.db".to_string(),
+                changes: feature_changeset,
+            },
+            &feature_deps,
+        );
+
+        let diff = collect_operation_diff(&op_conn, op_main.hash, op_feature.hash).expect("diff");
+        assert_eq!(diff.operations, vec![op_main.hash, op_feature.hash]);
+        assert_eq!(diff.added_block_groups.len(), 1);
+        assert_eq!(diff.removed_block_groups.len(), 1);
+        assert_eq!(diff.added_block_groups[0].id, feature_block_group.id);
+        assert_eq!(diff.removed_block_groups[0].id, main_block_group.id);
     }
 }

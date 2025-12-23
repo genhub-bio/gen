@@ -1461,6 +1461,90 @@ mod tests {
         }
     }
 
+    mod search_hash {
+        use super::*;
+
+        #[test]
+        fn test_search_hashes_returns_matches() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op_1 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_2 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000002",
+                ),
+            )
+            .unwrap();
+            let _op_3 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "def0000000000000000000000000000000000000000000000000000000000003",
+                ),
+            )
+            .unwrap();
+
+            let matches = Operation::search_hashes(op_conn, "abc");
+            assert_eq!(matches.len(), 2);
+        }
+
+        #[test]
+        fn test_search_hash_resolves_and_errors() {
+            setup_gen_dir();
+            let op_conn = &get_operation_connection(None).unwrap();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_unique = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "def0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_ambiguous = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_ambiguous_2 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000002",
+                ),
+            )
+            .unwrap();
+
+            let resolved = Operation::search_hash(op_conn, "def").unwrap();
+            assert_eq!(resolved.hash, op_unique.hash);
+
+            let ambiguous = Operation::search_hash(op_conn, "abc");
+            assert!(matches!(
+                ambiguous,
+                Err(HashParseError::OperationAmbiguous(_))
+            ));
+        }
+    }
+
     #[test]
     fn test_create_operation_adds_database() {
         setup_gen_dir();

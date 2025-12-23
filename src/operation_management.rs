@@ -155,8 +155,6 @@ pub enum PatchParseError {
     StartHashNotFound(HashId),
     #[error("Unable to find end hash {0}.")]
     EndHashNotFound(HashId),
-    #[error("Start hash {0} is after end hash {1}.")]
-    StartAfterEnd(HashId, HashId),
     #[error("Unable to find hash {0}.")]
     HashNotFound(HashId),
     #[error("Unable to parse hash input '{0}'.")]
@@ -437,9 +435,6 @@ pub fn parse_patch_operations(
                     .iter()
                     .position(|op| op.hash == end_hash)
                     .ok_or(PatchParseError::EndHashNotFound(end_hash))?;
-                if start_pos > end_pos {
-                    return Err(PatchParseError::StartAfterEnd(start_hash, end_hash));
-                }
                 results.extend(
                     branch_operations[start_pos..=end_pos]
                         .iter()
