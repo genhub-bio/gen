@@ -35,6 +35,13 @@ struct DiffComponent {
     db_path: String,
 }
 
+struct ListEntry {
+    label: String,
+    component_index: Option<usize>,
+    db_path: String,
+    is_header: bool,
+}
+
 fn split_connected_components(graph: &gen_graph::GenGraph) -> Vec<gen_graph::GenGraph> {
     use std::collections::HashSet;
 
@@ -134,20 +141,28 @@ pub fn view_diff(
     diffs: &HashMap<String, OperationDiff>,
 ) -> Result<(), io::Error> {
     let mut components: Vec<DiffComponent> = vec![];
-    for diff in diffs.values() {
-        for db_diff in diff.dbs.values() {
-            collect_components(
-                &db_diff.added_block_groups,
-                "Add",
-                &db_diff.db_path,
-                &mut components,
-            );
-            collect_components(
-                &db_diff.removed_block_groups,
-                "Remove",
-                &db_diff.db_path,
-                &mut components,
-            );
+    let mut components_by_db: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut db_order = diffs.keys().cloned().collect::<Vec<_>>();
+    db_order.sort();
+
+    for db_path in &db_order {
+        if let Some(diff) = diffs.get(db_path)
+            && let Some(db_diff) = diff.dbs.get(db_path)
+        {
+            for component in
+                collect_components(&db_diff.added_block_groups, "Add", &db_diff.db_path)
+            {
+                let entry = components_by_db.entry(db_path.clone()).or_default();
+                entry.push(components.len());
+                components.push(component);
+            }
+            for component in
+                collect_components(&db_diff.removed_block_groups, "Remove", &db_diff.db_path)
+            {
+                let entry = components_by_db.entry(db_path.clone()).or_default();
+                entry.push(components.len());
+                components.push(component);
+            }
         }
     }
 
@@ -163,11 +178,40 @@ pub fn view_diff(
     let mut terminal = Terminal::new(backend)?;
 
     let mut selected = 0usize;
+    let mut expanded_db = db_order.first().cloned();
     let mut graph_focus = false;
-    let mut viewer = make_viewer(conn, &components[selected].graph, PlotParameters::default());
+    let mut current_component = 0usize;
+    let mut viewer = make_viewer(
+        conn,
+        &components[current_component].graph,
+        PlotParameters::default(),
+    );
 
     let result = (|| -> Result<(), io::Error> {
         loop {
+            let entries = build_entries(&db_order, &components, &components_by_db, &expanded_db);
+            if entries.is_empty() {
+                break;
+            }
+            if selected >= entries.len() {
+                selected = 0;
+            }
+            let desired_component = resolve_selected_component(
+                &entries,
+                selected,
+                &components_by_db,
+                expanded_db.as_ref(),
+            )
+            .unwrap_or(0);
+            if desired_component != current_component {
+                current_component = desired_component;
+                viewer = make_viewer(
+                    conn,
+                    &components[current_component].graph,
+                    PlotParameters::default(),
+                );
+            }
+
             terminal.draw(|f| {
                 let outer = Layout::default()
                     .direction(Direction::Vertical)
@@ -179,24 +223,10 @@ pub fn view_diff(
                     .constraints([Constraint::Length(45), Constraint::Min(1)])
                     .split(outer[0]);
 
-                let list_items: Vec<ListItem> = components
+                let list_items: Vec<ListItem> = entries
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| {
-                        let part = c
-                            .part_label
-                            .as_ref()
-                            .map(|p| format!(" | {p}"))
-                            .unwrap_or_default();
-                        let content = format!(
-                            "{change} | {db} | {collection} | {sample} | {bg}{part}",
-                            change = c.change_label,
-                            db = c.db_path,
-                            collection = c.collection,
-                            sample = c.sample,
-                            bg = c.block_group,
-                            part = part
-                        );
+                    .map(|(i, entry)| {
                         let style = if i == selected {
                             Style::default()
                                 .fg(Color::Cyan)
@@ -204,7 +234,7 @@ pub fn view_diff(
                         } else {
                             Style::default()
                         };
-                        ListItem::new(content).style(style)
+                        ListItem::new(entry.label.clone()).style(style)
                     })
                     .collect();
 
@@ -224,8 +254,8 @@ pub fn view_diff(
                     Block::default()
                         .title(format!(
                             "{} ({}/{})",
-                            components[selected].title,
-                            selected + 1,
+                            components[current_component].title,
+                            current_component + 1,
                             components.len()
                         ))
                         .borders(Borders::ALL)
@@ -264,21 +294,17 @@ pub fn view_diff(
                     KeyCode::Up if !graph_focus => {
                         if selected > 0 {
                             selected -= 1;
-                            viewer = make_viewer(
-                                conn,
-                                &components[selected].graph,
-                                PlotParameters::default(),
-                            );
+                            if let Some(entry) = entries.get(selected) {
+                                expanded_db = Some(entry.db_path.clone());
+                            }
                         }
                     }
                     KeyCode::Down if !graph_focus => {
-                        if selected + 1 < components.len() {
+                        if selected + 1 < entries.len() {
                             selected += 1;
-                            viewer = make_viewer(
-                                conn,
-                                &components[selected].graph,
-                                PlotParameters::default(),
-                            );
+                            if let Some(entry) = entries.get(selected) {
+                                expanded_db = Some(entry.db_path.clone());
+                            }
                         }
                     }
                     _ => {
@@ -301,8 +327,8 @@ fn collect_components(
     graphs: &[BlockGroupDiff],
     change_label: &'static str,
     db_path: &str,
-    components: &mut Vec<DiffComponent>,
-) {
+) -> Vec<DiffComponent> {
+    let mut components = Vec::new();
     for graph_diff in graphs {
         let parts = split_connected_components(&graph_diff.graph);
         let (collection, sample, block_group) = if let Some(bg) = &graph_diff.block_group {
@@ -355,4 +381,73 @@ fn collect_components(
             }
         }
     }
+    components
+}
+
+fn build_entries(
+    db_order: &[String],
+    components: &[DiffComponent],
+    components_by_db: &HashMap<String, Vec<usize>>,
+    expanded_db: &Option<String>,
+) -> Vec<ListEntry> {
+    let mut entries = Vec::new();
+    for db_path in db_order {
+        entries.push(ListEntry {
+            label: db_path.clone(),
+            component_index: None,
+            db_path: db_path.clone(),
+            is_header: true,
+        });
+        if expanded_db.as_ref() == Some(db_path)
+            && let Some(indices) = components_by_db.get(db_path)
+        {
+            for index in indices {
+                let component = &components[*index];
+                let part = component
+                    .part_label
+                    .as_ref()
+                    .map(|p| format!(" | {p}"))
+                    .unwrap_or_default();
+                let label = format!(
+                    "  {change} | {collection} | {sample} | {bg}{part}",
+                    change = component.change_label,
+                    collection = component.collection,
+                    sample = component.sample,
+                    bg = component.block_group,
+                    part = part
+                );
+                entries.push(ListEntry {
+                    label,
+                    component_index: Some(*index),
+                    db_path: db_path.clone(),
+                    is_header: false,
+                });
+            }
+        }
+    }
+    entries
+}
+
+fn resolve_selected_component(
+    entries: &[ListEntry],
+    selected: usize,
+    components_by_db: &HashMap<String, Vec<usize>>,
+    expanded_db: Option<&String>,
+) -> Option<usize> {
+    if let Some(entry) = entries.get(selected) {
+        if let Some(index) = entry.component_index {
+            return Some(index);
+        }
+        if entry.is_header
+            && let Some(indices) = components_by_db.get(&entry.db_path)
+        {
+            return indices.first().copied();
+        }
+    }
+    if let Some(db_path) = expanded_db
+        && let Some(indices) = components_by_db.get(db_path)
+    {
+        return indices.first().copied();
+    }
+    None
 }
