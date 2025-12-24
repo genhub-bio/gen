@@ -177,13 +177,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .to
                 .or(to_range.from)
                 .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
-            let diff = collect_operation_diff(&operation_conn, from_hash, to_hash)?;
-            let has_changes =
-                !diff.added_block_groups.is_empty() || !diff.removed_block_groups.is_empty();
-            if !has_changes {
+            let diffs = collect_operation_diff(&operation_conn, from_hash, to_hash, Some(db))?;
+            if diffs.is_empty() {
                 println!("No differences found between {from} and {to_ref}.");
             } else {
-                view_diff(&conn, &diff)?;
+                view_diff(&conn, &diffs)?;
             }
             Ok(())
         }

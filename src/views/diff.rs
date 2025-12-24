@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{collections::HashMap, io, time::Duration};
 
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -32,6 +32,7 @@ struct DiffComponent {
     part_label: Option<String>,
     graph: gen_graph::GenGraph,
     change_label: &'static str,
+    db_path: String,
 }
 
 fn split_connected_components(graph: &gen_graph::GenGraph) -> Vec<gen_graph::GenGraph> {
@@ -128,10 +129,27 @@ fn block_group_label(diff: &BlockGroupDiff) -> String {
     }
 }
 
-pub fn view_diff(conn: &Connection, diff: &OperationDiff) -> Result<(), io::Error> {
+pub fn view_diff(
+    conn: &Connection,
+    diffs: &HashMap<String, OperationDiff>,
+) -> Result<(), io::Error> {
     let mut components: Vec<DiffComponent> = vec![];
-    collect_components(&diff.added_block_groups, "Add", &mut components);
-    collect_components(&diff.removed_block_groups, "Remove", &mut components);
+    for diff in diffs.values() {
+        for db_diff in diff.dbs.values() {
+            collect_components(
+                &db_diff.added_block_groups,
+                "Add",
+                &db_diff.db_path,
+                &mut components,
+            );
+            collect_components(
+                &db_diff.removed_block_groups,
+                "Remove",
+                &db_diff.db_path,
+                &mut components,
+            );
+        }
+    }
 
     if components.is_empty() {
         println!("No differences to display.");
@@ -171,8 +189,9 @@ pub fn view_diff(conn: &Connection, diff: &OperationDiff) -> Result<(), io::Erro
                             .map(|p| format!(" | {p}"))
                             .unwrap_or_default();
                         let content = format!(
-                            "{change} | {collection} | {sample} | {bg}{part}",
+                            "{change} | {db} | {collection} | {sample} | {bg}{part}",
                             change = c.change_label,
+                            db = c.db_path,
                             collection = c.collection,
                             sample = c.sample,
                             bg = c.block_group,
@@ -281,6 +300,7 @@ pub fn view_diff(conn: &Connection, diff: &OperationDiff) -> Result<(), io::Erro
 fn collect_components(
     graphs: &[BlockGroupDiff],
     change_label: &'static str,
+    db_path: &str,
     components: &mut Vec<DiffComponent>,
 ) {
     for graph_diff in graphs {
@@ -311,6 +331,7 @@ fn collect_components(
                 part_label: None,
                 graph,
                 change_label,
+                db_path: db_path.to_string(),
             });
         } else {
             let total = parts.len();
@@ -329,6 +350,7 @@ fn collect_components(
                     part_label: Some(format!("part {}/{}", idx + 1, total)),
                     graph,
                     change_label,
+                    db_path: db_path.to_string(),
                 });
             }
         }
