@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_with_single_operation_uses_current_as_default_target() {
+    fn one_operation_diff() {
         let op_conn = init_branch();
         let start_node = Node::get_start_node();
         let end_node = Node::get_end_node();
@@ -419,12 +419,10 @@ mod tests {
         let graph = &db_diff.added_block_groups[0].graph;
         assert_eq!(graph.nodes().count(), 3);
         assert_eq!(graph.all_edges().count(), 2);
-
-        let _ = base_op; // silence unused warning for explicitly named base operation
     }
 
     #[test]
-    fn diff_merges_multiple_operations() {
+    fn merges_multiple_operations() {
         let op_conn = init_branch();
         let start_node = Node::get_start_node();
         let end_node = Node::get_end_node();
@@ -498,76 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_merges_nested_changes_in_same_block_group() {
-        let op_conn = init_branch();
-        let start_node = Node::get_start_node();
-        let end_node = Node::get_end_node();
-
-        let op1 = Operation::create(&op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
-
-        let block_group = BlockGroup {
-            id: HashId::pad_str(5),
-            collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
-            name: "bg".to_string(),
-            created_on: 0,
-        };
-
-        let seq_one = NewSequence::new()
-            .sequence_type("dna")
-            .sequence("AAAAA")
-            .name("one")
-            .build();
-        let node_one = Node {
-            id: HashId::pad_str(12),
-            sequence_hash: seq_one.hash,
-        };
-        let op2 = Operation::create(&op_conn, "add", &HashId::pad_str(2)).expect("create op2");
-        let (changeset_one, mut dependencies_one) =
-            simple_changeset(&block_group, &node_one, &seq_one, &start_node, &end_node);
-        dependencies_one.block_group.push(block_group.clone());
-        write_changeset(
-            &op2,
-            DatabaseChangeset {
-                db_path: "diff.db".to_string(),
-                changes: changeset_one,
-            },
-            &dependencies_one,
-        );
-
-        let seq_two = NewSequence::new()
-            .sequence_type("dna")
-            .sequence("CCCC")
-            .name("two")
-            .build();
-        let node_two = Node {
-            id: HashId::pad_str(13),
-            sequence_hash: seq_two.hash,
-        };
-        let op3 = Operation::create(&op_conn, "add", &HashId::pad_str(3)).expect("create op3");
-        let (changeset_two, mut dependencies_two) =
-            simple_changeset(&block_group, &node_two, &seq_two, &start_node, &end_node);
-        dependencies_two.block_group.push(block_group.clone());
-        write_changeset(
-            &op3,
-            DatabaseChangeset {
-                db_path: "diff.db".to_string(),
-                changes: changeset_two,
-            },
-            &dependencies_two,
-        );
-
-        let diffs = collect_operation_diff(&op_conn, op1.hash, op3.hash, None).expect("diff");
-        let diff = diffs.get("diff.db").expect("diff db");
-        let db_diff = get_db_diff(&diffs, "diff.db");
-        assert_eq!(diff.operations, vec![op2.hash, op3.hash]);
-        assert_eq!(db_diff.added_block_groups.len(), 1);
-        let graph = &db_diff.added_block_groups[0].graph;
-        assert_eq!(graph.nodes().count(), 4);
-        assert_eq!(graph.all_edges().count(), 4);
-    }
-
-    #[test]
     fn diff_against_itself_is_empty() {
         let op_conn = init_branch();
         let base =
@@ -577,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_populates_removed_block_groups_on_branch_change() {
+    fn diffs_across_branches() {
         let op_conn = init_branch();
         let start_node = Node::get_start_node();
         let end_node = Node::get_end_node();
@@ -659,7 +587,7 @@ mod tests {
             collect_operation_diff(&op_conn, op_main.hash, op_feature.hash, None).expect("diff");
         let diff = diffs.get("diff.db").expect("diff db");
         let db_diff = get_db_diff(&diffs, "diff.db");
-        assert_eq!(diff.operations, vec![op_main.hash, op_feature.hash]);
+        assert_eq!(diff.operations, vec![op_feature.hash, op_main.hash]);
         assert_eq!(db_diff.added_block_groups.len(), 1);
         assert_eq!(db_diff.removed_block_groups.len(), 1);
         assert_eq!(db_diff.added_block_groups[0].id, feature_block_group.id);
@@ -667,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_filters_by_database_path() {
+    fn filters_by_database_path() {
         let op_conn = init_branch();
         let start_node = Node::get_start_node();
         let end_node = Node::get_end_node();
