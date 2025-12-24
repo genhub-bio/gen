@@ -48,6 +48,8 @@ struct ListEntry {
     is_header: bool,
 }
 
+/// This splits a graph into its connected components. It's needed because a change may happen in the middle of a graph where no
+/// start/end nodes are present and the viewer crashes without splitting it.
 fn split_connected_components(graph: &DiffGenGraph) -> Vec<DiffGenGraph> {
     use std::collections::HashSet;
 
@@ -92,6 +94,7 @@ fn split_connected_components(graph: &DiffGenGraph) -> Vec<DiffGenGraph> {
     components
 }
 
+/// This positions the viewer on either the start node if it exists, or the first node it can find otherwise.
 fn choose_origin(conn: &Connection, graph: &gen_graph::GenGraph) -> (Node, i64) {
     if let Some(start_block) = graph
         .nodes()
@@ -436,6 +439,9 @@ fn build_component(
     }
 }
 
+/// This function looks a little odd because it goes into the existing `highlights` of block_group_viewer, where nodes are defined
+/// by HashId, start, end. So we are not actually losing our edges here because the nodes contain the sequence start/end and have been
+/// split up into their own nodes by this point.
 fn build_edge_highlight_graph(diff_graph: &DiffGenGraph) -> DiGraphMap<gen_graph::GraphNode, ()> {
     let mut highlight_graph = DiGraphMap::new();
     for (src, dest, edges) in diff_graph.all_edges() {
