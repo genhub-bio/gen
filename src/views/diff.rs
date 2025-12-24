@@ -6,6 +6,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_models::traits::Query;
+use petgraph::graphmap::DiGraphMap;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -19,9 +20,11 @@ use rusqlite::Connection;
 use crate::{
     core::HashId,
     diffs::operations::{BlockGroupDiff, OperationDiff},
-    graph::connect_all_boundary_edges,
     models::node::Node,
-    views::block_group_viewer::{PlotParameters, Viewer},
+    views::{
+        block_group_viewer::{PlotParameters, Viewer},
+        patch::{DiffGenGraph, DiffGraphNode, diff_graph_to_gen_graph},
+    },
 };
 
 struct DiffComponent {
@@ -31,6 +34,9 @@ struct DiffComponent {
     block_group: String,
     part_label: Option<String>,
     graph: gen_graph::GenGraph,
+    highlight_graph: DiGraphMap<gen_graph::GraphNode, ()>,
+    highlight_nodes: std::collections::HashSet<gen_graph::GraphNode>,
+    highlight_color: Color,
     change_label: &'static str,
     db_path: String,
 }
@@ -42,13 +48,12 @@ struct ListEntry {
     is_header: bool,
 }
 
-fn split_connected_components(graph: &gen_graph::GenGraph) -> Vec<gen_graph::GenGraph> {
+fn split_connected_components(graph: &DiffGenGraph) -> Vec<DiffGenGraph> {
     use std::collections::HashSet;
 
-    use gen_graph::GraphNode;
     use petgraph::Direction;
 
-    let mut visited: HashSet<GraphNode> = HashSet::new();
+    let mut visited: HashSet<DiffGraphNode> = HashSet::new();
     let mut components = vec![];
 
     for node in graph.nodes() {
@@ -56,7 +61,7 @@ fn split_connected_components(graph: &gen_graph::GenGraph) -> Vec<gen_graph::Gen
             continue;
         }
         let mut stack = vec![node];
-        let mut component_nodes: HashSet<GraphNode> = HashSet::new();
+        let mut component_nodes: HashSet<DiffGraphNode> = HashSet::new();
         while let Some(current) = stack.pop() {
             if !visited.insert(current) {
                 continue;
@@ -72,7 +77,7 @@ fn split_connected_components(graph: &gen_graph::GenGraph) -> Vec<gen_graph::Gen
             }
         }
 
-        let mut subgraph = gen_graph::GenGraph::new();
+        let mut subgraph = DiffGenGraph::new();
         for n in &component_nodes {
             subgraph.add_node(*n);
         }
@@ -186,6 +191,14 @@ pub fn view_diff(
         &components[current_component].graph,
         PlotParameters::default(),
     );
+    viewer.set_highlights(vec![(
+        components[current_component].highlight_color,
+        components[current_component].highlight_graph.clone(),
+    )]);
+    viewer.set_node_highlights(vec![(
+        components[current_component].highlight_color,
+        components[current_component].highlight_nodes.clone(),
+    )]);
 
     let result = (|| -> Result<(), io::Error> {
         loop {
@@ -210,6 +223,14 @@ pub fn view_diff(
                     &components[current_component].graph,
                     PlotParameters::default(),
                 );
+                viewer.set_highlights(vec![(
+                    components[current_component].highlight_color,
+                    components[current_component].highlight_graph.clone(),
+                )]);
+                viewer.set_node_highlights(vec![(
+                    components[current_component].highlight_color,
+                    components[current_component].highlight_nodes.clone(),
+                )]);
             }
 
             terminal.draw(|f| {
@@ -270,7 +291,7 @@ pub fn view_diff(
 
                 let status = Paragraph::new(Text::styled(
                     format!(
-                        "↑/↓ select | tab/enter toggle focus | shift+tab list | graph: {} | q to exit",
+                        "↑/↓ select | tab toggle focus | graph: {} | q to exit",
                         Viewer::get_status_line()
                     ),
                     Style::default().bg(Color::DarkGray).fg(Color::White),
@@ -283,13 +304,9 @@ pub fn view_diff(
             {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => break,
-                    KeyCode::Tab | KeyCode::Enter => {
-                        graph_focus = true;
-                        viewer.has_focus = true;
-                    }
-                    KeyCode::BackTab => {
-                        graph_focus = false;
-                        viewer.has_focus = false;
+                    KeyCode::Tab => {
+                        graph_focus = !graph_focus;
+                        viewer.has_focus = graph_focus;
                     }
                     KeyCode::Up if !graph_focus => {
                         if selected > 0 {
@@ -329,6 +346,11 @@ fn collect_components(
     db_path: &str,
 ) -> Vec<DiffComponent> {
     let mut components = Vec::new();
+    let highlight_color = match change_label {
+        "Add" => Color::Green,
+        "Remove" => Color::Red,
+        _ => Color::White,
+    };
     for graph_diff in graphs {
         let parts = split_connected_components(&graph_diff.graph);
         let (collection, sample, block_group) = if let Some(bg) = &graph_diff.block_group {
@@ -347,41 +369,92 @@ fn collect_components(
             )
         };
         if parts.len() <= 1 {
-            let mut graph = graph_diff.graph.clone();
-            connect_all_boundary_edges(&mut graph);
-            components.push(DiffComponent {
-                title: format!("{change_label} {}", block_group_label(graph_diff)),
+            let diff_graph = graph_diff.graph.clone();
+            components.push(build_component(
+                &diff_graph,
+                change_label,
+                highlight_color,
+                &block_group_label(graph_diff),
                 collection,
                 sample,
                 block_group,
-                part_label: None,
-                graph,
-                change_label,
-                db_path: db_path.to_string(),
-            });
+                None,
+                db_path,
+            ));
         } else {
             let total = parts.len();
-            for (idx, mut graph) in parts.into_iter().enumerate() {
-                connect_all_boundary_edges(&mut graph);
-                components.push(DiffComponent {
-                    title: format!(
-                        "{change_label} {} (part {}/{})",
+            for (idx, diff_graph) in parts.into_iter().enumerate() {
+                components.push(build_component(
+                    &diff_graph,
+                    change_label,
+                    highlight_color,
+                    &format!(
+                        "{} (part {}/{})",
                         block_group_label(graph_diff),
                         idx + 1,
                         total
                     ),
-                    collection: collection.clone(),
-                    sample: sample.clone(),
-                    block_group: block_group.clone(),
-                    part_label: Some(format!("part {}/{}", idx + 1, total)),
-                    graph,
-                    change_label,
-                    db_path: db_path.to_string(),
-                });
+                    collection.clone(),
+                    sample.clone(),
+                    block_group.clone(),
+                    Some(format!("part {}/{}", idx + 1, total)),
+                    db_path,
+                ));
             }
         }
     }
     components
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_component(
+    diff_graph: &DiffGenGraph,
+    change_label: &'static str,
+    highlight_color: Color,
+    title: &str,
+    collection: String,
+    sample: String,
+    block_group: String,
+    part_label: Option<String>,
+    db_path: &str,
+) -> DiffComponent {
+    let graph = diff_graph_to_gen_graph(diff_graph);
+    let highlight_graph = build_edge_highlight_graph(diff_graph);
+    let highlight_nodes = build_node_highlights(diff_graph);
+    DiffComponent {
+        title: format!("{change_label} {title}"),
+        collection,
+        sample,
+        block_group,
+        part_label,
+        graph,
+        highlight_graph,
+        highlight_nodes,
+        highlight_color,
+        change_label,
+        db_path: db_path.to_string(),
+    }
+}
+
+fn build_edge_highlight_graph(diff_graph: &DiffGenGraph) -> DiGraphMap<gen_graph::GraphNode, ()> {
+    let mut highlight_graph = DiGraphMap::new();
+    for (src, dest, edges) in diff_graph.all_edges() {
+        if edges.iter().any(|edge| edge.is_new) {
+            highlight_graph.add_node(src.node);
+            highlight_graph.add_node(dest.node);
+            highlight_graph.add_edge(src.node, dest.node, ());
+        }
+    }
+    highlight_graph
+}
+
+fn build_node_highlights(
+    diff_graph: &DiffGenGraph,
+) -> std::collections::HashSet<gen_graph::GraphNode> {
+    diff_graph
+        .nodes()
+        .filter_map(|node| node.is_new.then_some(node.node))
+        .collect()
 }
 
 fn build_entries(

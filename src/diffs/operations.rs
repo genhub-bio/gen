@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::HashId;
-use gen_graph::{GenGraph, connect_all_boundary_edges};
 use gen_models::{
     block_group::BlockGroup, changesets::ChangesetModels, errors::OperationError,
     operations::Operation, session_operations::DependencyModels, traits::Query,
@@ -10,7 +9,7 @@ use petgraph::Direction;
 use rusqlite::Connection;
 use thiserror::Error;
 
-use crate::views::patch::get_change_graph;
+use crate::views::patch::{DiffGenGraph, connect_all_boundary_edges_diff, get_diff_graph};
 
 #[derive(Debug, Error)]
 pub enum OperationDiffError {
@@ -30,7 +29,7 @@ pub enum OperationDiffError {
 pub struct BlockGroupDiff {
     pub id: HashId,
     pub block_group: Option<BlockGroup>,
-    pub graph: GenGraph,
+    pub graph: DiffGenGraph,
 }
 
 #[derive(Clone, Debug)]
@@ -193,7 +192,7 @@ fn build_block_group_diffs(
 
     let mut results = HashMap::new();
     for (db_path, acc) in accumulators {
-        let merged_graphs = get_change_graph(
+        let merged_graphs = get_diff_graph(
             &ChangesetModels {
                 block_groups: acc.block_groups.into_iter().collect(),
                 edges: acc.edges.into_iter().collect(),
@@ -214,7 +213,7 @@ fn build_block_group_diffs(
             .into_iter()
             .map(|(id, mut graph)| {
                 let block_group = acc.block_group_info.get(&id).cloned();
-                connect_all_boundary_edges(&mut graph);
+                connect_all_boundary_edges_diff(&mut graph);
                 BlockGroupDiff {
                     id,
                     block_group,
