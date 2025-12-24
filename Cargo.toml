@@ -18,8 +18,8 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-graph", "gen-python"]
-default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-python"]
+members = [".", "gen-core", "gen-models", "gen-graph", "gen-python", "gen-diff"]
+default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-python", "gen-diff"]
 
 [features]
 benchmark = []
@@ -31,6 +31,7 @@ cli = []
 
 [dependencies]
 gen-core = { path = "gen-core" }
+gen-diff = { path = "gen-diff" }
 gen-models = { path = "gen-models" }
 gen-graph = { path = "gen-graph" }
 clap = { version = "4.5.32", features = ["derive"] }

@@ -17,7 +17,7 @@ use r#gen::{
     annotations::gff::propagate_gff,
     commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
     config,
-    diffs::{gfa::gfa_sample_diff, operations::collect_operation_diff},
+    diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection,
     graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
     operation_management,
@@ -30,6 +30,7 @@ use r#gen::{
     },
 };
 use gen_core::config::{get_gen_dir, get_or_create_gen_dir};
+use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     block_group::BlockGroup,
     errors::{OperationError, RemoteError},

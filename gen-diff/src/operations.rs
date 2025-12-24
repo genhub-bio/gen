@@ -9,7 +9,7 @@ use petgraph::Direction;
 use rusqlite::Connection;
 use thiserror::Error;
 
-use crate::views::patch::{DiffGenGraph, connect_all_boundary_edges_diff, get_diff_graph};
+use crate::graph::{DiffGenGraph, connect_all_boundary_edges_diff, get_diff_graph};
 
 #[derive(Debug, Error)]
 pub enum OperationDiffError {
@@ -587,7 +587,7 @@ mod tests {
             collect_operation_diff(&op_conn, op_main.hash, op_feature.hash, None).expect("diff");
         let diff = diffs.get("diff.db").expect("diff db");
         let db_diff = get_db_diff(&diffs, "diff.db");
-        assert_eq!(diff.operations, vec![op_feature.hash, op_main.hash]);
+        assert_eq!(diff.operations, vec![op_main.hash, op_feature.hash]);
         assert_eq!(db_diff.added_block_groups.len(), 1);
         assert_eq!(db_diff.removed_block_groups.len(), 1);
         assert_eq!(db_diff.added_block_groups[0].id, feature_block_group.id);

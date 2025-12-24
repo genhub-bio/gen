@@ -5,6 +5,10 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use gen_diff::{
+    graph::{DiffGenGraph, DiffGenGraphRef, DiffGraphNode},
+    operations::{BlockGroupDiff, OperationDiff},
+};
 use gen_models::traits::Query;
 use petgraph::graphmap::DiGraphMap;
 use ratatui::{
@@ -19,12 +23,8 @@ use rusqlite::Connection;
 
 use crate::{
     core::HashId,
-    diffs::operations::{BlockGroupDiff, OperationDiff},
     models::node::Node,
-    views::{
-        block_group_viewer::{PlotParameters, Viewer},
-        patch::{DiffGenGraph, DiffGraphNode, diff_graph_to_gen_graph},
-    },
+    views::block_group_viewer::{PlotParameters, Viewer},
 };
 
 struct DiffComponent {
@@ -421,7 +421,7 @@ fn build_component(
     part_label: Option<String>,
     db_path: &str,
 ) -> DiffComponent {
-    let graph = diff_graph_to_gen_graph(diff_graph);
+    let graph: gen_graph::GenGraph = DiffGenGraphRef(diff_graph).into();
     let highlight_graph = build_edge_highlight_graph(diff_graph);
     let highlight_nodes = build_node_highlights(diff_graph);
     DiffComponent {
