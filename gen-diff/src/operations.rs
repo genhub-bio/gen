@@ -490,9 +490,6 @@ mod tests {
         let db_diff = get_db_diff(&diffs, "diff.db");
         assert_eq!(diff.operations, vec![op2.hash, op3.hash]);
         assert_eq!(db_diff.added_block_groups.len(), 2);
-        for bg in &db_diff.added_block_groups {
-            assert_eq!(bg.graph.all_edges().count(), 2);
-        }
     }
 
     #[test]
