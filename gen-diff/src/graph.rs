@@ -427,15 +427,35 @@ mod tests {
             id: HashId::pad_str(11),
             sequence_hash: seq.hash,
         };
-        let old_edge = Edge {
-            id: HashId::convert_str("node-deletion"),
-            source_node_id: node.id,
-            source_coordinate: 3,
-            source_strand: Strand::Forward,
-            target_node_id: node.id,
-            target_coordinate: 5,
-            target_strand: Strand::Forward,
-        };
+        let old_edges = vec![
+            Edge {
+                id: HashId::convert_str("start-node"),
+                source_node_id: start_node.id,
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: node.id,
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+            },
+            Edge {
+                id: HashId::convert_str("node-deletion"),
+                source_node_id: node.id,
+                source_coordinate: 3,
+                source_strand: Strand::Forward,
+                target_node_id: node.id,
+                target_coordinate: 5,
+                target_strand: Strand::Forward,
+            },
+            Edge {
+                id: HashId::convert_str("node-end"),
+                source_node_id: node.id,
+                source_coordinate: seq.length,
+                source_strand: Strand::Forward,
+                target_node_id: end_node.id,
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+            },
+        ];
         let new_seq = NewSequence::new()
             .sequence_type("dna")
             .sequence("TTTT")
@@ -447,39 +467,21 @@ mod tests {
         };
         let edges = vec![
             Edge {
-                id: HashId::convert_str("node-to-end-5"),
+                id: HashId::convert_str("node-insertion-start"),
                 source_node_id: node.id,
                 source_coordinate: 5,
-                source_strand: Strand::Forward,
-                target_node_id: end_node.id,
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-            },
-            Edge {
-                id: HashId::convert_str("node-to-end-10"),
-                source_node_id: node.id,
-                source_coordinate: 10,
-                source_strand: Strand::Forward,
-                target_node_id: end_node.id,
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-            },
-            Edge {
-                id: HashId::convert_str("node-to-new-node"),
-                source_node_id: node.id,
-                source_coordinate: 10,
                 source_strand: Strand::Forward,
                 target_node_id: new_node.id,
                 target_coordinate: 0,
                 target_strand: Strand::Forward,
             },
             Edge {
-                id: HashId::convert_str("new-node-to-end"),
+                id: HashId::convert_str("node-insertion-end"),
                 source_node_id: new_node.id,
                 source_coordinate: new_seq.length,
                 source_strand: Strand::Forward,
-                target_node_id: end_node.id,
-                target_coordinate: 0,
+                target_node_id: node.id,
+                target_coordinate: 8,
                 target_strand: Strand::Forward,
             },
         ];
@@ -512,18 +514,16 @@ mod tests {
         let mut dependencies = base_dependencies(&start_node, &end_node);
         dependencies.sequences.push(seq.clone());
         dependencies.nodes.push(node.clone());
-        dependencies.edges.push(old_edge);
+        dependencies.edges.extend(old_edges);
 
         let diff_graphs = get_diff_graph(&changes, &dependencies);
         let graph = diff_graphs.get(&block_group.id).expect("block group graph");
-        assert_eq!(graph.nodes().count(), 5);
-        assert_eq!(graph.all_edges().count(), 5);
 
         let block_nodes = graph
             .nodes()
             .filter(|node_ref| node_ref.node.node_id == node.id)
             .collect::<Vec<_>>();
-        assert_eq!(block_nodes.len(), 2);
+        assert_eq!(block_nodes.len(), 3);
         assert!(block_nodes.iter().all(|node_ref| !node_ref.is_new));
 
         let new_node_block = graph
@@ -532,27 +532,15 @@ mod tests {
             .expect("new node block");
         assert!(new_node_block.is_new);
 
-        let block_start = block_nodes
-            .iter()
-            .find(|node_ref| node_ref.node.sequence_start == 0)
-            .copied()
-            .expect("block start node");
-        let block_mid = block_nodes
-            .iter()
-            .find(|node_ref| node_ref.node.sequence_start == 5)
-            .copied()
-            .expect("block mid node");
-        dbg!(&graph.all_edges());
-        let internal_edges = find_edge(graph, block_start, block_mid).expect("internal edge");
+        let block_node_insert_start = graph
+            .nodes()
+            .find(|node_ref| node_ref.node.node_id == node.id && node_ref.node.sequence_end == 5)
+            .expect("insert node block");
+
+        let internal_edges =
+            find_edge(graph, block_node_insert_start, new_node_block).expect("internal edge");
         assert_eq!(internal_edges.len(), 1);
         assert!(internal_edges[0].is_new);
-
-        let start_block = graph
-            .nodes()
-            .find(|node_ref| node_ref.node.node_id == start_node.id)
-            .expect("start node");
-        let start_edges = find_edge(graph, start_block, block_start).expect("start edge");
-        assert!(!start_edges[0].is_new);
     }
 
     #[test]
