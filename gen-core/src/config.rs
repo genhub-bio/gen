@@ -5,6 +5,8 @@ use std::{
 
 use crate::{HashId, errors::ConfigError};
 
+pub const CHANGESET_DIR_NAME: &str = "changesets";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workspace {
     base_dir: PathBuf,
@@ -28,7 +30,7 @@ impl Workspace {
     pub fn ensure_gen_dir(&self) -> PathBuf {
         let gen_path = self.base_dir.join(".gen");
         ensure_dir(&gen_path);
-        let changesets = gen_path.join("changesets");
+        let changesets = gen_path.join(CHANGESET_DIR_NAME);
         ensure_dir(&changesets);
         gen_path
     }
@@ -63,7 +65,7 @@ impl Workspace {
     pub fn changeset_path(&self, hash: &HashId) -> PathBuf {
         let path = self
             .ensure_gen_dir()
-            .join("changeset")
+            .join(CHANGESET_DIR_NAME)
             .join(format!("{hash}"));
         ensure_dir(&path);
         path
@@ -155,7 +157,7 @@ mod tests {
             path,
             tmp_dir_path
                 .join(".gen")
-                .join("changeset")
+                .join(CHANGESET_DIR_NAME)
                 .join(format!("{hash}"))
         );
         assert!(path.is_dir());

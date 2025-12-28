@@ -2302,6 +2302,8 @@ mod tests {
 
     #[cfg(test)]
     mod push_to_file_remote {
+        use gen_core::config::CHANGESET_DIR_NAME;
+
         use super::*;
         use crate::test_helpers::setup_gen_on_disk;
 
@@ -2357,8 +2359,12 @@ mod tests {
 
             // Verify both operations exist in remote
             let remote_gen_path = remote_context.workspace().ensure_gen_dir();
-            let remote_op1_dir = remote_gen_path.join("changeset").join(op1.hash.to_string());
-            let remote_op2_dir = remote_gen_path.join("changeset").join(op2.hash.to_string());
+            let remote_op1_dir = remote_gen_path
+                .join(CHANGESET_DIR_NAME)
+                .join(op1.hash.to_string());
+            let remote_op2_dir = remote_gen_path
+                .join(CHANGESET_DIR_NAME)
+                .join(op2.hash.to_string());
             assert!(remote_op1_dir.exists());
             assert!(remote_op2_dir.exists());
         }
