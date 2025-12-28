@@ -16,7 +16,8 @@ use clap::{Parser, Subcommand};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
-    diffs::{gfa::gfa_sample_diff, operations::collect_operation_diff},
+    config,
+    diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection,
     graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
     operation_management,
@@ -29,13 +30,16 @@ use r#gen::{
     },
 };
 use gen_core::config::Workspace;
+use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
     file_types::FileTypes,
     metadata,
-    operations::{Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState},
+    operations::{
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
+    },
     sample::Sample,
     traits::Query,
 };
@@ -166,16 +170,27 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             )?)
         }
         Some(Commands::ViewDiff { from, to }) => {
-            let target_display = to.clone().unwrap_or_else(|| {
+            let to_ref = to.clone().unwrap_or_else(|| {
                 OperationState::get_operation(operation_conn)
                     .map(|h| format!("{h}"))
                     .unwrap_or_else(|| "HEAD".to_string())
             });
-            let diff = collect_operation_diff(&db_context, &from, to.as_deref())?;
-            if diff.block_groups.is_empty() {
-                println!("No differences found between {from} and {target_display}.");
+            let from_range = parse_hash(operation_conn, &from)?;
+            let from_hash = from_range
+                .from
+                .or(from_range.to)
+                .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
+            let to_range = parse_hash(operation_conn, &to_ref)?;
+            let to_hash = to_range
+                .to
+                .or(to_range.from)
+                .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
+            let diffs =
+                collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
+            if diffs.is_empty() {
+                println!("No differences found between {from} and {to_ref}.");
             } else {
-                view_diff(graph_conn, &diff.block_groups)?;
+                view_diff(graph_conn, &diffs)?;
             }
             Ok(())
         }
@@ -435,13 +450,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("Unable to get current branch")?
             };
             let branch_ops = Branch::get_operations(operation_conn, branch.id);
-            let operations = parse_patch_operations(
-                &branch_ops,
-                &branch
-                    .current_operation_hash
-                    .ok_or("Branch has no current operation")?,
-                &operation,
-            );
+            let operations = parse_patch_operations(operation_conn, &branch_ops, &operation)?;
             let mut f = File::create(format!("{name}.gz"))?;
             patch::create_patch(&db_context, &operations, &mut f)?;
             Ok(())

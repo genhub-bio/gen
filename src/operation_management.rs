@@ -23,13 +23,12 @@ use gen_models::{
     },
     metadata::get_db_uuid,
     operations::{
-        Branch, Defaults, FileAddition, Operation, OperationFile, OperationInfo, OperationState,
-        Remote,
+        Branch, Defaults, FileAddition, HashParseError, Operation, OperationFile, OperationInfo,
+        OperationState, Remote, parse_hash,
     },
     session_operations::{end_operation, start_operation},
     traits::*,
 };
-use itertools::Itertools;
 use petgraph::Direction;
 use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Error as SQLError};
@@ -147,6 +146,20 @@ pub enum RemoteOperationError {
     FileAdditionError(#[from] FileAdditionError),
     #[error("Branch Error: {0}")]
     BranchError(String),
+}
+
+#[derive(Debug, Error)]
+pub enum PatchParseError {
+    #[error(transparent)]
+    HashParse(#[from] HashParseError),
+    #[error("Unable to find starting hash {0}.")]
+    StartHashNotFound(HashId),
+    #[error("Unable to find end hash {0}.")]
+    EndHashNotFound(HashId),
+    #[error("Unable to find hash {0}.")]
+    HashNotFound(HashId),
+    #[error("Unable to parse hash input '{0}'.")]
+    EmptyInput(String),
 }
 
 pub enum FileMode {
@@ -410,92 +423,42 @@ pub fn checkout(
 }
 
 pub fn parse_patch_operations(
+    op_conn: &OperationsConnection,
     branch_operations: &[Operation],
-    head_hash: &HashId,
     operations: &str,
-) -> Vec<HashId> {
+) -> Result<Vec<HashId>, PatchParseError> {
     let mut results = vec![];
-    let (head_pos, _) = branch_operations
-        .iter()
-        .find_position(|op| op.hash == *head_hash)
-        .expect("Current head position is not in branch.");
     for operation in operations.split(",") {
-        if operation.contains("..") {
-            let mut it = operation.split("..");
-            let start = it.next().unwrap().parse::<String>().unwrap();
-            let end = it.next().unwrap().parse::<String>().unwrap();
-
-            let start_hash = if start.starts_with("HEAD") {
-                if start.contains("~") {
-                    let mut it = start.rsplit("~");
-                    let count = it.next().unwrap().parse::<usize>().unwrap();
-                    format!("{}", branch_operations[head_pos - count].hash)
-                } else {
-                    format!("{}", branch_operations[head_pos].hash)
-                }
-            } else {
-                start
-            };
-
-            let end_hash = if end.starts_with("HEAD") {
-                if end.contains("~") {
-                    let mut it = end.rsplit("~");
-                    let count = it.next().unwrap().parse::<usize>().unwrap();
-                    format!("{}", branch_operations[head_pos - count].hash)
-                } else {
-                    format!("{}", branch_operations[head_pos].hash)
-                }
-            } else {
-                end
-            };
-            let mut start_iter = branch_operations
-                .iter()
-                .positions(|op| op.hash.starts_with(start_hash.as_str()));
-            let start_pos = start_iter
-                .next()
-                .unwrap_or_else(|| panic!("Unable to find starting hash {start_hash:?}"));
-            let mut end_iter = branch_operations
-                .iter()
-                .positions(|op| op.hash.starts_with(end_hash.as_str()));
-            let end_pos = end_iter
-                .next()
-                .unwrap_or_else(|| panic!("Unable to find end hash {end_hash:?}"));
-            if start_iter.next().is_some() {
-                panic!("Start hash {start_hash} is ambiguous.");
-            }
-            if end_iter.next().is_some() {
-                panic!("Ending hash {end_hash} is ambiguous.");
-            }
-            results.extend(
-                branch_operations[start_pos..end_pos + 1]
+        let range = parse_hash(op_conn, operation.trim())?;
+        match (range.from, range.to) {
+            (Some(start_hash), Some(end_hash)) => {
+                let start_pos = branch_operations
                     .iter()
-                    .map(|op| op.hash),
-            );
-        } else {
-            let hash = if operation.starts_with("HEAD") {
-                if operation.contains("~") {
-                    let mut it = operation.rsplit("~");
-                    let count = it.next().unwrap().parse::<usize>().unwrap();
-                    branch_operations[head_pos - count].hash
-                } else {
-                    branch_operations[head_pos].hash
-                }
-            } else {
-                let mut iter = branch_operations
+                    .position(|op| op.hash == start_hash)
+                    .ok_or(PatchParseError::StartHashNotFound(start_hash))?;
+                let end_pos = branch_operations
                     .iter()
-                    .positions(|op| op.hash.starts_with(operation));
-                let pos = iter
-                    .next()
-                    .unwrap_or_else(|| panic!("Unable to find starting hash {operation:?}"));
-                if iter.next().is_some() {
-                    panic!("Hash {operation:?} is ambiguous.");
-                }
-                branch_operations[pos].hash
-            };
-            results.push(hash);
+                    .position(|op| op.hash == end_hash)
+                    .ok_or(PatchParseError::EndHashNotFound(end_hash))?;
+                results.extend(
+                    branch_operations[start_pos..=end_pos]
+                        .iter()
+                        .map(|op| op.hash),
+                );
+            }
+            (None, Some(hash)) => {
+                let pos = branch_operations
+                    .iter()
+                    .position(|op| op.hash == hash)
+                    .ok_or(PatchParseError::HashNotFound(hash))?;
+                results.push(branch_operations[pos].hash);
+            }
+            _ => {
+                return Err(PatchParseError::EmptyInput(operation.trim().to_string()));
+            }
         }
     }
-    results
+    Ok(results)
 }
 
 // The url-parse crate doesn't know about file-based urls, so we need to provide it with a
@@ -1408,11 +1371,7 @@ mod tests {
             let branch = Branch::get_by_name(op_conn, "main").unwrap();
             let ops = Branch::get_operations(op_conn, branch.id);
             assert_eq!(
-                parse_patch_operations(
-                    &ops,
-                    &branch.current_operation_hash.unwrap(),
-                    "HEAD~1..HEAD"
-                ),
+                parse_patch_operations(op_conn, &ops, "HEAD~1..HEAD").unwrap(),
                 vec![op_2.hash, op_3.hash]
             );
         }
@@ -1449,28 +1408,27 @@ mod tests {
 
             let branch = Branch::get_by_name(op_conn, "main").unwrap();
             let ops = Branch::get_operations(op_conn, branch.id);
-            let head_hash = branch.current_operation_hash.unwrap();
             assert_eq!(
                 parse_patch_operations(
+                    op_conn,
                     &ops,
-                    &head_hash,
                     &format!(
                         "{op_2}..{op_3}",
                         op_2 = &format!("{}", op_2.hash)[..6],
                         op_3 = &format!("{}", op_3.hash)[..6]
                     )
-                ),
+                )
+                .unwrap(),
                 vec![op_2.hash, op_3.hash]
             );
 
             assert_eq!(
-                parse_patch_operations(&ops, &head_hash, &format!("{}", op_2.hash)[..6]),
+                parse_patch_operations(op_conn, &ops, &format!("{}", op_2.hash)[..6]).unwrap(),
                 vec![op_2.hash]
             );
         }
 
         #[test]
-        #[should_panic(expected = "Start hash 587 is ambiguous.")]
         fn test_error_on_ambiguous_hash_shorthand() {
             let context = setup_gen();
             let conn = context.graph().conn();
@@ -1490,31 +1448,28 @@ mod tests {
                 "foo",
                 FileTypes::Fasta,
                 "fasta_addition",
-                HashId::convert_str("op-2-abc-123"),
+                HashId::pad_str("abc0000000000000000000000000000000000000000000000000000000000001"),
             );
             let op_3 = create_operation(
                 &context,
                 "foo",
                 FileTypes::Fasta,
                 "vcf_addition",
-                // some random string i found to collide with prefix of above
-                HashId::convert_str("AXf5SuLvAM"),
+                HashId::pad_str("abc0000000000000000000000000000000000000000000000000000000000002"),
             );
 
             let branch = Branch::get_by_name(op_conn, "main").unwrap();
             let ops = Branch::get_operations(op_conn, branch.id);
-            assert_eq!(
-                parse_patch_operations(
-                    &ops,
-                    &branch.current_operation_hash.unwrap(),
-                    &format!(
-                        "{op_2}..{op_3}",
-                        op_2 = &format!("{}", op_2.hash)[..3],
-                        op_3 = &format!("{}", op_3.hash)[..3]
-                    )
+            let result = parse_patch_operations(
+                op_conn,
+                &ops,
+                &format!(
+                    "{op_2}..{op_3}",
+                    op_2 = &format!("{}", op_2.hash)[..3],
+                    op_3 = &format!("{}", op_3.hash)[..3]
                 ),
-                vec![op_2.hash, op_3.hash]
             );
+            assert!(result.is_err());
         }
     }
 

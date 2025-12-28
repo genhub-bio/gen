@@ -1,0 +1,19 @@
+[package]
+name = "gen-diff"
+description = "Diff algorithms for the gen sequence graph and version control system."
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/genhub-bio/gen"
+homepage = "https://genhub.bio"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+gen-core = { path = "../gen-core" }
+gen-graph = { path = "../gen-graph" }
+gen-models = { path = "../gen-models" }
+itertools = "0.14.0"
+petgraph = "0.6.5"
+rusqlite = { version = "0.32.1" }
+tempfile = "3.24.0"
+thiserror = "2.0.12"

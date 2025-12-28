@@ -17,8 +17,8 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-graph"]
-default-members = [".", "gen-core", "gen-models", "gen-graph"]
+members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff"]
+default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff"]
 exclude = ["gen-python"]
 
 [features]
@@ -29,6 +29,7 @@ cli = []
 
 [dependencies]
 gen-core = { path = "gen-core" }
+gen-diff = { path = "gen-diff" }
 gen-models = { path = "gen-models" }
 gen-graph = { path = "gen-graph" }
 clap = { version = "4.5.32", features = ["derive"] }
