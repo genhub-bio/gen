@@ -37,7 +37,6 @@ struct DiffComponent {
     highlight_nodes: std::collections::HashSet<gen_graph::GraphNode>,
     highlight_color: Color,
     change_label: &'static str,
-    db_path: String,
 }
 
 struct ListEntry {
@@ -156,16 +155,12 @@ pub fn view_diff(
         if let Some(diff) = diffs.get(db_path)
             && let Some(db_diff) = diff.dbs.get(db_path)
         {
-            for component in
-                collect_components(&db_diff.added_block_groups, "Add", &db_diff.db_path)
-            {
+            for component in collect_components(&db_diff.added_block_groups, "Add") {
                 let entry = components_by_db.entry(db_path.clone()).or_default();
                 entry.push(components.len());
                 components.push(component);
             }
-            for component in
-                collect_components(&db_diff.removed_block_groups, "Remove", &db_diff.db_path)
-            {
+            for component in collect_components(&db_diff.removed_block_groups, "Remove") {
                 let entry = components_by_db.entry(db_path.clone()).or_default();
                 entry.push(components.len());
                 components.push(component);
@@ -342,11 +337,7 @@ pub fn view_diff(
     result
 }
 
-fn collect_components(
-    graphs: &[BlockGroupDiff],
-    change_label: &'static str,
-    db_path: &str,
-) -> Vec<DiffComponent> {
+fn collect_components(graphs: &[BlockGroupDiff], change_label: &'static str) -> Vec<DiffComponent> {
     let mut components = Vec::new();
     let highlight_color = match change_label {
         "Add" => Color::Green,
@@ -381,7 +372,6 @@ fn collect_components(
                 sample,
                 block_group,
                 None,
-                db_path,
             ));
         } else {
             let total = parts.len();
@@ -400,7 +390,6 @@ fn collect_components(
                     sample.clone(),
                     block_group.clone(),
                     Some(format!("part {}/{}", idx + 1, total)),
-                    db_path,
                 ));
             }
         }
@@ -418,7 +407,6 @@ fn build_component(
     sample: String,
     block_group: String,
     part_label: Option<String>,
-    db_path: &str,
 ) -> DiffComponent {
     let graph: gen_graph::GenGraph = DiffGenGraphRef(diff_graph).into();
     let highlight_graph = build_edge_highlight_graph(diff_graph);
@@ -434,7 +422,6 @@ fn build_component(
         highlight_nodes,
         highlight_color,
         change_label,
-        db_path: db_path.to_string(),
     }
 }
 
