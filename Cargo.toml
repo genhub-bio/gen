@@ -23,7 +23,8 @@ exclude = ["gen-python"]
 
 [features]
 benchmark = []
-default = ["models", "cli"]
+default = ["models", "cli", "diff"]
+diff = []
 models = []
 cli = []
 

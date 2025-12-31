@@ -35,6 +35,8 @@ pub mod views;
 // reexports for public api, put behind features as needed
 pub use gen_core as core;
 use gen_core::config::Workspace;
+#[cfg(feature = "diff")]
+pub use gen_diff as diff;
 pub use gen_graph as graph;
 #[cfg(feature = "models")]
 pub use gen_models as models;
