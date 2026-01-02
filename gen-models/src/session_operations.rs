@@ -1,4 +1,4 @@
-use std::str;
+use std::{fs, path::Path as FilePath, str};
 
 use gen_core::{HashId, traits::Capnp};
 use rusqlite::session;
@@ -13,6 +13,7 @@ use crate::{
     db::{DbContext, GraphConnection},
     edge::Edge,
     errors::OperationError,
+    file_types::FileTypes,
     files::GenDatabase,
     gen_models_capnp::dependency_models,
     metadata::{self, get_db_uuid},
@@ -64,18 +65,39 @@ pub fn end_operation(
 
     match Operation::create(operation_conn, &operation_info.description, &hash) {
         Ok(operation) => {
+            let gen_dir = match get_gen_dir() {
+                Some(dir) => dir,
+                None => {
+                    return Err(OperationError::ConfigError(
+                        ConfigError::GenDirectoryNotFound,
+                    ));
+                }
+            };
+            let assets_dir = FilePath::new(&gen_dir).join("assets");
+            ensure_dir(&assets_dir);
+
             for op_file in operation_info.files.iter() {
                 let fa = match FileAddition::get_or_create(
                     context.workspace(),
                     operation_conn,
                     &op_file.file_path,
                     op_file.file_type,
+                    None,
                 ) {
                     Ok(fa) => fa,
                     Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
                 };
                 Operation::add_file(operation_conn, &operation.hash, &fa.id)
-                    .map_err(|err| OperationError::SQLError(format!("{err}")))?
+                    .map_err(|err| OperationError::SQLError(format!("{err}")))?;
+                if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
+                    let asset_destination_path = assets_dir.join(fa.hashed_filename());
+                    if !asset_destination_path.exists() {
+                        match fs::copy(&op_file.file_path, asset_destination_path) {
+                            Ok(result) => result,
+                            Err(_) => return Err(OperationError::IOError),
+                        };
+                    }
+                }
             }
             Operation::add_database(operation_conn, &operation.hash, &db_uuid)
                 .map_err(|err| OperationError::SQLError(format!("{err}")))?;

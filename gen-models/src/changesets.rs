@@ -1321,7 +1321,7 @@ mod tests {
                 &OperationInfo {
                     files: vec![OperationFile {
                         file_path: "test".to_string(),
-                        file_type: FileTypes::Fasta,
+                        file_type: FileTypes::None,
                     }],
                     description: "test".to_string(),
                 },

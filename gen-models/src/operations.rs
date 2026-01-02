@@ -451,17 +451,19 @@ impl FileAddition {
         conn: &OperationsConnection,
         file_path: &str,
         file_type: FileTypes,
+        checksum_override: Option<HashId>,
     ) -> Result<FileAddition, FileAdditionError> {
         let (absolute_file_path, relative_file_path) =
             FileAddition::normalize_file_paths(workspace, file_path);
 
-        let checksum = if relative_file_path.is_empty() {
-            HashId::convert_str("empty")
+        // TODO: Verify checksum_override actually matches the file's checksum?
+        let checksum = if let Some(checksum_override) = checksum_override {
+            checksum_override
         } else {
-            let checksum_path = if absolute_file_path.is_empty() {
-                relative_file_path.as_str()
-            } else {
+            let checksum_path = if relative_file_path.is_empty() {
                 absolute_file_path.as_str()
+            } else {
+                relative_file_path.as_str()
             };
             match calculate_file_checksum(checksum_path) {
                 Ok(checksum) => checksum,
@@ -543,6 +545,14 @@ impl FileAddition {
                 acc.entry(hash).or_default().push(item);
                 Ok(acc)
             })
+    }
+
+    pub fn hashed_filename(self) -> String {
+        format!(
+            "{}.{}",
+            self.checksum.clone(),
+            &FileTypes::suffix(self.file_type)
+        )
     }
 }
 
@@ -1161,7 +1171,7 @@ impl OperationState {
 mod tests {
     use std::{
         collections::HashSet,
-        fs,
+        env, fs,
         io::{Cursor, Write},
         path::PathBuf,
     };
@@ -2592,9 +2602,14 @@ mod tests {
         let op_conn = context.operations().conn();
         let repo_root = context.workspace().repo_root().unwrap();
 
+        // NOTE: The file checksums are calculated based on relative path, so
+        // change working directory to the repo root so that they are correctly
+        // calculated
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(&repo_root).unwrap();
+
         let file1_path = repo_root.join("test_file.txt");
         fs::write(&file1_path, b"Test file content").unwrap();
-        let file1_path_str = file1_path.to_string_lossy().to_string();
         let relative1 = file1_path
             .strip_prefix(&repo_root)
             .unwrap()
@@ -2610,13 +2625,11 @@ mod tests {
         .expect("Failed to create FileAddition");
 
         assert_eq!(fa1.file_path, relative1);
-        assert_eq!(
-            fa1.id,
-            FileAddition::generate_file_addition_id(
-                &calculate_file_checksum(&file1_path_str).unwrap(),
-                &relative1
-            )
-        );
+
+        let checksum = calculate_file_checksum(&relative1).unwrap();
+        let relative1_id = FileAddition::generate_file_addition_id(&checksum, &relative1);
+
+        assert_eq!(fa1.id, relative1_id);
 
         // Second call with same file should return the same FileAddition
         let fa2 = FileAddition::get_or_create(
@@ -2628,6 +2641,8 @@ mod tests {
         .expect("Failed to get existing FileAddition");
 
         assert_eq!(fa1, fa2);
+
+        env::set_current_dir(original_dir).unwrap();
 
         let file2_path = repo_root.join("nested").join("file2.txt");
         fs::create_dir_all(file2_path.parent().unwrap()).unwrap();

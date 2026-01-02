@@ -1,4 +1,4 @@
-use gen_core::errors::{ConnectionError, StrandError};
+use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
@@ -39,6 +39,10 @@ pub enum OperationError {
     SQLError(String),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Config Error: {0}")]
+    ConfigError(#[from] ConfigError),
+    #[error("Error storing data file")]
+    IOError,
 }
 
 #[derive(Debug, PartialEq, Error)]
