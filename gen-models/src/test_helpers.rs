@@ -200,6 +200,21 @@ pub fn create_operation(
     description: &str,
     hash: impl Into<Option<HashId>>,
 ) -> Operation {
+    let repo_root = context.repo_root().unwrap();
+    if file_type != FileTypes::Changeset && file_type != FileTypes::None {
+        let full_path = if std::path::Path::new(file_path).is_absolute() {
+            std::path::PathBuf::from(file_path)
+        } else {
+            repo_root.join(file_path)
+        };
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        if !full_path.exists() {
+            fs::write(&full_path, b"test file content").unwrap();
+        }
+    }
+
     let conn = context.graph().conn();
     let mut session = start_operation(conn);
     end_operation(

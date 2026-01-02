@@ -1,6 +1,10 @@
-use std::{fs, path::Path as FilePath, str};
+use std::{
+    fs,
+    path::{Path as FilePath, PathBuf},
+    str,
+};
 
-use gen_core::{HashId, traits::Capnp};
+use gen_core::{HashId, errors::ConfigError, traits::Capnp};
 use rusqlite::session;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -65,7 +69,7 @@ pub fn end_operation(
 
     match Operation::create(operation_conn, &operation_info.description, &hash) {
         Ok(operation) => {
-            let gen_dir = match get_gen_dir() {
+            let gen_dir = match context.workspace().find_gen_dir() {
                 Some(dir) => dir,
                 None => {
                     return Err(OperationError::ConfigError(
@@ -74,7 +78,7 @@ pub fn end_operation(
                 }
             };
             let assets_dir = FilePath::new(&gen_dir).join("assets");
-            ensure_dir(&assets_dir);
+            fs::create_dir_all(&assets_dir).map_err(|_| OperationError::IOError)?;
 
             for op_file in operation_info.files.iter() {
                 let fa = match FileAddition::get_or_create(
@@ -92,7 +96,16 @@ pub fn end_operation(
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
                     let asset_destination_path = assets_dir.join(fa.hashed_filename());
                     if !asset_destination_path.exists() {
-                        match fs::copy(&op_file.file_path, asset_destination_path) {
+                        let source_path = if FilePath::new(&op_file.file_path).is_absolute() {
+                            PathBuf::from(&op_file.file_path)
+                        } else {
+                            context
+                                .workspace()
+                                .repo_root()
+                                .map_err(OperationError::ConfigError)?
+                                .join(&op_file.file_path)
+                        };
+                        match fs::copy(source_path, asset_destination_path) {
                             Ok(result) => result,
                             Err(_) => return Err(OperationError::IOError),
                         };

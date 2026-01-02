@@ -1095,17 +1095,13 @@ struct RemoteOperationAssetResponse {
     changeset: String,
     dependencies: String,
     #[serde(default)]
-    #[expect(dead_code, reason = "Used by apis")]
     files: Vec<RemoteFileAsset>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RemoteFileAsset {
-    #[expect(dead_code, reason = "Used by apis")]
     asset_path: String,
-    #[expect(dead_code, reason = "Used by apis")]
     file_path: String,
-    #[expect(dead_code, reason = "Used by apis")]
     url: String,
 }
 
@@ -1149,7 +1145,9 @@ fn download_remote_operation_assets(
         "dependencies",
     )?;
 
-    let gen_dir = get_gen_dir().unwrap();
+    let gen_dir = workspace
+        .find_gen_dir()
+        .ok_or(ConfigError::GenDirectoryNotFound)?;
     let gen_path = FilePath::new(&gen_dir);
     for file in asset_response.files {
         let destination = gen_path.join("assets").join(&file.asset_path);
@@ -2197,14 +2195,8 @@ mod tests {
                 };
 
                 // Create the file addition we're transferring
-                fs::write(
-                    FilePath::new(local_dir).join(file_path),
-                    "test file content",
-                )
-                .unwrap();
+                fs::write(local_root.join(&file_path), "test file content").unwrap();
 
-                let previous_dir = env::current_dir().unwrap();
-                env::set_current_dir(local_dir).unwrap();
                 end_operation(
                     &local_context,
                     &mut session,

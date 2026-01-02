@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs, io::Write, ops::Add};
+use std::{fmt::Debug, fs, io::Write, ops::Add, path::PathBuf};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
@@ -275,6 +275,21 @@ pub fn create_operation(
     description: &str,
     hash: impl Into<Option<HashId>>,
 ) -> Operation {
+    let repo_root = context.repo_root().unwrap();
+    if file_type != FileTypes::Changeset && file_type != FileTypes::None {
+        let full_path = if std::path::Path::new(file_path).is_absolute() {
+            PathBuf::from(file_path)
+        } else {
+            repo_root.join(file_path)
+        };
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        if !full_path.exists() {
+            fs::write(&full_path, b"test file content").unwrap();
+        }
+    }
+
     let mut session = start_operation(context.graph().conn());
     end_operation(
         context,

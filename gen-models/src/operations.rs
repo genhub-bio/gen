@@ -460,7 +460,8 @@ impl FileAddition {
         let checksum = if let Some(checksum_override) = checksum_override {
             checksum_override
         } else {
-            let checksum_path = if relative_file_path.is_empty() {
+            let absolute_path = Path::new(&absolute_file_path);
+            let checksum_path = if absolute_path.is_file() {
                 absolute_file_path.as_str()
             } else {
                 relative_file_path.as_str()
@@ -1171,7 +1172,7 @@ impl OperationState {
 mod tests {
     use std::{
         collections::HashSet,
-        env, fs,
+        fs,
         io::{Cursor, Write},
         path::PathBuf,
     };
@@ -2602,14 +2603,9 @@ mod tests {
         let op_conn = context.operations().conn();
         let repo_root = context.workspace().repo_root().unwrap();
 
-        // NOTE: The file checksums are calculated based on relative path, so
-        // change working directory to the repo root so that they are correctly
-        // calculated
-        let original_dir = env::current_dir().unwrap();
-        env::set_current_dir(&repo_root).unwrap();
-
         let file1_path = repo_root.join("test_file.txt");
         fs::write(&file1_path, b"Test file content").unwrap();
+        let file1_path_str = file1_path.to_string_lossy().to_string();
         let relative1 = file1_path
             .strip_prefix(&repo_root)
             .unwrap()
@@ -2621,12 +2617,13 @@ mod tests {
             op_conn,
             &file1_path_str,
             FileTypes::Fasta,
+            None,
         )
         .expect("Failed to create FileAddition");
 
         assert_eq!(fa1.file_path, relative1);
 
-        let checksum = calculate_file_checksum(&relative1).unwrap();
+        let checksum = calculate_file_checksum(&file1_path_str).unwrap();
         let relative1_id = FileAddition::generate_file_addition_id(&checksum, &relative1);
 
         assert_eq!(fa1.id, relative1_id);
@@ -2637,12 +2634,11 @@ mod tests {
             op_conn,
             &file1_path_str,
             FileTypes::Fasta,
+            None,
         )
         .expect("Failed to get existing FileAddition");
 
         assert_eq!(fa1, fa2);
-
-        env::set_current_dir(original_dir).unwrap();
 
         let file2_path = repo_root.join("nested").join("file2.txt");
         fs::create_dir_all(file2_path.parent().unwrap()).unwrap();
@@ -2654,6 +2650,7 @@ mod tests {
             op_conn,
             &file2_path_str,
             FileTypes::Fasta,
+            None,
         )
         .expect("Failed to create different FileAddition");
 
@@ -2665,6 +2662,7 @@ mod tests {
             op_conn,
             &file1_path_str,
             FileTypes::Fasta,
+            None,
         )
         .expect("Failed to create FileAddition");
 
