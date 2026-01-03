@@ -36,7 +36,7 @@ jobs:
           container: quay.io/pypa/manylinux_2_28_x86_64:latest
           before-script-linux: |
             yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig
-            cargo install capnpc
+            cargo install capnpc --version 0.24 --locked
             export PATH="/root/.cargo/bin:${PATH}"
             export CAPNPC_RUST="/root/.cargo/bin/capnpc-rust"
             mkdir -p gen-core/src/generated gen-models/src/generated src/generated
