@@ -11,6 +11,7 @@ use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::DbContext,
     edge::Edge,
     file_types::FileTypes,
     node::Node,
@@ -21,7 +22,6 @@ use gen_models::{
     session_operations::{end_operation, start_operation},
 };
 use noodles::{bgzf, fasta};
-use rusqlite::{self, Connection};
 
 use crate::{
     fasta::FastaError,
@@ -29,13 +29,13 @@ use crate::{
 };
 
 pub fn import_fasta<'a>(
+    context: &DbContext,
     fasta: &String,
     name: &str,
     sample: impl Into<Option<&'a str>>,
     shallow: bool,
-    conn: &Connection,
-    operation_conn: &Connection,
 ) -> Result<Operation, FastaError> {
+    let conn = context.graph().conn();
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
 
@@ -148,8 +148,7 @@ pub fn import_fasta<'a>(
 
     let bar = add_saving_operation_bar(&progress_bar);
     let op = end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -174,28 +173,24 @@ mod tests {
     use gen_models::{errors::OperationError, traits::*};
 
     use super::*;
-    use crate::{
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{test_helpers::setup_gen, track_database};
 
     #[test]
     fn test_add_fasta() {
-        setup_gen_dir();
-        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
+        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_path.push("fixtures/simple.fa");
+
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", None, "m123");
@@ -213,21 +208,20 @@ mod tests {
 
     #[test]
     fn test_supports_normal_gz_fasta() {
-        setup_gen_dir();
-        let fasta_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/gzipped.fa.gz");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
+        let fasta_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/gzipped.fa.gz");
+
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", None, "m123");
@@ -239,20 +233,19 @@ mod tests {
 
     #[test]
     fn test_large_gz_fasta() {
-        setup_gen_dir();
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22.fa.gz");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22.fa.gz");
+
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", None, "chr22");
@@ -266,21 +259,20 @@ mod tests {
 
     #[test]
     fn test_supports_bgzip_fasta() {
-        setup_gen_dir();
-        let fasta_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
+        let fasta_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz");
+
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", None, "m123");
@@ -292,21 +284,20 @@ mod tests {
 
     #[test]
     fn test_add_fasta_creates_sample() {
-        setup_gen_dir();
-        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
+        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_path.push("fixtures/simple.fa");
+
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             "new-sample",
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Some("new-sample"), "m123");
@@ -328,21 +319,20 @@ mod tests {
 
     #[test]
     fn test_add_fasta_shallow() {
-        setup_gen_dir();
-        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
+        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_path.push("fixtures/simple.fa");
+
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             None,
             true,
-            conn,
-            op_conn,
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", None, "m123");
@@ -360,23 +350,21 @@ mod tests {
 
     #[test]
     fn test_deduplicates_nodes() {
-        setup_gen_dir();
-        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
+        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_path.push("fixtures/simple.fa");
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         assert_eq!(
@@ -385,12 +373,11 @@ mod tests {
         );
 
         let result_error = import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap_err();
 

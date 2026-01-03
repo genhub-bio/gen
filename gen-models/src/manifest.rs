@@ -1,8 +1,8 @@
 use gen_core::{HashId, traits::Capnp};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    db::OperationsConnection,
     gen_models_capnp::{manifest, manifest_diff, manifest_operation},
     operations::{FileAddition, Operation, OperationSummary},
     traits::Query,
@@ -172,11 +172,11 @@ impl<'a> Capnp<'a> for ManifestDiff {
 }
 
 pub struct ManifestGenerator<'a> {
-    conn: &'a Connection,
+    conn: &'a OperationsConnection,
 }
 
 impl<'a> ManifestGenerator<'a> {
-    pub fn new(conn: &'a Connection) -> Self {
+    pub fn new(conn: &'a OperationsConnection) -> Self {
         Self { conn }
     }
 
@@ -293,14 +293,14 @@ mod tests {
         file_types::FileTypes,
         operations::OperationInfo,
         session_operations::{end_operation, start_operation},
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        test_helpers::setup_gen,
     };
 
     #[test]
     fn test_manifest_operation_capnp_serialization() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -314,7 +314,7 @@ mod tests {
             files: vec![],
             description: "test op".to_string(),
         };
-        let operation = end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+        let operation = end_operation(&context, &mut session, &op_info, "test", None).unwrap();
 
         let manifest_operation = ManifestOperation {
             operation: operation.clone(),
@@ -341,9 +341,9 @@ mod tests {
 
     #[test]
     fn test_manifest_capnp_serialization() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -357,7 +357,7 @@ mod tests {
             files: vec![],
             description: "test op".to_string(),
         };
-        let operation = end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+        let operation = end_operation(&context, &mut session, &op_info, "test", None).unwrap();
 
         let manifest = Manifest {
             manifest_version: "1.0".to_string(),
@@ -380,9 +380,9 @@ mod tests {
 
     #[test]
     fn test_manifest_diff_capnp_serialization() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -396,7 +396,7 @@ mod tests {
             files: vec![],
             description: "test op".to_string(),
         };
-        let operation = end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+        let operation = end_operation(&context, &mut session, &op_info, "test", None).unwrap();
 
         let manifest_operation = ManifestOperation {
             operation,
@@ -419,9 +419,9 @@ mod tests {
 
     #[test]
     fn test_manifest_generator() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -435,7 +435,7 @@ mod tests {
             files: vec![],
             description: "first op".to_string(),
         };
-        let op1 = end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+        let op1 = end_operation(&context, &mut session, &op_info, "test", None).unwrap();
 
         let mut session = start_operation(conn);
         crate::sequence::Sequence::new()
@@ -446,7 +446,7 @@ mod tests {
             files: vec![],
             description: "second op".to_string(),
         };
-        let op2 = end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+        let op2 = end_operation(&context, &mut session, &op_info, "test", None).unwrap();
 
         let generator = ManifestGenerator::new(op_conn);
         let manifest = generator
@@ -467,9 +467,9 @@ mod tests {
 
     #[test]
     fn test_manifest_comparer() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -483,7 +483,7 @@ mod tests {
             files: vec![],
             description: "first op".to_string(),
         };
-        let op1 = end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+        let op1 = end_operation(&context, &mut session, &op_info, "test", None).unwrap();
 
         let mut session = start_operation(conn);
         crate::sequence::Sequence::new()
@@ -494,7 +494,7 @@ mod tests {
             files: vec![],
             description: "second op".to_string(),
         };
-        let op2 = end_operation(conn, op_conn, &mut session, &op_info, "test 2", None).unwrap();
+        let op2 = end_operation(&context, &mut session, &op_info, "test 2", None).unwrap();
 
         let mut session = start_operation(conn);
         crate::sequence::Sequence::new()
@@ -505,7 +505,7 @@ mod tests {
             files: vec![],
             description: "third op".to_string(),
         };
-        let op3 = end_operation(conn, op_conn, &mut session, &op_info, "test 3", None).unwrap();
+        let op3 = end_operation(&context, &mut session, &op_info, "test 3", None).unwrap();
 
         let manifest1 = Manifest {
             manifest_version: "1.0".to_string(),
@@ -554,9 +554,9 @@ mod tests {
 
     #[test]
     fn test_manifest_generator_operation_not_found() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -570,7 +570,7 @@ mod tests {
             files: vec![],
             description: "first op".to_string(),
         };
-        end_operation(conn, op_conn, &mut session, &op_info, "test", None).unwrap();
+        end_operation(&context, &mut session, &op_info, "test", None).unwrap();
 
         let generator = ManifestGenerator::new(op_conn);
         let manifest = generator

@@ -10,7 +10,9 @@ use crossterm::{
 };
 use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
-use gen_models::{block_group::BlockGroup, node::Node, path::Path, traits::Query};
+use gen_models::{
+    block_group::BlockGroup, db::GraphConnection, node::Node, path::Path, traits::Query,
+};
 use log::warn;
 use ratatui::{
     layout::Constraint,
@@ -18,7 +20,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
 };
-use rusqlite::{Connection, params};
+use rusqlite::params;
 
 use crate::{
     config::get_theme_color,
@@ -66,7 +68,7 @@ fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<
 }
 
 pub fn view_block_group(
-    conn: &Connection,
+    conn: &GraphConnection,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,

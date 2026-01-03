@@ -2,8 +2,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::{
-    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
-    get_connection, get_operation_connection,
+    commands::{cli_context::CliContext, get_default_collection},
     updates::gfa::update_with_gfa,
 };
 
@@ -27,11 +26,9 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with GFA called");
 
-    let operation_conn = get_operation_connection(None)?;
-    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db)?;
-
-    // initialize the selected database if needed.
+    let context = cli_context.context;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;
@@ -39,11 +36,10 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(&operation_conn));
+        .unwrap_or_else(|| get_default_collection(operation_conn));
 
     match update_with_gfa(
-        &conn,
-        &operation_conn,
+        context,
         name,
         cmd.sample.clone().as_deref(),
         &cmd.new_sample,

@@ -31,16 +31,17 @@ pub mod test_helpers;
 pub mod translate;
 pub mod updates;
 pub mod views;
-// The Python bindings are in a separate module to avoid issues with non-local impl
-#[cfg(feature = "python-bindings")]
-pub mod python_api;
 
 // reexports for public api, put behind features as needed
 pub use gen_core as core;
+use gen_core::config::Workspace;
+#[cfg(feature = "diff")]
+pub use gen_diff as diff;
 pub use gen_graph as graph;
 #[cfg(feature = "models")]
 pub use gen_models as models;
 use gen_models::{
+    db::{GraphConnection, OperationsConnection},
     files::GenDatabase,
     migrations::{run_migrations, run_operation_migrations},
 };
@@ -49,18 +50,18 @@ use rusqlite::{Connection, OptionalExtension};
 
 pub fn get_connection(
     db_path: impl Into<PathBuf>,
-) -> Result<Connection, core::errors::ConnectionError> {
+) -> Result<GraphConnection, core::errors::ConnectionError> {
     let db_path = db_path.into();
     let mut conn = Connection::open(&db_path)?;
     rusqlite::vtab::array::load_module(&conn).unwrap();
     run_migrations(&mut conn);
 
-    Ok(conn)
+    Ok(GraphConnection(conn))
 }
 
 pub fn track_database(
-    conn: &Connection,
-    op_conn: &Connection,
+    conn: &GraphConnection,
+    op_conn: &OperationsConnection,
 ) -> Result<(), core::errors::ConnectionError> {
     // This records the database in the main gen database file. It prevents things like a user copying a database to a new file
     // or overwriting databases without informing Gen about the changes. Not doing this would lead to situations like 2 databases
@@ -124,17 +125,17 @@ pub fn track_database(
 
 pub fn get_operation_connection(
     db_path: impl Into<Option<PathBuf>>,
-) -> Result<Connection, core::errors::ConnectionError> {
+) -> Result<OperationsConnection, core::errors::ConnectionError> {
     let db_path = db_path.into();
     let path = if let Some(s) = db_path {
         s
     } else {
-        core::config::get_gen_db_path()?
+        Workspace::from_current_dir().gen_db_path()?
     };
     let mut conn = Connection::open(&path)?;
     rusqlite::vtab::array::load_module(&conn).unwrap();
     run_operation_migrations(&mut conn);
-    Ok(conn)
+    Ok(OperationsConnection(conn))
 }
 
 pub fn run_query(conn: &Connection, query: &str) {
@@ -205,10 +206,10 @@ pub fn normalize_string(s: &str) -> String {
 mod tests {
     use std::fs;
 
-    use gen_models::{files::GenDatabase, metadata::get_db_uuid, traits::Query};
+    use gen_models::{db::DbContext, files::GenDatabase, metadata::get_db_uuid, traits::Query};
 
     use super::*;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
+    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen};
 
     #[cfg(test)]
     mod test_normalize_string {
@@ -302,11 +303,19 @@ mod tests {
     #[test]
     fn test_database_tracking_integration() {
         // Assert that connecting to the database triggers database tracking
-
-        let gen_dir = setup_gen_dir();
-        let db_path = gen_dir.parent().unwrap().join("test_tracking.db");
-        let conn = &get_connection(db_path.to_str()).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("test_tracking.db");
+        let context = DbContext::new(
+            context.workspace().clone(),
+            get_connection(db_path.to_str()).unwrap(),
+            get_operation_connection(None).unwrap(),
+        );
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
         let db_uuid: String = models::metadata::get_db_uuid(conn);
@@ -331,13 +340,19 @@ mod tests {
 
     #[test]
     fn test_path_conflict_detection_different_path() {
-        let gen_dir = setup_gen_dir();
-        let db_path = gen_dir.parent().unwrap().join("original_location.db");
-
-        // Because the test_helper get_connection overwrites existing db files, we have to
-        // use the actual get_connection function
-        let conn = &crate::get_connection(&db_path).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("original_location.db");
+        let context = DbContext::new(
+            context.workspace().clone(),
+            crate::get_connection(&db_path).unwrap(),
+            get_operation_connection(None).unwrap(),
+        );
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
         // Force write of the WAL file into the db so we can copy
@@ -345,7 +360,11 @@ mod tests {
             .unwrap();
 
         // Move database to different location within .gen directory
-        let moved_db_path = gen_dir.parent().unwrap().join("moved_location.db");
+        let moved_db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("moved_location.db");
         fs::copy(&db_path, &moved_db_path).unwrap();
 
         // Try to access from moved location - should detect path conflict
@@ -363,17 +382,26 @@ mod tests {
 
     #[test]
     fn test_path_conflict_detection_uuid_mismatch() {
-        let gen_dir = setup_gen_dir();
-        let db_path = gen_dir.parent().unwrap().join("original_location.db");
-        let conn = &crate::get_connection(db_path.clone()).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let db_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("original_location.db");
+        let context = DbContext::new(
+            context.workspace().clone(),
+            crate::get_connection(db_path.clone()).unwrap(),
+            get_operation_connection(None).unwrap(),
+        );
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
         conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
             .unwrap();
         let db_uuid1 = get_db_uuid(conn);
 
-        let new_db_path = gen_dir.parent().unwrap().join("new.db");
+        let new_db_path = context.workspace().repo_root().unwrap().join("new.db");
         let conn = &crate::get_connection(new_db_path.clone()).unwrap();
         track_database(conn, op_conn).unwrap();
         conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")

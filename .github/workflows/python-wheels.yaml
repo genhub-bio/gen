@@ -1,0 +1,67 @@
+name: Python API Wheels
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build-wheels:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: setup-python
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install capnp (macOS)
+        if: runner.os == 'macOS'
+        run: brew install capnp
+      - name: Install capnp (Windows)
+        if: runner.os == 'Windows'
+        run: choco install capnproto
+      - name: Build wheels (Linux)
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
+          manylinux: auto
+          container: quay.io/pypa/manylinux_2_28_x86_64:latest
+          before-script-linux: |
+            yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig
+            cargo install capnpc
+            export PATH="/root/.cargo/bin:${PATH}"
+            export CAPNPC_RUST="/root/.cargo/bin/capnpc-rust"
+            mkdir -p gen-core/src/generated gen-models/src/generated src/generated
+            (cd gen-core && capnp compile -I .. -orust:src/generated gen-core.capnp)
+            (cd gen-models && capnp compile -I .. -orust:src/generated gen-models.capnp)
+            capnp compile -I . -orust:src/generated gen-schema.capnp
+            # For some reason these files get generated in a subdirectory for this manylinux image
+            if [ -d gen-core/src/generated/gen-core ]; then mv gen-core/src/generated/gen-core/*.rs gen-core/src/generated/ && rmdir gen-core/src/generated/gen-core; fi
+            if [ -d gen-models/src/generated/gen-models ]; then mv gen-models/src/generated/gen-models/*.rs gen-models/src/generated/ && rmdir gen-models/src/generated/gen-models; fi
+            ls -la gen-core/src/generated
+            ls -la gen-models/src/generated
+            ls -la src/generated
+          working-directory: .
+        env:
+          CAPNP: /usr/bin/capnp
+          LIBCLANG_PATH: /usr/lib64
+      - name: Build wheels (macOS, Windows)
+        if: runner.os != 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
+          working-directory: .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: gen-python/target/wheels/*.whl
+          if-no-files-found: error

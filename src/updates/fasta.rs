@@ -3,6 +3,7 @@ use std::str;
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, PathChange},
+    db::DbContext,
     edge::Edge,
     file_types::FileTypes,
     node::Node,
@@ -12,14 +13,13 @@ use gen_models::{
     traits::*,
 };
 use noodles::fasta;
-use rusqlite::{self, Connection, types::Value as SQLValue};
+use rusqlite::{self, types::Value as SQLValue};
 
 use crate::fasta::FastaError;
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_fasta(
-    conn: &Connection,
-    operation_conn: &Connection,
+    context: &DbContext,
     collection_name: &str,
     parent_sample_name: Option<&str>,
     new_sample_name: &str,
@@ -29,6 +29,7 @@ pub fn update_with_fasta(
     fasta_file_path: &str,
     disable_reference_path_update: bool,
 ) -> Result<Operation, FastaError> {
+    let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
     let mut fasta_reader = fasta::io::reader::Builder.build_from_path(fasta_file_path)?;
@@ -186,8 +187,7 @@ pub fn update_with_fasta(
 
     let summary_str = format!("{change_count} sequences inserted");
     let op = gen_models::session_operations::end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -214,7 +214,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{get_connection, get_operation_connection, get_sample_bg, setup_gen_dir},
+        test_helpers::{get_sample_bg, setup_gen},
         track_database,
     };
 
@@ -225,30 +225,28 @@ mod tests {
         AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
            \-> AAAAAAAA --/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -282,29 +280,27 @@ mod tests {
     fn test_disable_reference_path_update() {
         // This tests if we stop updating the reference path if explicitly asked for when there
         // is a single insert occurring
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let fasta_update_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -315,8 +311,7 @@ mod tests {
             false,
         );
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "other sample",
@@ -349,29 +344,27 @@ mod tests {
         AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
            \-> CCCC --/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let fasta_update_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/multiple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -410,32 +403,30 @@ mod tests {
             \-> AA -----> AA -------> AAAA --/
                    \--> TTTTTTTT --/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update1_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         let _ = import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -447,8 +438,7 @@ mod tests {
         );
         // Second fasta update replacing part of the first update sequence
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             Some("child sample"),
             "grandchild sample",
@@ -486,32 +476,30 @@ mod tests {
          \       \-> AAAA -------> AAAA --/
           \--> TTTTTTTT --/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update1_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -523,8 +511,7 @@ mod tests {
         );
         // Second fasta update replacing parts of both the original and first update sequences
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             Some("child sample"),
             "grandchild sample",
@@ -568,32 +555,30 @@ mod tests {
               \-> AAAA -------> AAAA ----/        /
                            \--> TTTTTTTT --------/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update1_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -605,8 +590,7 @@ mod tests {
         );
         // Second fasta update replacing parts of both the original and first update sequences
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             Some("child sample"),
             "grandchild sample",
@@ -644,32 +628,30 @@ mod tests {
               \-> AAAA -------> AAAA ----/        /
                            \--> TTTTTTTT --------/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update1_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update1_path.push("fixtures/aaaaaaaa.fa");
         let mut fasta_update2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update2_path.push("fixtures/tttttttt.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -681,8 +663,7 @@ mod tests {
         );
         // Second fasta update replacing parts of both the original and first update sequences
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             Some("child sample"),
             "grandchild sample",
@@ -720,30 +701,28 @@ mod tests {
             \-> AA -----> AA -------> AAAA --/
                    \--> AAAAAAAA --/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -755,8 +734,7 @@ mod tests {
         );
         // Same fasta second time
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             Some("child sample"),
             "grandchild sample",
@@ -793,30 +771,28 @@ mod tests {
         AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
            \-> -------- --/
         */
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/empty.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",

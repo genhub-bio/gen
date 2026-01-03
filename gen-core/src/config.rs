@@ -1,136 +1,165 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::{LazyLock, RwLock},
 };
 
 use crate::{HashId, errors::ConfigError};
 
-thread_local! {
-pub static BASE_DIR: LazyLock<RwLock<PathBuf>> =
-    LazyLock::new(|| RwLock::new(env::current_dir().unwrap()));
+pub const CHANGESET_DIR_NAME: &str = "changesets";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace {
+    base_dir: PathBuf,
 }
 
-pub fn ensure_dir(path: &PathBuf) {
+impl Workspace {
+    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            base_dir: base_dir.into(),
+        }
+    }
+
+    pub fn from_current_dir() -> Self {
+        Self::new(env::current_dir().unwrap())
+    }
+
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    pub fn ensure_gen_dir(&self) -> PathBuf {
+        let gen_path = self.base_dir.join(".gen");
+        ensure_dir(&gen_path);
+        let changesets = gen_path.join(CHANGESET_DIR_NAME);
+        ensure_dir(&changesets);
+        gen_path
+    }
+
+    pub fn find_gen_dir(&self) -> Option<PathBuf> {
+        let mut cur_dir = self.base_dir.as_path();
+        let mut gen_path = cur_dir.join(".gen");
+        while !gen_path.is_dir() {
+            cur_dir = cur_dir.parent()?;
+            gen_path = cur_dir.join(".gen");
+        }
+        Some(gen_path)
+    }
+
+    pub fn repo_root(&self) -> Result<PathBuf, ConfigError> {
+        let gen_dir = self
+            .find_gen_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?;
+
+        gen_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or(ConfigError::RepoRootNotFound)
+    }
+
+    pub fn gen_db_path(&self) -> Result<PathBuf, ConfigError> {
+        self.find_gen_dir()
+            .map(|dir| dir.join("gen.db"))
+            .ok_or(ConfigError::GenDirectoryNotFound)
+    }
+
+    pub fn changeset_path(&self, hash: &HashId) -> PathBuf {
+        let path = self
+            .ensure_gen_dir()
+            .join(CHANGESET_DIR_NAME)
+            .join(format!("{hash}"));
+        ensure_dir(&path);
+        path
+    }
+}
+
+fn ensure_dir(path: &Path) {
     if !path.is_dir() {
         fs::create_dir_all(path).unwrap();
     }
 }
 
-pub fn set_base_dir(d: &Path) {
-    BASE_DIR
-        .try_with(|v| {
-            let mut w = v.write().unwrap();
-            *w = d.to_path_buf()
-        })
-        .unwrap();
-}
-
-pub fn get_base_dir() -> PathBuf {
-    BASE_DIR.with(|v| v.read().unwrap().clone())
-}
-
-/// Looks for the .gen directory in the current directory, or in a temporary directory if setup_gen_dir()
-/// was called first.  If it doesn't exist, it will be created.
-/// Returns the path to the .gen directory.
-pub fn get_or_create_gen_dir() -> PathBuf {
-    let start_dir = get_base_dir();
-    let cur_dir = start_dir.as_path();
-    let gen_path = cur_dir.join(".gen");
-    ensure_dir(&gen_path);
-    let asset_path = gen_path.join("assets");
-    ensure_dir(&asset_path);
-    gen_path
-}
-
-// TODO: maybe just store all these things in a sqlite file too in .gen
-/// Searches for the .gen directory in the current directory and all parent directories,
-/// or in a temporary directory if setup_gen_dir() was called first.
-/// Returns the path to the .gen directory if found, otherwise returns None.
-pub fn get_gen_dir() -> Option<String> {
-    let start_dir = get_base_dir();
-    let mut cur_dir = start_dir.as_path();
-    let mut gen_path = cur_dir.join(".gen");
-    while !gen_path.is_dir() {
-        match cur_dir.parent() {
-            Some(v) => {
-                cur_dir = v;
-            }
-            None => {
-                // TODO: make gen init
-                return None;
-            }
-        };
-        gen_path = cur_dir.join(".gen");
-    }
-    Some(gen_path.to_str().unwrap().to_string())
-}
-
-pub fn get_repo_root_path() -> Result<PathBuf, ConfigError> {
-    let gen_dir = get_gen_dir().ok_or(ConfigError::GenDirectoryNotFound)?;
-    PathBuf::from(gen_dir)
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or(ConfigError::RepoRootNotFound)
-}
-
-pub fn get_gen_db_path() -> Result<PathBuf, ConfigError> {
-    match get_gen_dir() {
-        Some(dir) => Ok(Path::new(&dir).join("gen.db")),
-        None => Err(ConfigError::GenDirectoryNotFound),
-    }
-}
-
-pub fn get_changeset_path(hash: &HashId) -> PathBuf {
-    let gen_dir = get_gen_dir()
-        .unwrap_or_else(|| panic!("No .gen directory found. Please run 'gen init' first."));
-    let path = Path::new(&gen_dir)
-        .join("changeset")
-        .join(format!("{hash}"));
-    ensure_dir(&path);
-    path
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::tempdir;
 
     use super::*;
 
     #[test]
-    fn test_finds_gen_dir() {
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        get_or_create_gen_dir();
-        assert!(get_gen_dir().is_some());
+    fn ensure_gen_dir_creates_directory() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+
+        let gen_dir = workspace.ensure_gen_dir();
+
+        assert_eq!(gen_dir, tmp_dir_path.join(".gen"));
+        assert!(gen_dir.is_dir());
     }
 
     #[test]
-    fn test_set_base_dir() {
-        let old_dir = get_base_dir();
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        assert_eq!(tmp_dir, get_base_dir());
-        assert_ne!(get_base_dir(), old_dir);
+    fn find_gen_dir_walks_up_tree() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let root_workspace = Workspace::new(&tmp_dir_path);
+        let gen_dir = root_workspace.ensure_gen_dir();
+
+        let nested_dir = tmp_dir_path.join("nested").join("deep");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let nested_workspace = Workspace::new(&nested_dir);
+
+        assert_eq!(nested_workspace.find_gen_dir(), Some(gen_dir));
     }
 
     #[test]
-    fn test_get_repo_root_path() {
-        let gen_dir = setup_gen_environment();
-        let expected_root = gen_dir.parent().unwrap().to_path_buf();
-        assert_eq!(get_repo_root_path().unwrap(), expected_root);
+    fn repo_root_returns_parent_of_gen_dir() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+        workspace.ensure_gen_dir();
+
+        assert_eq!(workspace.repo_root().unwrap(), tmp_dir_path);
     }
 
     #[test]
-    fn test_get_repo_root_path_missing_gen_dir() {
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        assert_eq!(Err(ConfigError::GenDirectoryNotFound), get_repo_root_path());
+    fn repo_root_errors_when_missing_gen_dir() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+
+        assert_eq!(
+            Err(ConfigError::GenDirectoryNotFound),
+            workspace.repo_root()
+        );
     }
 
-    fn setup_gen_environment() -> PathBuf {
-        let tmp_dir = tempdir().unwrap().keep();
-        set_base_dir(&tmp_dir);
-        get_or_create_gen_dir()
+    #[test]
+    fn gen_db_path_resolves_inside_gen_dir() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+        let gen_dir = workspace.ensure_gen_dir();
+
+        assert_eq!(workspace.gen_db_path().unwrap(), gen_dir.join("gen.db"));
+    }
+
+    #[test]
+    fn changeset_path_creates_directory_for_hash() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+        let hash = HashId([0; 32]);
+
+        let path = workspace.changeset_path(&hash);
+
+        assert_eq!(
+            path,
+            tmp_dir_path
+                .join(".gen")
+                .join(CHANGESET_DIR_NAME)
+                .join(format!("{hash}"))
+        );
+        assert!(path.is_dir());
     }
 }

@@ -546,69 +546,94 @@ pub fn find_articulation_points(graph: &GenGraph) -> Vec<GraphNode> {
     articulation_points
 }
 
-pub fn connect_all_boundary_edges(graph: &mut GenGraph) {
-    let mut nodes_without_incoming: Vec<GraphNode> = vec![];
-    let mut nodes_without_outgoing: Vec<GraphNode> = vec![];
-    for node in graph.nodes() {
-        if !is_terminal(node.node_id)
-            && graph
-                .edges_directed(node, Direction::Incoming)
-                .next()
-                .is_none()
-        {
-            nodes_without_incoming.push(node);
+pub trait ConnectBoundaryEdges {
+    type Node: Copy + Eq + Hash;
+    type NodeIter<'a>: Iterator<Item = Self::Node>
+    where
+        Self: 'a;
+
+    fn graph_nodes(&self) -> Self::NodeIter<'_>;
+    fn is_terminal(&self, node: Self::Node) -> bool;
+    fn can_connect_nodes(&self, node: Self::Node, other_node: Self::Node) -> bool;
+    fn has_incoming(&self, node: Self::Node) -> bool;
+    fn has_outgoing(&self, node: Self::Node) -> bool;
+    fn add_boundary_edge(&mut self, source: Self::Node, target: Self::Node);
+}
+
+pub fn connect_all_boundary_edges<G>(graph: &mut G)
+where
+    G: ConnectBoundaryEdges,
+{
+    let mut edges_to_add: Vec<(G::Node, G::Node)> = vec![];
+    for node in graph.graph_nodes() {
+        if graph.is_terminal(node) {
+            continue;
         }
-        if !is_terminal(node.node_id)
-            && graph
-                .edges_directed(node, Direction::Outgoing)
-                .next()
-                .is_none()
-        {
-            nodes_without_outgoing.push(node);
+        let no_incoming = !graph.has_incoming(node);
+        let no_outgoing = !graph.has_outgoing(node);
+        if no_incoming || no_outgoing {
+            for other_node in graph.graph_nodes() {
+                if no_incoming && graph.can_connect_nodes(node, other_node) {
+                    edges_to_add.push((other_node, node));
+                };
+                if no_outgoing && graph.can_connect_nodes(other_node, node) {
+                    edges_to_add.push((node, other_node));
+                };
+            }
         }
     }
 
-    for node in nodes_without_incoming {
-        let upstream_node = graph.nodes().find(|other_node| {
-            other_node.node_id == node.node_id && other_node.sequence_end == node.sequence_start
-        });
-        if let Some(upstream_node) = upstream_node {
-            graph.add_edge(
-                upstream_node,
-                node,
-                vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
-                    source_strand: Strand::Forward,
-                    target_strand: Strand::Forward,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                    created_on: 0,
-                }],
-            );
-        }
+    for (source, target) in edges_to_add {
+        graph.add_boundary_edge(source, target);
     }
-    for node in nodes_without_outgoing {
-        let downstream_node = graph.nodes().find(|other_node| {
-            other_node.node_id == node.node_id && other_node.sequence_start == node.sequence_end
-        });
-        if let Some(downstream_node) = downstream_node {
-            graph.add_edge(
-                node,
-                downstream_node,
-                vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
-                    source_strand: Strand::Forward,
-                    target_strand: Strand::Forward,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                    created_on: 0,
-                }],
-            );
-        }
+}
+
+impl ConnectBoundaryEdges for GenGraph {
+    type Node = GraphNode;
+    type NodeIter<'a>
+        = petgraph::graphmap::Nodes<'a, GraphNode>
+    where
+        Self: 'a;
+
+    fn graph_nodes(&self) -> Self::NodeIter<'_> {
+        self.nodes()
+    }
+
+    fn is_terminal(&self, node: Self::Node) -> bool {
+        is_terminal(node.node_id)
+    }
+
+    fn can_connect_nodes(&self, node: Self::Node, other_node: Self::Node) -> bool {
+        other_node.node_id == node.node_id && other_node.sequence_end == node.sequence_start
+    }
+
+    fn has_incoming(&self, node: Self::Node) -> bool {
+        self.edges_directed(node, Direction::Incoming)
+            .next()
+            .is_some()
+    }
+
+    fn has_outgoing(&self, node: Self::Node) -> bool {
+        self.edges_directed(node, Direction::Outgoing)
+            .next()
+            .is_some()
+    }
+
+    fn add_boundary_edge(&mut self, source: Self::Node, target: Self::Node) {
+        self.add_edge(
+            source,
+            target,
+            vec![GraphEdge {
+                edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
+                    .try_into()
+                    .unwrap(),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                created_on: 0,
+            }],
+        );
     }
 }
 

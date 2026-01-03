@@ -11,6 +11,7 @@ use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::DbContext,
     edge::{Edge, EdgeData},
     errors::OperationError,
     file_types::FileTypes,
@@ -24,7 +25,6 @@ use gen_models::{
 };
 use itertools::Itertools;
 use noodles::fasta;
-use rusqlite::Connection;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -38,14 +38,14 @@ pub enum LibraryImportError {
 }
 
 pub fn import_library<'a>(
-    conn: &Connection,
-    operation_conn: &Connection,
+    context: &DbContext,
     collection_name: &str,
     sample: impl Into<Option<&'a str>>,
     parts_file_path: &str,
     library_file_path: &str,
     library_name: &str,
 ) -> Result<Operation, LibraryImportError> {
+    let conn = context.graph().conn();
     let mut session = session_operations::start_operation(conn);
 
     if !Collection::exists(conn, collection_name) {
@@ -240,8 +240,7 @@ pub fn import_library<'a>(
 
     let summary_str = format!("{library_name}: {path_changes_count} changes.\n");
     let op = session_operations::end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![
@@ -272,16 +271,13 @@ mod tests {
     use gen_models::block_group::BlockGroup;
 
     use super::*;
-    use crate::{
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{test_helpers::setup_gen, track_database};
 
     #[test]
     fn imports_a_library() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         let collection = "test";
@@ -291,8 +287,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/affix_layout.csv");
 
         let _ = import_library(
-            conn,
-            op_conn,
+            &context,
             collection,
             None,
             parts_path.to_str().unwrap(),
@@ -331,9 +326,9 @@ mod tests {
 
     #[test]
     fn one_column_of_parts() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         let collection = "test";
@@ -343,8 +338,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
 
         let _ = import_library(
-            conn,
-            op_conn,
+            &context,
             collection,
             None,
             parts_path.to_str().unwrap(),
@@ -368,9 +362,9 @@ mod tests {
 
     #[test]
     fn two_columns_of_same_parts() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         let collection = "test";
@@ -380,8 +374,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/design_reusing_parts.csv");
 
         let _ = import_library(
-            conn,
-            op_conn,
+            &context,
             collection,
             None,
             parts_path.to_str().unwrap(),

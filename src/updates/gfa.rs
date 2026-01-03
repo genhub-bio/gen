@@ -7,6 +7,7 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
+    db::{DbContext, GraphConnection},
     edge::{Edge, EdgeData},
     file_types::FileTypes,
     node::Node,
@@ -16,7 +17,6 @@ use gen_models::{
     sequence::Sequence,
     session_operations,
 };
-use rusqlite::Connection;
 
 use crate::{
     gfa::bool_to_strand,
@@ -24,8 +24,7 @@ use crate::{
 };
 
 pub fn update_with_gfa(
-    conn: &Connection,
-    operation_conn: &Connection,
+    context: &DbContext,
     collection_name: &str,
     parent_sample_name: Option<&str>,
     new_sample_name: &str,
@@ -41,6 +40,7 @@ pub fn update_with_gfa(
     (let's call it an "unmatched path"), we create a new path (and nodes and edges as necessary)
     for the unmatched path within the same block group as the existing path.
     */
+    let conn = context.graph().conn();
     let mut session = session_operations::start_operation(conn);
 
     let _new_sample =
@@ -209,8 +209,7 @@ pub fn update_with_gfa(
     let summary_str = format!("{new_paths_added} new paths added");
 
     session_operations::end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -231,7 +230,7 @@ pub fn update_with_gfa(
 
 #[allow(clippy::too_many_arguments)]
 fn create_new_path_from_existing(
-    conn: &Connection,
+    conn: &GraphConnection,
     existing_path: &Path,
     matched_path_segment_ids: &[String],
     unmatched_path_name: &str,
@@ -470,11 +469,7 @@ mod tests {
     use rusqlite::types::Value as SQLValue;
 
     use super::*;
-    use crate::{
-        imports::fasta::import_fasta,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen, track_database};
 
     #[test]
     fn test_basic_update() {
@@ -484,24 +479,22 @@ mod tests {
         // 3. Generate a GFA diff between the original import and the update
         // 4. Update the original with the diff in a new sample
         // 5. Confirm the fasta update and the GFA update match
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -509,8 +502,7 @@ mod tests {
         gfa_update_path.push("fixtures/path-diff.gfa");
 
         let _ = update_with_gfa(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "applied diff",
@@ -539,24 +531,22 @@ mod tests {
     #[test]
     fn test_update_with_walks() {
         // Same as previous test, but with walks instead of paths in the GFA
-        setup_gen_dir();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -564,8 +554,7 @@ mod tests {
         gfa_update_path.push("fixtures/walk-diff.gfa");
 
         let _ = update_with_gfa(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "applied diff",

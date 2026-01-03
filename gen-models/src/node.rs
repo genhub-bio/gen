@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, calculate_hash, traits::Capnp};
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{gen_models_capnp::node, sequence::Sequence, traits::*};
+use crate::{db::GraphConnection, gen_models_capnp::node, sequence::Sequence, traits::*};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
 pub struct Node {
     pub id: HashId,
     pub sequence_hash: HashId,
@@ -55,7 +55,7 @@ impl Query for Node {
 }
 
 impl Node {
-    pub fn create(conn: &Connection, sequence_hash: &HashId, node_hash: &HashId) -> HashId {
+    pub fn create(conn: &GraphConnection, sequence_hash: &HashId, node_hash: &HashId) -> HashId {
         let insert_statement = "INSERT INTO nodes (id, sequence_hash) VALUES (?1, ?2);";
         let mut stmt = conn.prepare_cached(insert_statement).unwrap();
         match stmt.execute(params![node_hash, sequence_hash]) {
@@ -74,7 +74,7 @@ impl Node {
     }
 
     pub fn get_sequences_by_node_ids(
-        conn: &Connection,
+        conn: &GraphConnection,
         node_ids: &[HashId],
     ) -> HashMap<HashId, Sequence> {
         let nodes = Node::query_by_ids(conn, node_ids);

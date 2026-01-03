@@ -13,12 +13,13 @@ use gen_graph::{
     flatten_to_interval_tree,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Connection, Row, params, types::Value as SQLValue};
+use rusqlite::{Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
+    db::GraphConnection,
     edge::{Edge, EdgeData, GroupBlock},
     errors::{ChangeError, QueryError},
     gen_models_capnp::block_group,
@@ -28,7 +29,7 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq)]
 pub struct BlockGroup {
     pub id: HashId,
     pub collection_name: String,
@@ -105,11 +106,11 @@ pub struct PathChange {
 pub struct PathCache<'a> {
     pub cache: HashMap<PathData, Path>,
     pub intervaltree_cache: HashMap<Path, IntervalTree<i64, NodeIntervalBlock>>,
-    pub conn: &'a Connection,
+    pub conn: &'a GraphConnection,
 }
 
-impl PathCache<'_> {
-    pub fn new(conn: &Connection) -> PathCache<'_> {
+impl<'a> PathCache<'a> {
+    pub fn new(conn: &'a GraphConnection) -> PathCache<'a> {
         PathCache {
             cache: HashMap::<PathData, Path>::new(),
             intervaltree_cache: HashMap::<Path, IntervalTree<i64, NodeIntervalBlock>>::new(),
@@ -126,31 +127,32 @@ impl PathCache<'_> {
         if let Some(path) = path_lookup {
             path.clone()
         } else {
+            let conn = path_cache.conn;
             let new_path = Path::query(
-                path_cache.conn,
+                conn,
                 "select * from paths where block_group_id = ?1 AND name = ?2",
                 params![block_group_id, name],
             )[0]
             .clone();
 
             path_cache.cache.insert(path_key, new_path.clone());
-            let tree = new_path.intervaltree(path_cache.conn);
+            let tree = new_path.intervaltree(conn);
             path_cache.intervaltree_cache.insert(new_path.clone(), tree);
             new_path
         }
     }
 
-    pub fn get_intervaltree<'a>(
-        path_cache: &'a PathCache<'a>,
-        path: &'a Path,
-    ) -> Option<&'a IntervalTree<i64, NodeIntervalBlock>> {
+    pub fn get_intervaltree<'b>(
+        path_cache: &'b PathCache<'_>,
+        path: &Path,
+    ) -> Option<&'b IntervalTree<i64, NodeIntervalBlock>> {
         path_cache.intervaltree_cache.get(path)
     }
 }
 
 impl BlockGroup {
     pub fn create(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: Option<&str>,
         name: &str,
@@ -183,7 +185,12 @@ impl BlockGroup {
         }
     }
 
-    pub fn delete(conn: &Connection, collection_name: &str, sample_name: Option<&str>, name: &str) {
+    pub fn delete(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: Option<&str>,
+        name: &str,
+    ) {
         if let Some(n) = sample_name {
             let query = "delete from block_groups where collection_name = ?1 and sample_name = ?2 and name = ?3;";
             conn.execute(
@@ -201,7 +208,7 @@ impl BlockGroup {
         }
     }
 
-    pub fn get_by_id(conn: &Connection, id: &HashId) -> BlockGroup {
+    pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> BlockGroup {
         let query = "SELECT * FROM block_groups WHERE id = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         match stmt.query_row([id], |row| Ok(Self::process_row(row))) {
@@ -213,7 +220,7 @@ impl BlockGroup {
         }
     }
 
-    pub fn duplicate(&self, conn: &Connection, target_block_group_id: &HashId) {
+    pub fn duplicate(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
         let existing_paths = Path::query(
             conn,
             "SELECT * from paths where block_group_id = ?1;",
@@ -280,7 +287,7 @@ impl BlockGroup {
     }
 
     pub fn get_or_create_sample_block_group(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
         group_name: &str,
@@ -340,7 +347,7 @@ impl BlockGroup {
         )))
     }
 
-    pub fn get_graph(conn: &Connection, block_group_id: &HashId) -> GenGraph {
+    pub fn get_graph(conn: &GraphConnection, block_group_id: &HashId) -> GenGraph {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
         let blocks = Edge::blocks_from_edges(conn, &edges);
         let (graph, _) = Edge::build_graph(&edges, &blocks);
@@ -396,7 +403,7 @@ impl BlockGroup {
     }
 
     pub fn get_all_sequences(
-        conn: &Connection,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         _prune: bool,
     ) -> HashSet<String> {
@@ -448,7 +455,7 @@ impl BlockGroup {
     }
 
     pub fn add_accession(
-        conn: &Connection,
+        conn: &GraphConnection,
         path: &Path,
         name: &str,
         start: i64,
@@ -526,7 +533,7 @@ impl BlockGroup {
     }
 
     pub fn insert_changes(
-        conn: &Connection,
+        conn: &GraphConnection,
         changes: &[PathChange],
         cache: &mut PathCache,
         modify_blockgroup: bool,
@@ -613,7 +620,7 @@ impl BlockGroup {
     #[allow(clippy::ptr_arg)]
     #[allow(clippy::needless_late_init)]
     pub fn insert_change(
-        conn: &Connection,
+        conn: &GraphConnection,
         change: &PathChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
     ) -> Result<(), ChangeError> {
@@ -858,7 +865,7 @@ impl BlockGroup {
     }
 
     pub fn intervaltree_for(
-        conn: &Connection,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         remove_ambiguous_positions: bool,
     ) -> IntervalTree<i64, NodeIntervalBlock> {
@@ -868,7 +875,7 @@ impl BlockGroup {
         flatten_to_interval_tree(&graph, remove_ambiguous_positions)
     }
 
-    pub fn get_current_path(conn: &Connection, block_group_id: &HashId) -> Path {
+    pub fn get_current_path(conn: &GraphConnection, block_group_id: &HashId) -> Path {
         let paths = Path::query(
             conn,
             "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
@@ -878,7 +885,7 @@ impl BlockGroup {
     }
 
     pub fn get_path_by_name(
-        conn: &Connection,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         path_name: &str,
     ) -> Option<Path> {
@@ -899,7 +906,7 @@ impl BlockGroup {
 
     #[allow(clippy::too_many_arguments)]
     pub fn derive_subgraph(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         child_sample_name: &str,
         source_block_group_id: &HashId,

@@ -19,7 +19,7 @@ description = "Python bindings for the Gen graph database"
 readme = "README.md"
 
 [tool.maturin]
-features = ["python-bindings"]
-python-source = "python"
+manifest-path = "gen-python/Cargo.toml"
+features = ["extension-module"]
+python-source = "gen-python/python"
 module-name = "gen.gen" # TODO: pick a name available on pypi
-crate-type = ["cdylib"]  

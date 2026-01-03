@@ -13,6 +13,7 @@ pub mod range;
 pub mod strand;
 pub mod traits;
 
+pub use config::Workspace;
 pub use generated::gen_core_capnp;
 pub use path::PathBlock;
 #[cfg(feature = "python-bindings")]
@@ -44,7 +45,7 @@ pub fn is_end_node(node_id: HashId) -> bool {
 }
 
 #[cfg_attr(feature = "python-bindings", pyclass)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HashId(pub [u8; 32]);
 
 impl serde::Serialize for HashId {

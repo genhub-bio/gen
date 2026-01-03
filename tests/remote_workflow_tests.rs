@@ -3,15 +3,15 @@ mod remote_workflow_integration_tests {
     use r#gen::{
         commands::remote::{RemoteCommand, handle_remote_command},
         operation_management::push,
-        test_helpers::{get_operation_connection, setup_gen_dir},
+        test_helpers::setup_gen,
     };
     use gen_models::operations::{Branch, Defaults, Remote};
 
     /// Test remote deletion with branch associations (should set to null)
     #[test]
     fn test_remote_deletion_with_branch_associations() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Add remotes
         Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -68,8 +68,8 @@ mod remote_workflow_integration_tests {
     /// Test default remote deletion (should clear default)
     #[test]
     fn test_default_remote_deletion_clears_default() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Add remotes
         Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -96,8 +96,8 @@ mod remote_workflow_integration_tests {
     /// Test error scenarios across the remote workflow
     #[test]
     fn test_remote_workflow_error_scenarios() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Test 1: Try to associate branch with non-existent remote
         let main_branch = Branch::get_by_name(op_conn, "main").unwrap();
@@ -162,7 +162,7 @@ mod remote_workflow_integration_tests {
         );
 
         // Test 7: Try to push without default remote set
-        let push_result = push(op_conn, None);
+        let push_result = push(&context, None);
         assert!(
             push_result.is_err(),
             "Should fail when pushing without default remote"

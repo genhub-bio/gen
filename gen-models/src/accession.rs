@@ -2,11 +2,12 @@ use std::collections::HashSet;
 
 use gen_core::{HashId, Strand, calculate_hash, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{Connection, Result as SQLResult, Row, params};
+use rusqlite::{Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     block_group_edge::AugmentedEdgeData,
+    db::GraphConnection,
     gen_models_capnp::{accession, accession_edge, accession_path},
     traits::*,
 };
@@ -250,7 +251,7 @@ impl From<&AugmentedEdgeData> for AccessionEdgeData {
 
 impl Accession {
     pub fn create(
-        conn: &Connection,
+        conn: &GraphConnection,
         name: &str,
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
@@ -271,7 +272,7 @@ impl Accession {
     }
 
     pub fn get_or_create(
-        conn: &Connection,
+        conn: &GraphConnection,
         name: &str,
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
@@ -319,7 +320,7 @@ impl Query for Accession {
 }
 
 impl AccessionEdge {
-    pub fn create(conn: &Connection, edge: AccessionEdgeData) -> AccessionEdge {
+    pub fn create(conn: &GraphConnection, edge: AccessionEdgeData) -> AccessionEdge {
         let hash = HashId(calculate_hash(&format!(
             "{}:{}:{}:{}:{}:{}:{}",
             edge.source_node_id,
@@ -361,7 +362,7 @@ impl AccessionEdge {
         }
     }
 
-    pub fn bulk_create(conn: &Connection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
+    pub fn bulk_create(conn: &GraphConnection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let query = AccessionEdge::query_by_ids(conn, &edge_ids);
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
@@ -399,7 +400,7 @@ impl AccessionEdge {
         edge_ids
     }
 
-    pub fn bulk_delete(conn: &Connection, edges: &[AccessionEdgeData]) {
+    pub fn bulk_delete(conn: &GraphConnection, edges: &[AccessionEdgeData]) {
         let ids = edges.iter().map(|e| e.id_hash()).collect::<Vec<_>>();
         AccessionEdge::delete_by_ids(conn, &ids);
     }
@@ -437,7 +438,7 @@ impl Query for AccessionEdge {
 }
 
 impl AccessionPath {
-    pub fn create(conn: &Connection, accession_id: &HashId, edge_ids: &[HashId]) {
+    pub fn create(conn: &GraphConnection, accession_id: &HashId, edge_ids: &[HashId]) {
         let batch_size = max_rows_per_batch(conn, 4);
 
         for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {

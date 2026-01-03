@@ -12,14 +12,24 @@ publish = false
 name = "gen_python"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
+flate2 = "1.1.5"
 gen = { path = ".." }
-gen-core = { path = "../gen-core" }
+gen-core = { path = "../gen-core", features = ["python-bindings"] }
+gen-graph = { path = "../gen-graph" }
 gen-models = { path = "../gen-models" }
+rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }
 
 [dependencies.pyo3]
 version = "0.25.1"
-features = ["extension-module"]
+features = []
 
 [build-dependencies]
 pyo3-build-config = "0.26.0"
+
+[workspace]
+members = ["."]

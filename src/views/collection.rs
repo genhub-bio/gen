@@ -5,7 +5,10 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::HashId;
-use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample, traits::Query};
+use gen_models::{
+    block_group::BlockGroup, collection::Collection, db::GraphConnection, sample::Sample,
+    traits::Query,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -13,7 +16,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, StatefulWidget, Wrap},
 };
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::config::get_theme_color;
@@ -113,7 +116,7 @@ pub struct CollectionExplorerData {
 /// Gathers information about a hierarchical collection, enumerating reference (null-sample)
 /// block groups, sample block groups, and immediate sub-collections.
 pub fn gather_collection_explorer_data(
-    conn: &Connection,
+    conn: &GraphConnection,
     full_collection_name: &str,
 ) -> CollectionExplorerData {
     let current_collection = collection_basename(full_collection_name).to_string();
@@ -261,13 +264,13 @@ pub struct CollectionExplorer {
 }
 
 impl CollectionExplorer {
-    pub fn new(conn: &Connection, full_collection_name: &str) -> Self {
+    pub fn new(conn: &GraphConnection, full_collection_name: &str) -> Self {
         let data = gather_collection_explorer_data(conn, full_collection_name);
         Self { data }
     }
 
     /// Refresh the explorer data from the database and return true if data changed
-    pub fn refresh(&mut self, conn: &Connection, full_collection_name: &str) -> bool {
+    pub fn refresh(&mut self, conn: &GraphConnection, full_collection_name: &str) -> bool {
         let new_data = gather_collection_explorer_data(conn, full_collection_name);
         let changed = self.data.reference_block_groups.len()
             != new_data.reference_block_groups.len()
@@ -587,15 +590,14 @@ mod tests {
     use gen_models::{block_group::BlockGroup, sample::Sample};
 
     use super::*;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen_dir};
+    use crate::test_helpers::setup_gen;
 
     /// For these tests we create an in-memory database, run minimal schema
     /// creation, and insert data to test gather_collection_explorer_data.
     #[test]
     fn test_gather_collection_explorer_data() {
-        setup_gen_dir();
-        let conn = &mut get_connection(None).unwrap();
-        get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
 
         // Create collections with hierarchical paths
         Collection::create(conn, "/foo/bar");

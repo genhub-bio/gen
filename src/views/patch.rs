@@ -3,30 +3,32 @@ use std::collections::{HashMap, HashSet};
 use gen_core::{
     HashId,
     Strand::{self, Forward},
+    config::Workspace,
     is_end_node, is_start_node, is_terminal,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{
-    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, edge::Edge,
+    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, db::DbContext, edge::Edge,
     errors::OperationError, node::Node, operations::Operation, sequence::Sequence,
     session_operations::DependencyModels, traits::Query,
 };
 use html_escape;
 use itertools::Itertools;
 use petgraph::{Direction, graphmap::DiGraphMap};
-use rusqlite::Connection;
 
 use crate::patch::OperationPatch;
 
 pub fn get_change_graph_from_hash(
-    conn: &Connection,
+    context: &DbContext,
     hash: &HashId,
 ) -> Result<HashMap<HashId, GenGraph>, OperationError> {
-    let operation =
-        Operation::get_by_id(conn, hash).ok_or(OperationError::NoOperation(format!("{hash}")))?;
+    let op_conn = context.operations().conn();
+    let operation = Operation::get_by_id(op_conn, hash)
+        .ok_or(OperationError::NoOperation(format!("{hash}")))?;
 
-    let changeset = operation.get_changeset();
-    let dependencies = operation.get_changeset_dependencies();
+    let workspace = context.workspace();
+    let changeset = operation.get_changeset(workspace);
+    let dependencies = operation.get_changeset_dependencies(workspace);
 
     Ok(get_change_graph(&changeset.changes, &dependencies))
 }
@@ -69,7 +71,7 @@ pub fn get_change_graph(
         // There are 2 graphs created here. The first graph is our normal graph of nodes
         // and edges. This graph is then used to make our second graph representing the spans
         // of each node (blocks).
-        let mut graph: DiGraphMap<HashId, (i64, i64)> = DiGraphMap::new();
+        let mut graph: DiGraphMap<HashId, Vec<(i64, i64)>> = DiGraphMap::new();
         let mut block_graph = GenGraph::new();
         block_graph.add_node(GraphNode {
             block_id: -1,
@@ -85,11 +87,15 @@ pub fn get_change_graph(
         });
         for bg_edge in bg_edges {
             let edge = *edges_by_id.get(&bg_edge.edge_id).unwrap();
-            graph.add_edge(
-                edge.source_node_id,
-                edge.target_node_id,
-                (edge.source_coordinate, edge.target_coordinate),
-            );
+            if let Some(weights) = graph.edge_weight_mut(edge.source_node_id, edge.target_node_id) {
+                weights.push((edge.source_coordinate, edge.target_coordinate));
+            } else {
+                graph.add_edge(
+                    edge.source_node_id,
+                    edge.target_node_id,
+                    vec![(edge.source_coordinate, edge.target_coordinate)],
+                );
+            }
         }
 
         for node in graph.nodes() {
@@ -101,11 +107,15 @@ pub fn get_change_graph(
             }
             let in_ports = graph
                 .edges_directed(node, Direction::Incoming)
-                .map(|(_src, _dest, (_fp, tp))| *tp)
+                .flat_map(|(_src, _dest, weights)| {
+                    weights.iter().map(|(_, tp)| *tp).collect::<Vec<_>>()
+                })
                 .collect::<Vec<_>>();
             let out_ports = graph
                 .edges_directed(node, Direction::Outgoing)
-                .map(|(_src, _dest, (fp, _tp))| *fp)
+                .flat_map(|(_src, _dest, weights)| {
+                    weights.iter().map(|(fp, _tp)| *fp).collect::<Vec<_>>()
+                })
                 .collect::<Vec<_>>();
 
             let node_obj = *nodes_by_id.get(&node).unwrap();
@@ -157,28 +167,30 @@ pub fn get_change_graph(
             }
         }
 
-        for (src, dest, (fp, tp)) in graph.all_edges() {
-            if !(is_end_node(src) && is_start_node(dest)) {
-                let source_block = block_graph
-                    .nodes()
-                    .find(|node| node.node_id == src && node.sequence_end == *fp)
-                    .unwrap();
-                let dest_block = block_graph
-                    .nodes()
-                    .find(|node| node.node_id == dest && node.sequence_start == *tp)
-                    .unwrap();
-                block_graph.add_edge(
-                    source_block,
-                    dest_block,
-                    vec![GraphEdge {
-                        edge_id: HashId::pad_str(1),
-                        source_strand: Strand::Forward,
-                        target_strand: Forward,
-                        chromosome_index: 0,
-                        phased: 0,
-                        created_on: 0,
-                    }],
-                );
+        for (src, dest, weights) in graph.all_edges() {
+            for (fp, tp) in weights {
+                if !(is_end_node(src) && is_start_node(dest)) {
+                    let source_block = block_graph
+                        .nodes()
+                        .find(|node| node.node_id == src && node.sequence_end == *fp)
+                        .unwrap();
+                    let dest_block = block_graph
+                        .nodes()
+                        .find(|node| node.node_id == dest && node.sequence_start == *tp)
+                        .unwrap();
+                    block_graph.add_edge(
+                        source_block,
+                        dest_block,
+                        vec![GraphEdge {
+                            edge_id: HashId::pad_str(1),
+                            source_strand: Strand::Forward,
+                            target_strand: Forward,
+                            chromosome_index: 0,
+                            phased: 0,
+                            created_on: 0,
+                        }],
+                    );
+                }
             }
         }
         block_graphs.insert(*bg_id, block_graph);
@@ -186,7 +198,10 @@ pub fn get_change_graph(
     block_graphs
 }
 
-pub fn view_patches(patches: &[OperationPatch]) -> HashMap<HashId, HashMap<HashId, String>> {
+pub fn view_patches(
+    workspace: &Workspace,
+    patches: &[OperationPatch],
+) -> HashMap<HashId, HashMap<HashId, String>> {
     // For each blockgroup in a patch, a .dot file is generated showing how the base sequence
     // has been updated.
     let mut diagrams: HashMap<HashId, HashMap<HashId, String>> = HashMap::new();
@@ -197,8 +212,8 @@ pub fn view_patches(patches: &[OperationPatch]) -> HashMap<HashId, HashMap<HashI
         let mut bg_dots: HashMap<HashId, String> = HashMap::new();
 
         let op_info = &patch.operation;
-        let changeset = op_info.get_changeset();
-        let dependencies = op_info.get_changeset_dependencies();
+        let changeset = op_info.get_changeset(workspace);
+        let dependencies = op_info.get_changeset_dependencies(workspace);
 
         let block_graphs = get_change_graph(&changeset.changes, &dependencies);
 

@@ -4,12 +4,13 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use gen_core::{HashId, errors::ConnectionError, traits::Capnp};
 use gen_models::{
     changesets::{DatabaseChangeset, apply_changeset},
+    db::DbContext,
     errors::{ChangesetError, OperationError},
     operations::{FileAddition, Operation, OperationFile, OperationInfo, OperationSummary},
     session_operations::{DependencyModels, end_operation, start_operation},
     traits::Query,
 };
-use rusqlite::{Connection, Error as SQLError, params, types::Value};
+use rusqlite::{Error as SQLError, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -136,13 +137,15 @@ pub enum CreatePatchError {
 }
 
 pub fn create_patch<W>(
-    op_conn: &Connection,
+    context: &DbContext,
     operations: &[HashId],
     write_stream: &mut W,
 ) -> Result<(), CreatePatchError>
 where
     W: Write,
 {
+    let op_conn = context.operations().conn();
+    let workspace = context.workspace();
     let mut patches = vec![];
     for hash in operations.iter() {
         let operation = Operation::get_by_id(op_conn, hash)
@@ -156,8 +159,8 @@ where
                 "select * from operation_summaries where operation_hash = ?1",
                 params![Value::from(operation.hash)],
             )?,
-            dependencies: operation.get_changeset_dependencies(),
-            changeset: operation.get_changeset(),
+            dependencies: operation.get_changeset_dependencies(workspace),
+            changeset: operation.get_changeset(workspace),
         })
     }
 
@@ -202,21 +205,18 @@ where
     operation_patches.patches
 }
 
-pub fn apply_patches(
-    connection: Option<&Connection>,
-    op_conn: &Connection,
-    patches: &[OperationPatch],
-) -> Result<(), PatchError> {
+pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<(), PatchError> {
+    let workspace = context.workspace();
     for patch in patches.iter() {
         let changeset = &patch.changeset;
-        let c_bind;
-        let conn = if let Some(c) = connection {
-            c
-        } else {
-            c_bind = get_connection(&changeset.db_path)?;
-            &c_bind
-        };
         let dependencies = &patch.dependencies;
+        let mut change_context = context.clone();
+        let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
+        let data_db_path = repo_root.join(&changeset.db_path);
+        let graph_conn = get_connection(&data_db_path)?;
+        change_context.set_graph(graph_conn);
+
+        let conn = change_context.graph().conn();
         let mut session = start_operation(conn);
 
         conn.execute("BEGIN TRANSACTION", [])?;
@@ -231,8 +231,7 @@ pub fn apply_patches(
         }
 
         end_operation(
-            conn,
-            op_conn,
+            &change_context,
             &mut session,
             &OperationInfo {
                 files: patch
@@ -265,131 +264,131 @@ mod tests {
     use crate::{
         imports::fasta::import_fasta,
         operation_management,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        test_helpers::{setup_gen, setup_gen_on_disk},
         track_database,
         updates::vcf::update_with_vcf,
     };
 
     #[test]
     fn test_creates_patch() {
-        setup_gen_dir();
+        let context = setup_gen();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &mut get_connection(None).unwrap();
-        let operation_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
 
         track_database(conn, operation_conn).unwrap();
         let collection = "test".to_string();
         let op_1 = import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            operation_conn,
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            operation_conn,
             None,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
+        create_patch(&context, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
         load_patches(&write_stream[..]);
     }
 
     #[test]
     fn test_cross_db_patches() {
-        setup_gen_dir();
+        let source_context = setup_gen_on_disk();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &mut get_connection(None).unwrap();
-        let conn2 = &mut get_connection(None).unwrap();
-        let operation_conn = &get_operation_connection(None).unwrap();
+        let conn = source_context.graph().conn();
+        let operation_conn = source_context.operations().conn();
 
         track_database(conn, operation_conn).unwrap();
-        track_database(conn2, operation_conn).unwrap();
         let collection = "test".to_string();
         let op_1 = import_fasta(
+            &source_context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            operation_conn,
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &source_context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            operation_conn,
             None,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
+        create_patch(&source_context, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
         let patches = load_patches(&write_stream[..]);
-        apply_patches(Some(conn2), operation_conn, &patches).unwrap();
+
+        let target_context = setup_gen_on_disk();
+        let target_conn = target_context.graph().conn();
+        let target_operation_conn = target_context.operations().conn();
+        track_database(target_conn, target_operation_conn).unwrap();
+
+        apply_patches(&target_context, &patches).unwrap();
         for bg in BlockGroup::query(conn, "select * from block_groups;", params![]).iter() {
             let seqs = BlockGroup::get_all_sequences(conn, &bg.id, false);
             assert!(!seqs.is_empty());
-            assert_eq!(seqs, BlockGroup::get_all_sequences(conn2, &bg.id, false),)
+            assert_eq!(
+                seqs,
+                BlockGroup::get_all_sequences(target_conn, &bg.id, false),
+            );
         }
     }
 
     #[test]
     fn test_cross_branch_patches() {
-        setup_gen_dir();
+        let context = setup_gen_on_disk();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &mut get_connection(None).unwrap();
-        let operation_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
 
         track_database(conn, operation_conn).unwrap();
 
         let collection = "test".to_string();
         let _op_1 = import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            operation_conn,
         )
         .unwrap();
         let main_branch = Branch::get_by_name(operation_conn, "main").unwrap();
         let _branch = Branch::get_or_create(operation_conn, "new-branch");
         OperationState::set_branch(operation_conn, "new-branch");
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            operation_conn,
             None,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_2.hash], &mut write_stream).unwrap();
+        create_patch(&context, &[op_2.hash], &mut write_stream).unwrap();
 
-        operation_management::checkout(Some(conn), operation_conn, &Some("main".to_string()), None)
-            .unwrap();
+        operation_management::checkout(&context, &Some("main".to_string()), None).unwrap();
         let patches = load_patches(&write_stream[..]);
-        apply_patches(Some(conn), operation_conn, &patches).unwrap();
+        apply_patches(&context, &patches).unwrap();
         let branch_ops = Branch::get_operations(operation_conn, main_branch.id);
         assert_eq!(branch_ops.len(), 2);
         // ensure if we apply the operation again it'll be a no-op
-        let res = apply_patches(Some(conn), operation_conn, &patches);
+        let res = apply_patches(&context, &patches);
         assert_eq!(
             res,
             Err(PatchError::OperationError(OperationError::NoChanges))
@@ -400,37 +399,35 @@ mod tests {
 
     #[test]
     fn test_capnp_serialization() {
-        setup_gen_dir();
+        let context = setup_gen();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &mut get_connection(None).unwrap();
-        let operation_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
 
         track_database(conn, operation_conn).unwrap();
         let collection = "test".to_string();
         let op_1 = import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            operation_conn,
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            operation_conn,
             None,
         )
         .unwrap();
 
         // Test Cap'n Proto serialization/deserialization
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
+        create_patch(&context, &[op_1.hash, op_2.hash], &mut write_stream).unwrap();
         let loaded_patches = load_patches(&write_stream[..]);
 
         // Verify we got the same patches back
@@ -440,40 +437,42 @@ mod tests {
 
     #[test]
     fn test_patch_empty_db() {
-        setup_gen_dir();
+        let context = setup_gen_on_disk();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let operation_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
 
         track_database(conn, operation_conn).unwrap();
 
         let collection = "test".to_string();
         let _op_1 = import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            operation_conn,
         )
         .unwrap();
         let op_2 = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            operation_conn,
             None,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
-        create_patch(operation_conn, &[op_2.hash], &mut write_stream).unwrap();
+        create_patch(&context, &[op_2.hash], &mut write_stream).unwrap();
 
         let patches = load_patches(&write_stream[..]);
-        let fresh_db = &get_connection(None).unwrap();
-        track_database(fresh_db, operation_conn).unwrap();
-        apply_patches(Some(fresh_db), operation_conn, &patches).unwrap();
+        let fresh_context = setup_gen_on_disk();
+        track_database(
+            fresh_context.graph().conn(),
+            fresh_context.operations().conn(),
+        )
+        .unwrap();
+        apply_patches(&fresh_context, &patches).unwrap();
     }
 }

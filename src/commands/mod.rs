@@ -1,8 +1,5 @@
-use std::path::PathBuf;
-
 use clap::{Parser, Subcommand};
-use gen_core::config::get_gen_dir;
-use rusqlite::Connection;
+use gen_models::db::OperationsConnection;
 
 pub mod cli_context;
 pub mod export;
@@ -58,6 +55,16 @@ pub enum Commands {
         /// Position as "node id:coordinate" to center the graph on
         #[arg(short, long)]
         position: Option<String>,
+    },
+    /// Show a diff of operations and render the consolidated graph
+    #[command(name = "view-diff", arg_required_else_help(true))]
+    ViewDiff {
+        /// The base ref (operation hash/prefix, branch name, or HEAD shorthand) to diff from
+        #[clap(index = 1)]
+        from: String,
+        /// The target ref to diff to (defaults to the currently checked out operation)
+        #[clap(index = 2)]
+        to: Option<String>,
     },
     /// Export a set of operations to a patch file
     #[command(name = "patch-create", arg_required_else_help(true))]
@@ -327,26 +334,7 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-pub fn get_db_for_command(db: Option<String>, operation_conn: &Connection) -> String {
-    db.clone().unwrap_or_else(|| {
-        let mut stmt = operation_conn
-            .prepare("select db_name from defaults where id = 1;")
-            .unwrap();
-        let row: Option<String> = stmt.query_row((), |row| row.get(0)).unwrap();
-        row.unwrap_or_else(|| match get_gen_dir() {
-            Some(dir) => PathBuf::from(dir)
-                .join("default.db")
-                .to_str()
-                .unwrap()
-                .to_string(),
-            None => {
-                panic!("No .gen directory found. Please run 'gen init' first.")
-            }
-        })
-    })
-}
-
-pub fn get_default_collection(conn: &Connection) -> String {
+pub fn get_default_collection(conn: &OperationsConnection) -> String {
     let mut stmt = conn
         .prepare("select collection_name from defaults where id = 1")
         .unwrap();

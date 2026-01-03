@@ -1,9 +1,9 @@
 use std::{path::PathBuf, sync::Mutex};
 
-use gen_core::config::get_or_create_gen_dir;
-use gen_models::{block_group::BlockGroup, traits::Query};
+use r#gen::{core::HashId, get_connection, views::block_layout::BaseLayout};
+use gen_core::config::Workspace;
+use gen_models::{block_group::BlockGroup, db::GraphConnection, traits::Query};
 use pyo3::{prelude::*, types::PyModule};
-use rusqlite::Connection;
 
 use super::{
     block_group::PyBlockGroup,
@@ -11,7 +11,6 @@ use super::{
     layouts::PyBaseLayout,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
-use crate::{core::HashId, get_connection, views::block_layout::BaseLayout};
 
 /// The main entry point for the gen Python module.
 ///
@@ -22,8 +21,8 @@ pub struct PyRepository {
     // We use custom getters, hence no #[pyo3(get)]
     pub gen_dir: PathBuf,
     pub db_path: PathBuf,
-    pub conn: Mutex<Option<Connection>>, // Private to Rust, not exposed to Python
-    pub factory: Factory,                // Embedded factory for BlockGroup transformations
+    pub conn: Mutex<Option<GraphConnection>>, // Private to Rust, not exposed to Python
+    pub factory: Factory,                     // Embedded factory for BlockGroup transformations
 }
 
 // Regular Rust implementation outside of PyO3 exposure
@@ -33,7 +32,7 @@ impl PyRepository {
     // while still ensuring proper connection management
     pub fn with_connection<F, T>(&self, op: F) -> T
     where
-        F: FnOnce(&Connection) -> T,
+        F: FnOnce(&GraphConnection) -> T,
     {
         let mut conn_guard = self.conn.lock().unwrap();
         if conn_guard.is_none() {
@@ -52,7 +51,7 @@ impl PyRepository {
         // PathBuf instead of Path to avoid borrowing issues
         let gen_dir: PathBuf = match path {
             Some(path_str) => PathBuf::from(path_str),
-            None => get_or_create_gen_dir(),
+            None => Workspace::from_current_dir().ensure_gen_dir(),
         };
 
         let db_path = gen_dir.join("default.db");
@@ -264,13 +263,14 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
+    use r#gen::test_helpers::setup_gen;
     use pyo3::{prelude::*, py_run};
 
-    use crate::{python_api::repository::PyRepository, test_helpers::setup_gen_dir};
+    use crate::python_api::repository::PyRepository;
 
     #[test]
     fn test_repository_creation() {
-        setup_gen_dir();
+        setup_gen();
         // Run python code to confirm that the repository class is available, with the repository class passed in from Rust
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
@@ -281,7 +281,7 @@ mod python_tests {
                 r#"
                 # Create a repository in the present working directory
                 repo = repository()
-                
+
                 # Test that the repository was created successfully
                 assert hasattr(repo, "gen_dir")
                 assert hasattr(repo, "db_path")

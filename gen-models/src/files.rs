@@ -1,11 +1,11 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, traits::Capnp};
-use rusqlite::{Connection, Result as SQLResult, Row, params, types::Value};
+use rusqlite::{Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{gen_models_capnp::gen_database, traits::*};
+use crate::{db::OperationsConnection, gen_models_capnp::gen_database, traits::*};
 
 #[derive(Debug, Error)]
 pub enum GenDatabaseError {
@@ -60,7 +60,7 @@ impl Query for GenDatabase {
 
 impl GenDatabase {
     pub fn create(
-        conn: &Connection,
+        conn: &OperationsConnection,
         db_uuid: &str,
         name: &str,
         path: &str,
@@ -75,7 +75,7 @@ impl GenDatabase {
         })
     }
 
-    pub fn delete_by_uuid(conn: &Connection, db_uuid: &str) -> SQLResult<GenDatabase> {
+    pub fn delete_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn,
             "DELETE FROM gen_databases WHERE db_uuid = ?1",
@@ -83,7 +83,7 @@ impl GenDatabase {
         )
     }
 
-    pub fn get_by_uuid(conn: &Connection, db_uuid: &str) -> SQLResult<GenDatabase> {
+    pub fn get_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn,
             "SELECT * FROM gen_databases WHERE db_uuid = ?1",
@@ -91,7 +91,7 @@ impl GenDatabase {
         )
     }
 
-    pub fn get_by_path(conn: &Connection, path: &str) -> SQLResult<GenDatabase> {
+    pub fn get_by_path(conn: &OperationsConnection, path: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn,
             "SELECT * FROM gen_databases WHERE path = ?1",
@@ -100,7 +100,7 @@ impl GenDatabase {
     }
 
     pub fn get_or_create(
-        conn: &Connection,
+        conn: &OperationsConnection,
         db_uuid: &str,
         name: &str,
         path: &str,
@@ -128,7 +128,7 @@ impl GenDatabase {
     }
 
     pub fn query_by_operations(
-        conn: &Connection,
+        conn: &OperationsConnection,
         operations: &[HashId],
     ) -> Result<HashMap<HashId, Vec<GenDatabase>>, GenDatabaseError> {
         let query = "select gd.*, od.operation_hash from gen_databases gd left join operation_databases od on (gd.db_uuid = od.database_uuid) where od.operation_hash in rarray(?1)";

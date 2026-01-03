@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node, is_terminal};
 use gen_graph::{GenGraph, GraphNode, project_path};
-use gen_models::{node::Node, path::Path, sequence::Sequence};
+use gen_models::{db::GraphConnection, node::Node, path::Path, sequence::Sequence};
 use log::{info, warn};
 use petgraph::{Direction, graphmap::DiGraphMap};
 use ratatui::{
@@ -16,7 +16,6 @@ use ratatui::{
         canvas::{Canvas, Line, Points},
     },
 };
-use rusqlite::Connection;
 
 use crate::{
     config::get_theme_color,
@@ -255,7 +254,7 @@ impl Default for State {
 
 pub struct Viewer<'a> {
     pub block_graph: &'a GenGraph,
-    pub conn: &'a Connection,
+    pub conn: &'a GraphConnection,
     pub base_layout: BaseLayout,
     pub scaled_layout: ScaledLayout,
     pub node_sequences: HashMap<HashId, Sequence>,
@@ -265,12 +264,13 @@ pub struct Viewer<'a> {
     view_block: Block<'a>,
     pub has_focus: bool,
     highlights: Vec<(Color, DiGraphMap<GraphNode, ()>)>,
+    node_highlights: Vec<(Color, HashSet<GraphNode>)>,
 }
 
 impl<'a> Viewer<'a> {
     pub fn new(
         block_graph: &'a GenGraph,
-        conn: &'a Connection,
+        conn: &'a GraphConnection,
         plot_parameters: PlotParameters,
     ) -> Viewer<'a> {
         let mut new_viewer = Self::with_origin(
@@ -293,7 +293,7 @@ impl<'a> Viewer<'a> {
 
     pub fn with_origin(
         block_graph: &'a GenGraph,
-        conn: &'a Connection,
+        conn: &'a GraphConnection,
         plot_parameters: PlotParameters,
         origin: (Node, i64),
     ) -> Viewer<'a> {
@@ -340,6 +340,7 @@ impl<'a> Viewer<'a> {
             view_block: Block::default(), //Ratatui block (TODO: make Viewer a proper widget with nesting, or find a better name)
             has_focus: false,
             highlights: Vec::new(),
+            node_highlights: Vec::new(),
         }
     }
 
@@ -378,6 +379,14 @@ impl<'a> Viewer<'a> {
         }
         self.highlights.push((color, highlight_graph));
         Ok(())
+    }
+
+    pub fn set_highlights(&mut self, highlights: Vec<(Color, DiGraphMap<GraphNode, ()>)>) {
+        self.highlights = highlights;
+    }
+
+    pub fn set_node_highlights(&mut self, highlights: Vec<(Color, HashSet<GraphNode>)>) {
+        self.node_highlights = highlights;
     }
 
     /// Check if we currently have highlights of a specific color.
@@ -757,16 +766,26 @@ impl<'a> Viewer<'a> {
                     // and whether the block is selected or not.
                     let is_selected = Some(block) == self.state.selected_block;
                     let is_glyph = label == label::NODE;
-                    let style = match (is_glyph, is_selected) {
-                        (true, true) => {
+                    let highlight_color = self
+                        .node_highlights
+                        .iter()
+                        .find_map(|(color, nodes)| nodes.contains(&block).then_some(*color));
+                    let style = match (is_glyph, is_selected, highlight_color) {
+                        (true, true, _) => {
                             label = label::SELECTED.to_string();
                             Style::default().fg(get_theme_color("highlight").unwrap())
                         }
-                        (true, false) => Style::default().fg(get_theme_color("text").unwrap()),
-                        (false, true) => Style::default()
+                        (true, false, Some(color)) => Style::default().fg(color),
+                        (true, false, None) => {
+                            Style::default().fg(get_theme_color("text").unwrap())
+                        }
+                        (false, true, _) => Style::default()
                             .fg(get_theme_color("canvas").unwrap())
                             .bg(get_theme_color("highlight").unwrap()),
-                        (false, false) => Style::default()
+                        (false, false, Some(color)) => Style::default()
+                            .fg(get_theme_color("canvas").unwrap())
+                            .bg(color),
+                        (false, false, None) => Style::default()
                             .fg(get_theme_color("text").unwrap())
                             .bg(get_theme_color("node").unwrap()),
                     };

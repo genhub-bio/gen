@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gen_core::config::get_gen_dir;
+use gen_core::config::Workspace;
 use pyo3::{
     prelude::*,
     types::{PyBytes, PyModule},
@@ -56,13 +56,6 @@ pub fn py_query(conn: &Connection, query: &str) -> PyResult<Vec<Vec<PyObject>>> 
 /// Returns the path to the .gen directory as a Python pathlib.Path object.
 #[pyfunction(name = "get_gen_dir")]
 pub fn get_gen_dir_py(py: Python) -> PyResult<PyObject> {
-    match get_gen_dir() {
-        Some(dir) => {
-            let path = Path::new(&dir);
-            path_to_py_path(py, path)
-        }
-        None => Err(pyo3::exceptions::PyFileNotFoundError::new_err(
-            "No .gen directory found. Run 'gen init' in the project root directory to initialize gen.",
-        )),
-    }
+    let gen_dir = Workspace::from_current_dir().ensure_gen_dir();
+    path_to_py_path(py, &gen_dir)
 }
