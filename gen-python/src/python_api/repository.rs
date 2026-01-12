@@ -107,6 +107,32 @@ impl PyRepository {
             })
         })
     }
+    
+    /// Retrieves all BlockGroups.
+    ///
+    /// Returns:
+    ///     A vector of PyBlockGroup instances
+    fn get_block_groups(&self) -> PyResult<Vec<PyBlockGroup>> {
+        self.with_connection(|conn| {
+            let block_groups = BlockGroup::query(
+                conn,
+                "SELECT * FROM block_groups",
+                [],
+            );
+
+            let result = block_groups
+                .into_iter()
+                .map(|bg| PyBlockGroup {
+                    id: bg.id,
+                    collection_name: bg.collection_name,
+                    sample_name: bg.sample_name,
+                    name: bg.name,
+                })
+                .collect();
+
+            Ok(result)
+        })
+    }
 
     /// Retrieves all BlockGroups belonging to a specific collection.
     ///
