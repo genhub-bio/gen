@@ -451,6 +451,29 @@ pub fn make_stitch(
         &new_path_edge_ids,
     );
 
+    let summary_str = format!(
+        " {}: stitched {} chunks into new graph",
+        new_sample_name,
+        region_names.len()
+    );
+
+    let _op = end_operation(
+        context,
+        &mut session,
+        &OperationInfo {
+            files: vec![],
+            description: "make stitch".to_string(),
+        },
+        &summary_str,
+        None,
+    )
+    .map_err(GraphOperationError::OperationError);
+
+    println!(
+        "Stitched chunks successfully into new region {} in sample {}.",
+        new_region_name, new_sample_name
+    );
+
     Ok(())
 }
 
