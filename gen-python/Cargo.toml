@@ -22,6 +22,7 @@ gen = { path = ".." }
 gen-core = { path = "../gen-core", features = ["python-bindings"] }
 gen-graph = { path = "../gen-graph" }
 gen-models = { path = "../gen-models" }
+log = "0.4.26"
 rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }
 
 [dependencies.pyo3]

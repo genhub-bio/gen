@@ -1100,6 +1100,7 @@ dependencies = [
  "gen-core",
  "gen-graph",
  "gen-models",
+ "log",
  "pyo3",
  "pyo3-build-config 0.26.0",
  "rusqlite",
