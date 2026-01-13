@@ -9,6 +9,9 @@ pub mod node_key;
 pub mod repository;
 pub mod utils;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export components for use in the main module
 use crate::{
     PyDbContext,
