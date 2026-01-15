@@ -1,17 +1,11 @@
 use std::{path::PathBuf, sync::Mutex};
 
 use r#gen::{core::HashId, get_connection, views::block_layout::BaseLayout};
-use gen_core::{config::Workspace, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::config::Workspace;
 use gen_models::{
     block_group::BlockGroup,
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::Collection,
     db::GraphConnection,
-    edge::Edge,
     node::Node,
-    path::Path,
-    sample::Sample,
-    sequence::Sequence,
     traits::Query,
 };
 use pyo3::{prelude::*, types::PyModule};
@@ -245,121 +239,6 @@ impl PyRepository {
                     ))
                 }
             }
-        })
-    }
-
-    /// Creates a new BlockGroup.
-    ///
-    /// Args:
-    ///     name: The name of the BlockGroup
-    ///     collection_name: The name of the collection
-    ///     sample_name: Optional name of the sample
-    ///     sequence: Optional DNA sequence string.
-    ///
-    /// Returns:
-    ///     A PyBlockGroup instance
-    #[pyo3(signature = (name, collection_name, sample_name = None, sequence = None))]
-    fn create_block_group(
-        &self,
-        name: String,
-        collection_name: String,
-        sample_name: Option<String>,
-        sequence: Option<String>,
-    ) -> PyResult<PyBlockGroup> {
-        self.with_connection(|conn| {
-            // Ensure collection exists
-            if !Collection::exists(conn, &collection_name) {
-                Collection::create(conn, &collection_name);
-            }
-
-            // Ensure sample exists if provided
-            if let Some(ref sample) = sample_name {
-                Sample::get_or_create(conn, sample);
-            }
-
-            // Create the block group
-            let block_group = BlockGroup::create(
-                conn,
-                &collection_name,
-                sample_name.as_deref(), // Option<String> to Option<&str>
-                &name,
-            );
-
-            // If a sequence was provided, create the full graph structure
-            if let Some(seq_string) = sequence {
-                let sequence_length = seq_string.len() as i64;
-                
-                // Create and save the sequence to the database
-                let seq = Sequence::new()
-                    .sequence_type("DNA")
-                    .sequence(&seq_string)
-                    .save(conn);
-
-                // Create a node with the sequence
-                let node_id = Node::create(
-                    conn,
-                    &seq.hash,
-                    &HashId::convert_str(&format!(
-                        "{collection}.{name}:{hash}",
-                        collection = collection_name,
-                        name = name,
-                        hash = seq.hash
-                    )),
-                );
-
-                // Create edges: START -> node -> END
-                let edge_into = Edge::create(
-                    conn,
-                    PATH_START_NODE_ID,
-                    0,
-                    Strand::Forward,
-                    node_id,
-                    0,
-                    Strand::Forward,
-                );
-                
-                let edge_out_of = Edge::create(
-                    conn,
-                    node_id,
-                    sequence_length,
-                    Strand::Forward,
-                    PATH_END_NODE_ID,
-                    0,
-                    Strand::Forward,
-                );
-
-                // Link the block group to the edges
-                let new_block_group_edges = vec![
-                    BlockGroupEdgeData {
-                        block_group_id: block_group.id,
-                        edge_id: edge_into.id,
-                        chromosome_index: 0,
-                        phased: 0,
-                    },
-                    BlockGroupEdgeData {
-                        block_group_id: block_group.id,
-                        edge_id: edge_out_of.id,
-                        chromosome_index: 0,
-                        phased: 0,
-                    },
-                ];
-                BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-
-                // Create a path through the edges
-                Path::create(
-                    conn,
-                    &name,
-                    &block_group.id,
-                    &[edge_into.id, edge_out_of.id],
-                );
-            }
-
-            Ok(PyBlockGroup {
-                id: block_group.id,
-                collection_name: block_group.collection_name,
-                sample_name: block_group.sample_name,
-                name: block_group.name,
-            })
         })
     }
 

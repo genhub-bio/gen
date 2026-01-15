@@ -3,49 +3,19 @@ use log::debug;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use crate::python_api::block_group::PyBlockGroup;
-use r#gen::graph_operators::{derive_chunks, make_stitch, GraphOperationError};
+use r#gen::graph_operators::{create_block_group, derive_chunks, make_stitch, GraphOperationError};
 
-/// Helper function to handle transactions and execute an operation
-pub(crate) fn with_transaction<F, T>(
-    context: &gen_models::db::DbContext,
-    operation: F,
-) -> PyResult<T>
-where
-    F: FnOnce(&gen_models::db::DbContext) -> Result<T, GraphOperationError>,
-{
-    let operation_conn = context.operations().conn();
-    let conn = context.graph().conn();
-
-    if let Err(err) = r#gen::track_database(conn, operation_conn) {
-        return Err(PyRuntimeError::new_err(format!(
-            "Error tracking database: {err}"
-        )));
-    }
-
-    conn.execute("BEGIN TRANSACTION", [])
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
-    operation_conn
-        .execute("BEGIN TRANSACTION", [])
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
-
-    let result = operation(context);
-
-    match result {
-        Ok(value) => {
-            conn.execute("END TRANSACTION;", [])
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit transaction: {e}")))?;
-            operation_conn
-                .execute("END TRANSACTION;", [])
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit transaction: {e}")))?;
-            Ok(value)
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK TRANSACTION;", []);
-            let _ = operation_conn.execute("ROLLBACK TRANSACTION;", []);
-            Err(map_graph_operation_error(err))
-        }
-    }
-}
+// NOTE: The transaction management code has been removed because it should include the operation tracking
+// as well, ideally in a Python context manager (implement __enter__ and __exit__ methods). The problem is
+// that the stitch and chunk operations are tracked within their function, so we can't use a context manager
+// to do something like this:
+// with repo.commit("Design knockouts"):
+//     for gene in genes:
+//         # find CRISPR target
+//         # design deletion (chunk + stitch for example, probably a dedicated function )
+//         derive_chunks(genome, [0, ])
+//         # extract homology regions
+//         # assemble payload
 
 /// Maps GraphOperationError to Python exceptions with detailed error messages
 pub(crate) fn map_graph_operation_error(err: GraphOperationError) -> PyErr {
@@ -96,6 +66,83 @@ pub(crate) fn validate_block_groups_for_stitch(
     Ok((collection_name, parent_sample_name))
 }
 
+/// Creates a new block group with optional sequence data.
+///
+/// Args:
+///     context: The database context
+///     name: Name of the block group
+///     collection_name: Name of the collection
+///     sample_name: Optional sample name
+///     sequence: Optional DNA sequence string
+///
+/// Returns:
+///     PyBlockGroup instance
+#[pyfunction]
+#[pyo3(signature = (context, name, collection_name, sample_name = None, sequence = None))]
+pub fn create_block_group_py(
+    context: PyRef<'_, crate::PyDbContext>,
+    name: String,
+    collection_name: String,
+    sample_name: Option<String>,
+    sequence: Option<String>,
+) -> PyResult<PyBlockGroup> {
+    let context = &context.0;
+    let conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
+
+    if let Err(err) = r#gen::track_database(conn, operation_conn) {
+        return Err(PyRuntimeError::new_err(format!(
+            "Error tracking database: {err}"
+        )));
+    }
+
+    conn.execute("BEGIN TRANSACTION", [])
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
+    operation_conn
+        .execute("BEGIN TRANSACTION", [])
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
+
+    match create_block_group(
+        context,
+        &name,
+        &collection_name,
+        sample_name.as_deref(),
+        sequence.as_deref(),
+    ) {
+        Ok(_op) => {
+            conn.execute("END TRANSACTION;", [])
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit: {e}")))?;
+            operation_conn
+                .execute("END TRANSACTION;", [])
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit: {e}")))?;
+
+            // Query for the created block group to get its actual ID
+            use gen_models::{block_group::BlockGroup, traits::Query};
+            let block_groups = BlockGroup::query(
+                conn,
+                "SELECT * FROM block_groups WHERE collection_name = ?1 AND name = ?2 ORDER BY created_on DESC LIMIT 1",
+                rusqlite::params![&collection_name, &name],
+            );
+
+            if let Some(bg) = block_groups.into_iter().next() {
+                Ok(PyBlockGroup {
+                    id: bg.id,
+                    collection_name: bg.collection_name,
+                    sample_name: bg.sample_name,
+                    name: bg.name,
+                })
+            } else {
+                Err(PyRuntimeError::new_err("Failed to retrieve created block group"))
+            }
+        }
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK TRANSACTION;", []);
+            let _ = operation_conn.execute("ROLLBACK TRANSACTION;", []);
+            Err(map_graph_operation_error(err))
+        }
+    }
+}
+
 /// Derives chunks from a parent block group.
 ///
 /// Args:
@@ -118,6 +165,20 @@ pub fn derive_chunks_py(
     debug!("derive_chunks called for block group: {}", parent_block_group.name);
 
     let context = &context.0;
+    let conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
+
+    if let Err(err) = r#gen::track_database(conn, operation_conn) {
+        return Err(PyRuntimeError::new_err(format!(
+            "Error tracking database: {err}"
+        )));
+    }
+
+    conn.execute("BEGIN TRANSACTION", [])
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
+    operation_conn
+        .execute("BEGIN TRANSACTION", [])
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
 
     // Convert Python tuples to Rust Range<i64>
     let ranges: Vec<Range<i64>> = chunk_ranges
@@ -125,19 +186,29 @@ pub fn derive_chunks_py(
         .map(|(start, end)| Range { start, end })
         .collect();
 
-    with_transaction(context, |ctx| {
-        derive_chunks(
-            ctx,
-            &parent_block_group.collection_name,
-            parent_block_group.sample_name.as_deref(),
-            &new_sample_name,
-            &parent_block_group.name,
-            backbone.as_deref(),
-            ranges,
-        )
-    })?;
-
-    Ok("Chunks derived successfully.".to_string())
+    match derive_chunks(
+        context,
+        &parent_block_group.collection_name,
+        parent_block_group.sample_name.as_deref(),
+        &new_sample_name,
+        &parent_block_group.name,
+        backbone.as_deref(),
+        ranges,
+    ) {
+        Ok(_) => {
+            conn.execute("END TRANSACTION;", [])
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit: {e}")))?;
+            operation_conn
+                .execute("END TRANSACTION;", [])
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit: {e}")))?;
+            Ok("Chunks derived successfully.".to_string())
+        }
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK TRANSACTION;", []);
+            let _ = operation_conn.execute("ROLLBACK TRANSACTION;", []);
+            Err(map_graph_operation_error(err))
+        }
+    }
 }
 
 // TODO: clarify how "region" is used here and elsewhere, it basically the sequence name (or block group name)
@@ -165,6 +236,20 @@ pub fn make_stitch_py(
     );
 
     let context = &context.0;
+    let conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
+
+    if let Err(err) = r#gen::track_database(conn, operation_conn) {
+        return Err(PyRuntimeError::new_err(format!(
+            "Error tracking database: {err}"
+        )));
+    }
+
+    conn.execute("BEGIN TRANSACTION", [])
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
+    operation_conn
+        .execute("BEGIN TRANSACTION", [])
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to begin transaction: {e}")))?;
 
     let (collection_name, parent_sample_name) =
         validate_block_groups_for_stitch(&parent_block_groups)?;
@@ -174,16 +259,26 @@ pub fn make_stitch_py(
         .map(|bg| bg.name.as_str())
         .collect();
 
-    with_transaction(context, |ctx| {
-        make_stitch(
-            ctx,
-            collection_name,
-            parent_sample_name,
-            &new_sample_name,
-            &region_names,
-            &new_region_name,
-        )
-    })?;
-
-    Ok("Stitch completed successfully.".to_string())
+    match make_stitch(
+        context,
+        collection_name,
+        parent_sample_name,
+        &new_sample_name,
+        &region_names,
+        &new_region_name,
+    ) {
+        Ok(_) => {
+            conn.execute("END TRANSACTION;", [])
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit: {e}")))?;
+            operation_conn
+                .execute("END TRANSACTION;", [])
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to commit: {e}")))?;
+            Ok("Stitch completed successfully.".to_string())
+        }
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK TRANSACTION;", []);
+            let _ = operation_conn.execute("ROLLBACK TRANSACTION;", []);
+            Err(map_graph_operation_error(err))
+        }
+    }
 }
