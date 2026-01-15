@@ -28,11 +28,13 @@ impl PyHashId {
         // This doesn't work in practice (string is too long to fit in isize)
         let hex_string = self.hash_id.to_string();
 
-        let hash = isize::from_str_radix(&hex_string, 16)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Failed to parse hash_id as hex: {}", e)
-            ))?;
-        
+        let hash = isize::from_str_radix(&hex_string, 16).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse hash_id as hex: {}",
+                e
+            ))
+        })?;
+
         Ok(hash)
     }
 
