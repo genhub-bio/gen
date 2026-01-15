@@ -1,7 +1,11 @@
-use std::str;
+use std::{
+    fs,
+    path::{Path as FilePath, PathBuf},
+    str,
+};
 
-use gen_core::{HashId, traits::Capnp};
-use rusqlite::{Connection, session};
+use gen_core::{HashId, errors::ConfigError, traits::Capnp};
+use rusqlite::session;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -10,8 +14,10 @@ use crate::{
     block_group::BlockGroup,
     changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
     collection::Collection,
+    db::{DbContext, GraphConnection},
     edge::Edge,
     errors::OperationError,
+    file_types::FileTypes,
     files::GenDatabase,
     gen_models_capnp::dependency_models,
     metadata::{self, get_db_uuid},
@@ -22,7 +28,7 @@ use crate::{
     sequence::Sequence,
 };
 
-pub fn start_operation(conn: &Connection) -> session::Session<'_> {
+pub fn start_operation(conn: &GraphConnection) -> session::Session<'_> {
     let mut session = session::Session::new(conn).unwrap();
     attach_session(&mut session);
     session
@@ -30,13 +36,14 @@ pub fn start_operation(conn: &Connection) -> session::Session<'_> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn end_operation(
-    conn: &Connection,
-    operation_conn: &Connection,
+    context: &DbContext,
     session: &mut session::Session,
     operation_info: &OperationInfo,
     summary_str: &str,
     force_hash: impl Into<Option<HashId>>,
 ) -> Result<Operation, OperationError> {
+    let conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
     let db_uuid = metadata::get_db_uuid(conn);
     // determine if this operation has already happened
     let mut output = Vec::new();
@@ -62,16 +69,56 @@ pub fn end_operation(
 
     match Operation::create(operation_conn, &operation_info.description, &hash) {
         Ok(operation) => {
+            let gen_dir = match context.workspace().find_gen_dir() {
+                Some(dir) => dir,
+                None => {
+                    return Err(OperationError::ConfigError(
+                        ConfigError::GenDirectoryNotFound,
+                    ));
+                }
+            };
+            let assets_dir = FilePath::new(&gen_dir).join("assets");
+            fs::create_dir_all(&assets_dir).map_err(|_| OperationError::IOError)?;
+
             for op_file in operation_info.files.iter() {
-                let fa =
-                    FileAddition::create(operation_conn, &op_file.file_path, op_file.file_type);
-                Operation::add_file(operation_conn, &operation.hash, fa.id)
-                    .map_err(|err| OperationError::SQLError(format!("{err}")))?
+                let fa = match FileAddition::get_or_create(
+                    context.workspace(),
+                    operation_conn,
+                    &op_file.file_path,
+                    op_file.file_type,
+                    None,
+                ) {
+                    Ok(fa) => fa,
+                    Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
+                };
+                Operation::add_file(operation_conn, &operation.hash, &fa.id)
+                    .map_err(|err| OperationError::SQLError(format!("{err}")))?;
+                if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
+                    let asset_destination_path = assets_dir.join(fa.hashed_filename());
+                    if !asset_destination_path.exists() {
+                        let source_path = if FilePath::new(&op_file.file_path).is_absolute() {
+                            PathBuf::from(&op_file.file_path)
+                        } else {
+                            context
+                                .workspace()
+                                .repo_root()
+                                .map_err(OperationError::ConfigError)?
+                                .join(&op_file.file_path)
+                        };
+                        match fs::copy(source_path, asset_destination_path) {
+                            Ok(result) => result,
+                            Err(_) => return Err(OperationError::IOError),
+                        };
+                    }
+                }
             }
+            Operation::add_database(operation_conn, &operation.hash, &db_uuid)
+                .map_err(|err| OperationError::SQLError(format!("{err}")))?;
             OperationSummary::create(operation_conn, &operation.hash, summary_str);
             let db_uuid = get_db_uuid(conn);
             let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid).unwrap();
             write_changeset(
+                context.workspace(),
                 &operation,
                 DatabaseChangeset {
                     db_path: gen_db.path,
@@ -123,7 +170,7 @@ pub fn attach_session(session: &mut session::Session) {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Default, Deserialize, Serialize, Debug, PartialEq)]
 pub struct DependencyModels {
     pub collections: Vec<Collection>,
     pub samples: Vec<Sample>,

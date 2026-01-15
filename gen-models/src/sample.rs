@@ -2,10 +2,10 @@ use std::fmt::*;
 
 use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
-use rusqlite::{Connection, Result as SQLResult, Row, params};
+use rusqlite::{Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{block_group::BlockGroup, gen_models_capnp::sample, traits::*};
+use crate::{block_group::BlockGroup, db::GraphConnection, gen_models_capnp::sample, traits::*};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
@@ -40,14 +40,14 @@ impl Query for Sample {
 }
 
 impl Sample {
-    pub fn create(conn: &Connection, name: &str) -> SQLResult<Sample> {
+    pub fn create(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
         let mut stmt = conn
             .prepare("INSERT INTO samples (name) VALUES (?1) returning (name);")
             .unwrap();
         stmt.query_row((name,), |row| Ok(Sample { name: row.get(0)? }))
     }
 
-    pub fn get_or_create(conn: &Connection, name: &str) -> Sample {
+    pub fn get_or_create(conn: &GraphConnection, name: &str) -> Sample {
         match Sample::create(conn, name) {
             Ok(sample) => sample,
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
@@ -65,13 +65,13 @@ impl Sample {
         }
     }
 
-    pub fn delete_by_name(conn: &Connection, name: &str) {
+    pub fn delete_by_name(conn: &GraphConnection, name: &str) {
         let mut stmt = conn.prepare("delete from samples where name = ?1").unwrap();
         stmt.execute([name]).unwrap();
     }
 
     pub fn get_graph<'a>(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection: &str,
         name: impl Into<Option<&'a str>>,
     ) -> GenGraph {
@@ -96,7 +96,7 @@ impl Sample {
     }
 
     pub fn get_or_create_child(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
         parent_sample: Option<&str>,
@@ -134,7 +134,7 @@ impl Sample {
     }
 
     pub fn get_block_groups(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: Option<&str>,
     ) -> Vec<BlockGroup> {
@@ -153,12 +153,12 @@ impl Sample {
         }
     }
 
-    pub fn get_all_names(conn: &Connection) -> Vec<String> {
+    pub fn get_all_names(conn: &GraphConnection) -> Vec<String> {
         let samples = Sample::query(conn, "select * from samples;", rusqlite::params!());
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
-    pub fn get_by_name(conn: &Connection, name: &str) -> SQLResult<Sample> {
+    pub fn get_by_name(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
         Sample::get(
             conn,
             "select * from samples where name = ?1;",
@@ -192,15 +192,15 @@ mod tests {
     fn test_delete_by_name() {
         let conn = &get_connection(None).unwrap();
 
-        let sample1 = Sample::create(conn, "sample1").unwrap();
-        let sample2 = Sample::create(conn, "sample2").unwrap();
+        let _ = Sample::create(conn, "sample1").unwrap();
+        let _ = Sample::create(conn, "sample2").unwrap();
 
-        assert!(Sample::get_by_name(&conn, "sample1").is_ok());
-        assert!(Sample::get_by_name(&conn, "sample2").is_ok());
+        assert!(Sample::get_by_name(conn, "sample1").is_ok());
+        assert!(Sample::get_by_name(conn, "sample2").is_ok());
 
-        Sample::delete_by_name(&conn, "sample1");
+        Sample::delete_by_name(conn, "sample1");
 
-        assert!(Sample::get_by_name(&conn, "sample1").is_err());
-        assert!(Sample::get_by_name(&conn, "sample2").is_ok());
+        assert!(Sample::get_by_name(conn, "sample1").is_err());
+        assert!(Sample::get_by_name(conn, "sample2").is_ok());
     }
 }

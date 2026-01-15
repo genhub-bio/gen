@@ -9,6 +9,7 @@ use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::DbContext,
     edge::{Edge, EdgeData},
     errors::OperationError,
     file_types::FileTypes,
@@ -23,7 +24,6 @@ use gen_models::{
 use indexmap::IndexSet;
 use itertools::Itertools;
 use petgraph::{algo::kosaraju_scc, prelude::UnGraphMap, visit::Dfs};
-use rusqlite::{self, Connection};
 use thiserror::Error;
 
 use crate::{
@@ -39,12 +39,12 @@ pub enum GFAImportError {
 }
 
 pub fn import_gfa<'a>(
+    context: &DbContext,
     gfa_path: &FilePath,
     collection_name: &str,
     sample_name: impl Into<Option<&'a str>>,
-    conn: &Connection,
-    operation_conn: &Connection,
 ) -> Result<Operation, GFAImportError> {
+    let conn = context.graph().conn();
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
 
@@ -420,8 +420,7 @@ pub fn import_gfa<'a>(
     bar.finish();
 
     let op = end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -463,22 +462,18 @@ mod tests {
     use rusqlite::params;
 
     use super::*;
-    use crate::{
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{test_helpers::setup_gen, track_database};
 
     #[test]
     fn test_import_simple_gfa() {
-        setup_gen_dir();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/simple.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
 
-        track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        track_database(conn, context.operations().conn()).unwrap();
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
@@ -497,15 +492,14 @@ mod tests {
 
     #[test]
     fn test_creates_sample() {
-        setup_gen_dir();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/simple.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
 
-        track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, "new-sample", conn, op_conn);
+        track_database(conn, context.operations().conn()).unwrap();
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "new-sample");
         assert_eq!(
             Sample::get_by_name(conn, "new-sample").unwrap().name,
             "new-sample"
@@ -514,15 +508,14 @@ mod tests {
 
     #[test]
     fn test_import_no_path_gfa() {
-        setup_gen_dir();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/no_path.gfa");
         let collection_name = "no path".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
 
-        track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        track_database(conn, context.operations().conn()).unwrap();
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
@@ -537,15 +530,14 @@ mod tests {
 
     #[test]
     fn test_import_gfa_with_walk() {
-        setup_gen_dir();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/walk.gfa");
         let collection_name = "walk".to_string();
-        let conn = &mut get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
 
-        track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        track_database(conn, context.operations().conn()).unwrap();
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
@@ -564,15 +556,14 @@ mod tests {
 
     #[test]
     fn test_import_gfa_with_reverse_strand_edges() {
-        setup_gen_dir();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/reverse_strand.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
 
-        track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        track_database(conn, context.operations().conn()).unwrap();
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
@@ -591,15 +582,15 @@ mod tests {
 
     #[test]
     fn test_import_anderson_promoters() {
-        setup_gen_dir();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/anderson_promoters.gfa");
         let collection_name = "anderson promoters".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let paths = Path::query_for_collection(conn, &collection_name);
         assert_eq!(paths.len(), 20);
@@ -697,15 +688,15 @@ mod tests {
 
     #[test]
     fn test_import_aa_gfa() {
-        setup_gen_dir();
         let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         gfa_path.push("fixtures/aa.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
         let path = Path::query(
@@ -727,15 +718,15 @@ mod tests {
 
     #[test]
     fn test_imports_gfa_with_cycle() {
-        setup_gen_dir();
         let gfa_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/cycle_no_path.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
 
@@ -750,15 +741,15 @@ mod tests {
     fn test_breaks_cycle_using_path_node() {
         // here the fixture has a path indicting the cycle starts in the middle of where it would
         // normally be created
-        setup_gen_dir();
         let gfa_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/cycle_with_path.gfa");
         let collection_name = "test".to_string();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&gfa_path, &collection_name, None, conn, op_conn);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
 
         let block_group_id = BlockGroup::get_id(&collection_name, None, "");
 

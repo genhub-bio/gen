@@ -2,10 +2,12 @@ use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{self, Connection, Row, params, types::Value};
+use rusqlite::{self, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 
-use crate::{edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*};
+use crate::{
+    db::GraphConnection, edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*,
+};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct PathEdge {
@@ -76,7 +78,7 @@ impl Query for PathEdge {
 
 impl PathEdge {
     pub fn create(
-        conn: &Connection,
+        conn: &GraphConnection,
         path_id: &HashId,
         index_in_path: i64,
         edge_id: HashId,
@@ -106,8 +108,10 @@ impl PathEdge {
         }
     }
 
-    pub fn bulk_create(conn: &Connection, path_id: &HashId, edge_ids: &[HashId]) {
-        for (index1, chunk) in edge_ids.chunks(100000).enumerate() {
+    pub fn bulk_create(conn: &GraphConnection, path_id: &HashId, edge_ids: &[HashId]) {
+        let batch_size = max_rows_per_batch(conn, 4);
+
+        for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
             let mut rows_to_insert = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for (index2, edge_id) in chunk.iter().enumerate() {
@@ -130,12 +134,12 @@ impl PathEdge {
         }
     }
 
-    pub fn delete(conn: &Connection, path_id: &HashId) {
+    pub fn delete(conn: &GraphConnection, path_id: &HashId) {
         let statement = "DELETE from path_edges WHERE path_id = ?1;";
         conn.execute(statement, params![path_id]).unwrap();
     }
 
-    pub fn edges_for_path(conn: &Connection, path_id: &HashId) -> Vec<Edge> {
+    pub fn edges_for_path(conn: &GraphConnection, path_id: &HashId) -> Vec<Edge> {
         let path_edges = PathEdge::query(
             conn,
             "select * from path_edges where path_id = ?1 order by index_in_path ASC",
@@ -156,7 +160,10 @@ impl PathEdge {
             .collect::<Vec<Edge>>()
     }
 
-    pub fn edges_for_paths(conn: &Connection, path_ids: Vec<HashId>) -> HashMap<HashId, Vec<Edge>> {
+    pub fn edges_for_paths(
+        conn: &GraphConnection,
+        path_ids: Vec<HashId>,
+    ) -> HashMap<HashId, Vec<Edge>> {
         let query_path_ids = path_ids
             .iter()
             .map(|path_id| Value::from(*path_id))

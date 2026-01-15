@@ -13,12 +13,13 @@ use gen_graph::{
     flatten_to_interval_tree,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Connection, Row, params, types::Value as SQLValue};
+use rusqlite::{Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
+    db::GraphConnection,
     edge::{Edge, EdgeData, GroupBlock},
     errors::{ChangeError, QueryError},
     gen_models_capnp::block_group,
@@ -28,7 +29,7 @@ use crate::{
     traits::*,
 };
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq)]
 pub struct BlockGroup {
     pub id: HashId,
     pub collection_name: String,
@@ -105,11 +106,11 @@ pub struct PathChange {
 pub struct PathCache<'a> {
     pub cache: HashMap<PathData, Path>,
     pub intervaltree_cache: HashMap<Path, IntervalTree<i64, NodeIntervalBlock>>,
-    pub conn: &'a Connection,
+    pub conn: &'a GraphConnection,
 }
 
-impl PathCache<'_> {
-    pub fn new(conn: &Connection) -> PathCache<'_> {
+impl<'a> PathCache<'a> {
+    pub fn new(conn: &'a GraphConnection) -> PathCache<'a> {
         PathCache {
             cache: HashMap::<PathData, Path>::new(),
             intervaltree_cache: HashMap::<Path, IntervalTree<i64, NodeIntervalBlock>>::new(),
@@ -126,31 +127,32 @@ impl PathCache<'_> {
         if let Some(path) = path_lookup {
             path.clone()
         } else {
+            let conn = path_cache.conn;
             let new_path = Path::query(
-                path_cache.conn,
+                conn,
                 "select * from paths where block_group_id = ?1 AND name = ?2",
                 params![block_group_id, name],
             )[0]
             .clone();
 
             path_cache.cache.insert(path_key, new_path.clone());
-            let tree = new_path.intervaltree(path_cache.conn);
+            let tree = new_path.intervaltree(conn);
             path_cache.intervaltree_cache.insert(new_path.clone(), tree);
             new_path
         }
     }
 
-    pub fn get_intervaltree<'a>(
-        path_cache: &'a PathCache<'a>,
-        path: &'a Path,
-    ) -> Option<&'a IntervalTree<i64, NodeIntervalBlock>> {
+    pub fn get_intervaltree<'b>(
+        path_cache: &'b PathCache<'_>,
+        path: &Path,
+    ) -> Option<&'b IntervalTree<i64, NodeIntervalBlock>> {
         path_cache.intervaltree_cache.get(path)
     }
 }
 
 impl BlockGroup {
     pub fn create(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: Option<&str>,
         name: &str,
@@ -183,7 +185,12 @@ impl BlockGroup {
         }
     }
 
-    pub fn delete(conn: &Connection, collection_name: &str, sample_name: Option<&str>, name: &str) {
+    pub fn delete(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: Option<&str>,
+        name: &str,
+    ) {
         if let Some(n) = sample_name {
             let query = "delete from block_groups where collection_name = ?1 and sample_name = ?2 and name = ?3;";
             conn.execute(
@@ -201,7 +208,7 @@ impl BlockGroup {
         }
     }
 
-    pub fn get_by_id(conn: &Connection, id: &HashId) -> BlockGroup {
+    pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> BlockGroup {
         let query = "SELECT * FROM block_groups WHERE id = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         match stmt.query_row([id], |row| Ok(Self::process_row(row))) {
@@ -213,7 +220,7 @@ impl BlockGroup {
         }
     }
 
-    pub fn clone(&self, conn: &Connection, target_block_group_id: &HashId) {
+    pub fn duplicate(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
         let existing_paths = Path::query(
             conn,
             "SELECT * from paths where block_group_id = ?1;",
@@ -280,7 +287,7 @@ impl BlockGroup {
     }
 
     pub fn get_or_create_sample_block_group(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
         group_name: &str,
@@ -317,7 +324,7 @@ impl BlockGroup {
                 BlockGroup::create(conn, collection_name, Some(sample_name), group_name);
 
             // clone parent blocks/edges/path
-            parent_block_group.clone(conn, &new_block_group.id);
+            parent_block_group.duplicate(conn, &new_block_group.id);
 
             Ok(new_block_group.id)
         } else {
@@ -340,7 +347,7 @@ impl BlockGroup {
         )))
     }
 
-    pub fn get_graph(conn: &Connection, block_group_id: &HashId) -> GenGraph {
+    pub fn get_graph(conn: &GraphConnection, block_group_id: &HashId) -> GenGraph {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
         let blocks = Edge::blocks_from_edges(conn, &edges);
         let (graph, _) = Edge::build_graph(&edges, &blocks);
@@ -349,19 +356,14 @@ impl BlockGroup {
 
     pub fn prune_graph(graph: &mut GenGraph) {
         // Prunes a graph by removing edges on the same chromosome_index. This means if 2 edges are
-        // both "chromosome index 0", we keep the newer one (newer known by the higher edge id).
-        // TODO: This check is not actually right but allows us to test some functionality wrt
-        // inherited block groups now. We need to know whether an edge was added to a blockgroup
-        // via inheritance or created by it. Because edges can be reused, if an edge created
-        // earlier in some other sample is added to a sample, it may be the correct one but have
-        // a lower edge id than some edge in the current sample.
+        // both "chromosome index 0", we keep the newer one.
         let mut root_nodes = HashSet::new();
         let mut edges_to_remove: Vec<(GraphNode, GraphNode)> = vec![];
         for node in graph.nodes() {
             if node.node_id == PATH_START_NODE_ID {
                 root_nodes.insert(node);
             }
-            let mut edges_by_ci: HashMap<i64, (HashId, GraphNode, GraphNode)> = HashMap::new();
+            let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
             for (source_node, target_node, edge_weights) in graph.edges(node) {
                 for edge_weight in edge_weights {
                     if edge_weight.chromosome_index == -1 {
@@ -369,17 +371,17 @@ impl BlockGroup {
                     }
                     edges_by_ci
                         .entry(edge_weight.chromosome_index)
-                        .and_modify(|(edge_id, source, target)| {
-                            if edge_weight.edge_id > *edge_id {
+                        .and_modify(|(source, target, created_on)| {
+                            if edge_weight.created_on > *created_on {
                                 edges_to_remove.push((*source, *target));
-                                *edge_id = edge_weight.edge_id;
                                 *source = source_node;
                                 *target = target_node;
+                                *created_on = edge_weight.created_on;
                             } else {
                                 edges_to_remove.push((source_node, target_node));
                             }
                         })
-                        .or_insert((edge_weight.edge_id, source_node, target_node));
+                        .or_insert((source_node, target_node, edge_weight.created_on));
                 }
             }
         }
@@ -401,7 +403,7 @@ impl BlockGroup {
     }
 
     pub fn get_all_sequences(
-        conn: &Connection,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         _prune: bool,
     ) -> HashSet<String> {
@@ -453,7 +455,7 @@ impl BlockGroup {
     }
 
     pub fn add_accession(
-        conn: &Connection,
+        conn: &GraphConnection,
         path: &Path,
         name: &str,
         start: i64,
@@ -531,8 +533,8 @@ impl BlockGroup {
     }
 
     pub fn insert_changes(
-        conn: &Connection,
-        changes: &Vec<PathChange>,
+        conn: &GraphConnection,
+        changes: &[PathChange],
         cache: &mut PathCache,
         modify_blockgroup: bool,
     ) -> Result<(), ChangeError> {
@@ -618,7 +620,7 @@ impl BlockGroup {
     #[allow(clippy::ptr_arg)]
     #[allow(clippy::needless_late_init)]
     pub fn insert_change(
-        conn: &Connection,
+        conn: &GraphConnection,
         change: &PathChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
     ) -> Result<(), ChangeError> {
@@ -863,7 +865,7 @@ impl BlockGroup {
     }
 
     pub fn intervaltree_for(
-        conn: &Connection,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         remove_ambiguous_positions: bool,
     ) -> IntervalTree<i64, NodeIntervalBlock> {
@@ -873,7 +875,7 @@ impl BlockGroup {
         flatten_to_interval_tree(&graph, remove_ambiguous_positions)
     }
 
-    pub fn get_current_path(conn: &Connection, block_group_id: &HashId) -> Path {
+    pub fn get_current_path(conn: &GraphConnection, block_group_id: &HashId) -> Path {
         let paths = Path::query(
             conn,
             "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
@@ -883,7 +885,7 @@ impl BlockGroup {
     }
 
     pub fn get_path_by_name(
-        conn: &Connection,
+        conn: &GraphConnection,
         block_group_id: &HashId,
         path_name: &str,
     ) -> Option<Path> {
@@ -904,7 +906,7 @@ impl BlockGroup {
 
     #[allow(clippy::too_many_arguments)]
     pub fn derive_subgraph(
-        conn: &Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         child_sample_name: &str,
         source_block_group_id: &HashId,
@@ -1193,7 +1195,7 @@ mod tests {
         let bg1 = BlockGroup::create(conn, "test", None, "hg19");
         let bg2 = BlockGroup::create(conn, "test", None, "hg38");
 
-        BlockGroup::delete(conn, "test", None, "hg19");
+        BlockGroup::delete(conn, "test", None, &bg1.name);
 
         let bgs = BlockGroup::all(conn);
         assert_eq!(bgs.len(), 1);
@@ -1209,7 +1211,7 @@ mod tests {
         let bg1 = BlockGroup::create(conn, "test", Some("sample1"), "hg19");
         let bg2 = BlockGroup::create(conn, "test", Some("sample2"), "hg19");
 
-        BlockGroup::delete(conn, "test", Some("sample1"), "hg19");
+        BlockGroup::delete(conn, "test", bg1.sample_name.as_deref(), &bg1.name);
 
         let bgs = BlockGroup::all(conn);
         assert_eq!(bgs.len(), 1);
@@ -1249,7 +1251,7 @@ mod tests {
             vec![Accession {
                 id: acc_1.id,
                 name: "test".to_string(),
-                path_id: path.id.clone(),
+                path_id: path.id,
                 parent_accession_id: None,
             }]
         );
@@ -1289,7 +1291,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 7,
@@ -1329,7 +1331,7 @@ mod tests {
         };
 
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 19,
@@ -1374,7 +1376,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 7,
@@ -1417,7 +1419,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 15,
@@ -1460,7 +1462,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 12,
@@ -1503,7 +1505,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 10,
@@ -1546,7 +1548,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 9,
@@ -1589,7 +1591,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 10,
@@ -1632,7 +1634,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 15,
@@ -1675,7 +1677,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 5,
@@ -1720,7 +1722,7 @@ mod tests {
         };
 
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 19,
@@ -1764,7 +1766,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 7,
@@ -1819,7 +1821,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 0,
@@ -1862,7 +1864,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 0,
@@ -1905,7 +1907,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 40,
@@ -1948,7 +1950,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 10,
@@ -1991,7 +1993,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 19,
@@ -2035,7 +2037,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 0,
@@ -2079,7 +2081,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 35,
@@ -2123,7 +2125,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let after_end_change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 350,
@@ -2134,7 +2136,7 @@ mod tests {
             preserve_edge: true,
         };
         let before_start_change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: -300,
@@ -2172,7 +2174,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 10,
@@ -2216,7 +2218,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: block_group_id.clone(),
+            block_group_id,
             path: path.clone(),
             path_accession: None,
             start: 18,
@@ -2272,7 +2274,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: new_bg_id.clone(),
+            block_group_id: new_bg_id,
             path: new_path[0].clone(),
             path_accession: None,
             start: 7,
@@ -2433,7 +2435,7 @@ mod tests {
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(new_bg_id.clone())),
+            rusqlite::params!(SQLValue::from(new_bg_id)),
         );
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2451,7 +2453,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: new_bg_id.clone(),
+            block_group_id: new_bg_id,
             path: new_path[0].clone(),
             path_accession: None,
             start: 7,
@@ -2483,7 +2485,7 @@ mod tests {
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(gc_bg_id.clone())),
+            rusqlite::params!(SQLValue::from(gc_bg_id)),
         );
 
         let insert = PathBlock {
@@ -2497,7 +2499,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: gc_bg_id.clone(),
+            block_group_id: gc_bg_id,
             path: new_path[0].clone(),
             path_accession: None,
             start: 7,
@@ -2548,7 +2550,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: new_bg_id.clone(),
+            block_group_id: new_bg_id,
             path: new_path[0].clone(),
             path_accession: None,
             start: 7,
@@ -2607,7 +2609,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: gc_bg_id.clone(),
+            block_group_id: gc_bg_id,
             path: new_path[0].clone(),
             path_accession: None,
             start: 20,
@@ -2645,7 +2647,7 @@ mod tests {
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(new_bg_id.clone())),
+            rusqlite::params!(SQLValue::from(new_bg_id)),
         );
         // This is a heterozygous replacement of 5 bases with 4 bases, so positions
         // downstream of this are not addressable.
@@ -2665,7 +2667,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: new_bg_id.clone(),
+            block_group_id: new_bg_id,
             path: new_path[0].clone(),
             path_accession: None,
             start: 7,
@@ -2700,7 +2702,7 @@ mod tests {
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(gc_bg_id.clone())),
+            rusqlite::params!(SQLValue::from(gc_bg_id)),
         );
 
         let insert_sequence = Sequence::new()
@@ -2721,7 +2723,7 @@ mod tests {
             strand: Strand::Forward,
         };
         let change = PathChange {
-            block_group_id: gc_bg_id.clone(),
+            block_group_id: gc_bg_id,
             path: new_path[0].clone(),
             path_accession: None,
             start: 20,
@@ -2821,8 +2823,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, edge_id)| BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
-                    edge_id: (*edge_id).clone(),
+                    block_group_id: block_group1_id,
+                    edge_id: *(*edge_id),
                     chromosome_index: if i < 2 { 1 } else { 0 },
                     phased: 0,
                 })
@@ -2948,8 +2950,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, edge_id)| BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
-                    edge_id: (*edge_id).clone(),
+                    block_group_id: block_group1_id,
+                    edge_id: *(*edge_id),
                     chromosome_index: if i < 2 { 1 } else { 0 },
                     phased: 0,
                 })
@@ -3025,8 +3027,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, edge_id)| BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
-                    edge_id: (*edge_id).clone(),
+                    block_group_id: block_group1_id,
+                    edge_id: *(*edge_id),
                     chromosome_index: if i < 2 { 1 } else { 0 },
                     phased: 0,
                 })
@@ -3161,8 +3163,8 @@ mod tests {
             let block_group_edges = edge_ids
                 .iter()
                 .map(|edge_id| BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
-                    edge_id: (*edge_id).clone(),
+                    block_group_id: block_group1_id,
+                    edge_id: *(*edge_id),
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
                 })
@@ -3237,8 +3239,8 @@ mod tests {
             let block_group_edges = edge_ids
                 .iter()
                 .map(|edge_id| BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
-                    edge_id: (*edge_id).clone(),
+                    block_group_id: block_group1_id,
+                    edge_id: *(*edge_id),
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
                 })
@@ -3282,19 +3284,19 @@ mod tests {
             );
             let block_group_edges = [
                 BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
+                    block_group_id: block_group1_id,
                     edge_id: deletion_edge.id,
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
                 },
                 BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
+                    block_group_id: block_group1_id,
                     edge_id: ref_heal_1.id,
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,
                 },
                 BlockGroupEdgeData {
-                    block_group_id: block_group1_id.clone(),
+                    block_group_id: block_group1_id,
                     edge_id: ref_heal_2.id,
                     chromosome_index: NO_CHROMOSOME_INDEX,
                     phased: 0,

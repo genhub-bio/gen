@@ -1,27 +1,38 @@
-use std::{convert::TryInto, path::PathBuf, string::ToString};
+use std::{
+    collections::HashMap,
+    convert::TryInto,
+    io::{self, BufReader},
+    path::{Path, PathBuf},
+    rc::Rc,
+    string::ToString,
+};
 
-use gen_core::{HashId, config::get_changeset_path, traits::Capnp};
+use gen_core::{HashId, Workspace, calculate_hash, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
 use petgraph::{Direction, graphmap::UnGraphMap};
-use rusqlite::{Connection, Result as SQLResult, Row, params, params_from_iter, types::Value};
+use rusqlite::{Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::{
     changesets::{
         DatabaseChangeset, get_changeset_dependencies_from_path, get_changeset_from_path,
     },
-    errors::{BranchError, RemoteError},
+    db::OperationsConnection,
+    errors::{BranchError, FileAdditionError, RemoteError},
     file_types::FileTypes,
     gen_models_capnp::operation,
     session_operations::DependencyModels,
     traits::*,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Operation {
     pub hash: HashId,
     pub parent_hash: Option<HashId>,
     pub change_type: String,
+    pub created_on: i64,
 }
 
 impl<'a> Capnp<'a> for Operation {
@@ -39,6 +50,7 @@ impl<'a> Capnp<'a> for Operation {
             }
         }
         builder.set_change_type(&self.change_type);
+        builder.set_created_on(self.created_on);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -56,28 +68,60 @@ impl<'a> Capnp<'a> for Operation {
             }
         };
         let change_type = reader.get_change_type().unwrap().to_string().unwrap();
+        let created_on = reader.get_created_on();
 
         Operation {
             hash,
             parent_hash,
             change_type,
+            created_on,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HashRange {
+    pub from: Option<HashId>,
+    pub to: Option<HashId>,
+}
+
+#[derive(Debug, Error)]
+pub enum HashParseError {
+    #[error("No current branch is checked out.")]
+    NoCurrentBranch,
+    #[error("Branch '{0}' not found.")]
+    BranchNotFound(String),
+    #[error("Branch '{0}' has no operations.")]
+    EmptyBranch(String),
+    #[error("Reference '{0}' is not a valid HEAD shorthand.")]
+    InvalidHead(String),
+    #[error("HEAD offset {0} is out of range for the current branch.")]
+    HeadOffsetOutOfRange(usize),
+    #[error("Reference '{0}' did not match any operation.")]
+    OperationNotFound(String),
+    #[error("Reference '{0}' matches multiple operations.")]
+    OperationAmbiguous(String),
+}
+
 impl Operation {
-    pub fn create(conn: &Connection, change_type: &str, hash: &HashId) -> SQLResult<Operation> {
+    pub fn create(
+        conn: &OperationsConnection,
+        change_type: &str,
+        hash: &HashId,
+    ) -> SQLResult<Operation> {
         let current_op = OperationState::get_operation(conn);
         let current_branch_id =
             OperationState::get_current_branch(conn).expect("No branch is checked out.");
 
-        let query = "INSERT INTO operations (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
+        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let query = "INSERT INTO operations (hash, change_type, parent_hash, created_on) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
-        stmt.execute(params![hash, change_type, current_op])?;
+        stmt.execute(params![hash, change_type, current_op, timestamp])?;
         let operation = Operation {
             hash: *hash,
             parent_hash: current_op,
             change_type: change_type.to_string(),
+            created_on: timestamp,
         };
         // TODO: error condition here where we can write to disk but transaction fails
         OperationState::set_operation(conn, &operation.hash);
@@ -86,26 +130,29 @@ impl Operation {
     }
 
     pub fn create_without_tracking(
-        conn: &Connection,
+        conn: &OperationsConnection,
         hash: &HashId,
         change_type: &str,
         parent_hash: Option<HashId>,
+        created_on: Option<i64>,
     ) -> SQLResult<Operation> {
-        let query = "INSERT INTO operations (hash, change_type, parent_hash) VALUES (?1, ?2, ?3);";
+        let timestamp = created_on.unwrap_or(chrono::Utc::now().timestamp_nanos_opt().unwrap());
+        let query = "INSERT INTO operations (hash, change_type, parent_hash, created_on) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
-        stmt.execute(params![hash, change_type, parent_hash])?;
+        stmt.execute(params![hash, change_type, parent_hash, timestamp])?;
         let operation = Operation {
             hash: *hash,
             parent_hash,
             change_type: change_type.to_string(),
+            created_on: timestamp,
         };
         Ok(operation)
     }
 
     pub fn add_file(
-        conn: &Connection,
+        conn: &OperationsConnection,
         operation_hash: &HashId,
-        file_addition_id: i64,
+        file_addition_id: &HashId,
     ) -> SQLResult<()> {
         let query =
             "INSERT INTO operation_files (operation_hash, file_addition_id) VALUES (?1, ?2)";
@@ -114,7 +161,19 @@ impl Operation {
         Ok(())
     }
 
-    pub fn get_upstream(conn: &Connection, operation_hash: &HashId) -> Vec<HashId> {
+    pub fn add_database(
+        conn: &OperationsConnection,
+        operation_hash: &HashId,
+        db_uuid: &str,
+    ) -> SQLResult<()> {
+        let query =
+            "INSERT INTO operation_databases (operation_hash, database_uuid) VALUES (?1, ?2)";
+        let mut stmt = conn.prepare(query).unwrap();
+        stmt.execute(params![operation_hash, db_uuid])?;
+        Ok(())
+    }
+
+    pub fn get_upstream(conn: &OperationsConnection, operation_hash: &HashId) -> Vec<HashId> {
         let query = "WITH RECURSIVE r_operations(operation_hash, depth) AS ( \
         select ?1, 0 UNION \
         select parent_hash, depth + 1 from r_operations join operations ON hash=operation_hash \
@@ -126,7 +185,7 @@ impl Operation {
             .collect::<Vec<HashId>>()
     }
 
-    pub fn get_operation_graph(conn: &Connection) -> OperationGraph {
+    pub fn get_operation_graph(conn: &OperationsConnection) -> OperationGraph {
         let mut graph = OperationGraph::new();
         let operations = Operation::query(conn, "select * from operations;", rusqlite::params![]);
         for op in operations.iter() {
@@ -140,7 +199,7 @@ impl Operation {
     }
 
     pub fn get_path_between(
-        conn: &Connection,
+        conn: &OperationsConnection,
         source_node: HashId,
         target_node: HashId,
     ) -> Vec<(HashId, Direction, HashId)> {
@@ -181,31 +240,105 @@ impl Operation {
         patch_path
     }
 
-    pub fn search_hash(conn: &Connection, op_hash: &str) -> SQLResult<Operation> {
-        Operation::get(
+    pub fn search_hash(
+        conn: &OperationsConnection,
+        op_hash: &str,
+    ) -> Result<Operation, HashParseError> {
+        let matches = Operation::search_hashes(conn, op_hash);
+        match matches.len() {
+            0 => Err(HashParseError::OperationNotFound(op_hash.to_string())),
+            1 => Ok(matches[0].clone()),
+            _ => Err(HashParseError::OperationAmbiguous(op_hash.to_string())),
+        }
+    }
+
+    pub fn search_hashes(conn: &OperationsConnection, op_hash: &str) -> Vec<Operation> {
+        Operation::query(
             conn,
-            "select * from operations where hash LIKE ?1",
-            params![op_hash],
+            "select * from operations where hex(hash) LIKE ?1",
+            params![format!("{op_hash}%")],
         )
     }
 
-    pub fn get_changeset_path(&self) -> PathBuf {
-        get_changeset_path(&self.hash).join("changeset")
+    pub fn get_changeset_path(&self, workspace: &Workspace) -> PathBuf {
+        workspace.changeset_path(&self.hash).join("changeset")
     }
 
-    pub fn get_changeset_dependencies_path(&self) -> PathBuf {
-        get_changeset_path(&self.hash).join("dependencies")
+    pub fn get_changeset_dependencies_path(&self, workspace: &Workspace) -> PathBuf {
+        workspace.changeset_path(&self.hash).join("dependencies")
     }
 
-    pub fn get_changeset(&self) -> DatabaseChangeset {
-        let path = get_changeset_path(&self.hash).join("changeset");
+    pub fn get_changeset(&self, workspace: &Workspace) -> DatabaseChangeset {
+        let path = self.get_changeset_path(workspace);
         get_changeset_from_path(path)
     }
 
-    pub fn get_changeset_dependencies(&self) -> DependencyModels {
-        let path = get_changeset_path(&self.hash).join("dependencies");
+    pub fn get_changeset_dependencies(&self, workspace: &Workspace) -> DependencyModels {
+        let path = self.get_changeset_dependencies_path(workspace);
         get_changeset_dependencies_from_path(path)
     }
+}
+
+pub fn parse_hash(conn: &OperationsConnection, input: &str) -> Result<HashRange, HashParseError> {
+    if input.contains("..") {
+        let mut it = input.split("..");
+        let from_ref = it.next().unwrap_or_default();
+        let to_ref = it.next().unwrap_or_default();
+        return Ok(HashRange {
+            from: Some(resolve_reference(conn, from_ref)?),
+            to: Some(resolve_reference(conn, to_ref)?),
+        });
+    }
+
+    Ok(HashRange {
+        from: None,
+        to: Some(resolve_reference(conn, input)?),
+    })
+}
+
+fn resolve_reference(
+    conn: &OperationsConnection,
+    reference: &str,
+) -> Result<HashId, HashParseError> {
+    if reference.starts_with("HEAD") {
+        return resolve_head(conn, reference);
+    }
+
+    if let Some(branch) = Branch::get_by_name(conn, reference) {
+        if let Some(hash) = branch.current_operation_hash {
+            return Ok(hash);
+        }
+        return Err(HashParseError::EmptyBranch(branch.name));
+    }
+
+    let operation = Operation::search_hash(conn, reference)?;
+    Ok(operation.hash)
+}
+
+fn resolve_head(conn: &OperationsConnection, reference: &str) -> Result<HashId, HashParseError> {
+    let branch_id =
+        OperationState::get_current_branch(conn).ok_or(HashParseError::NoCurrentBranch)?;
+    let branch = Branch::get_by_id(conn, branch_id)
+        .ok_or_else(|| HashParseError::BranchNotFound(branch_id.to_string()))?;
+    let operations = Branch::get_operations(conn, branch.id);
+    if operations.is_empty() {
+        return Err(HashParseError::EmptyBranch(branch.name));
+    }
+    if reference == "HEAD" {
+        return Ok(operations.last().unwrap().hash);
+    }
+    if let Some(offset) = reference.strip_prefix("HEAD~") {
+        let offset: usize = offset
+            .parse()
+            .map_err(|_| HashParseError::InvalidHead(reference.to_string()))?;
+        let head_index = operations.len() - 1;
+        let target_index = head_index
+            .checked_sub(offset)
+            .ok_or(HashParseError::HeadOffsetOutOfRange(offset))?;
+        return Ok(operations[target_index].hash);
+    }
+
+    Err(HashParseError::InvalidHead(reference.to_string()))
 }
 
 impl Query for Operation {
@@ -219,6 +352,7 @@ impl Query for Operation {
             hash: row.get(0).unwrap(),
             parent_hash: row.get(1).unwrap(),
             change_type: row.get(2).unwrap(),
+            created_on: row.get(3).unwrap(),
         }
     }
 }
@@ -233,11 +367,28 @@ pub struct OperationInfo {
     pub description: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<HashId, std::io::Error> {
+    let file = std::fs::File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let hash_bytes = calculate_stream_hash(reader)?;
+    Ok(HashId(hash_bytes))
+}
+
+fn calculate_stream_hash<R: std::io::Read>(mut reader: R) -> Result<[u8; 32], std::io::Error> {
+    let mut hasher = Sha256::new();
+    io::copy(&mut reader, &mut hasher)?;
+    let result = hasher.finalize();
+    let mut hash_array = [0u8; 32];
+    hash_array.copy_from_slice(&result);
+    Ok(hash_array)
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct FileAddition {
-    pub id: i64,
+    pub id: HashId,
     pub file_path: String,
     pub file_type: FileTypes,
+    pub checksum: HashId,
 }
 
 impl Query for FileAddition {
@@ -250,35 +401,116 @@ impl Query for FileAddition {
             id: row.get(0).unwrap(),
             file_path: row.get(1).unwrap(),
             file_type: row.get(2).unwrap(),
+            checksum: row.get(3).unwrap(),
         }
     }
 }
 
 impl FileAddition {
-    pub fn create(conn: &Connection, file_path: &str, file_type: FileTypes) -> FileAddition {
-        let query =
-            "INSERT INTO file_additions (file_path, file_type) VALUES (?1, ?2) RETURNING (id)";
-        let mut stmt = conn.prepare(query).unwrap();
-        let mut rows = stmt
-            .query_map(
-                params_from_iter(vec![
-                    Value::from(file_path.to_string()),
-                    Value::from(file_type),
-                ]),
-                |row| {
-                    Ok(FileAddition {
-                        id: row.get(0)?,
-                        file_path: file_path.to_string(),
-                        file_type,
-                    })
+    pub fn generate_file_addition_id(checksum: &HashId, file_path: &str) -> HashId {
+        let combined = format!("{checksum};{file_path}");
+        HashId(calculate_hash(&combined))
+    }
+
+    fn normalize_file_paths(workspace: &Workspace, file_path: &str) -> (String, String) {
+        if file_path.is_empty() {
+            return (String::new(), String::new());
+        }
+        let repo_root = workspace.repo_root().unwrap();
+
+        let provided_path = Path::new(file_path);
+
+        if provided_path.is_absolute() {
+            if provided_path.starts_with(&repo_root) {
+                let absolute = provided_path.to_string_lossy().to_string();
+                let relative = provided_path
+                    .strip_prefix(&repo_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                return (absolute, relative);
+            }
+        } else {
+            let absolute = repo_root.join(provided_path);
+            if absolute.exists() {
+                let relative = absolute
+                    .strip_prefix(&repo_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                return (absolute.to_string_lossy().to_string(), relative);
+            }
+        };
+
+        let fallback = file_path.to_string();
+        (fallback.clone(), fallback)
+    }
+
+    pub fn get_or_create(
+        workspace: &Workspace,
+        conn: &OperationsConnection,
+        file_path: &str,
+        file_type: FileTypes,
+        checksum_override: Option<HashId>,
+    ) -> Result<FileAddition, FileAdditionError> {
+        let (absolute_file_path, relative_file_path) =
+            FileAddition::normalize_file_paths(workspace, file_path);
+
+        // TODO: Verify checksum_override actually matches the file's checksum?
+        let checksum = if let Some(checksum_override) = checksum_override {
+            checksum_override
+        } else {
+            let absolute_path = Path::new(&absolute_file_path);
+            let checksum_path = if absolute_path.is_file() {
+                absolute_file_path.as_str()
+            } else {
+                relative_file_path.as_str()
+            };
+            match calculate_file_checksum(checksum_path) {
+                Ok(checksum) => checksum,
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::NotFound => HashId::convert_str("non-existent"),
+                    std::io::ErrorKind::PermissionDenied => {
+                        return Err(FileAdditionError::FilePermissionDenied(
+                            file_path.to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(FileAdditionError::FileReadError(e));
+                    }
                 },
-            )
-            .unwrap();
-        rows.next().unwrap().unwrap()
+            }
+        };
+
+        let id = FileAddition::generate_file_addition_id(&checksum, &relative_file_path);
+
+        let query = "INSERT INTO file_additions (id, file_path, file_type, checksum) VALUES (?1, ?2, ?3, ?4);";
+        let mut stmt = conn.prepare(query).unwrap();
+
+        let addition = FileAddition {
+            id,
+            file_path: relative_file_path.clone(),
+            file_type,
+            checksum,
+        };
+
+        match stmt.execute((&id, &relative_file_path, file_type, &checksum)) {
+            Ok(_) => Ok(addition),
+            Err(err) => match &err {
+                rusqlite::Error::SqliteFailure(suberr, _details) => {
+                    if suberr.code == rusqlite::ErrorCode::ConstraintViolation {
+                        Ok(addition)
+                    } else {
+                        Err(FileAdditionError::DatabaseError(err))
+                    }
+                }
+                _ => Err(FileAdditionError::DatabaseError(err)),
+            },
+        }
     }
 
     pub fn get_files_for_operation(
-        conn: &Connection,
+        conn: &OperationsConnection,
         operation_hash: &HashId,
     ) -> Vec<FileAddition> {
         let query = "select fa.* from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
@@ -290,6 +522,45 @@ impl FileAddition {
             .unwrap();
         rows.map(|row| row.unwrap()).collect()
     }
+
+    pub fn query_by_operations(
+        conn: &OperationsConnection,
+        operations: &[HashId],
+    ) -> Result<HashMap<HashId, Vec<FileAddition>>, FileAdditionError> {
+        let query = "select fa.*, of.operation_hash from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash in rarray(?1)";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map(
+                params![Rc::new(
+                    operations
+                        .iter()
+                        .map(|h| Value::from(*h))
+                        .collect::<Vec<Value>>()
+                )],
+                |row| Ok((FileAddition::process_row(row), row.get::<_, HashId>(4)?)),
+            )
+            .unwrap();
+        rows.into_iter()
+            .try_fold(HashMap::new(), |mut acc: HashMap<_, Vec<_>>, row| {
+                let (item, hash) = row?;
+                acc.entry(hash).or_default().push(item);
+                Ok(acc)
+            })
+    }
+
+    pub fn hashed_filename(self) -> String {
+        format!(
+            "{}.{}",
+            self.checksum.clone(),
+            &FileTypes::suffix(self.file_type)
+        )
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum OperationSummaryError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -314,8 +585,12 @@ impl Query for OperationSummary {
 }
 
 impl OperationSummary {
-    pub fn create(conn: &Connection, operation_hash: &HashId, summary: &str) -> OperationSummary {
-        let query = "INSERT INTO operation_summary (operation_hash, summary) VALUES (?1, ?2) RETURNING (id)";
+    pub fn create(
+        conn: &OperationsConnection,
+        operation_hash: &HashId,
+        summary: &str,
+    ) -> OperationSummary {
+        let query = "INSERT INTO operation_summaries (operation_hash, summary) VALUES (?1, ?2) RETURNING (id)";
         let mut stmt = conn.prepare(query).unwrap();
         let mut rows = stmt
             .query_map(params![operation_hash, summary], |row| {
@@ -329,11 +604,36 @@ impl OperationSummary {
         rows.next().unwrap().unwrap()
     }
 
-    pub fn set_message(conn: &Connection, id: i64, message: &str) -> SQLResult<()> {
-        let query = "UPDATE operation_summary SET summary = ?2 where id = ?1";
+    pub fn set_message(conn: &OperationsConnection, id: i64, message: &str) -> SQLResult<()> {
+        let query = "UPDATE operation_summaries SET summary = ?2 where id = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         stmt.execute(params![id, message])?;
         Ok(())
+    }
+
+    pub fn query_by_operations(
+        conn: &OperationsConnection,
+        operations: &[HashId],
+    ) -> Result<HashMap<HashId, Vec<Self>>, OperationSummaryError> {
+        let query = "select * from operation_summaries where operation_hash in rarray(?1)";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map(
+                params![Rc::new(
+                    operations
+                        .iter()
+                        .map(|h| Value::from(*h))
+                        .collect::<Vec<Value>>()
+                )],
+                |row| Ok(Self::process_row(row)),
+            )
+            .unwrap();
+        rows.into_iter()
+            .try_fold(HashMap::new(), |mut acc: HashMap<_, Vec<_>>, row| {
+                let item = row?;
+                acc.entry(item.operation_hash).or_default().push(item);
+                Ok(acc)
+            })
     }
 }
 
@@ -342,16 +642,30 @@ impl<'a> Capnp<'a> for FileAddition {
     type Reader = crate::gen_models_capnp::file_addition::Reader<'a>;
 
     fn write_capnp(&self, builder: &mut Self::Builder) {
-        builder.set_id(self.id);
+        builder.set_id(&self.id.0).unwrap();
         builder.set_file_path(&self.file_path);
         builder.set_file_type(self.file_type.into());
+        builder.set_checksum(&self.checksum.0).unwrap();
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
         Self {
-            id: reader.get_id(),
+            id: reader
+                .get_id()
+                .unwrap()
+                .as_slice()
+                .unwrap()
+                .try_into()
+                .unwrap(),
             file_path: reader.get_file_path().unwrap().to_string().unwrap(),
             file_type: reader.get_file_type().unwrap().into(),
+            checksum: reader
+                .get_checksum()
+                .unwrap()
+                .as_slice()
+                .unwrap()
+                .try_into()
+                .unwrap(),
         }
     }
 }
@@ -445,7 +759,11 @@ impl Remote {
 
     /// Create a new remote with the given name and URL
     /// Validates input and handles constraint violations gracefully
-    pub fn create(conn: &Connection, name: &str, url: &str) -> Result<Remote, RemoteError> {
+    pub fn create(
+        conn: &OperationsConnection,
+        name: &str,
+        url: &str,
+    ) -> Result<Remote, RemoteError> {
         // Validate input
         Self::validate_name(name)?;
         Self::validate_url(url)?;
@@ -468,7 +786,7 @@ impl Remote {
     }
 
     /// Get a remote by name
-    pub fn get_by_name(conn: &Connection, name: &str) -> Result<Remote, RemoteError> {
+    pub fn get_by_name(conn: &OperationsConnection, name: &str) -> Result<Remote, RemoteError> {
         let query = "SELECT name, url FROM remotes WHERE name = ?1";
         match Remote::get(conn, query, params![name]) {
             Ok(remote) => Ok(remote),
@@ -480,12 +798,12 @@ impl Remote {
     }
 
     /// Get a remote by name, returning None if not found (for backward compatibility)
-    pub fn get_by_name_optional(conn: &Connection, name: &str) -> Option<Remote> {
+    pub fn get_by_name_optional(conn: &OperationsConnection, name: &str) -> Option<Remote> {
         Self::get_by_name(conn, name).ok()
     }
 
     /// List all remotes
-    pub fn list_all(conn: &Connection) -> Vec<Remote> {
+    pub fn list_all(conn: &OperationsConnection) -> Vec<Remote> {
         Remote::query(
             conn,
             "SELECT name, url FROM remotes ORDER BY name",
@@ -494,7 +812,7 @@ impl Remote {
     }
 
     /// Delete a remote by name
-    pub fn delete(conn: &Connection, name: &str) -> Result<(), RemoteError> {
+    pub fn delete(conn: &OperationsConnection, name: &str) -> Result<(), RemoteError> {
         // Check if remote exists first
         Self::get_by_name(conn, name)?;
 
@@ -505,7 +823,7 @@ impl Remote {
     }
 
     /// Check if a remote exists
-    pub fn exists(conn: &Connection, name: &str) -> bool {
+    pub fn exists(conn: &OperationsConnection, name: &str) -> bool {
         Self::get_by_name_optional(conn, name).is_some()
     }
 }
@@ -534,7 +852,7 @@ impl Query for Branch {
 }
 
 impl Branch {
-    pub fn get_or_create(conn: &Connection, branch_name: &str) -> Branch {
+    pub fn get_or_create(conn: &OperationsConnection, branch_name: &str) -> Branch {
         match Branch::create_with_remote(conn, branch_name, None) {
             Ok(res) => res,
             Err(rusqlite::Error::SqliteFailure(err, details)) => {
@@ -552,7 +870,7 @@ impl Branch {
     }
 
     pub fn create_with_remote(
-        conn: &Connection,
+        conn: &OperationsConnection,
         branch_name: &str,
         remote_name: Option<&str>,
     ) -> SQLResult<Branch> {
@@ -572,7 +890,7 @@ impl Branch {
         rows.next().unwrap()
     }
 
-    pub fn delete(conn: &Connection, branch_id: i64) -> Result<(), BranchError> {
+    pub fn delete(conn: &OperationsConnection, branch_id: i64) -> Result<(), BranchError> {
         if let Some(current_branch) = OperationState::get_current_branch(conn)
             && current_branch == branch_id
         {
@@ -584,11 +902,11 @@ impl Branch {
         Ok(())
     }
 
-    pub fn all(conn: &Connection) -> Vec<Branch> {
+    pub fn all(conn: &OperationsConnection) -> Vec<Branch> {
         Branch::query(conn, "select * from branch;", params![])
     }
 
-    pub fn get_by_name(conn: &Connection, branch_name: &str) -> Option<Branch> {
+    pub fn get_by_name(conn: &OperationsConnection, branch_name: &str) -> Option<Branch> {
         let mut branch: Option<Branch> = None;
         let results = Branch::query(
             conn,
@@ -601,7 +919,7 @@ impl Branch {
         branch
     }
 
-    pub fn get_by_id(conn: &Connection, branch_id: i64) -> Option<Branch> {
+    pub fn get_by_id(conn: &OperationsConnection, branch_id: i64) -> Option<Branch> {
         let mut branch: Option<Branch> = None;
         for result in Branch::query(
             conn,
@@ -615,7 +933,11 @@ impl Branch {
         branch
     }
 
-    pub fn set_current_operation(conn: &Connection, branch_id: i64, operation_hash: &HashId) {
+    pub fn set_current_operation(
+        conn: &OperationsConnection,
+        branch_id: i64,
+        operation_hash: &HashId,
+    ) {
         conn.execute(
             "UPDATE branch set current_operation_hash = ?2 where id = ?1",
             params![branch_id, operation_hash],
@@ -623,19 +945,23 @@ impl Branch {
         .unwrap();
     }
 
-    pub fn get_operations(conn: &Connection, branch_id: i64) -> Vec<Operation> {
+    pub fn get_operations(conn: &OperationsConnection, branch_id: i64) -> Vec<Operation> {
         let branch = Branch::get_by_id(conn, branch_id)
             .unwrap_or_else(|| panic!("No branch with id {branch_id}."));
-        let hashes = Operation::get_upstream(conn, &branch.current_operation_hash.unwrap());
-        hashes
-            .iter()
-            .map(|hash| Operation::get_by_id(conn, hash).unwrap())
-            .collect::<Vec<Operation>>()
+        if let Some(hash) = branch.current_operation_hash {
+            let hashes = Operation::get_upstream(conn, &hash);
+            hashes
+                .iter()
+                .map(|hash| Operation::get_by_id(conn, hash).unwrap())
+                .collect::<Vec<Operation>>()
+        } else {
+            vec![]
+        }
     }
 
     /// Associate a branch with a remote
     pub fn set_remote(
-        conn: &Connection,
+        conn: &OperationsConnection,
         branch_id: i64,
         remote_name: Option<&str>,
     ) -> SQLResult<()> {
@@ -647,7 +973,7 @@ impl Branch {
 
     /// Associate a branch with a remote with validation
     pub fn set_remote_validated(
-        conn: &Connection,
+        conn: &OperationsConnection,
         branch_id: i64,
         remote_name: Option<&str>,
     ) -> Result<(), RemoteError> {
@@ -663,7 +989,7 @@ impl Branch {
     }
 
     /// Get the remote associated with a branch
-    pub fn get_remote(conn: &Connection, branch_id: i64) -> Option<String> {
+    pub fn get_remote(conn: &OperationsConnection, branch_id: i64) -> Option<String> {
         let query = "SELECT remote_name FROM branch WHERE id = ?1";
         let mut stmt = conn.prepare(query).ok()?;
         let mut rows = stmt
@@ -704,7 +1030,7 @@ impl Query for Defaults {
 impl Defaults {
     /// Set the default remote by name
     pub fn set_default_remote(
-        conn: &Connection,
+        conn: &OperationsConnection,
         remote_name: Option<&str>,
     ) -> Result<(), RemoteError> {
         // If setting a remote name, validate that it exists
@@ -719,7 +1045,7 @@ impl Defaults {
     }
 
     pub fn set_default_remote_compat(
-        conn: &Connection,
+        conn: &OperationsConnection,
         remote_name: Option<&str>,
     ) -> SQLResult<()> {
         let query = "UPDATE defaults SET remote_name = ?1 WHERE id = 1";
@@ -729,7 +1055,7 @@ impl Defaults {
     }
 
     /// Get the default remote name
-    pub fn get_default_remote(conn: &Connection) -> Option<String> {
+    pub fn get_default_remote(conn: &OperationsConnection) -> Option<String> {
         let query = "SELECT remote_name FROM defaults WHERE id = 1";
         let mut stmt = conn.prepare(query).ok()?;
         let mut rows = stmt
@@ -744,7 +1070,7 @@ impl Defaults {
     }
 
     /// Helper method to get the default remote URL by resolving the remote name
-    pub fn get_default_remote_url(conn: &Connection) -> Option<String> {
+    pub fn get_default_remote_url(conn: &OperationsConnection) -> Option<String> {
         if let Some(remote_name) = Self::get_default_remote(conn) {
             if let Some(remote) = Remote::get_by_name_optional(conn, &remote_name) {
                 Some(remote.url)
@@ -757,14 +1083,14 @@ impl Defaults {
     }
 
     /// Get the defaults record
-    pub fn get(conn: &Connection) -> Option<Defaults> {
+    pub fn get(conn: &OperationsConnection) -> Option<Defaults> {
         let query = "SELECT id, db_name, collection_name, remote_name FROM defaults WHERE id = 1";
         Self::get_single(conn, query, params![]).ok()
     }
 
     /// Helper method to get a single defaults record using the Query trait
     fn get_single(
-        conn: &Connection,
+        conn: &OperationsConnection,
         query: &str,
         params: &[&dyn rusqlite::ToSql],
     ) -> SQLResult<Defaults> {
@@ -782,7 +1108,7 @@ impl Defaults {
 pub struct OperationState {}
 
 impl OperationState {
-    pub fn set_operation(conn: &Connection, op_hash: &HashId) {
+    pub fn set_operation(conn: &OperationsConnection, op_hash: &HashId) {
         let mut stmt = conn
             .prepare(
                 "INSERT INTO operation_state (id, operation_hash)
@@ -796,7 +1122,7 @@ impl OperationState {
         Branch::set_current_operation(conn, branch_id, op_hash);
     }
 
-    pub fn get_operation(conn: &Connection) -> Option<HashId> {
+    pub fn get_operation(conn: &OperationsConnection) -> Option<HashId> {
         let mut hash: Option<HashId> = None;
         let mut stmt = conn
             .prepare("SELECT operation_hash from operation_state where id = 1;")
@@ -808,7 +1134,7 @@ impl OperationState {
         hash
     }
 
-    pub fn set_branch(conn: &Connection, branch_name: &str) {
+    pub fn set_branch(conn: &OperationsConnection, branch_name: &str) {
         let branch = Branch::get_by_name(conn, branch_name)
             .unwrap_or_else(|| panic!("No branch named {branch_name}."));
         let mut stmt = conn
@@ -829,7 +1155,7 @@ impl OperationState {
         }
     }
 
-    pub fn get_current_branch(conn: &Connection) -> Option<i64> {
+    pub fn get_current_branch(conn: &OperationsConnection) -> Option<i64> {
         let mut id: Option<i64> = None;
         let mut stmt = conn
             .prepare("SELECT branch_id from operation_state where id = 1;")
@@ -844,11 +1170,19 @@ impl OperationState {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{
+        collections::HashSet,
+        fs,
+        io::{Cursor, Write},
+        path::PathBuf,
+    };
+
+    use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::test_helpers::{
-        create_operation, get_connection, get_operation_connection, setup_gen_dir,
+    use crate::{
+        files::GenDatabase,
+        test_helpers::{create_operation, setup_gen},
     };
 
     #[cfg(test)]
@@ -857,8 +1191,8 @@ mod tests {
 
         #[test]
         fn test_writes_operation_hash() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             let operation =
                 Operation::create(op_conn, "test", &HashId::convert_str("some-hash")).unwrap();
@@ -871,8 +1205,8 @@ mod tests {
 
         #[test]
         fn test_default_remote_functionality() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Create test remotes
             Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -920,8 +1254,8 @@ mod tests {
 
         #[test]
         fn test_defaults_get() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Test getting defaults record
             let defaults = Defaults::get(op_conn).unwrap();
@@ -978,8 +1312,8 @@ mod tests {
 
         #[test]
         fn test_branch_set_remote_valid() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Get database UUID and setup database
 
@@ -1005,8 +1339,8 @@ mod tests {
 
         #[test]
         fn test_branch_set_remote_nonexistent() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Get database UUID and setup database
 
@@ -1023,8 +1357,8 @@ mod tests {
 
         #[test]
         fn test_branch_clear_remote() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Get database UUID and setup database
 
@@ -1048,8 +1382,8 @@ mod tests {
 
         #[test]
         fn test_branch_remote_cascade_on_remote_delete() {
-            setup_gen_dir();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
 
             // Get database UUID and setup database
 
@@ -1079,18 +1413,302 @@ mod tests {
         }
     }
 
+    mod parse_hash {
+        use super::*;
+
+        #[test]
+        fn test_parse_hash_head_and_range() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_1 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-1-abc-123")).unwrap();
+            let op_2 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-2-abc-123")).unwrap();
+
+            let head = parse_hash(op_conn, "HEAD").unwrap();
+            assert_eq!(
+                head,
+                HashRange {
+                    from: None,
+                    to: Some(op_2.hash),
+                }
+            );
+
+            let range = parse_hash(op_conn, "HEAD~1..HEAD").unwrap();
+            assert_eq!(
+                range,
+                HashRange {
+                    from: Some(op_1.hash),
+                    to: Some(op_2.hash),
+                }
+            );
+        }
+
+        #[test]
+        fn test_parse_hash_branch_and_partial() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_1 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-1-xyz-123")).unwrap();
+            let op_2 =
+                Operation::create(op_conn, "add", &HashId::convert_str("op-2-xyz-123")).unwrap();
+
+            let branch_ref = parse_hash(op_conn, "main").unwrap();
+            assert_eq!(
+                branch_ref,
+                HashRange {
+                    from: None,
+                    to: Some(op_2.hash),
+                }
+            );
+
+            let partial = format!("{}", op_1.hash);
+            let prefix = &partial[..6];
+            let resolved = parse_hash(op_conn, prefix).unwrap();
+            assert_eq!(
+                resolved,
+                HashRange {
+                    from: None,
+                    to: Some(op_1.hash),
+                }
+            );
+        }
+
+        #[test]
+        fn test_parse_hash_head_offset_out_of_range() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
+            let result = parse_hash(op_conn, "HEAD~1");
+            assert!(matches!(
+                result,
+                Err(HashParseError::HeadOffsetOutOfRange(1))
+            ));
+        }
+    }
+
+    mod search_hash {
+        use super::*;
+
+        #[test]
+        fn test_search_hashes_returns_matches() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op_1 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_2 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000002",
+                ),
+            )
+            .unwrap();
+            let _op_3 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "def0000000000000000000000000000000000000000000000000000000000003",
+                ),
+            )
+            .unwrap();
+
+            let matches = Operation::search_hashes(op_conn, "abc");
+            assert_eq!(matches.len(), 2);
+        }
+
+        #[test]
+        fn test_search_hash_resolves_and_errors() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_unique = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "def0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_ambiguous = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_ambiguous_2 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000002",
+                ),
+            )
+            .unwrap();
+
+            let resolved = Operation::search_hash(op_conn, "def").unwrap();
+            assert_eq!(resolved.hash, op_unique.hash);
+
+            let ambiguous = Operation::search_hash(op_conn, "abc");
+            assert!(matches!(
+                ambiguous,
+                Err(HashParseError::OperationAmbiguous(_))
+            ));
+        }
+    }
+
+    mod resolve_reference {
+        use super::*;
+
+        #[test]
+        fn test_resolve_reference_branch_and_hash() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_unique = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "def0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+
+            let branch_hash = resolve_reference(op_conn, "main").unwrap();
+            assert_eq!(branch_hash, op_unique.hash);
+
+            let hash_ref = resolve_reference(op_conn, "def").unwrap();
+            assert_eq!(hash_ref, op_unique.hash);
+        }
+
+        #[test]
+        fn test_resolve_reference_ambiguous() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op_1 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000001",
+                ),
+            )
+            .unwrap();
+            let _op_2 = Operation::create(
+                op_conn,
+                "add",
+                &HashId::pad_str(
+                    "abc0000000000000000000000000000000000000000000000000000000000002",
+                ),
+            )
+            .unwrap();
+
+            let result = resolve_reference(op_conn, "abc");
+            assert!(matches!(result, Err(HashParseError::OperationAmbiguous(_))));
+        }
+    }
+
+    mod resolve_head {
+        use super::*;
+
+        #[test]
+        fn test_resolve_head_variants() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let op_1 = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
+            let op_2 = Operation::create(op_conn, "add", &HashId::convert_str("op-2")).unwrap();
+
+            let head = resolve_head(op_conn, "HEAD").unwrap();
+            assert_eq!(head, op_2.hash);
+
+            let head_prev = resolve_head(op_conn, "HEAD~1").unwrap();
+            assert_eq!(head_prev, op_1.hash);
+        }
+
+        #[test]
+        fn test_resolve_head_invalid() {
+            let context = setup_gen();
+            let op_conn = context.operations().conn();
+
+            let branch = Branch::get_or_create(op_conn, "main");
+            OperationState::set_branch(op_conn, &branch.name);
+
+            let _op = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
+            let result = resolve_head(op_conn, "HEAD~2");
+            assert!(matches!(
+                result,
+                Err(HashParseError::HeadOffsetOutOfRange(2))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_create_operation_adds_database() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        let gen_db = GenDatabase::create(op_conn, &db_uuid, "foo.db", "/foo.db").unwrap();
+
+        let op = create_operation(
+            &context,
+            "something.fa",
+            FileTypes::Fasta,
+            "foo",
+            HashId::convert_str("op-1"),
+        );
+
+        let databases = GenDatabase::query_by_operations(op_conn, &[op.hash]).unwrap();
+        assert_eq!(databases[&op.hash], vec![gen_db]);
+    }
+
     #[test]
     fn test_gets_operations_of_branch() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1117,32 +1735,28 @@ mod tests {
         //
         //
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-2"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-3"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-4"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1150,48 +1764,42 @@ mod tests {
         );
         OperationState::set_operation(op_conn, &HashId::convert_str("op-1"));
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-6"),
         );
-        let branch_2_midpoint = create_operation(
-            conn,
-            op_conn,
+        let _branch_2_midpoint = create_operation(
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-7"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-8"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-9"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-10"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1199,16 +1807,14 @@ mod tests {
         );
         OperationState::set_operation(op_conn, &HashId::convert_str("op-7"));
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-12"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1228,7 +1834,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_2_midpoint_1.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1243,7 +1849,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_1.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1256,7 +1862,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_2.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1270,7 +1876,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_1_sub_1.id)
             .iter()
-            .map(|f| f.hash.clone())
+            .map(|f| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1285,7 +1891,7 @@ mod tests {
 
         let ops = Branch::get_operations(op_conn, branch_2_sub_1.id)
             .iter()
-            .map(|f: &Operation| f.hash.clone())
+            .map(|f: &Operation| f.hash)
             .collect::<Vec<_>>();
         assert_eq!(
             ops,
@@ -1303,8 +1909,8 @@ mod tests {
 
     #[test]
     fn test_graph_representation() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // operations will be made in ascending order.
         // The branch topology is as follows. () indicate where a branch starts
@@ -1353,9 +1959,9 @@ mod tests {
 
     #[test]
     fn test_path_between() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
@@ -1371,24 +1977,21 @@ mod tests {
         //    branch-2                  \-> 6
 
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-1"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-2"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1397,16 +2000,14 @@ mod tests {
         Branch::get_or_create(op_conn, "branch-1");
         OperationState::set_branch(op_conn, "branch-1");
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
             HashId::convert_str("op-4"),
         );
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1416,8 +2017,7 @@ mod tests {
         Branch::get_or_create(op_conn, "branch-2");
         OperationState::set_branch(op_conn, "branch-2");
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1427,8 +2027,7 @@ mod tests {
         Branch::get_or_create(op_conn, "branch-3");
         OperationState::set_branch(op_conn, "branch-3");
         create_operation(
-            conn,
-            op_conn,
+            &context,
             "test.fasta",
             FileTypes::Fasta,
             "foo",
@@ -1505,8 +2104,8 @@ mod tests {
 
     #[test]
     fn test_remote_create() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Test successful remote creation
         let remote = Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1520,8 +2119,8 @@ mod tests {
 
     #[test]
     fn test_remote_get_by_name() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Test getting non-existent remote
         let result = Remote::get_by_name_optional(op_conn, "nonexistent");
@@ -1538,8 +2137,8 @@ mod tests {
 
     #[test]
     fn test_remote_list_all() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Test empty list
         let remotes = Remote::list_all(op_conn);
@@ -1560,8 +2159,8 @@ mod tests {
 
     #[test]
     fn test_remote_delete() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Create a remote
         Remote::create(op_conn, "temp", "https://temp.com/repo.gen").unwrap();
@@ -1585,8 +2184,8 @@ mod tests {
 
     #[test]
     fn test_remote_delete_with_branch_associations() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Create a remote
         Remote::create(op_conn, "test_remote", "https://test.com/repo.gen").unwrap();
@@ -1633,8 +2232,8 @@ mod tests {
 
     #[test]
     fn test_branch_set_remote() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Create a remote
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1663,8 +2262,8 @@ mod tests {
 
     #[test]
     fn test_branch_get_remote() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Create remotes
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1694,8 +2293,8 @@ mod tests {
 
     #[test]
     fn test_branch_create_with_remote() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Create a remote
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1718,8 +2317,8 @@ mod tests {
 
     #[test]
     fn test_branch_process_row_with_remote() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Create a remote
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
@@ -1743,8 +2342,8 @@ mod tests {
 
     #[test]
     fn test_branch_set_remote_foreign_key_constraint() {
-        setup_gen_dir();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
 
         // Create a branch
         let branch = Branch::get_or_create(op_conn, "test_branch");
@@ -1766,6 +2365,7 @@ mod tests {
             hash: HashId::convert_str("test"),
             parent_hash: Some(HashId::convert_str("parent")),
             change_type: "foo".to_string(),
+            created_on: 0,
         };
 
         let mut message = TypedBuilder::<operation::Owned>::new_default();
@@ -1784,6 +2384,7 @@ mod tests {
             hash: HashId::convert_str("test"),
             parent_hash: None,
             change_type: "foo".to_string(),
+            created_on: 1,
         };
 
         let mut message = TypedBuilder::<operation::Owned>::new_default();
@@ -1799,9 +2400,10 @@ mod tests {
         use capnp::message::TypedBuilder;
 
         let file_addition = FileAddition {
-            id: 42,
+            id: HashId([42u8; 32]),
             file_path: "test/path.fasta".to_string(),
             file_type: FileTypes::Fasta,
+            checksum: HashId([24u8; 32]),
         };
 
         let mut message =
@@ -1830,5 +2432,240 @@ mod tests {
 
         let deserialized = OperationSummary::read_capnp(root.into_reader());
         assert_eq!(operation_summary, deserialized);
+    }
+
+    #[test]
+    fn test_calculate_stream_hash() {
+        let content = b"Hello, World!";
+        let cursor = Cursor::new(content);
+        let hash = calculate_stream_hash(cursor).unwrap();
+
+        assert_eq!(hash.len(), 32);
+
+        // Test consistency - same content should produce same hash
+        let cursor2 = Cursor::new(content);
+        let hash2 = calculate_stream_hash(cursor2).unwrap();
+        assert_eq!(hash, hash2);
+
+        // Test different content produces different hash
+        let different_content = b"Hello, World!!";
+        let cursor3 = Cursor::new(different_content);
+        let hash3 = calculate_stream_hash(cursor3).unwrap();
+        assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_calculate_file_checksum() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let content = b"Test file content for checksum calculation";
+        temp_file.write_all(content).unwrap();
+        temp_file.flush().unwrap();
+
+        let checksum = calculate_file_checksum(temp_file.path()).unwrap();
+
+        assert_eq!(checksum.0.len(), 32);
+
+        // Test consistency - same file should produce same checksum
+        let checksum2 = calculate_file_checksum(temp_file.path()).unwrap();
+        assert_eq!(checksum, checksum2);
+
+        // Test with different file content
+        let mut temp_file2 = NamedTempFile::new().unwrap();
+        let different_content = b"Different test file content";
+        temp_file2.write_all(different_content).unwrap();
+        temp_file2.flush().unwrap();
+
+        let checksum3 = calculate_file_checksum(temp_file2.path()).unwrap();
+        assert_ne!(checksum, checksum3);
+    }
+
+    #[test]
+    fn test_calculate_file_checksum_nonexistent_file() {
+        let result = calculate_file_checksum("/nonexistent/file/path");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[test]
+    fn test_generate_file_addition_id_consistency() {
+        let checksum = HashId([1u8; 32]);
+        let file_path = "/path/to/file.txt";
+
+        let id1 = FileAddition::generate_file_addition_id(&checksum, file_path);
+        let id2 = FileAddition::generate_file_addition_id(&checksum, file_path);
+
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_generate_file_addition_id_uniqueness_different_paths() {
+        let checksum = HashId([1u8; 32]);
+        let file_path1 = "/path/to/file1.txt";
+        let file_path2 = "/path/to/file2.txt";
+
+        let id1 = FileAddition::generate_file_addition_id(&checksum, file_path1);
+        let id2 = FileAddition::generate_file_addition_id(&checksum, file_path2);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_generate_file_addition_id_uniqueness_different_checksums() {
+        let checksum1 = HashId([1u8; 32]);
+        let checksum2 = HashId([2u8; 32]);
+        let file_path = "/path/to/file.txt";
+
+        let id1 = FileAddition::generate_file_addition_id(&checksum1, file_path);
+        let id2 = FileAddition::generate_file_addition_id(&checksum2, file_path);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_normalize_file_paths_absolute_path_in_repo() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+        let repo_root = workspace.base_dir();
+
+        let absolute_path = repo_root.join("inputs").join("absolute.txt");
+        fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
+        fs::write(&absolute_path, b"absolute").unwrap();
+        let absolute_string = absolute_path.to_string_lossy().to_string();
+        let relative_string = absolute_path
+            .strip_prefix(repo_root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let (absolute, relative) =
+            FileAddition::normalize_file_paths(workspace, absolute_string.as_str());
+
+        assert_eq!(absolute, absolute_string);
+        assert_eq!(relative, relative_string);
+    }
+
+    #[test]
+    fn test_normalize_file_paths_relative_path_in_repo() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+        let repo_root = workspace.repo_root().unwrap();
+
+        let relative_path = PathBuf::from("relative/path/file.txt");
+        let absolute_path = repo_root.join(&relative_path);
+        fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
+        fs::write(&absolute_path, b"relative").unwrap();
+        let relative_string = relative_path.to_string_lossy().to_string();
+        let absolute_string = absolute_path.to_string_lossy().to_string();
+
+        let (absolute, relative) =
+            FileAddition::normalize_file_paths(workspace, relative_string.as_str());
+
+        assert_eq!(absolute, absolute_string);
+        assert_eq!(relative, relative_string);
+    }
+
+    #[test]
+    fn test_normalize_file_paths_outside_repo_fallbacks() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+
+        let outside_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let outside_string = outside_path.to_string_lossy().to_string();
+
+        let (absolute, relative) =
+            FileAddition::normalize_file_paths(workspace, outside_string.as_str());
+
+        assert_eq!(absolute, outside_string);
+        assert_eq!(relative, outside_string);
+    }
+
+    #[test]
+    fn test_normalize_file_paths_without_connection_path() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+
+        let (absolute, relative) =
+            FileAddition::normalize_file_paths(workspace, "detached/file.txt");
+        assert_eq!(absolute, "detached/file.txt");
+        assert_eq!(relative, "detached/file.txt");
+
+        let (absolute_empty, relative_empty) = FileAddition::normalize_file_paths(workspace, "");
+        assert_eq!(absolute_empty, "");
+        assert_eq!(relative_empty, "");
+    }
+
+    #[test]
+    fn test_file_addition_get_or_create() {
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
+        let repo_root = context.workspace().repo_root().unwrap();
+
+        let file1_path = repo_root.join("test_file.txt");
+        fs::write(&file1_path, b"Test file content").unwrap();
+        let file1_path_str = file1_path.to_string_lossy().to_string();
+        let relative1 = file1_path
+            .strip_prefix(&repo_root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let fa1 = FileAddition::get_or_create(
+            context.workspace(),
+            op_conn,
+            &file1_path_str,
+            FileTypes::Fasta,
+            None,
+        )
+        .expect("Failed to create FileAddition");
+
+        assert_eq!(fa1.file_path, relative1);
+
+        let checksum = calculate_file_checksum(&file1_path_str).unwrap();
+        let relative1_id = FileAddition::generate_file_addition_id(&checksum, &relative1);
+
+        assert_eq!(fa1.id, relative1_id);
+
+        // Second call with same file should return the same FileAddition
+        let fa2 = FileAddition::get_or_create(
+            context.workspace(),
+            op_conn,
+            &file1_path_str,
+            FileTypes::Fasta,
+            None,
+        )
+        .expect("Failed to get existing FileAddition");
+
+        assert_eq!(fa1, fa2);
+
+        let file2_path = repo_root.join("nested").join("file2.txt");
+        fs::create_dir_all(file2_path.parent().unwrap()).unwrap();
+        fs::write(&file2_path, b"Test file content").unwrap();
+        let file2_path_str = file2_path.to_string_lossy().to_string();
+
+        let fa3 = FileAddition::get_or_create(
+            context.workspace(),
+            op_conn,
+            &file2_path_str,
+            FileTypes::Fasta,
+            None,
+        )
+        .expect("Failed to create different FileAddition");
+
+        assert_ne!(fa1.id, fa3.id);
+
+        fs::write(&file1_path, b"new content").unwrap();
+        let fa1_new = FileAddition::get_or_create(
+            context.workspace(),
+            op_conn,
+            &file1_path_str,
+            FileTypes::Fasta,
+            None,
+        )
+        .expect("Failed to create FileAddition");
+
+        assert_ne!(fa1.id, fa1_new.id);
     }
 }

@@ -8,9 +8,11 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::PATH_START_NODE_ID;
-use gen_graph::{GenGraph, GraphNode};
-use gen_models::{block_group::BlockGroup, node::Node, traits::Query};
+use gen_core::{HashId, PATH_START_NODE_ID};
+use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
+use gen_models::{
+    block_group::BlockGroup, db::GraphConnection, node::Node, path::Path, traits::Query,
+};
 use gen_widget::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
 use log::warn;
 use ratatui::{
@@ -19,7 +21,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
 };
-use rusqlite::{Connection, params};
+use rusqlite::params;
 
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
@@ -66,7 +68,7 @@ fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<
 }
 
 pub fn view_block_group(
-    conn: &Connection,
+    conn: &GraphConnection,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,
@@ -137,6 +139,8 @@ pub fn view_block_group(
     } else {
         block_graph = get_empty_graph();
     }
+
+    connect_all_boundary_edges(&mut block_graph);
 
     bar.finish();
 
@@ -394,6 +398,7 @@ pub fn view_block_group(
             if let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
                 // Create a new graph for the selected block group
                 block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+                connect_all_boundary_edges(&mut block_graph);
                 // Update the graph controller
                 let node_sizer = GenGraphNodeSizer;
                 graph_controller = GraphController::new(&block_graph, node_sizer);

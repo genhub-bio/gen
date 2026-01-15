@@ -7,6 +7,7 @@ use std::{
 use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
+    db::{DbContext, GraphConnection},
     errors::{OperationError, QueryError},
     file_types::FileTypes,
     node::Node,
@@ -32,7 +33,7 @@ use noodles::{
     },
 };
 use regex::{self, Regex};
-use rusqlite::{self, Connection, types::Value as SQLValue};
+use rusqlite::{self, params};
 use thiserror::Error;
 
 use crate::{
@@ -43,11 +44,11 @@ use crate::{
 #[derive(Debug)]
 struct BlockGroupCache<'a> {
     pub cache: HashMap<BlockGroupData<'a>, HashId>,
-    pub conn: &'a Connection,
+    pub conn: &'a GraphConnection,
 }
 
 impl<'a> BlockGroupCache<'_> {
-    pub fn new(conn: &Connection) -> BlockGroupCache<'_> {
+    pub fn new(conn: &GraphConnection) -> BlockGroupCache<'_> {
         BlockGroupCache {
             cache: HashMap::<BlockGroupData, HashId>::new(),
             conn,
@@ -94,11 +95,11 @@ pub struct SequenceKey<'a> {
 #[derive(Debug)]
 pub struct SequenceCache<'a> {
     pub cache: HashMap<SequenceKey<'a>, Sequence>,
-    pub conn: &'a Connection,
+    pub conn: &'a GraphConnection,
 }
 
 impl<'a> SequenceCache<'_> {
-    pub fn new(conn: &Connection) -> SequenceCache<'_> {
+    pub fn new(conn: &GraphConnection) -> SequenceCache<'_> {
         SequenceCache {
             cache: HashMap::<SequenceKey, Sequence>::new(),
             conn,
@@ -191,14 +192,14 @@ pub enum VcfError {
 }
 
 pub fn update_with_vcf<'a>(
+    context: &DbContext,
     vcf_path: &String,
     collection_name: &'a str,
     fixed_genotype: String,
     fixed_sample: String,
-    conn: &Connection,
-    operation_conn: &Connection,
     coordinate_frame: impl Into<Option<&'a str>>,
 ) -> Result<Operation, VcfError> {
+    let conn = context.graph().conn();
     let progress_bar = get_handler();
     let coordinate_frame = coordinate_frame.into();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
@@ -322,7 +323,7 @@ pub fn update_with_vcf<'a>(
                             PathCache::lookup(&mut path_cache, &sample_bg_id, seq_name.clone());
                         let path_length = path_lengths
                             .entry(sample_path.id)
-                            .or_insert(sample_path.length(conn));
+                            .or_insert_with(|| sample_path.length(conn));
 
                         if ref_start > *path_length {
                             return Err(VcfError::InvalidRecord(format!(
@@ -486,7 +487,7 @@ pub fn update_with_vcf<'a>(
             let sequence_string = sequence.get_sequence(None, None);
 
             let parent_path_id = parent_block_groups.entry((collection_name, vcf_entry.path.id)).or_insert_with(|| {
-                let parent_bg = BlockGroup::query(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null and name = ?2", rusqlite::params!(SQLValue::from(collection_name.to_string()), SQLValue::from(vcf_entry.path.name.clone())));
+                let parent_bg = BlockGroup::query(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null and name = ?2", params![collection_name, &vcf_entry.path.name]);
                 if parent_bg.is_empty() {
                     vcf_entry.path.id
                 } else {
@@ -533,19 +534,16 @@ pub fn update_with_vcf<'a>(
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
     for ((path, sample_name), path_changes) in changes {
-        BlockGroup::insert_changes(
-            conn,
-            &path_changes,
-            &mut path_cache,
-            coordinate_frame.is_some(),
-        )
-        .unwrap();
-        bar.inc(path_changes.len() as u64);
+        for chunk in path_changes.chunks(1000) {
+            BlockGroup::insert_changes(conn, chunk, &mut path_cache, coordinate_frame.is_some())
+                .unwrap();
+            bar.inc(chunk.len() as u64);
+        }
         summary
             .entry(sample_name)
             .or_default()
             .entry(path.name)
-            .or_insert(path_changes.len() as i64);
+            .or_insert_with(|| path_changes.len() as i64);
     }
     bar.finish();
     for ((path, accession_name), (acc_start, acc_end)) in accession_cache.iter() {
@@ -569,8 +567,7 @@ pub fn update_with_vcf<'a>(
     let bar = add_saving_operation_bar(&progress_bar);
     bar.set_message("Saving operation");
     let op = end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -599,40 +596,38 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{get_connection, get_operation_connection, get_sample_bg, setup_gen_dir},
+        test_helpers::{get_sample_bg, setup_gen},
         track_database,
     };
 
     #[test]
     fn test_update_fasta_with_vcf() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/simple.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -654,32 +649,30 @@ mod tests {
 
     #[test]
     fn test_update_fasta_with_complex_vcf() {
-        setup_gen_dir();
+        let context = setup_gen();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/vcfs/complex.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -707,33 +700,31 @@ mod tests {
 
     #[test]
     fn test_update_fasta_with_vcf_custom_genotype() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/general.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
             "sample 1".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -762,9 +753,9 @@ mod tests {
 
     #[test]
     fn test_error_when_vcf_has_changes_out_of_bounds() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -774,21 +765,19 @@ mod tests {
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let res = update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
             "sample 1".to_string(),
-            conn,
-            op_conn,
             None,
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
@@ -796,33 +785,31 @@ mod tests {
 
     #[test]
     fn test_handles_missing_allele() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/simple_missing_allele.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -843,33 +830,31 @@ mod tests {
 
     #[test]
     fn test_handles_overlap_allele() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/simple_overlap.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -885,39 +870,35 @@ mod tests {
 
     #[test]
     fn test_parses_cnvs() {
-        setup_gen_dir();
+        let context = setup_gen();
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple_cnv.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
 
-        // TODO: Fix this once pruning works correctly. The issue currently is we prune away the boundary edge
-        // and only see a single path through the graph.
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, true),
             HashSet::from_iter(vec![
@@ -929,35 +910,33 @@ mod tests {
 
     #[test]
     fn test_deduplicates_nodes() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/simple.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -967,12 +946,11 @@ mod tests {
 
         assert_eq!(
             update_with_vcf(
+                &context,
                 &vcf_path.to_str().unwrap().to_string(),
                 &collection,
                 "".to_string(),
                 "".to_string(),
-                conn,
-                op_conn,
                 None,
             ),
             Err(VcfError::OperationError(OperationError::NoChanges))
@@ -981,25 +959,24 @@ mod tests {
 
     #[test]
     fn test_deduplicates_nodes_multiple_paths() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/multiseq.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/multiseq.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -1009,12 +986,11 @@ mod tests {
         );
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -1024,12 +1000,11 @@ mod tests {
 
         assert_eq!(
             update_with_vcf(
+                &context,
                 &vcf_path.to_str().unwrap().to_string(),
                 &collection,
                 "".to_string(),
                 "".to_string(),
-                conn,
-                op_conn,
                 None,
             ),
             Err(VcfError::OperationError(OperationError::NoChanges))
@@ -1039,36 +1014,34 @@ mod tests {
     #[test]
     #[cfg(feature = "benchmark")]
     fn test_vcf_import_benchmark() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/chr22_100k_no_samples.vcf.gz");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/chr22.fa.gz");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         let s = time::Instant::now();
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0|1".to_string(),
             "test".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -1081,35 +1054,33 @@ mod tests {
 
     #[test]
     fn test_creates_accession_paths() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/accession.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -1117,7 +1088,7 @@ mod tests {
             Accession::query(
                 conn,
                 "select * from accessions where name = ?1;",
-                rusqlite::params!(SQLValue::from("del1".to_string())),
+                params!["del1"],
             )
             .len(),
             1
@@ -1127,7 +1098,7 @@ mod tests {
             Accession::query(
                 conn,
                 "select * from accessions where name = ?1;",
-                rusqlite::params!(SQLValue::from("lp1".to_string())),
+                params!["lp1"],
             )
             .len(),
             1
@@ -1137,35 +1108,33 @@ mod tests {
     #[test]
     #[should_panic(expected = "Unable to create accession")]
     fn test_disallows_creating_accession_paths_that_exist() {
-        setup_gen_dir();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/accession.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -1174,7 +1143,7 @@ mod tests {
             Accession::query(
                 conn,
                 "select * from accessions where name = ?1",
-                rusqlite::params!(SQLValue::from("lp1".to_string()))
+                params!["lp1"]
             )
             .len(),
             1
@@ -1185,12 +1154,11 @@ mod tests {
         vcf_path.push("fixtures/accession_2_invalid.vcf");
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
@@ -1198,7 +1166,6 @@ mod tests {
 
     #[test]
     fn test_changes_in_child_samples() {
-        setup_gen_dir();
         let f0_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/simple_iterative_engineering_1.vcf");
         let f1_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1206,52 +1173,49 @@ mod tests {
         let f2_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/simple_iterative_engineering_3.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &f0_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &f1_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             "f1",
         )
         .unwrap();
 
         update_with_vcf(
+            &context,
             &f2_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             "f2",
         )
         .unwrap();

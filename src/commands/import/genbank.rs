@@ -1,5 +1,6 @@
 use std::fs::File;
 
+use anyhow::Result;
 use clap::Args;
 use gen_models::{
     file_types::FileTypes,
@@ -7,8 +8,7 @@ use gen_models::{
 };
 
 use crate::{
-    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
-    get_connection, get_operation_connection,
+    commands::{cli_context::CliContext, get_default_collection},
     imports::genbank::import_genbank,
 };
 
@@ -26,14 +26,12 @@ pub struct Command {
     sample: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Genbank import called");
 
-    let operation_conn = get_operation_connection(None).unwrap();
-    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db).unwrap();
-
-    // initialize the selected database if needed.
+    let context = cli_context.context;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
@@ -41,7 +39,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(&operation_conn));
+        .unwrap_or_else(|| get_default_collection(operation_conn));
     let mut reader: Box<dyn std::io::Read> = if cmd.path.ends_with(".gz") {
         let file = File::open(cmd.path.clone()).unwrap();
         Box::new(flate2::read::GzDecoder::new(file))
@@ -49,8 +47,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
         Box::new(File::open(cmd.path.clone()).unwrap())
     };
     match import_genbank(
-        &conn,
-        &operation_conn,
+        context,
         &mut reader,
         name.as_ref(),
         cmd.sample.as_deref(),
@@ -66,11 +63,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
             println!("GenBank imported.");
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
+            Ok(())
         }
         Err(err) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed: {err:?}");
+            println!("Import failed: {err:?}");
+            Err(err.into())
         }
     }
 }

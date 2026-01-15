@@ -6,6 +6,7 @@ use gen_models::{
     block_group::{BlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::DbContext,
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
@@ -15,13 +16,12 @@ use gen_models::{
     traits::Query,
 };
 use itertools::Itertools;
-use rusqlite::{Connection, params, types::Value};
+use rusqlite::{params, types::Value};
 
 use crate::genbank::{EditType, GenBankError, process_sequence};
 
 pub fn update_with_genbank<'a, R>(
-    conn: &Connection,
-    op_conn: &Connection,
+    context: &DbContext,
     data: R,
     collection: impl Into<Option<&'a str>>,
     create_missing: bool,
@@ -30,6 +30,7 @@ pub fn update_with_genbank<'a, R>(
 where
     R: Read,
 {
+    let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let reader = reader::SeqReader::new(data);
     let collection = Collection::create(conn, collection.into().unwrap_or_default());
@@ -203,8 +204,7 @@ where
         }
     }
     end_operation(
-        conn,
-        op_conn,
+        context,
         &mut session,
         operation_info,
         &format!(
@@ -228,10 +228,7 @@ mod tests {
     use noodles::fasta;
 
     use super::*;
-    use crate::{
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{test_helpers::setup_gen, track_database};
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -245,15 +242,14 @@ mod tests {
 
     #[test]
     fn test_error_on_invalid_file() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         assert_eq!(
             update_with_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new("this is not valid".as_bytes()),
                 None,
                 false,
@@ -274,17 +270,16 @@ mod tests {
 
     #[test]
     fn test_records_operation() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
         let operation = update_with_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             true,
@@ -308,23 +303,22 @@ mod tests {
         use gen_models::operations::OperationFile;
 
         use super::*;
-        use crate::{imports::genbank::import_genbank, track_database};
+        use crate::{imports::genbank::import_genbank, test_helpers::setup_gen, track_database};
 
         #[test]
         fn test_incorporates_updates() {
             // This tests that we are able to take a genbank that has been further modified
             // and update it, mimicking a workflow of going between gen <-> 3rd party tool <-> gen
-            setup_gen_dir();
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,
@@ -341,8 +335,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
             let file = File::open(&path).unwrap();
             let _ = update_with_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 true,
@@ -372,17 +365,16 @@ mod tests {
         fn test_creates_missing_entries() {
             // This tests that we are able to take a genbank that has been further modified
             // and includes new sequences and update it.
-            setup_gen_dir();
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,
@@ -399,8 +391,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/concat.gb");
             let file = File::open(&path).unwrap();
             let _ = update_with_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 true,
@@ -442,17 +433,16 @@ mod tests {
         fn test_errors_on_missing_locus() {
             // This tests that if a genbank file has sequences we are missing, it's an error. This
             // is an attempt to avoid updating the database with the wrong file.
-            setup_gen_dir();
-            let conn = &get_connection(None).unwrap();
-            let op_conn = &get_operation_connection(None).unwrap();
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
 
             track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
             let _ = import_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 None,
@@ -469,8 +459,7 @@ mod tests {
                 .join("fixtures/geneious_genbank/concat.gb");
             let file = File::open(&path).unwrap();
             let op = update_with_genbank(
-                conn,
-                op_conn,
+                &context,
                 BufReader::new(file),
                 None,
                 false,

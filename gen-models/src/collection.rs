@@ -1,8 +1,10 @@
 use gen_core::traits::Capnp;
-use rusqlite::{Connection, Row, params_from_iter};
+use rusqlite::{Row, params_from_iter};
 use serde::{Deserialize, Serialize};
 
-use crate::{block_group::BlockGroup, gen_models_capnp::collection, traits::*};
+use crate::{
+    block_group::BlockGroup, db::GraphConnection, gen_models_capnp::collection, traits::*,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Collection {
@@ -38,14 +40,14 @@ impl Query for Collection {
 }
 
 impl Collection {
-    pub fn exists(conn: &Connection, name: &str) -> bool {
+    pub fn exists(conn: &GraphConnection, name: &str) -> bool {
         let mut stmt = conn
             .prepare("select name from collections where name = ?1")
             .unwrap();
         stmt.exists([name]).unwrap()
     }
 
-    pub fn create(conn: &Connection, name: &str) -> Collection {
+    pub fn create(conn: &GraphConnection, name: &str) -> Collection {
         let mut stmt = conn
             .prepare("INSERT INTO collections (name) VALUES (?1) RETURNING *;")
             .unwrap();
@@ -71,7 +73,7 @@ impl Collection {
         }
     }
 
-    pub fn bulk_create(conn: &Connection, names: &Vec<String>) -> Vec<Collection> {
+    pub fn bulk_create(conn: &GraphConnection, names: &Vec<String>) -> Vec<Collection> {
         let placeholders = names.iter().map(|_| "(?)").collect::<Vec<_>>().join(", ");
         let q = format!("INSERT INTO collections (name) VALUES {placeholders} RETURNING *",);
         let mut stmt = conn.prepare(&q).unwrap();
@@ -83,7 +85,7 @@ impl Collection {
         rows.map(|row| row.unwrap()).collect()
     }
 
-    pub fn get_block_groups(conn: &Connection, collection_name: &str) -> Vec<BlockGroup> {
+    pub fn get_block_groups(conn: &GraphConnection, collection_name: &str) -> Vec<BlockGroup> {
         // Load all block groups that have the given collection_name
         let mut stmt = conn
             .prepare("SELECT * FROM block_groups WHERE collection_name = ?1 order by created_on;")
@@ -94,7 +96,7 @@ impl Collection {
         block_group_iter.map(|bg| bg.unwrap()).collect()
     }
 
-    pub fn delete_by_name(conn: &Connection, name: &str) {
+    pub fn delete_by_name(conn: &GraphConnection, name: &str) {
         let mut stmt = conn
             .prepare("delete from collections where name = ?1")
             .unwrap();
@@ -128,10 +130,10 @@ mod tests {
         let collection1 = Collection::create(conn, "test1");
         let collection2 = Collection::create(conn, "test2");
 
-        Collection::delete_by_name(conn, "test1");
+        Collection::delete_by_name(conn, &collection1.name);
 
         // Verify only the correct one was deleted
-        assert!(!Collection::exists(conn, "test1"));
-        assert!(Collection::exists(conn, "test2"));
+        assert!(!Collection::exists(conn, &collection1.name));
+        assert!(Collection::exists(conn, &collection2.name));
     }
 }

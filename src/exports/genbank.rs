@@ -4,10 +4,17 @@ use std::{collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, 
 use gb_io::{self, QualifierKey, seq::Location};
 use gen_core::{is_terminal, path::PathBlock};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
-use gen_models::{block_group::BlockGroup, node::Node, sample::Sample};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, sample::Sample};
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};
 use rusqlite::{self, Connection};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum GenbankExportError {
+    #[error("I/O error while exporting GenBank: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 fn merge_nodes(nodes: &[GraphNode]) -> Vec<GraphNode> {
     // This is purposefully not sorted, as the input may be a path of nodes from a path where
@@ -112,11 +119,11 @@ fn get_path_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode>
 }
 
 pub fn export_genbank(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     sample_name: Option<&str>,
     filename: &PathBuf,
-) {
+) -> Result<(), GenbankExportError> {
     // GenBank don't really support graph like structures. Programs like Geneious use features to
     // mark where changes have occurred, and for now we replicate this approach. However, we are
     // only able to show one alternative path. The assumption is GenBank will predominantly be used
@@ -133,7 +140,7 @@ pub fn export_genbank(
     // assumption.
     let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
 
-    let file = File::create(filename).unwrap();
+    let file = File::create(filename)?;
     let mut writer = gb_io::writer::SeqWriter::new(file);
 
     for block_group in block_groups.iter() {
@@ -285,8 +292,10 @@ pub fn export_genbank(
             }
         }
 
-        writer.write(&seq).unwrap();
+        writer.write(&seq)?;
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -304,11 +313,7 @@ mod tests {
     use tempfile;
 
     use super::*;
-    use crate::{
-        imports::genbank::import_genbank,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{imports::genbank::import_genbank, test_helpers::setup_gen, track_database};
 
     fn compare_genbanks(a: &PathBuf, b: &PathBuf) {
         let a = reader::parse_file(a).unwrap();
@@ -365,10 +370,9 @@ mod tests {
 
     #[test]
     fn test_import_then_export_insertion() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -376,8 +380,7 @@ mod tests {
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
         let operation = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             None,
@@ -392,16 +395,15 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename);
+        export_genbank(conn, "", None, &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
     #[test]
     fn test_import_then_export_replacement() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -409,8 +411,7 @@ mod tests {
             .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
         let file = File::open(&path).unwrap();
         let operation = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             None,
@@ -425,16 +426,15 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename);
+        export_genbank(conn, "", None, &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
     #[test]
     fn test_import_then_export_multiple_operations() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let db_uuid = metadata::get_db_uuid(conn);
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -442,8 +442,7 @@ mod tests {
             .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
         let file = File::open(&path).unwrap();
         let operation = import_genbank(
-            conn,
-            op_conn,
+            &context,
             BufReader::new(file),
             None,
             None,
@@ -458,7 +457,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename);
+        export_genbank(conn, "", None, &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
@@ -484,6 +483,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // second starting point for the graph, this also represents a node that is part of the path, but part of the sequence we don't want to use in our path
@@ -506,6 +506,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // represent node_id being split into 3 pieces
@@ -528,6 +529,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // put the same node_id 1 somewhere random in the graph on an edge we don't want to follow
@@ -550,6 +552,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -571,6 +574,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -592,6 +596,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         // final part of path block
@@ -614,6 +619,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -635,6 +641,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -656,6 +663,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         let path_blocks = vec![
@@ -739,6 +747,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -760,6 +769,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         graph.add_edge(
@@ -781,6 +791,7 @@ mod tests {
                 phased: 0,
                 source_strand: Forward,
                 target_strand: Forward,
+                created_on: 0,
             }],
         );
         let path_blocks = vec![PathBlock {

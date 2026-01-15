@@ -1,4 +1,4 @@
-use gen_core::errors::{ConnectionError, StrandError};
+use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
@@ -39,6 +39,10 @@ pub enum OperationError {
     SQLError(String),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Config Error: {0}")]
+    ConfigError(#[from] ConfigError),
+    #[error("Error storing data file")]
+    IOError,
 }
 
 #[derive(Debug, PartialEq, Error)]
@@ -87,19 +91,40 @@ pub enum RemoteError {
     DefaultRemoteNotFound(String),
 }
 
+#[derive(Debug, Error)]
+pub enum FileAdditionError {
+    #[error("Failed to read file: {0}")]
+    FileReadError(#[from] std::io::Error),
+
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
+    #[error("Permission denied accessing file: {0}")]
+    FilePermissionDenied(String),
+
+    #[error("Failed to calculate checksum: {0}")]
+    ChecksumError(String),
+
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+
+    #[error("HashId generation failed: {0}")]
+    HashIdError(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{get_operation_connection, setup_gen_dir};
 
     mod remote_error_tests {
-        use rusqlite::Connection;
-
         use super::*;
-        use crate::operations::{Branch, Defaults, Remote};
+        use crate::{
+            db::OperationsConnection,
+            operations::{Branch, Defaults, Remote},
+            test_helpers::get_operation_connection,
+        };
 
-        fn setup_test_db() -> Connection {
-            setup_gen_dir();
+        fn setup_test_db() -> OperationsConnection {
             get_operation_connection(None).unwrap()
         }
 

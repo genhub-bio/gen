@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
+use anyhow::Result;
 use clap::Args;
 use gen_models::errors::OperationError;
 
 use crate::{
-    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
-    get_connection, get_operation_connection,
+    commands::{cli_context::CliContext, get_default_collection},
     imports::gfa::{GFAImportError, import_gfa},
 };
 
@@ -23,14 +23,12 @@ pub struct Command {
     sample: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA import called");
 
-    let operation_conn = get_operation_connection(None).unwrap();
-    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db).unwrap();
-
-    // initialize the selected database if needed.
+    let context = cli_context.context;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
@@ -38,28 +36,30 @@ pub fn execute(cli_context: &CliContext, cmd: Command) {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(&operation_conn));
+        .unwrap_or_else(|| get_default_collection(operation_conn));
     match import_gfa(
+        context,
         &PathBuf::from(cmd.path.clone()),
         name,
         cmd.sample.as_deref(),
-        &conn,
-        &operation_conn,
     ) {
         Ok(_) => {
             println!("GFA imported.");
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
+            Ok(())
         }
         Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("GFA already exists.")
+            println!("GFA already exists.");
+            Ok(())
         }
-        Err(_) => {
+        Err(e) => {
             conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
             operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            panic!("Import failed.");
+            println!("Import failed.");
+            Err(e.into())
         }
     }
 }

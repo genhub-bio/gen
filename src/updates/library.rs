@@ -12,6 +12,7 @@ use gen_core::{
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    db::DbContext,
     edge::{Edge, EdgeData},
     file_types::FileTypes,
     node::Node,
@@ -21,12 +22,10 @@ use gen_models::{
 };
 use itertools::Itertools;
 use noodles::fasta;
-use rusqlite::Connection;
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_library(
-    conn: &Connection,
-    operation_conn: &Connection,
+    context: &DbContext,
     collection_name: &str,
     parent_sample_name: Option<&str>,
     new_sample_name: &str,
@@ -36,6 +35,7 @@ pub fn update_with_library(
     parts_file_path: &str,
     library_file_path: &str,
 ) -> std::io::Result<()> {
+    let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
     let mut parts_reader = fasta::io::reader::Builder.build_from_path(parts_file_path)?;
@@ -267,8 +267,7 @@ pub fn update_with_library(
 
     let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
     gen_models::session_operations::end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -294,29 +293,24 @@ mod tests {
     use gen_models::block_group::BlockGroup;
 
     use super::*;
-    use crate::{
-        imports::fasta::import_fasta,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
-    };
+    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen, track_database};
 
     #[test]
     fn makes_a_pool() {
-        setup_gen_dir();
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -325,8 +319,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
 
         let _ = update_with_library(
-            conn,
-            op_conn,
+            &context,
             "test",
             None,
             "new sample",
@@ -360,21 +353,20 @@ mod tests {
 
     #[test]
     fn one_column_of_parts() {
-        setup_gen_dir();
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -383,8 +375,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
 
         let _ = update_with_library(
-            conn,
-            op_conn,
+            &context,
             "test",
             None,
             "new sample",
@@ -412,21 +403,20 @@ mod tests {
 
     #[test]
     fn two_columns_of_same_parts() {
-        setup_gen_dir();
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -435,8 +425,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/design_reusing_parts.csv");
 
         let _ = update_with_library(
-            conn,
-            op_conn,
+            &context,
             "test",
             None,
             "new sample",
@@ -469,21 +458,20 @@ mod tests {
 
     #[test]
     fn one_column_of_parts_full_replacement() {
-        setup_gen_dir();
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -492,8 +480,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
 
         let _ = update_with_library(
-            conn,
-            op_conn,
+            &context,
             "test",
             None,
             "new sample",
@@ -521,21 +508,20 @@ mod tests {
 
     #[test]
     fn two_columns_of_same_parts_full_replacement() {
-        setup_gen_dir();
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
-
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
@@ -544,8 +530,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/design_reusing_parts.csv");
 
         let _ = update_with_library(
-            conn,
-            op_conn,
+            &context,
             "test",
             None,
             "new sample",

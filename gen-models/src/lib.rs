@@ -3,6 +3,7 @@ pub mod block_group;
 pub mod block_group_edge;
 pub mod changesets;
 pub mod collection;
+pub mod db;
 pub mod edge;
 pub mod errors;
 pub mod file_types;

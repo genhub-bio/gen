@@ -1,18 +1,24 @@
 use std::{fs::File, path::PathBuf};
 
-use gen_models::{block_group::BlockGroup, sample::Sample};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
 use noodles::fasta;
-use rusqlite::{self, Connection};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum FastaExportError {
+    #[error("I/O error while exporting FASTA: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 pub fn export_fasta(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     sample_name: Option<&str>,
     filename: &PathBuf,
-) {
+) -> Result<(), FastaExportError> {
     let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
 
-    let file = File::create(filename).unwrap();
+    let file = File::create(filename)?;
     let mut writer = fasta::io::Writer::new(file);
 
     for block_group in block_groups {
@@ -22,10 +28,12 @@ pub fn export_fasta(
         let sequence = fasta::record::Sequence::from(path.sequence(conn).into_bytes());
         let record = fasta::Record::new(definition, sequence);
 
-        let _ = writer.write_record(&record);
+        writer.write_record(&record)?;
     }
 
     println!("Exported to file {}", filename.display());
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -38,36 +46,33 @@ mod tests {
 
     use super::*;
     use crate::{
-        imports::fasta::import_fasta,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
+        imports::fasta::import_fasta, test_helpers::setup_gen, track_database,
         updates::fasta::update_with_fasta,
     };
 
     #[test]
     fn test_import_then_export() {
-        setup_gen_dir();
+        let context = setup_gen();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
-        export_fasta(conn, &collection, None, &filename);
+        export_fasta(conn, &collection, None, &filename).unwrap();
 
         let mut fasta_reader = fasta::io::reader::Builder
             .build_from_path(filename)
@@ -94,30 +99,28 @@ mod tests {
         AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
            \-> AAAAAAAA --/
         */
-        setup_gen_dir();
+        let context = setup_gen();
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             &collection,
             None,
             "child sample",
@@ -130,7 +133,7 @@ mod tests {
 
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
-        export_fasta(conn, &collection, Some("child sample"), &filename);
+        export_fasta(conn, &collection, Some("child sample"), &filename).unwrap();
 
         let mut fasta_reader = fasta::io::reader::Builder
             .build_from_path(filename)

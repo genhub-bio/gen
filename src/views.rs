@@ -1,5 +1,6 @@
 pub mod block_group;
 pub mod collection;
+pub mod diff;
 pub mod dot_export;
 pub mod gen_graph_widget;
 pub mod inline_gen_graph_widget;

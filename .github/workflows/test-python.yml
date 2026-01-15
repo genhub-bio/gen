@@ -1,0 +1,31 @@
+name: Test Python Bindings
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: setup-python
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install capnproto
+      - name: Test
+        run: cd gen-python && cargo test

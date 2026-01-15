@@ -3,14 +3,14 @@ use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
+    db::GraphConnection,
     edge::Edge,
     node::Node,
     path::Path,
     sequence::Sequence,
 };
-use rusqlite::Connection;
 
-pub fn get_simple_sequence(conn: &Connection) -> HashId {
+pub fn get_simple_sequence(conn: &GraphConnection) -> HashId {
     let collection = Collection::create(conn, "test");
     let seq1 = Sequence::new()
         .sequence_type("DNA")

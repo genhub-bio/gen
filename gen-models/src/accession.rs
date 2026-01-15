@@ -2,11 +2,12 @@ use std::collections::HashSet;
 
 use gen_core::{HashId, Strand, calculate_hash, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{Connection, Result as SQLResult, Row, params};
+use rusqlite::{Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     block_group_edge::AugmentedEdgeData,
+    db::GraphConnection,
     gen_models_capnp::{accession, accession_edge, accession_path},
     traits::*,
 };
@@ -250,7 +251,7 @@ impl From<&AugmentedEdgeData> for AccessionEdgeData {
 
 impl Accession {
     pub fn create(
-        conn: &Connection,
+        conn: &GraphConnection,
         name: &str,
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
@@ -271,7 +272,7 @@ impl Accession {
     }
 
     pub fn get_or_create(
-        conn: &Connection,
+        conn: &GraphConnection,
         name: &str,
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
@@ -319,7 +320,7 @@ impl Query for Accession {
 }
 
 impl AccessionEdge {
-    pub fn create(conn: &Connection, edge: AccessionEdgeData) -> AccessionEdge {
+    pub fn create(conn: &GraphConnection, edge: AccessionEdgeData) -> AccessionEdge {
         let hash = HashId(calculate_hash(&format!(
             "{}:{}:{}:{}:{}:{}:{}",
             edge.source_node_id,
@@ -361,7 +362,7 @@ impl AccessionEdge {
         }
     }
 
-    pub fn bulk_create(conn: &Connection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
+    pub fn bulk_create(conn: &GraphConnection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let query = AccessionEdge::query_by_ids(conn, &edge_ids);
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
@@ -373,7 +374,9 @@ impl AccessionEdge {
             }
         }
 
-        for chunk in &edges_to_insert.iter().chunks(100000) {
+        let batch_size = max_rows_per_batch(conn, 8);
+
+        for chunk in &edges_to_insert.iter().chunks(batch_size) {
             let mut rows = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for edge in chunk {
@@ -397,7 +400,7 @@ impl AccessionEdge {
         edge_ids
     }
 
-    pub fn bulk_delete(conn: &Connection, edges: &[AccessionEdgeData]) {
+    pub fn bulk_delete(conn: &GraphConnection, edges: &[AccessionEdgeData]) {
         let ids = edges.iter().map(|e| e.id_hash()).collect::<Vec<_>>();
         AccessionEdge::delete_by_ids(conn, &ids);
     }
@@ -435,8 +438,10 @@ impl Query for AccessionEdge {
 }
 
 impl AccessionPath {
-    pub fn create(conn: &Connection, accession_id: &HashId, edge_ids: &[HashId]) {
-        for (index1, chunk) in edge_ids.chunks(100000).enumerate() {
+    pub fn create(conn: &GraphConnection, accession_id: &HashId, edge_ids: &[HashId]) {
+        let batch_size = max_rows_per_batch(conn, 4);
+
+        for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
             let mut rows_to_insert = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for (index2, edge_id) in chunk.iter().enumerate() {
@@ -568,7 +573,7 @@ mod tests {
             vec![Accession {
                 id: accession.id,
                 name: "test".to_string(),
-                path_id: path.id.clone(),
+                path_id: path.id,
                 parent_accession_id: None,
             }]
         )

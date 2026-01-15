@@ -1,7 +1,7 @@
 use gen_core::traits::Capnp;
-use rusqlite::{Connection, Row};
+use rusqlite::Row;
 
-use crate::{gen_models_capnp::metadata, traits::*};
+use crate::{db::GraphConnection, gen_models_capnp::metadata, traits::*};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Metadata {
@@ -35,19 +35,19 @@ impl Query for Metadata {
 }
 
 impl Metadata {
-    pub fn get_db_uuid(conn: &Connection) -> String {
+    pub fn get_db_uuid(conn: &GraphConnection) -> String {
         let metadata = Metadata::get(conn, "SELECT db_uuid FROM gen_metadata LIMIT 1", [])
             .expect("Failed to get database UUID from metadata");
         metadata.db_uuid
     }
 
-    pub fn get_all(conn: &Connection) -> Vec<Metadata> {
+    pub fn get_all(conn: &GraphConnection) -> Vec<Metadata> {
         Metadata::query(conn, "SELECT db_uuid FROM gen_metadata", [])
     }
 }
 
 // Keep the old function for backwards compatibility
-pub fn get_db_uuid(conn: &Connection) -> String {
+pub fn get_db_uuid(conn: &GraphConnection) -> String {
     Metadata::get_db_uuid(conn)
 }
 

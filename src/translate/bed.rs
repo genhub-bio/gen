@@ -6,17 +6,16 @@ use std::{
 
 use gen_core::{HashId, Strand, is_terminal};
 use gen_graph::{GraphNode, connect_all_boundary_edges, project_path};
-use gen_models::{block_group::BlockGroup, sample::Sample};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
 use interavl::IntervalTree;
 use noodles::{
     bed,
     bed::feature::record_buf::{OtherFields, other_fields::Value},
     core::Position,
 };
-use rusqlite::Connection;
 
 pub fn translate_bed<'a, R, W>(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection: &str,
     sample: impl Into<Option<&'a str>>,
     reader: R,
@@ -85,7 +84,7 @@ mod tests {
     use std::{fs::File, path::PathBuf};
 
     use crate::{
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
+        test_helpers::setup_gen,
         track_database,
         translate::{bed::translate_bed, test_helpers::get_simple_sequence},
         updates::vcf::update_with_vcf,
@@ -93,9 +92,9 @@ mod tests {
 
     #[test]
     fn translates_coordinates_to_nodes() {
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -106,12 +105,11 @@ mod tests {
         get_simple_sequence(conn);
 
         update_with_vcf(
+            &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
             "".to_string(),
-            conn,
-            op_conn,
             None,
         )
         .unwrap();

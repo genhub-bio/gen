@@ -127,12 +127,14 @@ struct Operation {
     some @2 :List(UInt8);
   }
   changeType @3 :Text;
+  createdOn @4 :Int64;
 }
 
 struct FileAddition {
-  id @0 :Int64;
+  id @0 :List(UInt8);
   filePath @1 :Text;
   fileType @2 :FileType;
+  checksum @3 :List(UInt8);
 }
 
 struct OperationSummary {
@@ -177,10 +179,9 @@ struct Defaults {
 
 # Database and metadata models
 struct GenDatabase {
-  id @0 :Int64;
-  dbUuid @1 :Text;
-  name @2 :Text;
-  path @3 :Text;
+  dbUuid @0 :Text;
+  name @1 :Text;
+  path @2 :Text;
 }
 
 struct Metadata {
@@ -195,20 +196,21 @@ struct DatabaseChangeset {
 
 struct ManifestOperation {
   operation @0 :Operation;
-  changesetHash @1 :Text;
-  dependenciesHash @2 :Text;
-  fileAdditions @3 :List(FileAddition);
+  fileAdditions @1 :List(FileAddition);
   operationSummary :union {
-    none @4 :Void;
-    some @5 :OperationSummary;
+    none @2 :Void;
+    some @3 :OperationSummary;
   }
 }
 
 struct Manifest {
   manifestVersion @0 :Text;
   branchName @1 :Text;
-  endHash @2 :List(UInt8);
-  operations @3 :List(ManifestOperation);
+  endHash :union {
+    none @2 :Void;
+    some @3 :List(UInt8);
+  }
+  operations @4 :List(ManifestOperation);
 }
 
 struct ManifestDiff {

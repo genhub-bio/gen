@@ -1,8 +1,8 @@
+use anyhow::Result;
 use clap::Args;
 
 use crate::{
-    commands::{cli_context::CliContext, get_db_for_command, get_default_collection},
-    get_connection, get_operation_connection,
+    commands::{cli_context::CliContext, get_default_collection},
     updates::gaf::update_with_gaf,
 };
 
@@ -26,33 +26,36 @@ pub struct Command {
     parent_sample: Option<String>,
 }
 
-pub fn execute(cli_context: &CliContext, cmd: Command) {
+pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with GAF called");
 
-    let operation_conn = get_operation_connection(None).unwrap();
-    let db = get_db_for_command(cli_context.db.clone(), &operation_conn);
-    let conn = get_connection(&db).unwrap();
+    let context = cli_context.context;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
 
-    // initialize the selected database if needed.
-
-    conn.execute("BEGIN TRANSACTION", []).unwrap();
-    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+    conn.execute("BEGIN TRANSACTION", [])?;
+    operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(&operation_conn));
+        .unwrap_or_else(|| get_default_collection(operation_conn));
 
-    update_with_gaf(
-        &conn,
-        &operation_conn,
+    if let Err(err) = update_with_gaf(
+        context,
         &cmd.path,
         &cmd.csv,
         name,
         cmd.sample.as_deref(),
         cmd.parent_sample.as_deref(),
-    );
+    ) {
+        conn.execute("ROLLBACK TRANSACTION;", [])?;
+        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
+        return Err(err.into());
+    }
 
-    conn.execute("END TRANSACTION;", []).unwrap();
-    operation_conn.execute("END TRANSACTION;", []).unwrap();
+    conn.execute("END TRANSACTION;", [])?;
+    operation_conn.execute("END TRANSACTION;", [])?;
+
+    Ok(())
 }

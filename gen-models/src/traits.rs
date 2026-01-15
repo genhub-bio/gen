@@ -1,7 +1,20 @@
 use std::rc::Rc;
 
 use itertools::Itertools;
-use rusqlite::{Connection, Params, Result, Row, params, types::Value};
+use rusqlite::{Connection, Params, Result, Row, limits::Limit, params, types::Value};
+
+/// Returns the SQLite variable parameter limit for the provided connection.
+pub fn sqlite_parameter_limit(conn: &Connection) -> usize {
+    let limit = conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER);
+    usize::try_from(limit).expect("SQLite parameter limit should be positive")
+}
+
+/// Computes how many rows can be inserted per batch given a parameter count.
+pub fn max_rows_per_batch(conn: &Connection, params_per_row: usize) -> usize {
+    let params_per_row = params_per_row.max(1);
+    let max_params = sqlite_parameter_limit(conn);
+    (max_params / params_per_row).max(1)
+}
 
 pub trait Query {
     type Model;
@@ -49,7 +62,8 @@ pub trait Query {
         Value: From<T>,
     {
         let mut results = vec![];
-        for chunk in &ids.into_iter().chunks(1000) {
+        let batch_size = max_rows_per_batch(conn, 1);
+        for chunk in &ids.into_iter().chunks(batch_size) {
             let values: Vec<Value> = chunk
                 .map(|value: &'a T| Value::from(value.clone()))
                 .collect();
@@ -86,7 +100,8 @@ pub trait Query {
         Value: From<T>,
     {
         let mut results = vec![];
-        for chunk in &ids.into_iter().chunks(1000) {
+        let batch_size = max_rows_per_batch(conn, 1);
+        for chunk in &ids.into_iter().chunks(batch_size) {
             let values: Vec<Value> = chunk
                 .map(|value: &'a T| Value::from(value.clone()))
                 .collect();

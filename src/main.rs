@@ -6,10 +6,12 @@ use std::{
     io,
     io::{BufReader, Write},
     ops::Deref,
+    panic,
     path::{Path, PathBuf},
     str,
 };
 
+use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
     annotations::gff::propagate_gff,
@@ -19,21 +21,25 @@ use r#gen::{
     get_connection, get_operation_connection,
     graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
     operation_management,
-    operation_management::{parse_patch_operations, push},
+    operation_management::{parse_patch_operations, pull, push},
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, inline_gen_graph_widget::show_inline_gen_graph_widget,
+        block_group::view_block_group, diff::view_diff, inline_gen_graph_widget::show_inline_gen_graph_widget, operations::view_operations,
         patch::view_patches,
     },
 };
-use gen_core::config::{get_gen_dir, get_or_create_gen_dir};
+use gen_core::config::Workspace;
+use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     block_group::BlockGroup,
+    db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
     file_types::FileTypes,
     metadata,
-    operations::{Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState},
+    operations::{
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
+    },
     sample::Sample,
     traits::Query,
 };
@@ -42,51 +48,43 @@ use noodles::core::Region;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
-fn get_default_collection(conn: &Connection) -> String {
-    let mut stmt = conn
-        .prepare("select collection_name from defaults where id = 1")
-        .unwrap();
-    stmt.query_row((), |row| row.get(0))
-        .unwrap_or("default".to_string())
+fn get_default_collection(conn: &OperationsConnection) -> Result<String, rusqlite::Error> {
+    let mut stmt = conn.prepare("select collection_name from defaults where id = 1")?;
+    Ok(stmt
+        .query_row((), |row| row.get(0))
+        .unwrap_or("default".to_string()))
 }
 
-fn main() {
-    // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
-    env_logger::init();
-
+fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let cli_context = CliContext::from(&cli);
+    let workspace = Workspace::from_current_dir();
 
     // commands not requiring a db connection are handled here
     if let Some(Commands::Init {}) = &cli.command {
-        get_or_create_gen_dir();
-        get_operation_connection(None).unwrap();
+        workspace.ensure_gen_dir();
+        get_operation_connection(Some(workspace.gen_db_path()?))?;
         println!("Gen repository initialized.");
-        return;
+        return Ok(());
     }
 
-    let operation_conn = get_operation_connection(None).unwrap();
+    let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
     if let Some(Commands::Defaults {
         database,
         collection,
     }) = &cli.command
     {
         if let Some(name) = database {
-            operation_conn
-                .execute("update defaults set db_name=?1 where id = 1", (name,))
-                .unwrap();
+            operation_conn.execute("update defaults set db_name=?1 where id = 1", (name,))?;
             println!("Default database set to {name}");
         }
         if let Some(name) = collection {
-            operation_conn
-                .execute(
-                    "update defaults set collection_name=?1 where id = 1",
-                    (name,),
-                )
-                .unwrap();
+            operation_conn.execute(
+                "update defaults set collection_name=?1 where id = 1",
+                (name,),
+            )?;
             println!("Default collection set to {name}");
         }
-        return;
+        return Ok(());
     }
 
     if let Some(Commands::Transform { format_csv_for_gaf }) = &cli.command {
@@ -95,32 +93,47 @@ fn main() {
             .expect("csv for transformation not provided.");
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-        let mut csv_file = File::open(csv).unwrap();
-        transform_csv_to_fasta(&mut csv_file, &mut handle);
-        return;
-    }
-
-    let binding = cli.db.unwrap_or_else(|| {
-        let mut stmt = operation_conn
-            .prepare("select db_name from defaults where id = 1;")
-            .unwrap();
-        let row: Option<String> = stmt.query_row((), |row| row.get(0)).unwrap();
-        row.unwrap_or_else(|| match get_gen_dir() {
-            Some(dir) => PathBuf::from(dir)
-                .join("default.db")
-                .to_str()
-                .unwrap()
-                .to_string(),
-            None => {
-                panic!("No .gen directory found. Please run 'gen init' first.")
+        let mut csv_file = File::open(csv)?;
+        return match transform_csv_to_fasta(&mut csv_file, &mut handle) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                eprintln!("Failed to transform CSV for GAF usage: {err}");
+                Err(err.into())
             }
-        })
-    });
-    let db = binding.as_str();
-    let conn = get_connection(db).unwrap();
-    let db_uuid = metadata::get_db_uuid(&conn);
+        };
+    }
+    let binding = match cli.db {
+        Some(db) => db,
+        None => {
+            let mut stmt = operation_conn.prepare("select db_name from defaults where id = 1;")?;
+            let row: Option<String> = stmt.query_row((), |row| row.get(0)).ok();
 
-    match track_database(&conn, &operation_conn) {
+            match row {
+                Some(db_name) => db_name,
+                None => match workspace.find_gen_dir() {
+                    Some(dir) => dir
+                        .join("default.db")
+                        .to_str()
+                        .ok_or("Invalid path encoding")?
+                        .to_string(),
+                    None => {
+                        return Err("No .gen directory found. Please run 'gen init' first.".into());
+                    }
+                },
+            }
+        }
+    };
+    let db = binding.as_str();
+    let graph_connection = get_connection(db)?;
+    let db_context = DbContext::new(workspace.clone(), graph_connection, operation_conn);
+    let operation_conn = db_context.operations().conn();
+    let graph_conn = db_context.graph().conn();
+    let db_uuid = metadata::get_db_uuid(graph_conn);
+    let cli_context = CliContext {
+        context: &db_context,
+    };
+
+    match track_database(graph_conn, operation_conn) {
         Ok(_) => {}
         Err(err) => {
             panic!("Error tracking database: {err}");
@@ -129,26 +142,14 @@ fn main() {
 
     match cli.command {
         Some(Commands::Init {}) => {
-            get_or_create_gen_dir();
+            workspace.ensure_gen_dir();
             println!("Gen repository initialized.");
+            Ok(())
         }
-        Some(Commands::Import(cmd)) => {
-            r#gen::commands::import::execute(&cli_context, cmd);
-        }
-        Some(Commands::Update(cmd)) => {
-            r#gen::commands::update::execute(&cli_context, cmd);
-        }
-        Some(Commands::Export(cmd)) => {
-            r#gen::commands::export::execute(&cli_context, cmd);
-        }
-        Some(Commands::Remote(cmd)) => match handle_remote_command(&operation_conn, &cmd) {
-            Ok(_) => {}
-            Err(err) => {
-                eprintln!("Remote command failed: {err}");
-                std::process::exit(1);
-            }
-        },
-
+        Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
+        Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
+        Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),
+        Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
         Some(Commands::View {
             graph,
             sample,
@@ -156,22 +157,23 @@ fn main() {
             position,
             inline,
         }) => {
-            let collection_name = &collection
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match collection {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
 
             if inline {
                 // Use the inline widget
                 if let Some(name) = graph {
                     let block_group = if let Some(ref sample_name) = sample {
                         BlockGroup::get(
-                            &conn,
+                            graph_conn,
                             "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
                             params![collection_name, sample_name, name],
                         )
                     } else {
                         BlockGroup::get(
-                            &conn,
+                            graph_conn,
                             "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
                             params![collection_name, name],
                         )
@@ -179,9 +181,9 @@ fn main() {
 
                     match block_group {
                         Ok(bg) => {
-                            let block_graph = BlockGroup::get_graph(&conn, &bg.id);
+                            let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
                             // Use a default height of 10 for now
-                            if let Err(e) = show_inline_gen_graph_widget(&block_graph, &conn, 10) {
+                            if let Err(e) = show_inline_gen_graph_widget(&block_graph, graph_conn, 10) {
                                 eprintln!("Error showing inline widget: {}", e);
                             }
                         }
@@ -209,6 +211,38 @@ fn main() {
                     eprintln!("Error: {}", e);
                 }
             }
+            Ok(view_block_group(
+                graph_conn,
+                graph.clone(),
+                sample.clone(),
+                collection_name,
+                position.clone(),
+            )?)
+        }
+        Some(Commands::ViewDiff { from, to }) => {
+            let to_ref = to.clone().unwrap_or_else(|| {
+                OperationState::get_operation(operation_conn)
+                    .map(|h| format!("{h}"))
+                    .unwrap_or_else(|| "HEAD".to_string())
+            });
+            let from_range = parse_hash(operation_conn, &from)?;
+            let from_hash = from_range
+                .from
+                .or(from_range.to)
+                .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
+            let to_range = parse_hash(operation_conn, &to_ref)?;
+            let to_hash = to_range
+                .to
+                .or(to_range.from)
+                .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
+            let diffs =
+                collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
+            if diffs.is_empty() {
+                println!("No differences found between {from} and {to_ref}.");
+            } else {
+                view_diff(graph_conn, &diffs)?;
+            }
+            Ok(())
         }
 
         Some(Commands::Translate {
@@ -217,65 +251,61 @@ fn main() {
             collection,
             sample,
         }) => {
-            let collection = &collection
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match collection {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
+
             if let Some(bed) = bed {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                let mut bed_file = File::open(bed).unwrap();
-                match translate::bed::translate_bed(
-                    &conn,
-                    collection,
+                let mut bed_file = File::open(bed)?;
+                Ok(translate::bed::translate_bed(
+                    graph_conn,
+                    collection_name,
                     sample.as_deref(),
                     &mut bed_file,
                     &mut handle,
-                ) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("Error Translating Bed. {err}");
-                    }
-                }
+                )?)
             } else if let Some(gff) = gff {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                let mut gff_file = BufReader::new(File::open(gff).unwrap());
-                match translate::gff::translate_gff(
-                    &conn,
-                    collection,
+                let mut gff_file = BufReader::new(File::open(gff)?);
+                Ok(translate::gff::translate_gff(
+                    graph_conn,
+                    collection_name,
                     sample.as_deref(),
                     &mut gff_file,
                     &mut handle,
-                ) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("Error Translating GFF. {err}");
-                    }
-                }
+                )?)
+            } else {
+                Err("No input file specified.".into())
             }
         }
         Some(Commands::Operations {
             interactive,
             branch,
         }) => {
-            let current_op = OperationState::get_operation(&operation_conn);
+            let current_op = OperationState::get_operation(operation_conn);
             if let Some(current_op) = current_op {
-                let branch_name = branch.clone().unwrap_or_else(|| {
-                    let current_branch_id = OperationState::get_current_branch(&operation_conn)
-                        .expect("No current branch is set.");
-                    Branch::get_by_id(&operation_conn, current_branch_id)
-                        .unwrap_or_else(|| panic!("No branch with id {current_branch_id}"))
+                let branch_name = if let Some(name) = branch.clone() {
+                    name
+                } else {
+                    let current_branch_id = OperationState::get_current_branch(operation_conn)
+                        .ok_or("No current branch is set.")?;
+                    Branch::get_by_id(operation_conn, current_branch_id)
+                        .ok_or_else(|| format!("No branch with id {current_branch_id}"))?
                         .name
-                });
+                };
+
                 let operations = Branch::get_operations(
-                    &operation_conn,
-                    Branch::get_by_name(&operation_conn, &branch_name)
-                        .unwrap_or_else(|| panic!("No branch named {branch_name}."))
+                    operation_conn,
+                    Branch::get_by_name(operation_conn, &branch_name)
+                        .ok_or_else(|| format!("No branch named {branch_name}."))?
                         .id,
                 );
                 if interactive {
-                    // TODO: view_operations is deprecated, need to implement new interactive viewer
-                    eprintln!("Interactive view not yet implemented for new viewer");
+                    return Ok(view_operations(&db_context, &operations)?);
                 } else {
                     let mut indicator = "";
                     println!(
@@ -299,6 +329,7 @@ fn main() {
             } else {
                 println!("No operations found.");
             }
+            Ok(())
         }
         Some(Commands::Branch {
             create,
@@ -311,34 +342,33 @@ fn main() {
         }) => {
             if create {
                 Branch::get_or_create(
-                    &operation_conn,
-                    &branch_name
-                        .clone()
-                        .expect("Must provide a branch name to create."),
+                    operation_conn,
+                    branch_name
+                        .as_ref()
+                        .ok_or("Must provide a branch name to create.")?,
                 );
             } else if delete {
                 let branch = Branch::get_by_name(
-                    &operation_conn,
-                    &branch_name
-                        .clone()
-                        .expect("Must provide a branch name to delete."),
+                    operation_conn,
+                    branch_name
+                        .as_ref()
+                        .ok_or("Must provide a branch name to delete.")?,
                 )
-                .unwrap_or_else(|| panic!("Unable to find branch {branch_name:?}."));
-                Branch::delete(&operation_conn, branch.id);
+                .ok_or_else(|| format!("Unable to find branch {branch_name:?}."))?;
+                Branch::delete(operation_conn, branch.id);
             } else if checkout {
                 operation_management::checkout(
-                    None,
-                    &operation_conn,
+                    &db_context,
                     &Some(
                         branch_name
                             .clone()
-                            .expect("Must provide a branch name to checkout.")
+                            .ok_or("Must provide a branch name to checkout.")?
                             .to_string(),
                     ),
                     None,
-                );
+                )?;
             } else if list {
-                let current_branch = OperationState::get_current_branch(&operation_conn);
+                let current_branch = OperationState::get_current_branch(operation_conn);
                 let mut indicator = "";
                 println!(
                     "{indicator:<3}{col1:<30}   {col2:<20}   {col3:<15}",
@@ -347,7 +377,7 @@ fn main() {
                     col3 = "Remote",
                 );
                 for branch in
-                    Branch::query(&operation_conn, "select * from branch", params![]).iter()
+                    Branch::query(operation_conn, "select * from branch", params![]).iter()
                 {
                     if let Some(current_branch_id) = current_branch {
                         if current_branch_id == branch.id {
@@ -371,27 +401,16 @@ fn main() {
                     );
                 }
             } else if merge {
-                let branch_name = branch_name.clone().expect("Branch name must be provided.");
-                let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
-                    .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
-                let current_branch = OperationState::get_current_branch(&operation_conn)
-                    .expect("Unable to find current branch.");
-                match operation_management::merge(
-                    None,
-                    &operation_conn,
-                    current_branch,
-                    other_branch.id,
-                    None,
-                ) {
-                    Ok(_) => println!("Merge successful"),
-                    Err(_) => {
-                        panic!("Merge failed.");
-                    }
-                }
+                let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
+                let other_branch = Branch::get_by_name(operation_conn, &branch_name)
+                    .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
+                let current_branch = OperationState::get_current_branch(operation_conn)
+                    .ok_or("Unable to find current branch.")?;
+                operation_management::merge(&db_context, current_branch, other_branch.id, None)?;
+                println!("Merge successful");
             } else if let Some(remote_name) = set_remote {
-                // Handle setting remote for current branch
-                let current_branch_id = OperationState::get_current_branch(&operation_conn)
-                    .expect("No current branch is checked out.");
+                let current_branch_id = OperationState::get_current_branch(operation_conn)
+                    .ok_or("No current branch is checked out.")?;
 
                 let remote_to_set = if remote_name.is_empty() || remote_name == "null" {
                     None
@@ -399,101 +418,73 @@ fn main() {
                     Some(remote_name.as_str())
                 };
 
-                // Use the validated method for setting remote
-                match Branch::set_remote_validated(
-                    &operation_conn,
-                    current_branch_id,
-                    remote_to_set,
-                ) {
-                    Ok(_) => {
-                        if remote_to_set.is_some() {
-                            println!("Remote '{remote_name}' associated with current branch");
-                        } else {
-                            println!("Remote association cleared for current branch");
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("Error: {err}");
-                        std::process::exit(1);
-                    }
+                Branch::set_remote_validated(operation_conn, current_branch_id, remote_to_set)?;
+
+                if remote_to_set.is_some() {
+                    println!("Remote '{remote_name}' associated with current branch");
+                } else {
+                    println!("Remote association cleared for current branch");
                 }
             } else {
                 println!("No options selected.");
             }
+            Ok(())
         }
         Some(Commands::Merge { branch_name }) => {
-            let branch_name = branch_name.clone().expect("Branch name must be provided.");
-            let other_branch = Branch::get_by_name(&operation_conn, &branch_name)
-                .unwrap_or_else(|| panic!("Unable to find branch {branch_name}."));
-            let current_branch = OperationState::get_current_branch(&operation_conn)
-                .expect("Unable to find current branch.");
-            match operation_management::merge(
-                None,
-                &operation_conn,
-                current_branch,
-                other_branch.id,
-                None,
-            ) {
-                Ok(_) => println!("Merge successful"),
-                Err(details) => {
-                    panic!("Merge failed: {details}");
+            let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
+            let other_branch = Branch::get_by_name(operation_conn, &branch_name)
+                .ok_or_else(|| format!("Unable to find branch {branch_name}."))?;
+            let current_branch = OperationState::get_current_branch(operation_conn)
+                .ok_or("Unable to find current branch.")?;
+            match operation_management::merge(&db_context, current_branch, other_branch.id, None) {
+                Ok(_) => {
+                    println!("Merge successful");
+                    Ok(())
                 }
+                Err(e) => Err(format!("Merge failed: {}", e).into()),
             }
         }
         Some(Commands::Apply { hash }) => {
-            let operation = match Operation::search_hash(&operation_conn, &hash) {
-                Ok(op) => op,
-                Err(e) => {
-                    panic!("Unable to find operation by hash {hash}");
+            let operation = Operation::search_hash(operation_conn, &hash)?;
+            match operation_management::apply(&db_context, &operation.hash, None, true) {
+                Ok(_) => {
+                    println!("Operation applied");
+                    Ok(())
                 }
-            };
-            match operation_management::apply(None, &operation_conn, &operation.hash, None) {
-                Ok(_) => println!("Operation applied"),
-                Err(_) => {
-                    panic!("Apply failed.");
-                }
+                Err(e) => Err(format!("Operation application failed: {}", e).into()),
             }
         }
         Some(Commands::Checkout { branch, hash }) => {
             if let Some(name) = branch.clone() {
-                if Branch::get_by_name(&operation_conn, &name).is_none() {
-                    Branch::get_or_create(&operation_conn, &name);
+                if Branch::get_by_name(operation_conn, &name).is_none() {
+                    Branch::get_or_create(operation_conn, &name);
                     println!("Created branch {name}");
                 }
                 println!("Checking out branch {name}");
-                operation_management::checkout(None, &operation_conn, &Some(name), None);
+                operation_management::checkout(&db_context, &Some(name), None)?;
             } else if let Some(hash_name) = hash.clone() {
-                // if the hash is a branch, check it out
-                if Branch::get_by_name(&operation_conn, &hash_name).is_some() {
+                if Branch::get_by_name(operation_conn, &hash_name).is_some() {
                     println!("Checking out branch {hash_name}");
-                    operation_management::checkout(None, &operation_conn, &Some(hash_name), None);
+                    operation_management::checkout(&db_context, &Some(hash_name), None)?;
                 } else {
-                    let operation = match Operation::search_hash(&operation_conn, &hash_name) {
-                        Ok(op) => op,
-                        Err(err) => {
-                            panic!("Unable to find hash {hash_name}.")
-                        }
-                    };
+                    let operation = Operation::search_hash(operation_conn, &hash_name)?;
                     println!("Checking out operation {hash_name}");
-                    operation_management::checkout(
-                        None,
-                        &operation_conn,
-                        &None,
-                        Some(operation.hash),
-                    );
+                    operation_management::checkout(&db_context, &None, Some(operation.hash))?;
                 }
             } else {
                 println!("No branch or hash to checkout provided.");
             }
+            Ok(())
         }
         Some(Commands::Reset { hash }) => {
-            let operation = match Operation::search_hash(&operation_conn, &hash) {
-                Ok(op) => op,
-                Err(err) => {
-                    panic!("Unable to find hash {hash}.")
+            let operation = Operation::search_hash(operation_conn, &hash)?;
+            match operation_management::reset(&db_context, &operation.hash) {
+                Ok(_) => {
+                    println!("Operation reset");
+                    Ok(())
                 }
-            };
-            operation_management::reset(None, &operation_conn, &operation.hash);
+                Err(e) => Err(format!("Operation reset failed: {}", e).into()),
+            }
         }
         Some(Commands::PatchCreate {
             name,
@@ -501,33 +492,36 @@ fn main() {
             branch,
         }) => {
             let branch = if let Some(branch_name) = branch {
-                Branch::get_by_name(&operation_conn, &branch_name)
-                    .unwrap_or_else(|| panic!("No branch with name {branch_name} found."))
+                Branch::get_by_name(operation_conn, &branch_name)
+                    .ok_or_else(|| format!("No branch with name {branch_name} found."))?
             } else {
-                let current_branch_id = OperationState::get_current_branch(&operation_conn)
-                    .expect("No current branch is checked out.");
-                Branch::get_by_id(&operation_conn, current_branch_id).unwrap()
+                let current_branch_id = OperationState::get_current_branch(operation_conn)
+                    .ok_or("No current branch is checked out.")?;
+                Branch::get_by_id(operation_conn, current_branch_id)
+                    .ok_or("Unable to get current branch")?
             };
-            let branch_ops = Branch::get_operations(&operation_conn, branch.id);
-            let operations = parse_patch_operations(
-                &branch_ops,
-                &branch.current_operation_hash.unwrap(),
-                &operation,
-            );
-            let mut f = File::create(format!("{name}.gz")).unwrap();
-            patch::create_patch(&operation_conn, &operations, &mut f);
+            let branch_ops = Branch::get_operations(operation_conn, branch.id);
+            let operations = parse_patch_operations(operation_conn, &branch_ops, &operation)?;
+            let mut f = File::create(format!("{name}.gz"))?;
+            patch::create_patch(&db_context, &operations, &mut f)?;
+            Ok(())
         }
         Some(Commands::PatchApply { patch }) => {
-            let mut f = File::open(patch).unwrap();
+            let mut f = File::open(patch)?;
             let patches = patch::load_patches(&mut f);
-            patch::apply_patches(None, &operation_conn, &patches)
-                .unwrap_or_else(|op| panic!("Failed to apply patch: {op:?}"));
+            match patch::apply_patches(&db_context, &patches) {
+                Ok(_) => {
+                    println!("Patch applied");
+                    Ok(())
+                }
+                Err(e) => Err(format!("Patch application failed: {}", e).into()),
+            }
         }
         Some(Commands::PatchView { prefix, patch }) => {
             let patch_path = Path::new(&patch);
-            let mut f = File::open(patch_path).unwrap();
+            let mut f = File::open(patch_path)?;
             let patches = patch::load_patches(&mut f);
-            let diagrams = view_patches(&patches);
+            let diagrams = view_patches(&workspace, &patches);
             for (patch_hash, patch_diagrams) in diagrams.iter() {
                 for (bg_id, dot) in patch_diagrams.iter() {
                     let path = if let Some(ref p) = prefix {
@@ -538,29 +532,23 @@ fn main() {
                             patch_base = patch_path
                                 .with_extension("")
                                 .file_name()
-                                .unwrap()
+                                .ok_or("Invalid patch path")?
                                 .to_str()
-                                .unwrap()
+                                .ok_or("Invalid UTF-8 in path")?
                         )
                     };
-                    let mut f = File::create(path).unwrap();
-                    f.write_all(dot.as_bytes())
-                        .expect("Failed to write diagram");
+                    let mut f = File::create(path)?;
+                    f.write_all(dot.as_bytes())?;
                 }
             }
+            Ok(())
         }
-        None => {}
-        // these will never be handled by this method as we search for them earlier.
-        Some(Commands::Init {}) => {
-            get_or_create_gen_dir();
-            println!("Gen repository initialized.");
-        }
+        None => Ok(()),
         Some(Commands::Defaults {
             database,
             collection,
-        }) => {}
-
-        Some(Commands::Transform { format_csv_for_gaf }) => {}
+        }) => Ok(()),
+        Some(Commands::Transform { format_csv_for_gaf }) => Ok(()),
         Some(Commands::PropagateAnnotations {
             name,
             from_sample,
@@ -568,42 +556,47 @@ fn main() {
             gff,
             output_gff,
         }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
             let from_sample_name = from_sample.clone();
 
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
 
             propagate_gff(
-                &conn,
-                name,
+                graph_conn,
+                collection_name,
                 from_sample_name.as_deref(),
                 &to_sample,
                 &gff,
                 &output_gff,
-            );
+            )?;
 
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::ListSamples {}) => {
-            let sample_names = Sample::get_all_names(&conn);
-            // Null sample
+            let sample_names = Sample::get_all_names(graph_conn);
             println!();
             for sample_name in sample_names {
                 println!("{sample_name}");
             }
+            Ok(())
         }
         Some(Commands::ListGraphs { name, sample }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            let block_groups = Sample::get_block_groups(&conn, name, sample.as_deref());
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
+            let block_groups =
+                Sample::get_block_groups(graph_conn, collection_name, sample.as_deref());
             for block_group in block_groups {
                 println!("{}", block_group.name);
             }
+            Ok(())
         }
         Some(Commands::GetSequence {
             name,
@@ -613,27 +606,30 @@ fn main() {
             end,
             region,
         }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
-            let block_groups = Sample::get_block_groups(&conn, name, sample.as_deref());
-            let formatted_sample_name = if sample.is_some() {
-                format!("sample {}", sample.clone().unwrap())
-            } else {
-                "default sample".to_string()
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
+            let block_groups =
+                Sample::get_block_groups(graph_conn, collection_name, sample.as_deref());
+
+            let formatted_sample_name = match sample {
+                Some(s) => format!("sample {s}"),
+                None => "default sample".to_string(),
             };
+
             let (parsed_graph_name, start_coordinate, mut end_coordinate) =
                 if let Some(region) = region {
-                    let parsed_region = region.parse::<Region>().unwrap();
+                    let parsed_region = region.parse::<Region>()?;
                     let interval = parsed_region.interval();
                     (
                         parsed_region.name().to_string(),
-                        interval.start().unwrap().get() as i64,
-                        interval.end().unwrap().get() as i64,
+                        interval.start().ok_or("Region missing start")?.get() as i64,
+                        interval.end().ok_or("Region missing end")?.get() as i64,
                     )
                 } else {
                     (
-                        graph.clone().unwrap(),
+                        graph.clone().ok_or("Graph name required")?,
                         start.unwrap_or_default(),
                         end.unwrap_or(-1),
                     )
@@ -642,11 +638,11 @@ fn main() {
             let block_group = block_groups
                 .iter()
                 .find(|bg| bg.name == parsed_graph_name)
-                .unwrap_or_else(|| {
-                    panic!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
-                });
-            let path = BlockGroup::get_current_path(&conn, &block_group.id);
-            let sequence = path.sequence(&conn);
+                .ok_or_else(|| {
+                    format!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
+                })?;
+            let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
+            let sequence = path.sequence(graph_conn);
             if end_coordinate == -1 {
                 end_coordinate = sequence.len() as i64;
             }
@@ -654,6 +650,7 @@ fn main() {
                 "{}",
                 &sequence[start_coordinate as usize..end_coordinate as usize]
             );
+            Ok(())
         }
         Some(Commands::Diff {
             name,
@@ -661,16 +658,18 @@ fn main() {
             sample2,
             gfa,
         }) => {
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
             gfa_sample_diff(
-                &conn,
-                name,
+                graph_conn,
+                collection_name,
                 &PathBuf::from(gfa),
                 sample1.as_deref(),
                 sample2.as_deref(),
-            );
+            )?;
+            Ok(())
         }
         Some(Commands::DeriveSubgraph {
             name,
@@ -679,21 +678,21 @@ fn main() {
             region,
             backbone,
         }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
-            let parsed_region = region.parse::<Region>().unwrap();
+            let parsed_region = region.parse::<Region>()?;
             let interval = parsed_region.interval();
-            let start_coordinate = interval.start().unwrap().get() as i64;
-            let end_coordinate = interval.end().unwrap().get() as i64;
-            match derive_chunks(
-                &conn,
-                &operation_conn,
-                name,
+            let start_coordinate = interval.start().ok_or("Region missing start")?.get() as i64;
+            let end_coordinate = interval.end().ok_or("Region missing end")?.get() as i64;
+            derive_chunks(
+                &db_context,
+                collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
                 &parsed_region.name().to_string(),
@@ -702,12 +701,10 @@ fn main() {
                     start: start_coordinate,
                     end: end_coordinate,
                 }],
-            ) {
-                Ok(_) => {}
-                Err(e) => panic!("Error deriving subgraph: {e}"),
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            )?;
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::DeriveChunks {
             name,
@@ -718,48 +715,50 @@ fn main() {
             breakpoints,
             chunk_size,
         }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
-            let parsed_region = region.parse::<Region>().unwrap();
-            let interval = parsed_region.interval();
+            let parsed_region = region.parse::<Region>()?;
 
-            let path_length = match get_path(
-                &conn,
-                name,
+            let path_length = get_path(
+                graph_conn,
+                collection_name,
                 sample_name.as_deref(),
                 &parsed_region.name().to_string(),
                 backbone.as_deref(),
-            ) {
-                Ok(path) => path.length(&conn),
-                Err(e) => panic!("Error deriving subgraph(s): {e}"),
-            };
+            )?
+            .length(graph_conn);
 
-            let chunk_points;
-            if let Some(breakpoints) = breakpoints {
-                chunk_points = breakpoints
+            let chunk_points = if let Some(breakpoints) = breakpoints {
+                breakpoints
                     .split(",")
-                    .map(|x| x.parse::<i64>().unwrap())
+                    .map(|x| {
+                        x.parse::<i64>()
+                            .map_err(|e| format!("Invalid breakpoint: {e}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
                     .sorted()
-                    .collect::<Vec<i64>>();
+                    .collect::<Vec<i64>>()
             } else if let Some(chunk_size) = chunk_size {
                 let chunk_count = path_length / chunk_size;
-                chunk_points = (0..chunk_count)
+                (0..chunk_count)
                     .map(|i| i * chunk_size)
-                    .collect::<Vec<i64>>();
+                    .collect::<Vec<i64>>()
             } else {
-                panic!("No chunking method specified.");
-            }
+                return Err("No chunking method specified.".into());
+            };
 
             if chunk_points.is_empty() {
-                panic!("No chunk coordinates provided.");
+                return Err("No chunk coordinates provided.".into());
             }
             if chunk_points[chunk_points.len() - 1] > path_length {
-                panic!("At least one chunk coordinate exceeds path length.");
+                return Err("At least one chunk coordinate exceeds path length.".into());
             }
 
             let mut range_start = 0;
@@ -776,21 +775,18 @@ fn main() {
                 end: path_length,
             });
 
-            match derive_chunks(
-                &conn,
-                &operation_conn,
-                name,
+            derive_chunks(
+                &db_context,
+                collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
                 &parsed_region.name().to_string(),
                 backbone.as_deref(),
                 chunk_ranges,
-            ) {
-                Ok(_) => {}
-                Err(e) => panic!("Error deriving subgraph(s): {e}"),
-            }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            )?;
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::MakeStitch {
             name,
@@ -799,20 +795,20 @@ fn main() {
             regions,
             new_region,
         }) => {
-            conn.execute("BEGIN TRANSACTION", []).unwrap();
-            operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            let name = &name
-                .clone()
-                .unwrap_or_else(|| get_default_collection(&operation_conn));
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
             let sample_name = sample.clone();
             let new_sample_name = new_sample.clone();
 
             let region_names = regions.split(",").collect::<Vec<&str>>();
 
             match make_stitch(
-                &conn,
-                &operation_conn,
-                name,
+                &db_context,
+                collection_name,
                 sample_name.as_deref(),
                 &new_sample_name,
                 &region_names,
@@ -820,19 +816,37 @@ fn main() {
             ) {
                 Ok(_) => {}
                 Err(GraphOperationError::OperationError(OperationError::NoChanges)) => {}
-                Err(e) => panic!("Error stitching subgraphs: {e}"),
+                Err(e) => return Err(format!("Error stitching subgraphs: {e}").into()),
             }
-            conn.execute("END TRANSACTION", []).unwrap();
-            operation_conn.execute("END TRANSACTION", []).unwrap();
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
-        Some(Commands::Push { remote }) => match push(&operation_conn, remote.as_deref()) {
-            Ok(_) => {
-                println!("Push succeeded.");
-            }
-            Err(e) => {
-                println!("Push failed: {e}");
-            }
-        },
-        Some(Commands::Pull { remote }) => {}
+        Some(Commands::Push { remote }) => {
+            push(&db_context, remote.as_deref())?;
+            println!("Push succeeded.");
+            Ok(())
+        }
+        Some(Commands::Pull { remote }) => {
+            pull(&db_context, remote.as_deref())?;
+            Ok(())
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    panic::set_hook(Box::new(|info| {
+        eprintln!("❗ The application has encountered an unexpected error and must exit.");
+        eprintln!("Message: {}", info);
+        eprintln!();
+        eprintln!("👉 Please file an issue at: https://github.com/genhub-bio/gen/issues");
+        eprintln!("   Include the full output above, what you were doing, and system info.");
+    }));
+
+    // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
+    env_logger::init();
+    match call_cli() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow!("{e}").into()),
     }
 }

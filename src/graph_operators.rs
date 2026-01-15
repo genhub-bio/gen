@@ -5,6 +5,7 @@ use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    db::{DbContext, GraphConnection},
     edge::{Edge, EdgeData},
     errors::OperationError,
     file_types::FileTypes,
@@ -16,7 +17,6 @@ use gen_models::{
     traits::Query,
 };
 use itertools::Itertools;
-use rusqlite::Connection;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq)]
@@ -32,7 +32,7 @@ pub enum GraphOperationError {
 }
 
 pub fn get_path(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     sample_name: Option<&str>,
     region_name: &str,
@@ -55,8 +55,7 @@ pub fn get_path(
 
 #[allow(clippy::too_many_arguments)]
 pub fn derive_chunks(
-    conn: &Connection,
-    operation_conn: &Connection,
+    context: &DbContext,
     collection_name: &str,
     parent_sample_name: Option<&str>,
     new_sample_name: &str,
@@ -64,6 +63,7 @@ pub fn derive_chunks(
     backbone: Option<&str>,
     chunk_ranges: Vec<Range<i64>>,
 ) -> Result<Operation, GraphOperationError> {
+    let conn = context.graph().conn();
     let mut session = start_operation(conn);
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
 
@@ -216,8 +216,7 @@ pub fn derive_chunks(
         chunk_ranges.len()
     );
     let op = end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -237,7 +236,7 @@ pub fn derive_chunks(
 }
 
 fn get_block_group_id(
-    conn: &Connection,
+    conn: &GraphConnection,
     collection_name: &str,
     parent_sample_name: Option<&str>,
     region_name: &str,
@@ -256,14 +255,14 @@ fn get_block_group_id(
 }
 
 pub fn make_stitch(
-    conn: &Connection,
-    operation_conn: &Connection,
+    context: &DbContext,
     collection_name: &str,
     parent_sample_name: Option<&str>,
     new_sample_name: &str,
     region_names: &Vec<&str>,
     new_region_name: &str,
 ) -> Result<Operation, GraphOperationError> {
+    let conn = context.graph().conn();
     let mut session = start_operation(conn);
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
@@ -475,8 +474,7 @@ pub fn make_stitch(
     );
 
     end_operation(
-        conn,
-        operation_conn,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![OperationFile {
@@ -504,9 +502,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{
-            get_connection, get_operation_connection, setup_block_group, setup_gen_dir,
-        },
+        test_helpers::{setup_block_group, setup_gen},
         track_database,
         updates::fasta::update_with_fasta,
     };
@@ -519,9 +515,9 @@ mod tests {
         Subgraph range:  |-----------------|
         Sequences of the subgraph are TAAAAAAAAC, TTTTTCCCCC
          */
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
@@ -613,8 +609,7 @@ mod tests {
         );
 
         derive_chunks(
-            conn,
-            op_conn,
+            &context,
             "test",
             None,
             "test",
@@ -644,27 +639,25 @@ mod tests {
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aa.fa");
 
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test";
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             collection,
             None,
             "test1",
@@ -676,8 +669,7 @@ mod tests {
         );
 
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             collection,
             Some("test1"),
             "test2",
@@ -712,8 +704,7 @@ mod tests {
         );
 
         derive_chunks(
-            conn,
-            op_conn,
+            &context,
             collection,
             Some("test2"),
             "test3",
@@ -761,27 +752,25 @@ mod tests {
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aa.fa");
 
-        setup_gen_dir();
-        let conn = &get_connection(None).unwrap();
-        let op_conn = &get_operation_connection(None).unwrap();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
         let collection = "test";
 
         import_fasta(
+            &context,
             &fasta_path.to_str().unwrap().to_string(),
             collection,
             None,
             false,
-            conn,
-            op_conn,
         )
         .unwrap();
 
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             collection,
             None,
             "test1",
@@ -793,8 +782,7 @@ mod tests {
         );
 
         let _ = update_with_fasta(
-            conn,
-            op_conn,
+            &context,
             collection,
             Some("test1"),
             "test2",
@@ -829,8 +817,7 @@ mod tests {
         );
 
         derive_chunks(
-            conn,
-            op_conn,
+            &context,
             collection,
             Some("test2"),
             "test3",
@@ -872,8 +859,7 @@ mod tests {
 
         // Stitch the two main chunks back together in same order
         let _res = make_stitch(
-            conn,
-            op_conn,
+            &context,
             collection,
             Some("test3"),
             "test4",
@@ -905,8 +891,7 @@ mod tests {
 
         // Stitch the two main chunks together but in reverse order
         make_stitch(
-            conn,
-            op_conn,
+            &context,
             collection,
             Some("test3"),
             "test5",
