@@ -51,44 +51,11 @@ pub struct BlockGroupDiffs {
     pub block_group_diffs: Vec<BlockGroupDiff>,
 }
 
-pub fn collect_operation_diff(
-    workspace: &Workspace,
-    op_conn: &OperationsConnection,
-    from_hash: HashId,
-    to_hash: HashId,
-    db_path: Option<&str>,
-) -> Result<HashMap<String, OperationDiff>, OperationDiffError> {
-    if from_hash == to_hash {
-        return Ok(HashMap::new());
-    }
-
-    let path = Operation::get_path_between(op_conn, from_hash, to_hash);
-    if path.is_empty() {
-        return Err(OperationDiffError::PathNotFound(from_hash, to_hash));
-    }
-
-    let mut operations_in_order = vec![];
-    let mut added_ops = vec![];
-    let mut removed_ops = vec![];
-    for (src, direction, dest) in path {
-        let op_hash = match direction {
-            Direction::Outgoing => dest,
-            Direction::Incoming => src,
-        };
-        operations_in_order.push(op_hash);
-        match direction {
-            Direction::Outgoing => {
-                added_ops.push(op_hash);
-            }
-            Direction::Incoming => {
-                removed_ops.push(op_hash);
-            }
-        }
-    }
-
-    let added_graphs = build_block_group_diffs(workspace, op_conn, &added_ops, db_path)?;
-    let removed_graphs = build_block_group_diffs(workspace, op_conn, &removed_ops, db_path)?;
-
+fn build_operation_diffs(
+    operations_in_order: &[HashId],
+    added_graphs: &HashMap<String, BlockGroupDiffs>,
+    removed_graphs: &HashMap<String, BlockGroupDiffs>,
+) -> HashMap<String, OperationDiff> {
     let mut db_paths = HashSet::new();
     db_paths.extend(added_graphs.keys().cloned());
     db_paths.extend(removed_graphs.keys().cloned());
@@ -123,7 +90,58 @@ pub fn collect_operation_diff(
         diffs.insert(db_path, OperationDiff { operations, dbs });
     }
 
-    Ok(diffs)
+    diffs
+}
+
+pub fn collect_operation_diff(
+    workspace: &Workspace,
+    op_conn: &OperationsConnection,
+    from_hash: Option<HashId>,
+    to_hash: HashId,
+    db_path: Option<&str>,
+) -> Result<HashMap<String, OperationDiff>, OperationDiffError> {
+    let (operations_in_order, added_ops, removed_ops) = if let Some(from_hash) = from_hash {
+        if from_hash == to_hash {
+            return Ok(HashMap::new());
+        }
+
+        let path = Operation::get_path_between(op_conn, from_hash, to_hash);
+        if path.is_empty() {
+            return Err(OperationDiffError::PathNotFound(from_hash, to_hash));
+        }
+
+        let mut operations_in_order = vec![];
+        let mut added_ops = vec![];
+        let mut removed_ops = vec![];
+        for (src, direction, dest) in path {
+            let op_hash = match direction {
+                Direction::Outgoing => dest,
+                Direction::Incoming => src,
+            };
+            operations_in_order.push(op_hash);
+            match direction {
+                Direction::Outgoing => {
+                    added_ops.push(op_hash);
+                }
+                Direction::Incoming => {
+                    removed_ops.push(op_hash);
+                }
+            }
+        }
+
+        (operations_in_order, added_ops, removed_ops)
+    } else {
+        (vec![to_hash], vec![to_hash], vec![])
+    };
+
+    let added_graphs = build_block_group_diffs(workspace, op_conn, &added_ops, db_path)?;
+    let removed_graphs = build_block_group_diffs(workspace, op_conn, &removed_ops, db_path)?;
+
+    Ok(build_operation_diffs(
+        &operations_in_order,
+        &added_graphs,
+        &removed_graphs,
+    ))
 }
 
 /// The idea here is to build a merged changeset from the changesets of operations. This changeset is then fed into
@@ -407,8 +425,58 @@ mod tests {
             &dependencies,
         );
 
-        let diffs = collect_operation_diff(workspace, op_conn, base_op.hash, head.hash, None)
+        let diffs = collect_operation_diff(workspace, op_conn, Some(base_op.hash), head.hash, None)
             .expect("diff");
+        let diff = diffs.get("diff.db").expect("diff db");
+        let db_diff = get_db_diff(&diffs, "diff.db");
+        assert_eq!(diff.operations, vec![head.hash]);
+        assert_eq!(db_diff.added_block_groups.len(), 1);
+        assert!(db_diff.removed_block_groups.is_empty());
+        let graph = &db_diff.added_block_groups[0].graph;
+        assert_eq!(graph.nodes().count(), 3);
+        assert_eq!(graph.all_edges().count(), 2);
+    }
+
+    #[test]
+    fn initial_operation_diff_contains_added_block_groups() {
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
+        let workspace = context.workspace();
+        let start_node = Node::get_start_node();
+        let end_node = Node::get_end_node();
+
+        let seq_one = NewSequence::new()
+            .sequence_type("dna")
+            .sequence("AAAAA")
+            .name("one")
+            .build();
+        let node_one = Node {
+            id: HashId::pad_str(10),
+            sequence_hash: seq_one.hash,
+        };
+        let block_group = BlockGroup {
+            id: HashId::pad_str(3),
+            collection_name: "c".to_string(),
+            sample_name: Some("s".to_string()),
+            name: "bg".to_string(),
+            created_on: 0,
+        };
+
+        let head = Operation::create(op_conn, "add", &HashId::pad_str(2)).expect("create op");
+        let (changeset, dependencies) =
+            simple_changeset(&block_group, &node_one, &seq_one, &start_node, &end_node);
+        write_changeset(
+            workspace,
+            &head,
+            DatabaseChangeset {
+                db_path: "diff.db".to_string(),
+                changes: changeset,
+            },
+            &dependencies,
+        );
+
+        let diffs =
+            collect_operation_diff(workspace, op_conn, None, head.hash, None).expect("diff");
         let diff = diffs.get("diff.db").expect("diff db");
         let db_diff = get_db_diff(&diffs, "diff.db");
         assert_eq!(diff.operations, vec![head.hash]);
@@ -487,8 +555,8 @@ mod tests {
             &dependencies_two,
         );
 
-        let diffs =
-            collect_operation_diff(workspace, op_conn, op1.hash, op3.hash, None).expect("diff");
+        let diffs = collect_operation_diff(workspace, op_conn, Some(op1.hash), op3.hash, None)
+            .expect("diff");
         let diff = diffs.get("diff.db").expect("diff db");
         let db_diff = get_db_diff(&diffs, "diff.db");
         assert_eq!(diff.operations, vec![op2.hash, op3.hash]);
@@ -501,8 +569,8 @@ mod tests {
         let op_conn = context.operations().conn();
         let workspace = context.workspace();
         let base = Operation::create(op_conn, "seed", &HashId::pad_str(1)).expect("create base op");
-        let diffs =
-            collect_operation_diff(workspace, op_conn, base.hash, base.hash, None).expect("diff");
+        let diffs = collect_operation_diff(workspace, op_conn, Some(base.hash), base.hash, None)
+            .expect("diff");
         assert!(diffs.is_empty());
     }
 
@@ -589,8 +657,14 @@ mod tests {
             &feature_deps,
         );
 
-        let diffs = collect_operation_diff(workspace, op_conn, op_main.hash, op_feature.hash, None)
-            .expect("diff");
+        let diffs = collect_operation_diff(
+            workspace,
+            op_conn,
+            Some(op_main.hash),
+            op_feature.hash,
+            None,
+        )
+        .expect("diff");
         let diff = diffs.get("diff.db").expect("diff db");
         let db_diff = get_db_diff(&diffs, "diff.db");
         assert_eq!(diff.operations, vec![op_main.hash, op_feature.hash]);
@@ -681,7 +755,7 @@ mod tests {
         let diffs = collect_operation_diff(
             workspace,
             op_conn,
-            base.hash,
+            Some(base.hash),
             op_two.hash,
             Some("db-one.db"),
         )
@@ -695,7 +769,7 @@ mod tests {
         let diff_none = collect_operation_diff(
             workspace,
             op_conn,
-            base.hash,
+            Some(base.hash),
             op_two.hash,
             Some("missing.db"),
         )
