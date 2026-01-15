@@ -4,7 +4,6 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent};
-use gen_core::HashId;
 use gen_models::{
     block_group::BlockGroup, collection::Collection, db::GraphConnection, sample::Sample,
     traits::Query,
@@ -430,14 +429,14 @@ impl CollectionExplorer {
                 expanded: state.is_sample_expanded(sample),
             });
 
-            if state.is_sample_expanded(sample) {
-                if let Some(block_groups) = self.data.sample_block_groups.get(sample) {
-                    for (id, name) in block_groups {
-                        items.push(ExplorerItem::BlockGroup {
-                            id: *id,
-                            name: name.clone(),
-                        });
-                    }
+            if state.is_sample_expanded(sample)
+                && let Some(block_groups) = self.data.sample_block_groups.get(sample)
+            {
+                for (id, name) in block_groups {
+                    items.push(ExplorerItem::BlockGroup {
+                        id: *id,
+                        name: name.clone(),
+                    });
                 }
             }
         }

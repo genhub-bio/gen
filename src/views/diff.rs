@@ -20,11 +20,41 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
-use crate::{
-    core::HashId,
-    models::node::Node,
-    views::block_group_viewer::{PlotParameters, Viewer},
-};
+use crate::{core::HashId, models::node::Node};
+
+// Temporary stubs for deprecated types
+#[derive(Clone)]
+struct PlotParameters;
+impl PlotParameters {
+    fn default() -> Self {
+        PlotParameters
+    }
+}
+
+struct Viewer<'a> {
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> Viewer<'a> {
+    fn with_origin(
+        _graph: &'a gen_graph::GenGraph,
+        _conn: &'a GraphConnection,
+        _params: PlotParameters,
+        _origin: Option<HashId>,
+    ) -> Self {
+        Viewer {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    fn get_status_line() -> &'static str {
+        "diff viewer"
+    }
+
+    fn set_highlights(&mut self, _highlights: Vec<(HashId, HashId, Color)>) {}
+
+    fn set_node_highlights(&mut self, _highlights: Vec<HashId>) {}
+}
 
 struct DiffComponent {
     title: String,

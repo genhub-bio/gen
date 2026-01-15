@@ -59,16 +59,16 @@ pub enum Commands {
         #[arg(short, long)]
         inline: bool,
     },
-    /// Show a diff of operations and render the consolidated graph
-    #[command(name = "view-diff", arg_required_else_help(true))]
-    ViewDiff {
-        /// The base ref (operation hash/prefix, branch name, or HEAD shorthand) to diff from
-        #[clap(index = 1)]
-        from: String,
-        /// The target ref to diff to (defaults to the currently checked out operation)
-        #[clap(index = 2)]
-        to: Option<String>,
-    },
+    // /// Show a diff of operations and render the consolidated graph
+    // #[command(name = "view-diff", arg_required_else_help(true))]
+    // ViewDiff {
+    //     /// The base ref (operation hash/prefix, branch name, or HEAD shorthand) to diff from
+    //     #[clap(index = 1)]
+    //     from: String,
+    //     /// The target ref to diff to (defaults to the currently checked out operation)
+    //     #[clap(index = 2)]
+    //     to: Option<String>,
+    // },
     /// Export a set of operations to a patch file
     #[command(name = "patch-create", arg_required_else_help(true))]
     PatchCreate {

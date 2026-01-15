@@ -25,7 +25,6 @@ pub fn get_change_graph_from_hash(
     let op_conn = context.operations().conn();
     let operation = Operation::get_by_id(op_conn, hash)
         .ok_or(OperationError::NoOperation(format!("{hash}")))?;
->>>>>>> main
 
     let workspace = context.workspace();
     let changeset = operation.get_changeset(workspace);
@@ -72,13 +71,8 @@ pub fn get_change_graph(
         // There are 2 graphs created here. The first graph is our normal graph of nodes
         // and edges. This graph is then used to make our second graph representing the spans
         // of each node (blocks).
-<<<<<<< HEAD
-        let mut graph: DiGraphMap<gen_core::HashId, (i64, i64)> = DiGraphMap::new();
-        let mut block_graph: GenGraph = DiGraphMap::new();
-=======
         let mut graph: DiGraphMap<HashId, Vec<(i64, i64)>> = DiGraphMap::new();
         let mut block_graph = GenGraph::new();
->>>>>>> main
         block_graph.add_node(GraphNode {
             block_id: -1,
             node_id: start_node.id,
@@ -173,29 +167,6 @@ pub fn get_change_graph(
             }
         }
 
-<<<<<<< HEAD
-        for (src, dest, (fp, tp)) in graph.all_edges() {
-            if !(is_end_node(src) && is_start_node(dest)) {
-                let source_block = block_graph
-                    .nodes()
-                    .find(|node| node.node_id == src && node.sequence_end == *fp)
-                    .unwrap();
-                let dest_block = block_graph
-                    .nodes()
-                    .find(|node| node.node_id == dest && node.sequence_start == *tp)
-                    .unwrap();
-                block_graph.add_edge(
-                    source_block,
-                    dest_block,
-                    vec![GraphEdge {
-                        edge_id: gen_core::HashId::pad_str(-1),
-                        source_strand: Strand::Forward,
-                        target_strand: Forward,
-                        chromosome_index: 0,
-                        phased: 0,
-                    }],
-                );
-=======
         for (src, dest, weights) in graph.all_edges() {
             for (fp, tp) in weights {
                 if !(is_end_node(src) && is_start_node(dest)) {
@@ -220,7 +191,6 @@ pub fn get_change_graph(
                         }],
                     );
                 }
->>>>>>> main
             }
         }
         block_graphs.insert(*bg_id, block_graph);

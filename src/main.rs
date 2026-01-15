@@ -25,7 +25,8 @@ use r#gen::{
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, diff::view_diff, inline_gen_graph_widget::show_inline_gen_graph_widget, operations::view_operations,
+        block_group::view_block_group, // diff::view_diff, // temporarily disabled
+        inline_gen_graph_widget::show_inline_gen_graph_widget, // operations::view_operations, // temporarily disabled
         patch::view_patches,
     },
 };
@@ -164,7 +165,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             if inline {
                 // Use the inline widget
-                if let Some(name) = graph {
+                if let Some(ref name) = graph {
                     let block_group = if let Some(ref sample_name) = sample {
                         BlockGroup::get(
                             graph_conn,
@@ -183,7 +184,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(bg) => {
                             let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
                             // Use a default height of 10 for now
-                            if let Err(e) = show_inline_gen_graph_widget(&block_graph, graph_conn, 10) {
+                            if let Err(e) =
+                                show_inline_gen_graph_widget(&block_graph, graph_conn, 10)
+                            {
                                 eprintln!("Error showing inline widget: {}", e);
                             }
                         }
@@ -202,7 +205,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 // Use the original full-screen viewer
                 if let Err(e) = view_block_group(
-                    &conn,
+                    graph_conn,
                     graph.clone(),
                     sample.clone(),
                     collection_name,
@@ -219,32 +222,31 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 position.clone(),
             )?)
         }
-        Some(Commands::ViewDiff { from, to }) => {
-            let to_ref = to.clone().unwrap_or_else(|| {
-                OperationState::get_operation(operation_conn)
-                    .map(|h| format!("{h}"))
-                    .unwrap_or_else(|| "HEAD".to_string())
-            });
-            let from_range = parse_hash(operation_conn, &from)?;
-            let from_hash = from_range
-                .from
-                .or(from_range.to)
-                .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
-            let to_range = parse_hash(operation_conn, &to_ref)?;
-            let to_hash = to_range
-                .to
-                .or(to_range.from)
-                .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
-            let diffs =
-                collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
-            if diffs.is_empty() {
-                println!("No differences found between {from} and {to_ref}.");
-            } else {
-                view_diff(graph_conn, &diffs)?;
-            }
-            Ok(())
-        }
-
+        // Some(Commands::ViewDiff { from, to }) => {
+        //     let to_ref = to.clone().unwrap_or_else(|| {
+        //         OperationState::get_operation(operation_conn)
+        //             .map(|h| format!("{h}"))
+        //             .unwrap_or_else(|| "HEAD".to_string())
+        //     });
+        //     let from_range = parse_hash(operation_conn, &from)?;
+        //     let from_hash = from_range
+        //         .from
+        //         .or(from_range.to)
+        //         .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
+        //     let to_range = parse_hash(operation_conn, &to_ref)?;
+        //     let to_hash = to_range
+        //         .to
+        //         .or(to_range.from)
+        //         .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
+        //     let diffs =
+        //         collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
+        //     if diffs.is_empty() {
+        //         println!("No differences found between {from} and {to_ref}.");
+        //     } else {
+        //         view_diff(graph_conn, &diffs)?;
+        //     }
+        //     Ok(())
+        // }
         Some(Commands::Translate {
             bed,
             gff,
@@ -305,7 +307,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .id,
                 );
                 if interactive {
-                    return Ok(view_operations(&db_context, &operations)?);
+                    // return Ok(view_operations(&db_context, &operations)?); // temporarily disabled
+                    eprintln!(
+                        "Interactive operations view temporarily disabled due to merge conflicts"
+                    );
+                    return Ok(());
                 } else {
                     let mut indicator = "";
                     println!(

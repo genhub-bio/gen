@@ -8,11 +8,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::{HashId, PATH_START_NODE_ID};
+use gen_core::PATH_START_NODE_ID;
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
-use gen_models::{
-    block_group::BlockGroup, db::GraphConnection, node::Node, path::Path, traits::Query,
-};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_widget::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
 use log::warn;
 use ratatui::{
@@ -394,99 +392,96 @@ pub fn view_block_group(
         })?;
 
         // After drawing, update the graph controller if needed
-        if is_loading {
-            if let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
-                // Create a new graph for the selected block group
-                block_graph = BlockGroup::get_graph(conn, new_block_group_id);
-                connect_all_boundary_edges(&mut block_graph);
-                // Update the graph controller
-                let node_sizer = GenGraphNodeSizer;
-                graph_controller = GraphController::new(&block_graph, node_sizer);
-                graph_controller.set_detail_level(VisualDetail::Minimal);
-                graph_controller.show_cursor();
+        if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
+            // Create a new graph for the selected block group
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            connect_all_boundary_edges(&mut block_graph);
+            // Update the graph controller
+            let node_sizer = GenGraphNodeSizer;
+            graph_controller = GraphController::new(&block_graph, node_sizer);
+            graph_controller.set_detail_level(VisualDetail::Minimal);
+            graph_controller.show_cursor();
 
-                is_loading = false;
-            }
+            is_loading = false;
         }
 
         // Handle input
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
-        if crossterm::event::poll(timeout)? {
-            if let event::Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    // Global handlers
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Tab => {
-                            // Tab - cycle forwards
-                            focus_zone = match focus_zone {
-                                FocusZone::Canvas => {
-                                    if show_panel {
-                                        FocusZone::Panel
-                                    } else {
-                                        FocusZone::Sidebar
-                                    }
-                                }
-                                FocusZone::Sidebar => FocusZone::Canvas,
-                                FocusZone::Panel => FocusZone::Sidebar,
+        if crossterm::event::poll(timeout)?
+            && let event::Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            // Global handlers
+            match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Tab => {
+                    // Tab - cycle forwards
+                    focus_zone = match focus_zone {
+                        FocusZone::Canvas => {
+                            if show_panel {
+                                FocusZone::Panel
+                            } else {
+                                FocusZone::Sidebar
                             }
                         }
-                        KeyCode::BackTab => {
-                            // Shift+Tab - cycle backwards
-                            focus_zone = match focus_zone {
-                                FocusZone::Canvas => FocusZone::Sidebar,
-                                FocusZone::Sidebar => {
-                                    if show_panel {
-                                        FocusZone::Panel
-                                    } else {
-                                        FocusZone::Canvas
-                                    }
-                                }
-                                FocusZone::Panel => FocusZone::Canvas,
-                            }
-                        }
-                        _ => {}
+                        FocusZone::Sidebar => FocusZone::Canvas,
+                        FocusZone::Panel => FocusZone::Sidebar,
                     }
-
-                    // Focus-specific handlers
-                    match focus_zone {
-                        FocusZone::Canvas => match key.code {
-                            KeyCode::Enter => {
-                                // TODO: Node selection not yet supported, always show panel for now
-                                show_panel = true;
-                                focus_zone = FocusZone::Panel;
-                                tui_layout_change = true;
-                            }
-                            KeyCode::Esc => {
-                                if !show_panel {
-                                    focus_zone = FocusZone::Sidebar;
-                                }
-                            }
-                            KeyCode::Char('p') => {
-                                // TODO: Path highlighting not yet supported in GenGraphWidget
-                                warn!("Path highlighting not yet supported in GenGraphWidget");
-                            }
-                            _ => {
-                                graph_controller.handle_key_event(key);
-                            }
-                        },
-                        FocusZone::Panel => {
-                            if key.code == KeyCode::Esc {
-                                show_panel = false;
-                                focus_zone = FocusZone::Canvas;
-                                tui_layout_change = true;
-                            }
-                        }
+                }
+                KeyCode::BackTab => {
+                    // Shift+Tab - cycle backwards
+                    focus_zone = match focus_zone {
+                        FocusZone::Canvas => FocusZone::Sidebar,
                         FocusZone::Sidebar => {
-                            explorer.handle_input(&mut explorer_state, key);
-                            // Check if focus change was requested by the explorer
-                            if let Some(requested_zone) = explorer_state.focus_change_requested {
-                                focus_zone = requested_zone;
-                                explorer_state.focus_change_requested = None;
+                            if show_panel {
+                                FocusZone::Panel
+                            } else {
+                                FocusZone::Canvas
                             }
                         }
+                        FocusZone::Panel => FocusZone::Canvas,
+                    }
+                }
+                _ => {}
+            }
+
+            // Focus-specific handlers
+            match focus_zone {
+                FocusZone::Canvas => match key.code {
+                    KeyCode::Enter => {
+                        // TODO: Node selection not yet supported, always show panel for now
+                        show_panel = true;
+                        focus_zone = FocusZone::Panel;
+                        tui_layout_change = true;
+                    }
+                    KeyCode::Esc => {
+                        if !show_panel {
+                            focus_zone = FocusZone::Sidebar;
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        // TODO: Path highlighting not yet supported in GenGraphWidget
+                        warn!("Path highlighting not yet supported in GenGraphWidget");
+                    }
+                    _ => {
+                        graph_controller.handle_key_event(key).ok();
+                    }
+                },
+                FocusZone::Panel => {
+                    if key.code == KeyCode::Esc {
+                        show_panel = false;
+                        focus_zone = FocusZone::Canvas;
+                        tui_layout_change = true;
+                    }
+                }
+                FocusZone::Sidebar => {
+                    explorer.handle_input(&mut explorer_state, key);
+                    // Check if focus change was requested by the explorer
+                    if let Some(requested_zone) = explorer_state.focus_change_requested {
+                        focus_zone = requested_zone;
+                        explorer_state.focus_change_requested = None;
                     }
                 }
             }

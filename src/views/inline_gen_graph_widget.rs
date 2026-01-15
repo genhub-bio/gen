@@ -6,13 +6,13 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
+use gen_models::db::GraphConnection;
 use gen_widget::{graph_controller::GraphController, layout::VisualDetail};
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
     widgets::{Block, Borders},
 };
-use rusqlite::Connection;
 
 use crate::views::gen_graph_widget::{
     GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget,
@@ -75,11 +75,11 @@ impl EventSource for TickEventSource {
 
 pub struct InlineGenGraphState<'a> {
     controller: GraphController<&'a GenGraph, GenGraphNodeSizer>,
-    conn: &'a Connection,
+    conn: &'a GraphConnection,
 }
 
 impl<'a> InlineGenGraphState<'a> {
-    pub fn new(graph: &'a GenGraph, conn: &'a Connection) -> Self {
+    pub fn new(graph: &'a GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph, node_sizer);
         graph_controller.set_detail_level(VisualDetail::Minimal);
@@ -116,7 +116,7 @@ impl<'a> InlineGenGraphState<'a> {
 ///
 pub fn show_inline_gen_graph_widget(
     graph: &GenGraph,
-    conn: &Connection,
+    conn: &GraphConnection,
     height: u16,
 ) -> Result<()> {
     // Try to initialize the terminal - if it fails, fall back to text mode
@@ -143,7 +143,7 @@ pub fn show_inline_gen_graph_widget(
 fn show_interactive_widget(
     mut terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     graph: &GenGraph,
-    conn: &Connection,
+    conn: &GraphConnection,
     _height: u16,
 ) -> Result<()> {
     let mut state = InlineGenGraphState::new(graph, conn);
@@ -190,7 +190,7 @@ fn show_interactive_widget(
                             break;
                         }
                         _ => {
-                            state.controller.handle_key_event(key);
+                            let _ = state.controller.handle_key_event(key);
                         }
                     }
                 }
@@ -226,7 +226,7 @@ fn show_interactive_widget(
 /// * `Ok(())` if rendering succeeded
 pub fn plot_static(
     graph: &GenGraph,
-    conn: &Connection,
+    conn: &GraphConnection,
     detail_level: Option<VisualDetail>,
 ) -> Result<()> {
     use gen_widget::plotter::plot_graph_to_string;
@@ -261,7 +261,7 @@ pub fn plot_static(
 
 /// Text-based fallback for environments without interactive terminal support
 /// Uses TestBackend to render graph and provide visual debugging output
-fn show_text_fallback(graph: &GenGraph, conn: &Connection) -> Result<()> {
+fn show_text_fallback(graph: &GenGraph, conn: &GraphConnection) -> Result<()> {
     println!("GenGraph Text View (with TestBackend visualization)");
     println!("==================================================");
 
@@ -329,12 +329,8 @@ fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState
     frame.render_stateful_widget(widget, area, &mut state.controller);
 }
 
-fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    let camera_pos = state.controller.viewport_state.camera_current;
-    let help_text = format!(
-        " Camera: ({},{}) | ←→↑↓: Navigate/Pan | +/-: Zoom | q/Esc: Exit",
-        camera_pos.x, camera_pos.y
-    );
+fn draw_controls_help(frame: &mut Frame, area: Rect, _state: &mut InlineGenGraphState) {
+    let help_text = "←→↑↓: Navigate/Pan | +/-: Zoom | q/Esc: Exit".to_string();
 
     let paragraph =
         ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));
@@ -342,13 +338,8 @@ fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphS
 }
 
 #[allow(dead_code)]
-fn draw_final_message(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    let final_text = format!(
-        "GenGraph viewing completed (final position: {},{} at {:?} scale)",
-        state.controller.viewport_state.camera_current.x,
-        state.controller.viewport_state.camera_current.y,
-        state.controller.get_detail_level()
-    );
+fn draw_final_message(frame: &mut Frame, area: Rect, _state: &mut InlineGenGraphState) {
+    let final_text = "GenGraph viewing completed".to_string();
     let paragraph =
         ratatui::widgets::Paragraph::new(final_text).style(Style::default().fg(Color::Green));
     frame.render_widget(paragraph, area);
@@ -356,7 +347,6 @@ fn draw_final_message(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphS
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent};
     use gen_core::HashId;
     use petgraph::graphmap::DiGraphMap;
 

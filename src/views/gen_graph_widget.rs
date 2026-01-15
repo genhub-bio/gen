@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::node::Node;
+use gen_models::{db::GraphConnection, node::Node};
 use gen_widget::{
     geometry::WorldRect,
     graph_controller::WorldBuffer,
@@ -11,7 +11,6 @@ use gen_widget::{
     theme::get_theme_color,
 };
 use ratatui::style::Style;
-use rusqlite::Connection;
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
 /// based on genomic sequence length.
@@ -32,13 +31,13 @@ impl NodeSizer<&GenGraph> for GenGraphNodeSizer {
 /// Domain-specific node renderer for GenGraph that handles database sequence fetching
 /// and genomic sequence visualization with caching.
 pub struct GenGraphNodeRenderer<'a> {
-    conn: &'a Connection,
+    conn: &'a GraphConnection,
     cache: HashMap<GraphNode, String>,
 }
 
 impl<'a> GenGraphNodeRenderer<'a> {
     /// Create a new GenGraph node renderer with database connection
-    pub fn new(conn: &'a Connection) -> Self {
+    pub fn new(conn: &'a GraphConnection) -> Self {
         Self {
             conn,
             cache: HashMap::new(),
@@ -46,7 +45,7 @@ impl<'a> GenGraphNodeRenderer<'a> {
     }
 
     /// Get the database connection (for accessing from other code)
-    pub fn connection(&self) -> &'a Connection {
+    pub fn connection(&self) -> &'a GraphConnection {
         self.conn
     }
 
@@ -152,7 +151,7 @@ pub fn inner_truncation(s: &str, target_length: u32) -> String {
 /// # Returns
 /// A configured GraphWidget ready to visualize GenGraph data
 pub fn create_gen_graph_widget(
-    conn: &Connection,
+    conn: &GraphConnection,
 ) -> GraphWidget<'_, &GenGraph, GenGraphNodeSizer, GenGraphNodeRenderer<'_>> {
     let renderer = GenGraphNodeRenderer::new(conn);
     GraphWidget::with_renderer(renderer)
