@@ -1,8 +1,8 @@
+use super::hash_id::PyHashId;
 use r#gen::core::HashId;
 use pyo3::prelude::*;
-use super::hash_id::PyHashId;
 
-// TODO: rename to Block? 
+// TODO: rename to Block
 /// A Python-friendly representation of a graph node key (node id, sequence start, sequence end)
 /// Used to ensure consistent hashing when used as dictionary keys in Python
 #[pyclass] // pyclass includes  #[derive(IntoPyObject)]

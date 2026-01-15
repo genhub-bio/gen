@@ -2,12 +2,7 @@ use std::{path::PathBuf, sync::Mutex};
 
 use r#gen::{core::HashId, get_connection, views::block_layout::BaseLayout};
 use gen_core::config::Workspace;
-use gen_models::{
-    block_group::BlockGroup,
-    db::GraphConnection,
-    node::Node,
-    traits::Query,
-};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use pyo3::{prelude::*, types::PyModule};
 
 use super::{
@@ -113,18 +108,14 @@ impl PyRepository {
             })
         })
     }
-    
+
     /// Retrieves all BlockGroups.
     ///
     /// Returns:
     ///     A vector of PyBlockGroup instances
     fn get_block_groups(&self) -> PyResult<Vec<PyBlockGroup>> {
         self.with_connection(|conn| {
-            let block_groups = BlockGroup::query(
-                conn,
-                "SELECT * FROM block_groups",
-                [],
-            );
+            let block_groups = BlockGroup::query(conn, "SELECT * FROM block_groups", []);
 
             let result = block_groups
                 .into_iter()
@@ -242,6 +233,39 @@ impl PyRepository {
         })
     }
 
+    // TODO: implement operation tracking and wire into CLI simple sequence entry code
+    /// Creates a new BlockGroup.
+    ///
+    /// Args:
+    ///     name: The name of the BlockGroup
+    ///     collection_name: The name of the collection
+    ///     sample_name: Optional name of the sample
+    ///
+    /// Returns:
+    ///     A PyBlockGroup instance
+    fn create_block_group(
+        &self,
+        name: String,
+        collection_name: String,
+        sample_name: Option<String>,
+    ) -> PyResult<PyBlockGroup> {
+        self.with_connection(|conn| {
+            let block_group = BlockGroup::create(
+                conn,
+                &collection_name,
+                sample_name.as_deref(), // Option<String> to Option<&str>
+                &name,
+            );
+
+            Ok(PyBlockGroup {
+                id: block_group.id,
+                collection_name: block_group.collection_name,
+                sample_name: block_group.sample_name,
+                name: block_group.name,
+            })
+        })
+    }
+
     /// Creates a BaseLayout from a BlockGroup
     ///
     /// Args:
@@ -270,14 +294,12 @@ impl PyRepository {
     fn get_block_sequence(&self, node_key: &PyNodeKey) -> PyResult<String> {
         self.with_connection(|conn| {
             let sequences_by_node_id = Node::get_sequences_by_node_ids(conn, &[node_key.node_id]);
-            let sequence = sequences_by_node_id
-                .get(&node_key.node_id)
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "Node with id {:?} not found",
-                        node_key.node_id
-                    ))
-                })?;
+            let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Node with id {:?} not found",
+                    node_key.node_id
+                ))
+            })?;
             Ok(sequence.get_sequence(node_key.sequence_start, node_key.sequence_end))
         })
     }

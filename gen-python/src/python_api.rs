@@ -15,7 +15,6 @@ use crate::{
     exports::{export_fasta, export_genbank, export_gfa},
     imports::{import_fasta, import_genbank, import_gfa, import_library},
     init,
-    operators::{create_block_group_py, derive_chunks_py, make_stitch_py},
     python_api::{
         block_group::PyBlockGroup,
         hash_id::PyHashId,
@@ -52,9 +51,6 @@ pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(export_gfa, m)?)?;
     m.add_function(wrap_pyfunction!(export_genbank, m)?)?;
     m.add_function(wrap_pyfunction!(get_gen_dir_py, m)?)?;
-    m.add_function(wrap_pyfunction!(create_block_group_py, m)?)?;
-    m.add_function(wrap_pyfunction!(derive_chunks_py, m)?)?;
-    m.add_function(wrap_pyfunction!(make_stitch_py, m)?)?;
 
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBlockGroup>()?;

@@ -6,7 +6,6 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 pub mod exports;
 pub mod imports;
-pub mod operators;
 pub mod python_api;
 pub mod updates;
 
@@ -50,7 +49,6 @@ impl PyDbContext {
 
         Ok(Self(DbContext::new(workspace, graph_conn, operations_conn)))
     }
-
 }
 
 #[pyfunction]
