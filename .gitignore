@@ -35,7 +35,7 @@ rust-analyzer.json
 
 # Python bindings
 **/__pycache__/
-python/gen/*.so
+gen-python/python/gen/*.so
 
 # Cap'n proto generated files
 **/generated/*capnp.rs

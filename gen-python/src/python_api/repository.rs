@@ -2,13 +2,14 @@ use std::{path::PathBuf, sync::Mutex};
 
 use r#gen::{core::HashId, get_connection, views::block_layout::BaseLayout};
 use gen_core::config::Workspace;
-use gen_models::{block_group::BlockGroup, db::GraphConnection, traits::Query};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use pyo3::{prelude::*, types::PyModule};
 
 use super::{
     block_group::PyBlockGroup,
     factory::Factory,
     layouts::PyBaseLayout,
+    node_key::PyNodeKey,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
 
@@ -105,6 +106,28 @@ impl PyRepository {
                 sample_name: block_group.sample_name,
                 name: block_group.name,
             })
+        })
+    }
+
+    /// Retrieves all BlockGroups.
+    ///
+    /// Returns:
+    ///     A vector of PyBlockGroup instances
+    fn get_block_groups(&self) -> PyResult<Vec<PyBlockGroup>> {
+        self.with_connection(|conn| {
+            let block_groups = BlockGroup::all(conn);
+
+            let result = block_groups
+                .into_iter()
+                .map(|bg| PyBlockGroup {
+                    id: bg.id,
+                    collection_name: bg.collection_name,
+                    sample_name: bg.sample_name,
+                    name: bg.name,
+                })
+                .collect();
+
+            Ok(result)
         })
     }
 
@@ -210,6 +233,7 @@ impl PyRepository {
         })
     }
 
+    // TODO: implement operation tracking and wire into CLI simple sequence entry code
     /// Creates a new BlockGroup.
     ///
     /// Args:
@@ -257,6 +281,26 @@ impl PyRepository {
             Ok(PyBaseLayout {
                 layout: block_layout,
             })
+        })
+    }
+
+    /// Gets the sequence for a block specified by a NodeKey
+    ///
+    /// Args:
+    ///     node_key: The NodeKey containing node_id, sequence_start, and sequence_end
+    ///
+    /// Returns:
+    ///     A string containing the sequence for the specified block
+    fn get_block_sequence(&self, node_key: &PyNodeKey) -> PyResult<String> {
+        self.with_connection(|conn| {
+            let sequences_by_node_id = Node::get_sequences_by_node_ids(conn, &[node_key.node_id]);
+            let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Node with id {:?} not found",
+                    node_key.node_id
+                ))
+            })?;
+            Ok(sequence.get_sequence(node_key.sequence_start, node_key.sequence_end))
         })
     }
 }

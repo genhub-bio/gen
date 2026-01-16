@@ -1,12 +1,14 @@
 use r#gen::core::HashId;
 use pyo3::prelude::*;
 
-/// A Python-friendly representation of a graph node key
+use super::hash_id::PyHashId;
+
+// TODO: rename to Block
+/// A Python-friendly representation of a graph node key (node id, sequence start, sequence end)
 /// Used to ensure consistent hashing when used as dictionary keys in Python
 #[pyclass] // pyclass includes  #[derive(IntoPyObject)]
 #[derive(Clone, Copy)]
 pub struct PyNodeKey {
-    #[pyo3(get)]
     pub node_id: HashId,
     #[pyo3(get)]
     pub sequence_start: i64,
@@ -23,6 +25,11 @@ impl PyNodeKey {
             sequence_start,
             sequence_end,
         }
+    }
+
+    #[getter]
+    fn node_id(&self) -> PyHashId {
+        PyHashId::new(self.node_id)
     }
 
     fn __repr__(&self) -> PyResult<String> {
