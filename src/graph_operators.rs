@@ -93,8 +93,6 @@ pub fn derive_chunks(
             region_name.to_string()
         };
 
-        println!("here100");
-        println!("block group name: {}", child_block_group_name);
         let child_block_group = BlockGroup::create(
             conn,
             collection_name,
