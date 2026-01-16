@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Write};
 
-use gen_widget::layout::{LayoutEdge, LayoutNode, NodeRole};
+use gen_tui::layout::{LayoutEdge, LayoutNode, NodeRole};
 use petgraph::{
     Undirected,
     stable_graph::StableGraph,
@@ -72,8 +72,8 @@ fn generate_dot_debug(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u3
                     format!("R{:04b}", glyph_index)
                 }
                 NodeRole::Stitch(side) => match side {
-                    gen_widget::partition::StitchSide::Left => "S_L".to_string(),
-                    gen_widget::partition::StitchSide::Right => "S_R".to_string(),
+                    gen_tui::partition::StitchSide::Left => "S_L".to_string(),
+                    gen_tui::partition::StitchSide::Right => "S_R".to_string(),
                 },
             };
 

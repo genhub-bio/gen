@@ -8,7 +8,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use gen_graph::GenGraph;
     use gen_models::sample::Sample;
-    use gen_widget::{
+    use gen_tui::{
         geometry::WorldPos,
         graph_controller::{GraphConfig, GraphController},
         graph_widget::DefaultGraphWidget,

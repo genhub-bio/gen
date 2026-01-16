@@ -1,0 +1,46 @@
+[package]
+name = "gen-tui"
+description = "Graph visualization widget system for Gen"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+gen-core = { path = "../gen-core" }
+gen-models = { path = "../gen-models" }
+gen-graph = { path = "../gen-graph" }
+gen-sugiyama = { path = "../gen-sugiyama" }
+itertools = "0.14.0"
+petgraph = { version = "0.6.5", features = ["serde-1"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+log = "0.4.26"
+ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
+ratatui-base16 = "0.3.7"
+crossterm = "0.28.1"
+rstar = { version = "0.12.2", features = ["serde"] }
+once_cell = "1.21.3"
+ftree = "1.2.0"
+rand = { version = "0.9.1", features = ["std"] }
+tachyonfx = "0.15.0"
+tokio = { version = "1.45.0", features = [
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "macros",
+] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+
+[features]
+default = []
+
+[dev-dependencies]
+insta = "1.43.1"
+ratatui = { version = "0.29.0", features = ["crossterm"] }
+serial_test = "3.2.0"
+tempfile = "3.14.0"
+env_logger = "0.10.0"
+more-asserts = "0.3.1"
+

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::GraphConnection, node::Node};
-use gen_widget::{
+use gen_tui::{
     geometry::WorldRect,
     graph_controller::WorldBuffer,
     graph_widget::{GraphWidget, NODE_GLYPH},

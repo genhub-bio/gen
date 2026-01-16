@@ -5,7 +5,7 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_models::sample::Sample;
-    use gen_widget::{
+    use gen_tui::{
         graph_controller::{GraphConfig, GraphController},
         layout::{NodeRole, VisualDetail},
         partition_table::PartitionConfig,

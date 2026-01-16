@@ -7,7 +7,7 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::db::GraphConnection;
-use gen_widget::{graph_controller::GraphController, layout::VisualDetail};
+use gen_tui::{graph_controller::GraphController, layout::VisualDetail};
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
@@ -229,7 +229,7 @@ pub fn plot_static(
     conn: &GraphConnection,
     detail_level: Option<VisualDetail>,
 ) -> Result<()> {
-    use gen_widget::plotter::plot_graph_to_string;
+    use gen_tui::plotter::plot_graph_to_string;
 
     let node_sizer = GenGraphNodeSizer;
     let renderer = GenGraphNodeRenderer::new(conn);

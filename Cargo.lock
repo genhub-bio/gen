@@ -1416,7 +1416,7 @@ dependencies = [
  "gen-diff",
  "gen-graph",
  "gen-models",
- "gen-widget",
+ "gen-tui",
  "getrandom 0.3.3",
  "html-escape",
  "httparse",
@@ -1527,7 +1527,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "gen-widget"
+name = "gen-sugiyama"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "more-asserts",
+ "petgraph 0.6.5",
+]
+
+[[package]]
+name = "gen-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
@@ -1536,6 +1545,7 @@ dependencies = [
  "gen-core",
  "gen-graph",
  "gen-models",
+ "gen-sugiyama",
  "insta",
  "itertools 0.14.0",
  "log",

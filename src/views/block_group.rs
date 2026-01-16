@@ -11,7 +11,7 @@ use crossterm::{
 use gen_core::PATH_START_NODE_ID;
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use gen_widget::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
+use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
 use log::warn;
 use ratatui::{
     layout::Constraint,
