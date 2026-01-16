@@ -35,7 +35,7 @@ use r#gen::{
     },
 };
 use gen_annotations::translate;
-use gen_core::config::Workspace;
+use gen_core::{config::Workspace, range::Range};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     annotations::{add_annotation, add_annotation_file},

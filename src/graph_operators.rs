@@ -1,7 +1,7 @@
-use core::ops::Range;
+use core::ops::Range as RustRange;
 use std::collections::{HashMap, HashSet};
 
-use gen_core::{HashId, Strand, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, is_end_node, is_start_node, range::Range};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -93,6 +93,8 @@ pub fn derive_chunks(
             region_name.to_string()
         };
 
+        println!("here100");
+        println!("block group name: {}", child_block_group_name);
         let child_block_group = BlockGroup::create(
             conn,
             collection_name,
@@ -112,7 +114,7 @@ pub fn derive_chunks(
         }
 
         let mut blocks = current_intervaltree
-            .query(Range {
+            .query(RustRange {
                 start: start_coordinate,
                 end: end_coordinate,
             })
