@@ -115,7 +115,7 @@ impl PyRepository {
     ///     A vector of PyBlockGroup instances
     fn get_block_groups(&self) -> PyResult<Vec<PyBlockGroup>> {
         self.with_connection(|conn| {
-            let block_groups = BlockGroup::query(conn, "SELECT * FROM block_groups", []);
+            let block_groups = BlockGroup::all(conn);
 
             let result = block_groups
                 .into_iter()
