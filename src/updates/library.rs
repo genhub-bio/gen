@@ -11,14 +11,41 @@ use gen_models::{
 use thiserror::Error;
 
 use crate::{
-    combinatorial_library::{create_library, parse_library},
-    graph_operators::{derive_chunks, make_stitch},
+    combinatorial_library::{
+        CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
+        parse_library,
+    },
+    graph_operators::{GraphOperationError, derive_chunks, make_stitch},
 };
 
 #[derive(Error, Debug)]
 pub enum UpdateWithLibraryError {
     #[error("Failed to find block group")]
     BlockGroupLookupFailed(String),
+    #[error("Failed to create output graph(s)")]
+    GraphOperation(GraphOperationError),
+    #[error("Failed to parse library files")]
+    FileParse(CombinatorialLibraryParseError),
+    #[error("Failed to create library")]
+    LibraryCreation(CombinatorialLibraryCreationError),
+}
+
+impl From<CombinatorialLibraryParseError> for UpdateWithLibraryError {
+    fn from(err: CombinatorialLibraryParseError) -> Self {
+        UpdateWithLibraryError::FileParse(err)
+    }
+}
+
+impl From<GraphOperationError> for UpdateWithLibraryError {
+    fn from(err: GraphOperationError) -> Self {
+        UpdateWithLibraryError::GraphOperation(err)
+    }
+}
+
+impl From<CombinatorialLibraryCreationError> for UpdateWithLibraryError {
+    fn from(err: CombinatorialLibraryCreationError) -> Self {
+        UpdateWithLibraryError::LibraryCreation(err)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,7 +88,6 @@ pub fn update_with_library(
         });
     }
 
-    // TODO: handle errors
     let _chunks_result = derive_chunks(
         context,
         collection_name,
@@ -70,9 +96,9 @@ pub fn update_with_library(
         region_name,
         None,
         chunk_ranges,
-    );
+    )?;
 
-    let parts_list = parse_library(parts_file_path, library_file_path).unwrap();
+    let parts_list = parse_library(parts_file_path, library_file_path)?;
 
     let intermediate_block_group = BlockGroup::create(
         conn,
@@ -82,7 +108,7 @@ pub fn update_with_library(
     );
 
     let path_changes_count =
-        create_library(conn, &intermediate_block_group, new_sample_name, parts_list).unwrap();
+        create_library(conn, &intermediate_block_group, new_sample_name, parts_list)?;
 
     let mut chunk_names = vec![];
     let mut region_number = 1;
@@ -106,9 +132,7 @@ pub fn update_with_library(
         new_sample_name,
         &str_chunk_names,
         new_sample_name,
-    );
-
-    // TODO: Add option and code for adding middle chunk to the end block group?
+    )?;
 
     let summary_str = format!("{region_name}: {path_changes_count} changes.\n");
     gen_models::session_operations::end_operation(

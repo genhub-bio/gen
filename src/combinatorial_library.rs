@@ -29,11 +29,15 @@ pub struct SequencePart {
 }
 
 #[derive(Error, Debug)]
-pub enum CombinatorialLibraryError {
+pub enum CombinatorialLibraryParseError {
     #[error("Failed to parse fasta")]
     FastaParseFailed(String),
     #[error("Failed to parse library CSV")]
     CSVParseFailed(String),
+}
+
+#[derive(Error, Debug)]
+pub enum CombinatorialLibraryCreationError {
     #[error("Failed to create library")]
     CreationFailed(String),
 }
@@ -41,17 +45,17 @@ pub enum CombinatorialLibraryError {
 pub fn parse_library(
     parts_filename: &str,
     design_filename: &str,
-) -> Result<Vec<Vec<SequencePart>>, CombinatorialLibraryError> {
+) -> Result<Vec<Vec<SequencePart>>, CombinatorialLibraryParseError> {
     let mut sequence_parts_by_name = HashMap::new();
 
     let mut parts_reader = fasta::io::reader::Builder
         .build_from_path(parts_filename)
-        .map_err(|e| CombinatorialLibraryError::FastaParseFailed(e.to_string()))?;
+        .map_err(|e| CombinatorialLibraryParseError::FastaParseFailed(e.to_string()))?;
     for result in parts_reader.records() {
         let record =
-            result.map_err(|e| CombinatorialLibraryError::FastaParseFailed(e.to_string()))?;
+            result.map_err(|e| CombinatorialLibraryParseError::FastaParseFailed(e.to_string()))?;
         let sequence = str::from_utf8(record.sequence().as_ref())
-            .map_err(|e| CombinatorialLibraryError::FastaParseFailed(e.to_string()))?;
+            .map_err(|e| CombinatorialLibraryParseError::FastaParseFailed(e.to_string()))?;
         let name = String::from_utf8(record.name().to_vec()).unwrap();
         sequence_parts_by_name.insert(
             name.clone(),
@@ -64,7 +68,7 @@ pub fn parse_library(
     }
 
     let library_file = File::open(design_filename).map_err(|e| {
-        CombinatorialLibraryError::CSVParseFailed(format!(
+        CombinatorialLibraryParseError::CSVParseFailed(format!(
             "Failed to open library file {design_filename}: {}",
             e
         ))
@@ -78,11 +82,13 @@ pub fn parse_library(
     let mut max_index = 0;
     for result in library_csv_reader.records() {
         let record =
-            result.map_err(|e| CombinatorialLibraryError::CSVParseFailed(e.to_string()))?;
+            result.map_err(|e| CombinatorialLibraryParseError::CSVParseFailed(e.to_string()))?;
         for (index, part_name) in record.iter().enumerate() {
             if !part_name.is_empty() {
                 let part = sequence_parts_by_name.get(part_name).ok_or_else(|| {
-                    CombinatorialLibraryError::CSVParseFailed(format!("Part {part_name} missing."))
+                    CombinatorialLibraryParseError::CSVParseFailed(format!(
+                        "Part {part_name} missing."
+                    ))
                 })?;
                 parts_by_index
                     .entry(index)
@@ -98,7 +104,7 @@ pub fn parse_library(
     let mut parts_list = vec![];
     for index in 0..max_index {
         let parts = parts_by_index.get(&index).ok_or_else(|| {
-            CombinatorialLibraryError::CSVParseFailed(format!("Missing index {index}."))
+            CombinatorialLibraryParseError::CSVParseFailed(format!("Missing index {index}."))
         })?;
         parts_list.push(parts.clone());
     }
@@ -111,7 +117,7 @@ pub fn create_library(
     block_group: &BlockGroup,
     library_name: &str,
     parts_list: Vec<Vec<SequencePart>>,
-) -> Result<u64, CombinatorialLibraryError> {
+) -> Result<u64, CombinatorialLibraryCreationError> {
     let mut parts_set = HashSet::new();
     for parts in &parts_list {
         parts_set.extend(parts);
@@ -133,7 +139,10 @@ pub fn create_library(
         let mut part_nodes = vec![];
         for part in parts {
             let part_hash = sequence_hashes_by_name.get(&part.name).ok_or_else(|| {
-                CombinatorialLibraryError::CreationFailed(format!("Part {} missing.", part.name))
+                CombinatorialLibraryCreationError::CreationFailed(format!(
+                    "Part {} missing.",
+                    part.name
+                ))
             })?;
             let part_node_id = Node::create(
                 conn,
@@ -153,9 +162,9 @@ pub fn create_library(
     }
 
     let mut new_edges = HashSet::new();
-    let start_parts = part_nodes_list
-        .first()
-        .ok_or_else(|| CombinatorialLibraryError::CreationFailed("No parts found.".to_string()))?;
+    let start_parts = part_nodes_list.first().ok_or_else(|| {
+        CombinatorialLibraryCreationError::CreationFailed("No parts found.".to_string())
+    })?;
     for start_part in start_parts {
         let edge = EdgeData {
             source_node_id: PATH_START_NODE_ID,
@@ -168,13 +177,15 @@ pub fn create_library(
         new_edges.insert(edge);
     }
 
-    let end_parts = part_nodes_list
-        .last()
-        .ok_or_else(|| CombinatorialLibraryError::CreationFailed("No parts found.".to_string()))?;
+    let end_parts = part_nodes_list.last().ok_or_else(|| {
+        CombinatorialLibraryCreationError::CreationFailed("No parts found.".to_string())
+    })?;
     for end_part in end_parts {
         let end_part_source_coordinate =
             sequence_lengths_by_node_id.get(end_part).ok_or_else(|| {
-                CombinatorialLibraryError::CreationFailed(format!("Part {end_part} missing."))
+                CombinatorialLibraryCreationError::CreationFailed(format!(
+                    "Part {end_part} missing."
+                ))
             })?;
         let edge = EdgeData {
             source_node_id: *end_part,
@@ -194,7 +205,9 @@ pub fn create_library(
             for part2 in parts2 {
                 let part1_source_coordinate =
                     sequence_lengths_by_node_id.get(part1).ok_or_else(|| {
-                        CombinatorialLibraryError::CreationFailed(format!("Part {part1} missing."))
+                        CombinatorialLibraryCreationError::CreationFailed(format!(
+                            "Part {part1} missing."
+                        ))
                     })?;
                 let edge = EdgeData {
                     source_node_id: *part1,
