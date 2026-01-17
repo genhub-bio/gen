@@ -13,7 +13,10 @@ use gen_models::{
 };
 use thiserror::Error;
 
-use crate::combinatorial_library::{create_library, parse_library};
+use crate::combinatorial_library::{
+    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
+    parse_library,
+};
 
 #[derive(Error, Debug)]
 pub enum LibraryImportError {
@@ -23,6 +26,22 @@ pub enum LibraryImportError {
     ImportFailed(String),
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
+    #[error("Failed to parse library files")]
+    FileParse(CombinatorialLibraryParseError),
+    #[error("Failed to create library")]
+    LibraryCreation(CombinatorialLibraryCreationError),
+}
+
+impl From<CombinatorialLibraryParseError> for LibraryImportError {
+    fn from(err: CombinatorialLibraryParseError) -> Self {
+        LibraryImportError::FileParse(err)
+    }
+}
+
+impl From<CombinatorialLibraryCreationError> for LibraryImportError {
+    fn from(err: CombinatorialLibraryCreationError) -> Self {
+        LibraryImportError::LibraryCreation(err)
+    }
 }
 
 pub fn import_library<'a>(
@@ -46,10 +65,8 @@ pub fn import_library<'a>(
     }
     let new_block_group = BlockGroup::create(conn, collection_name, sample, library_name);
 
-    // TODO: handle errors
-    let parts_list = parse_library(parts_file_path, library_file_path).unwrap();
-    let path_changes_count =
-        create_library(conn, &new_block_group, library_name, parts_list).unwrap();
+    let parts_list = parse_library(parts_file_path, library_file_path)?;
+    let path_changes_count = create_library(conn, &new_block_group, library_name, parts_list)?;
 
     let summary_str = format!("{library_name}: {path_changes_count} changes.\n");
     let op = session_operations::end_operation(
