@@ -24,8 +24,8 @@ pub mod viewport_graph;
 // #[cfg(test)]
 // mod cursor_test;
 //
-#[cfg(test)]
-mod layer_navigation_test;
+// #[cfg(test)]
+// mod layer_navigation_test;
 //
 // #[cfg(test)]
 // mod cursor_partition_test;

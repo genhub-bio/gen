@@ -1,6 +1,7 @@
 use std::hash::Hash;
 
 use crossterm::event::{KeyCode, KeyEvent};
+use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
 use log::trace;
 use petgraph::{
     graph::NodeIndex,
@@ -14,8 +15,6 @@ use ratatui::style::Color;
 
 // Re-export the core module types
 pub use crate::viewport_state::{ViewportState, WorldBuffer};
-use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
-
 use crate::{
     cursor::Cursor,
     geometry::{BigRect, ViewportPos, WorldPos, WorldRect},

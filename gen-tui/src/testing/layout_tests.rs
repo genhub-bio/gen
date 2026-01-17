@@ -1,6 +1,4 @@
 #[cfg(test)]
-use crate::geometry::WorldPos;
-#[cfg(test)]
 use crate::graph_controller::{GraphController, WorldBuffer};
 #[cfg(test)]
 use crate::layout::VisualDetail;
@@ -418,7 +416,7 @@ fn test_layer_coordinate_alignment_and_ordering() {
     let _ = env_logger::try_init();
 
     use crate::{
-        geometry::{BigRect, WorldPos},
+        geometry::WorldPos,
         graph_controller::{GraphConfig, GraphController},
         layout::VisualDetail,
         testing::mocks::{FixedNodeSizer, TestGraphs},
@@ -441,12 +439,6 @@ fn test_layer_coordinate_alignment_and_ordering() {
 
     // Set detail level first
     controller.set_detail_level(VisualDetail::Full);
-
-    // Create viewport bounds using u16::MAX/2 limits to fit in Ratatui rect
-    let max_coord = (u16::MAX / 2) as i64;
-    let min_coord = -((u16::MAX / 2) as i64);
-
-    let unlimited_viewport = BigRect::from_coords(min_coord, min_coord, max_coord, max_coord);
 
     // Set camera bounds to cover the unlimited viewport BEFORE creating viewport graph
     controller.viewport_state.viewport_bounds =
@@ -679,7 +671,7 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
     let _ = env_logger::try_init();
 
     use crate::{
-        geometry::{BigRect, WorldPos},
+        geometry::WorldPos,
         graph_controller::{GraphConfig, GraphController},
         layout::VisualDetail,
         testing::mocks::{FixedNodeSizer, TestGraphs},
@@ -699,9 +691,6 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
     let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
 
     controller.set_detail_level(VisualDetail::Full);
-
-    let max_coord = (u16::MAX / 2) as i64;
-    let min_coord = -((u16::MAX / 2) as i64);
 
     controller.viewport_state.viewport_bounds =
         ratatui::layout::Rect::new(0, 0, u16::MAX / 2, u16::MAX / 2);

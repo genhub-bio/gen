@@ -8,6 +8,7 @@
 pub mod graph_validation;
 pub mod layout_tests;
 pub mod mocks;
+pub mod navigation_tests;
 
 // Re-export main testing APIs
 pub use graph_validation::{

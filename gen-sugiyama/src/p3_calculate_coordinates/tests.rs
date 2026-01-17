@@ -1,9 +1,7 @@
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 
 use super::{Edge, Vertex, reset_alignment};
-use crate::p3_calculate_coordinates::{
-    create_vertical_alignments, mark_type_1_conflicts,
-};
+use crate::p3_calculate_coordinates::{create_vertical_alignments, mark_type_1_conflicts};
 
 fn create_test_layout() -> (StableDiGraph<Vertex, Edge>, Vec<Vec<NodeIndex>>) {
     let edges: [(u32, u32); 30] = [

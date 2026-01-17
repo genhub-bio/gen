@@ -1,6 +1,8 @@
 use std::{collections::HashMap, hash::Hash};
 
 use ftree::FenwickTree;
+#[cfg(test)]
+use gen_sugiyama::VERTEX_SPACING_DEFAULT;
 use petgraph::{
     Direction, Undirected,
     algo::toposort,
@@ -12,8 +14,6 @@ use petgraph::{
     },
 };
 
-#[cfg(test)]
-use gen_sugiyama::VERTEX_SPACING_DEFAULT;
 use crate::{
     find_articulation_points,
     geometry::{BigRect, LocalPos, PartitionIndex, WorldPos},
@@ -1179,7 +1179,6 @@ where
         self.partitions
             .iter()
             .enumerate()
-            .filter(|(_, partition)| partition.has_layout(detail_level))
             .find_map(|(idx, _)| {
                 self.get_partition_rect(idx, detail_level)
                     .ok()

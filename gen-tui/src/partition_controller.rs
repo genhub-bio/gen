@@ -4,12 +4,11 @@ use std::{
     hash::Hash,
 };
 
+use gen_sugiyama::VERTEX_SPACING_DEFAULT;
 use petgraph::visit::{
     EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
     NodeCount, NodeIndexable, Visitable,
 };
-
-use gen_sugiyama::VERTEX_SPACING_DEFAULT;
 
 use crate::{
     geometry::{BigRect, LocalPos, Point, WorldPos, WorldRect},

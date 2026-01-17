@@ -1,5 +1,6 @@
 use std::{collections::HashMap, hash::Hash};
 
+use gen_sugiyama::{Config, Edge, Vertex, assign_coordinates, run_sugiyama_algorithm};
 use itertools::Itertools;
 use log::warn;
 use petgraph::{
@@ -10,8 +11,6 @@ use petgraph::{
 };
 use rstar::{AABB, RTree};
 use serde::{Deserialize, Serialize};
-
-use gen_sugiyama::{Config, Edge, Vertex, assign_coordinates, run_sugiyama_algorithm};
 
 use crate::{
     edge_router::route_graph::make_rectilinear,

@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-
     use petgraph::graph::NodeIndex;
     use ratatui::layout::Rect;
 
@@ -22,46 +21,99 @@ mod tests {
         let n1 = domain_graph.add_node(());
         let n2 = domain_graph.add_node(());
         let n3 = domain_graph.add_node(());
-
         // Create diamond structure
         domain_graph.add_edge(n0, n1, ());
         domain_graph.add_edge(n0, n2, ());
         domain_graph.add_edge(n1, n3, ());
         domain_graph.add_edge(n2, n3, ());
-
+        // Use 1x1 nodes to make navigation easier - any movement crosses boundaries
         let node_sizer = TestNodeSizers::fixed_1x1();
         let mut controller = GraphController::new(&domain_graph, node_sizer);
-
-        // Set up viewport
+        // Set up viewport to see the entire graph
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 100, 50);
         controller
             .rebuild_viewport_graph()
             .expect("Failed to rebuild viewport graph for layer navigation test");
-        // Test that we can navigate through the layers
-        let initial_pos = controller.cursor.viewport_pos;
-        println!("Initial cursor position: {:?}", initial_pos);
 
-        // Move right - should jump to next layer
+        // Initialize cursor to ensure it's properly positioned
+        controller.initialize_cursor();
+        // Test that we can navigate between layers
+        let initial_node = controller.cursor.node_idx;
+        println!("Initial cursor node: {:?}", initial_node);
+        // Move right - should jump to next layer (with 1x1 nodes, any movement crosses boundary)
         controller
             .cursor
             .move_horizontal(1, &controller.viewport_graph)
             .expect("Failed to move cursor right to next layer");
-        let pos_after_right = controller.cursor.viewport_pos;
-        println!("Position after moving right: {:?}", pos_after_right);
-
-        // The cursor should have moved to a different X position (next layer)
+        let node_after_right = controller.cursor.node_idx;
+        println!("Node after moving right: {:?}", node_after_right);
+        // The cursor should have moved to a different node (next layer)
         assert_ne!(
-            pos_after_right.x, initial_pos.x,
-            "Cursor should move to next layer when moving right"
+            node_after_right, initial_node,
+            "Cursor should move to different node when moving right to next layer"
         );
-
+        // Verify the nodes are in different layers
+        let initial_layer = controller
+            .viewport_graph
+            .find_domain_node_layer(initial_node.unwrap());
+        let right_layer = controller
+            .viewport_graph
+            .find_domain_node_layer(node_after_right.unwrap());
+        assert!(
+            initial_layer.is_some() && right_layer.is_some(),
+            "Both nodes should have layers"
+        );
+        assert_ne!(
+            initial_layer.unwrap(),
+            right_layer.unwrap(),
+            "Nodes should be in different layers"
+        );
+        // Move right again - should go to final layer
+        controller
+            .cursor
+            .move_horizontal(1, &controller.viewport_graph)
+            .expect("Failed to move cursor right to final layer");
+        let node_after_right2 = controller.cursor.node_idx;
+        println!("Node after moving right again: {:?}", node_after_right2);
+        // Should be in yet another layer
+        let right2_layer = controller
+            .viewport_graph
+            .find_domain_node_layer(node_after_right2.unwrap());
+        assert_ne!(
+            right_layer.unwrap(),
+            right2_layer.unwrap(),
+            "Should move to yet another layer"
+        );
         // Move left - should return to previous layer
         controller
             .cursor
             .move_horizontal(-1, &controller.viewport_graph)
             .expect("Failed to move cursor left to previous layer");
-        let pos_after_left = controller.cursor.viewport_pos;
-        println!("Position after moving left: {:?}", pos_after_left);
+        let node_after_left = controller.cursor.node_idx;
+        println!("Node after moving left: {:?}", node_after_left);
+        // Should be back in the middle layer
+        let left_layer = controller
+            .viewport_graph
+            .find_domain_node_layer(node_after_left.unwrap());
+        assert_eq!(
+            left_layer.unwrap(),
+            right_layer.unwrap(),
+            "Moving left should return to previous layer"
+        );
+        // Move left again - should return to initial layer
+        controller
+            .cursor
+            .move_horizontal(-1, &controller.viewport_graph)
+            .expect("Failed to move cursor left to initial layer");
+        let node_after_left2 = controller.cursor.node_idx;
+        let left2_layer = controller
+            .viewport_graph
+            .find_domain_node_layer(node_after_left2.unwrap());
+        assert_eq!(
+            left2_layer.unwrap(),
+            initial_layer.unwrap(),
+            "Moving left again should return to initial layer"
+        );
     }
 
     #[test]
@@ -93,6 +145,9 @@ mod tests {
 
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 200, 100);
         let _ = controller.ensure_camera_coverage();
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for routing nodes test");
         controller.initialize_cursor();
 
         // Navigate through the graph
@@ -103,7 +158,7 @@ mod tests {
             controller
                 .cursor
                 .move_horizontal(1, &controller.viewport_graph)
-                .expect(&format!("Failed to move cursor right at step {}", i));
+                .unwrap_or_else(|_| panic!("Failed to move cursor right at step {}", i));
             let current_node = controller.cursor.node_idx;
             println!("Step {}: Node {:?}", i, current_node);
 
