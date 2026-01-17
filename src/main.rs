@@ -186,7 +186,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .or(to_range.from)
                 .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
             let diffs =
-                collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
+                collect_operation_diff(&workspace, operation_conn, Some(from_hash), to_hash, None)?;
             if diffs.is_empty() {
                 println!("No differences found between {from} and {to_ref}.");
             } else {
