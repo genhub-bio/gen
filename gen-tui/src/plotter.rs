@@ -1,6 +1,7 @@
 // This module implements graph rendering using the ViewportGraph system.
 // All legacy rendering paths have been removed in favor of the unified ViewportGraph approach.
 
+use std::collections::HashSet;
 use std::hash::Hash;
 
 use petgraph::visit::{
@@ -196,6 +197,8 @@ pub fn plot_viewport_graph<R, G>(
     renderer: &mut R,
     original_graph: &G,
     detail_level: VisualDetail,
+    highlighted_edges: &HashSet<(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)>,
+    highlighted_positions: &HashSet<crate::geometry::WorldPos>,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -205,7 +208,13 @@ pub fn plot_viewport_graph<R, G>(
         // Ommit the edges that don't actually represent an original edge
         // (edges to/from terminal source/sink nodes)
         if !bundle.is_empty() {
-            draw_edge(buffer, source, target);
+            // Check if ANY of the bundled edges should be highlighted
+            let is_highlighted = bundle.iter().any(|(src, tgt)| {
+                highlighted_edges.contains(&(*src, *tgt))
+                    || highlighted_edges.contains(&(*tgt, *src))
+            });
+
+            draw_edge(buffer, source, target, is_highlighted);
         }
     }
 
@@ -218,8 +227,21 @@ pub fn plot_viewport_graph<R, G>(
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
             }
             NodeRole::Routing => {
+                let is_highlighted = highlighted_positions.contains(world_pos);
                 let glyph = compute_junction_glyph(viewport_graph, *world_pos);
-                buffer.set_char(*world_pos, glyph.glyph());
+                let style = if is_highlighted {
+                    Style::default()
+                        .fg(get_theme_color("highlight").unwrap_or(ratatui::style::Color::White))
+                } else {
+                    Style::default()
+                        .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray))
+                };
+                let char = if is_highlighted {
+                    glyph.heavy_glyph()
+                } else {
+                    glyph.glyph()
+                };
+                buffer.set_char_styled(*world_pos, char, style);
             }
             NodeRole::Stitch(_) => {
                 // Stitch nodes should have been replaced by actual content in ViewportGraph
@@ -252,8 +274,10 @@ fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> Junct
 }
 
 /// Draw a rectilinear edge between two world positions
-fn draw_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos) {
-    let style = Style::default().fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray));
+fn draw_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, highlighted: bool) {
+    let color_name = if highlighted { "highlight" } else { "edge" };
+    let style =
+        Style::default().fg(get_theme_color(color_name).unwrap_or(ratatui::style::Color::Gray));
 
     if source.x == target.x {
         // Vertical edge

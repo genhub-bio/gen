@@ -1,8 +1,11 @@
 use std::{hash::Hash, marker::PhantomData};
 
-use petgraph::visit::{
-    EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
-    NodeCount, NodeIndexable, Visitable,
+use petgraph::{
+    graph::NodeIndex,
+    visit::{
+        EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
+        NodeCount, NodeIndexable, Visitable,
+    },
 };
 use ratatui::{
     buffer::Buffer,
@@ -253,6 +256,8 @@ where
         // Extract data from controller and render directly via ViewportGraph
         let viewport_graph = controller.get_viewport_graph();
         let detail_level = controller.get_detail_level();
+        let highlighted_edges = controller.get_highlighted_edges();
+        let highlighted_positions = controller.get_highlighted_positions();
 
         plot_viewport_graph(
             viewport_graph,
@@ -260,7 +265,12 @@ where
             &mut self.renderer,
             &controller.graph,
             detail_level,
+            highlighted_edges,
+            &highlighted_positions,
         );
+
+        // Render path highlights if any exist
+        self.render_path_highlights(&mut world_buffer, controller);
 
         // Call user supplied closure if provided
         if let Some(mut buffer_render_fn) = self.buffer_paint_fn {
@@ -289,6 +299,109 @@ where
                     // Write the same character back with cursor styling
                     cursor_buffer.set_char_styled(cursor_world_pos, current_char, cursor_style);
                 }
+            }
+        }
+    }
+}
+
+impl<'a, G, S, R> GraphWidget<'a, G, S, R>
+where
+    G: GraphBase
+        + Clone
+        + EdgeIndexable
+        + NodeIndexable
+        + NodeCount
+        + Visitable
+        + IntoNodeIdentifiers
+        + IntoEdgeReferences
+        + IntoNeighborsDirected,
+    G::NodeId: Copy + Eq + Hash + Ord,
+    for<'b> &'b G: IntoNodeIdentifiers + IntoEdgeReferences + IntoNeighborsDirected,
+    for<'b> &'b G::NodeId: Hash + Ord,
+    for<'b> &'b G::EdgeId: Clone,
+    S: NodeSizer<G>,
+    R: NodeRenderer<G>,
+{
+    /// Render path highlights on top of the existing graph
+    fn render_path_highlights(
+        &self,
+        buffer: &mut WorldBuffer<'_>,
+        controller: &GraphController<G, S>,
+    ) {
+        let path_highlights = controller.get_path_highlights();
+        let node_highlights = controller.get_node_highlights();
+        let viewport_graph = controller.get_viewport_graph();
+
+        if path_highlights.is_empty() && node_highlights.is_empty() {
+            return;
+        }
+
+        // Render path highlights (edges)
+        for (color, path_graph) in path_highlights {
+            for (source, target, _) in path_graph.all_edges() {
+                // Convert node IDs to domain indices
+                let source_idx =
+                    NodeIndex::new(<G as NodeIndexable>::to_index(&controller.graph, source));
+                let target_idx =
+                    NodeIndex::new(<G as NodeIndexable>::to_index(&controller.graph, target));
+
+                // Find the visual positions of the source and target nodes
+                if let (Some(&source_pos), Some(&target_pos)) = (
+                    viewport_graph.node_positions.get(&source_idx),
+                    viewport_graph.node_positions.get(&target_idx),
+                ) {
+                    // Draw highlighted edge with path color
+                    self.draw_highlighted_edge(buffer, source_pos, target_pos, *color);
+                }
+            }
+        }
+
+        // Render node highlights
+        for (color, highlighted_nodes) in node_highlights {
+            for node_id in highlighted_nodes {
+                // Convert node ID to domain index
+                let node_idx =
+                    NodeIndex::new(<G as NodeIndexable>::to_index(&controller.graph, *node_id));
+
+                // Find the visual position of this node in the viewport
+                if let Some(&node_pos) = viewport_graph.node_positions.get(&node_idx) {
+                    // Get the current character at node position
+                    if let Some(current_char) = buffer.get_char(node_pos) {
+                        let highlight_style = Style::default()
+                            .fg(*color)
+                            .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Black));
+                        buffer.set_char_styled(node_pos, current_char, highlight_style);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw a highlighted edge between two world positions with a specific color
+    fn draw_highlighted_edge(
+        &self,
+        buffer: &mut WorldBuffer<'_>,
+        start: crate::geometry::WorldPos,
+        end: crate::geometry::WorldPos,
+        color: ratatui::style::Color,
+    ) {
+        let edge_style = Style::default().fg(color);
+
+        if start.x == end.x {
+            // Vertical edge
+            let y_min = start.y.min(end.y);
+            let y_max = start.y.max(end.y);
+            for y in y_min..=y_max {
+                let pos = crate::geometry::WorldPos { x: start.x, y };
+                buffer.set_char_styled(pos, '┃', edge_style);
+            }
+        } else if start.y == end.y {
+            // Horizontal edge
+            let x_min = start.x.min(end.x);
+            let x_max = start.x.max(end.x);
+            for x in x_min..=x_max {
+                let pos = crate::geometry::WorldPos { x, y: start.y };
+                buffer.set_char_styled(pos, '━', edge_style);
             }
         }
     }

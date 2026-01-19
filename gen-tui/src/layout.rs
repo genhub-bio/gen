@@ -71,6 +71,35 @@ impl JunctionSymbol {
             .unwrap_or('?')
     }
 
+    /// Heavy box-drawing characters for highlighted routing nodes
+    /// Index: 4-bit value where bits represent [North, East, South, West]
+    const HEAVY_ROUTING_GLYPHS: [char; 16] = [
+        '?', // 0000 ____
+        '╶', // 0001 ___W (same as normal)
+        '╷', // 0010 __S_ (same as normal)
+        '╭', // 0011 __SW (heavy corner)
+        '╴', // 0100 _E__ (same as normal)
+        '━', // 0105 _E_W (heavy horizontal)
+        '╮', // 0110 _ES_ (heavy corner)
+        '┳', // 0111 _ESW (heavy top T)
+        '╵', // 1000 N___ (same as normal)
+        '╰', // 1001 N__W (heavy corner)
+        '┃', // 1010 N_S_ (heavy vertical)
+        '┫', // 1011 N_SW (heavy right T)
+        '╯', // 1100 NE__ (heavy corner)
+        '┻', // 1101 NE_W (heavy bottom T)
+        '┣', // 1110 NES_ (heavy left T)
+        '╋', // 1111 NESW (heavy cross)
+    ];
+
+    /// Get the heavy routing glyph character for this index
+    pub fn heavy_glyph(&self) -> char {
+        Self::HEAVY_ROUTING_GLYPHS
+            .get(self.index as usize)
+            .copied()
+            .unwrap_or('?')
+    }
+
     /// Create a new GlyphIndex from a u8 value
     pub fn new(value: u8) -> Self {
         Self { index: value }

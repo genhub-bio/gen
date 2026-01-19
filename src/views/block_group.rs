@@ -12,7 +12,7 @@ use gen_core::PATH_START_NODE_ID;
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
-use log::warn;
+use log::{info, warn};
 use ratatui::{
     layout::Constraint,
     style::{Modifier, Style},
@@ -25,7 +25,10 @@ use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
-        gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
+        gen_graph_widget::{
+            GenGraphNodeRenderer, GenGraphNodeSizer, GenGraphPathHighlighter,
+            create_gen_graph_widget,
+        },
     },
 };
 
@@ -150,6 +153,9 @@ pub fn view_block_group(
     let mut graph_controller = GraphController::new(&block_graph, node_sizer);
     graph_controller.set_detail_level(VisualDetail::Minimal);
     graph_controller.show_cursor();
+
+    // Create a renderer for path highlighting functionality
+    let mut renderer = GenGraphNodeRenderer::new(conn);
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if origin.is_some() {
@@ -462,8 +468,31 @@ pub fn view_block_group(
                         }
                     }
                     KeyCode::Char('p') => {
-                        // TODO: Path highlighting not yet supported in GenGraphWidget
-                        warn!("Path highlighting not yet supported in GenGraphWidget");
+                        if let Some(ref block_group_id) = explorer_state.selected_block_group_id {
+                            let error_color =
+                                get_theme_color("error").unwrap_or(ratatui::style::Color::Red);
+                            match renderer.toggle_path_highlight(
+                                &mut graph_controller,
+                                block_group_id.to_string().as_str(),
+                                error_color,
+                            ) {
+                                Ok(highlighting_enabled) => {
+                                    if highlighting_enabled {
+                                        info!(
+                                            "Path highlighting enabled for block group {}",
+                                            block_group_id
+                                        );
+                                    } else {
+                                        info!("Path highlighting disabled");
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!("Failed to toggle path highlighting: {}", err);
+                                }
+                            }
+                        } else {
+                            warn!("No block group selected for path highlighting");
+                        }
                     }
                     _ => {
                         graph_controller.handle_key_event(key).ok();

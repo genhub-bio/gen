@@ -7,7 +7,8 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::db::GraphConnection;
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail};
+use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
+use log::info;
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
@@ -15,8 +16,20 @@ use ratatui::{
 };
 
 use crate::views::gen_graph_widget::{
-    GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget,
+    GenGraphNodeRenderer, GenGraphNodeSizer, GenGraphPathHighlighter, create_gen_graph_widget,
 };
+
+/// Get the current block group ID for path highlighting
+fn get_current_block_group_id(conn: &GraphConnection) -> Option<String> {
+    // Try to get the most recent block group - this is a simplified approach
+    // In a real implementation, you might want to track this differently
+    conn.query_row(
+        "SELECT name FROM block_groups ORDER BY rowid DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
 
 #[derive(Debug)]
 pub enum AppEvent {
@@ -76,6 +89,7 @@ impl EventSource for TickEventSource {
 pub struct InlineGenGraphState<'a> {
     controller: GraphController<&'a GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
+    renderer: GenGraphNodeRenderer<'a>,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -87,6 +101,7 @@ impl<'a> InlineGenGraphState<'a> {
         Self {
             controller: graph_controller,
             conn,
+            renderer: GenGraphNodeRenderer::new(conn),
         }
     }
 }
@@ -184,10 +199,38 @@ fn show_interactive_widget(
                     })?;
                 }
                 AppEvent::KeyPress(key) => {
-                    // Intercept quit signal
+                    // Intercept quit signal and path highlighting
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => {
                             break;
+                        }
+                        KeyCode::Char('p') => {
+                            // Toggle path highlighting
+                            if let Some(block_group_id) = get_current_block_group_id(state.conn) {
+                                let error_color =
+                                    get_theme_color("error").unwrap_or(ratatui::style::Color::Red);
+                                match state.renderer.toggle_path_highlight(
+                                    &mut state.controller,
+                                    &block_group_id,
+                                    error_color,
+                                ) {
+                                    Ok(highlighting_enabled) => {
+                                        info!(
+                                            "Path highlighting: {}",
+                                            if highlighting_enabled {
+                                                "enabled"
+                                            } else {
+                                                "disabled"
+                                            }
+                                        );
+                                    }
+                                    Err(err) => {
+                                        eprintln!("Failed to toggle path highlighting: {}", err);
+                                    }
+                                }
+                            } else {
+                                eprintln!("No block group available for path highlighting");
+                            }
                         }
                         _ => {
                             let _ = state.controller.handle_key_event(key);
@@ -329,8 +372,19 @@ fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState
     frame.render_stateful_widget(widget, area, &mut state.controller);
 }
 
-fn draw_controls_help(frame: &mut Frame, area: Rect, _state: &mut InlineGenGraphState) {
-    let help_text = "←→↑↓: Navigate/Pan | +/-: Zoom | q/Esc: Exit".to_string();
+fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
+    // Check if path highlighting is currently enabled
+    let _path_status = if state.controller.get_path_highlights().is_empty() {
+        "Path: Off"
+    } else {
+        "Path: On"
+    };
+
+    let help_text = if state.controller.get_path_highlights().is_empty() {
+        "←→↑↓: Navigate/Pan | +/-: Zoom | Path: Off | q/Esc: Exit".to_string()
+    } else {
+        "←→↑↓: Navigate/Pan | +/-: Zoom | Path: On | q/Esc: Exit".to_string()
+    };
 
     let paragraph =
         ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));
