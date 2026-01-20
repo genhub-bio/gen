@@ -15,10 +15,16 @@ on:
         options:
           - pypi
           - testpypi
+  push:
+    tags:
+      - "*"
 
 permissions:
   contents: read
   actions: read
+
+env:
+  PUBLISH_TAG: ${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
   publish:
@@ -27,9 +33,15 @@ jobs:
       - name: Resolve tag commit
         id: tag
         uses: actions/github-script@v7
+        env:
+          TAG: ${{ env.PUBLISH_TAG }}
         with:
           script: |
-            const tag = core.getInput("tag", { required: true });
+            const tag = process.env.TAG;
+            if (!tag) {
+              core.setFailed("Tag is required. Provide the workflow_dispatch input `tag` or run this workflow from a tag ref.");
+              return;
+            }
             const { data: ref } = await github.rest.git.getRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -42,7 +54,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           WHEEL_SHA: ${{ steps.tag.outputs.sha }}
-          WHEEL_TAG: ${{ inputs.tag }}
+          WHEEL_TAG: ${{ env.PUBLISH_TAG }}
         with:
           script: |
             const sha = process.env.WHEEL_SHA;
