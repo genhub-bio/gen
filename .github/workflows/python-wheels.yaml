@@ -3,9 +3,14 @@ name: Python API Wheels
 on:
   push:
     tags: ["*"]
+  create:
+    # Creating a tag via the GitHub UI fires `create` (not `push`), so catch it too.
+    branches: []
+    tags: ["*"]
 
 jobs:
   build-wheels:
+    if: github.ref_type == 'tag'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
