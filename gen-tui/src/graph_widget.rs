@@ -1,4 +1,4 @@
-use std::{hash::Hash, marker::PhantomData};
+use std::{cmp, hash::Hash, marker::PhantomData};
 
 use petgraph::{
     graph::NodeIndex,
@@ -16,7 +16,7 @@ use ratatui::{
 };
 
 use crate::{
-    geometry::WorldRect,
+    geometry::{WorldPos, WorldRect},
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer, plot_viewport_graph},
@@ -256,8 +256,6 @@ where
         // Extract data from controller and render directly via ViewportGraph
         let viewport_graph = controller.get_viewport_graph();
         let detail_level = controller.get_detail_level();
-        let highlighted_edges = controller.get_highlighted_edges();
-        let highlighted_positions = controller.get_highlighted_positions();
 
         plot_viewport_graph(
             viewport_graph,
@@ -265,8 +263,6 @@ where
             &mut self.renderer,
             &controller.graph,
             detail_level,
-            highlighted_edges,
-            &highlighted_positions,
         );
 
         // Render path highlights if any exist
@@ -381,25 +377,22 @@ where
     fn draw_highlighted_edge(
         &self,
         buffer: &mut WorldBuffer<'_>,
-        start: crate::geometry::WorldPos,
-        end: crate::geometry::WorldPos,
+        head: WorldPos,
+        tail: WorldPos,
         color: ratatui::style::Color,
     ) {
         let edge_style = Style::default().fg(color);
+        // Ensure the ordering
+        let start = cmp::min(head, tail);
+        let end = cmp::max(head, tail);
 
         if start.x == end.x {
-            // Vertical edge
-            let y_min = start.y.min(end.y);
-            let y_max = start.y.max(end.y);
-            for y in y_min..=y_max {
-                let pos = crate::geometry::WorldPos { x: start.x, y };
+            for y in start.y..=end.y {
+                let pos = WorldPos { x: start.x, y };
                 buffer.set_char_styled(pos, '┃', edge_style);
             }
         } else if start.y == end.y {
-            // Horizontal edge
-            let x_min = start.x.min(end.x);
-            let x_max = start.x.max(end.x);
-            for x in x_min..=x_max {
+            for x in start.x..=end.x {
                 let pos = crate::geometry::WorldPos { x, y: start.y };
                 buffer.set_char_styled(pos, '━', edge_style);
             }

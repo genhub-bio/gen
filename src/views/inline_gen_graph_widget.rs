@@ -1,12 +1,12 @@
 use std::{
-    io::Result,
+    io::{Error, Result},
     panic,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
-use gen_models::db::GraphConnection;
+use gen_models::{db::GraphConnection, path::Path};
 use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
 use log::info;
 use ratatui::{
@@ -16,19 +16,53 @@ use ratatui::{
 };
 
 use crate::views::gen_graph_widget::{
-    GenGraphNodeRenderer, GenGraphNodeSizer, GenGraphPathHighlighter, create_gen_graph_widget,
+    GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget,
 };
 
-/// Get the current block group ID for path highlighting
-fn get_current_block_group_id(conn: &GraphConnection) -> Option<String> {
-    // Try to get the most recent block group - this is a simplified approach
-    // In a real implementation, you might want to track this differently
-    conn.query_row(
-        "SELECT name FROM block_groups ORDER BY rowid DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    )
-    .ok()
+/// Get path nodes for a path and map it to GraphNodes in the current graph
+fn get_path_nodes(
+    conn: &GraphConnection,
+    path: &Path,
+    graph: &GenGraph,
+) -> std::io::Result<Vec<gen_graph::GraphNode>> {
+    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
+    use gen_graph::project_path;
+
+    eprintln!("DEBUG: Processing path '{}' for highlighting", path.name);
+
+    // Get the path blocks from the database
+    let path_blocks = path.blocks(conn);
+    eprintln!("DEBUG: Path has {} blocks", path_blocks.len());
+
+    // Project the path blocks onto the current graph state
+    let projected_path = project_path(graph, &path_blocks);
+    eprintln!("DEBUG: Projected path has {} nodes", projected_path.len());
+
+    // Filter out terminal nodes (start and end) and convert to GraphNodes
+    let path_nodes: Vec<gen_graph::GraphNode> = projected_path
+        .iter()
+        .filter_map(|(node, _)| {
+            // Filter out terminal nodes
+            if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
+                Some(*node)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    eprintln!(
+        "DEBUG: After filtering terminal nodes, path has {} nodes",
+        path_nodes.len()
+    );
+
+    if path_nodes.is_empty() {
+        return Err(Error::other(
+            "Path nodes not found in current graph state".to_string(),
+        ));
+    }
+
+    Ok(path_nodes)
 }
 
 #[derive(Debug)]
@@ -89,7 +123,7 @@ impl EventSource for TickEventSource {
 pub struct InlineGenGraphState<'a> {
     controller: GraphController<&'a GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
-    renderer: GenGraphNodeRenderer<'a>,
+    paths: Vec<Vec<gen_graph::GraphNode>>,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -98,11 +132,19 @@ impl<'a> InlineGenGraphState<'a> {
         let mut graph_controller = GraphController::new(graph, node_sizer);
         graph_controller.set_detail_level(VisualDetail::Minimal);
         graph_controller.show_cursor();
+        let paths = Vec::new();
         Self {
             controller: graph_controller,
             conn,
-            renderer: GenGraphNodeRenderer::new(conn),
+            paths,
         }
+    }
+
+    /// Add a path to the widget, starting from a Path object
+    pub fn add_path(&mut self, path: &Path, conn: &'a GraphConnection) -> Result<()> {
+        let path_nodes = get_path_nodes(conn, path, self.controller.graph)?;
+        self.paths.push(path_nodes);
+        Ok(())
     }
 }
 
@@ -130,10 +172,17 @@ impl<'a> InlineGenGraphState<'a> {
 /// * `Ok(())` if completed successfully
 ///
 pub fn show_inline_gen_graph_widget(
-    graph: &GenGraph,
     conn: &GraphConnection,
+    graph: &GenGraph,
+    paths: Vec<Path>,
     height: u16,
 ) -> Result<()> {
+    eprintln!(
+        "DEBUG: show_inline_gen_graph_widget called with graph having {} nodes and {} paths",
+        graph.node_count(),
+        paths.len()
+    );
+
     // Try to initialize the terminal - if it fails, fall back to text mode
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
@@ -144,7 +193,7 @@ pub fn show_inline_gen_graph_widget(
     match terminal_result {
         Ok(terminal) => {
             // Interactive mode - full widget functionality
-            show_interactive_widget(terminal, graph, conn, height)
+            show_interactive_widget(terminal, conn, graph, paths, height)
         }
         Err(_) => {
             // Fallback mode - text-based representation
@@ -157,12 +206,28 @@ pub fn show_inline_gen_graph_widget(
 /// Interactive widget implementation with tick-based event loop
 fn show_interactive_widget(
     mut terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-    graph: &GenGraph,
     conn: &GraphConnection,
+    graph: &GenGraph,
+    paths: Vec<Path>,
     _height: u16,
 ) -> Result<()> {
+    eprintln!(
+        "DEBUG: show_interactive_widget starting with graph having {} nodes and {} paths",
+        graph.node_count(),
+        paths.len()
+    );
     let mut state = InlineGenGraphState::new(graph, conn);
-
+    eprintln!(
+        "DEBUG: State created, controller has {} nodes",
+        state.controller.graph.node_count()
+    );
+    for path in paths {
+        state.add_path(&path, conn)?;
+    }
+    eprintln!(
+        "DEBUG: State updated and holding {} paths",
+        state.paths.len()
+    );
     // Set up tick-based event loop for 60 FPS (16ms per frame)
     let tick_rate = Duration::from_millis(16);
     let mut events = TickEventSource::new(tick_rate);
@@ -206,30 +271,15 @@ fn show_interactive_widget(
                         }
                         KeyCode::Char('p') => {
                             // Toggle path highlighting
-                            if let Some(block_group_id) = get_current_block_group_id(state.conn) {
-                                let error_color =
-                                    get_theme_color("error").unwrap_or(ratatui::style::Color::Red);
-                                match state.renderer.toggle_path_highlight(
-                                    &mut state.controller,
-                                    &block_group_id,
-                                    error_color,
-                                ) {
-                                    Ok(highlighting_enabled) => {
-                                        info!(
-                                            "Path highlighting: {}",
-                                            if highlighting_enabled {
-                                                "enabled"
-                                            } else {
-                                                "disabled"
-                                            }
-                                        );
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed to toggle path highlighting: {}", err);
-                                    }
-                                }
+                            let path_color = Color::Red;
+                            if state.controller.has_path_highlight(&path_color) {
+                                state.controller.clear_path_highlight(&path_color);
+                            } else if let Some(last_path) = state.paths.last() {
+                                state
+                                    .controller
+                                    .set_path_highlight(path_color, last_path.clone());
                             } else {
-                                eprintln!("No block group available for path highlighting");
+                                eprintln!("No paths available for path highlighting");
                             }
                         }
                         _ => {

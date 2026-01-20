@@ -1,14 +1,13 @@
 // This module implements graph rendering using the ViewportGraph system.
 // All legacy rendering paths have been removed in favor of the unified ViewportGraph approach.
 
-use std::collections::HashSet;
 use std::hash::Hash;
 
 use petgraph::visit::{
     EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
     NodeCount, NodeIndexable, Visitable,
 };
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 
 use crate::{
     geometry::{BigRect, Point, WorldPos, WorldRect},
@@ -184,21 +183,17 @@ where
 /// - **Domain Renderer**: Transforms data into visual representation via `renderer`
 ///
 /// # Parameters
-/// - `layout`: Layer 3 positioning information (LayoutNode with coordinates)
+/// - `viewport_graph`: CroppedGraph containing only visible nodes and edges
 /// - `buffer`: World coordinate buffer writer for drawing to the viewport
 /// - `renderer`: Domain-specific rendering logic and data lookup
-/// - `offset`: Global positioning offset used to stitch chunks of the world together
-/// - `graph`: Original graph for NodeIndex to NodeId conversion
-///
-/// The ViewportGraph contains only visible nodes and edges
+/// - `original_graph`: Original graph for NodeIndex to NodeId conversion
+/// - `detail_level`: Level of detail for rendering
 pub fn plot_viewport_graph<R, G>(
     viewport_graph: &CroppedGraph,
     buffer: &mut WorldBuffer<'_>,
     renderer: &mut R,
     original_graph: &G,
     detail_level: VisualDetail,
-    highlighted_edges: &HashSet<(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)>,
-    highlighted_positions: &HashSet<crate::geometry::WorldPos>,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -208,13 +203,8 @@ pub fn plot_viewport_graph<R, G>(
         // Ommit the edges that don't actually represent an original edge
         // (edges to/from terminal source/sink nodes)
         if !bundle.is_empty() {
-            // Check if ANY of the bundled edges should be highlighted
-            let is_highlighted = bundle.iter().any(|(src, tgt)| {
-                highlighted_edges.contains(&(*src, *tgt))
-                    || highlighted_edges.contains(&(*tgt, *src))
-            });
-
-            draw_edge(buffer, source, target, is_highlighted);
+            let color = get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray);
+            draw_edge(buffer, source, target, color);
         }
     }
 
@@ -227,21 +217,10 @@ pub fn plot_viewport_graph<R, G>(
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
             }
             NodeRole::Routing => {
-                let is_highlighted = highlighted_positions.contains(world_pos);
                 let glyph = compute_junction_glyph(viewport_graph, *world_pos);
-                let style = if is_highlighted {
-                    Style::default()
-                        .fg(get_theme_color("highlight").unwrap_or(ratatui::style::Color::White))
-                } else {
-                    Style::default()
-                        .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray))
-                };
-                let char = if is_highlighted {
-                    glyph.heavy_glyph()
-                } else {
-                    glyph.glyph()
-                };
-                buffer.set_char_styled(*world_pos, char, style);
+                let style = Style::default()
+                    .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray));
+                buffer.set_char_styled(*world_pos, glyph.glyph(), style);
             }
             NodeRole::Stitch(_) => {
                 // Stitch nodes should have been replaced by actual content in ViewportGraph
@@ -273,11 +252,22 @@ fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> Junct
     JunctionSymbol::new(connections)
 }
 
-/// Draw a rectilinear edge between two world positions
-fn draw_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, highlighted: bool) {
-    let color_name = if highlighted { "highlight" } else { "edge" };
-    let style =
-        Style::default().fg(get_theme_color(color_name).unwrap_or(ratatui::style::Color::Gray));
+/// Draw a rectilinear edge between two world positions (horizontal or vertical only),
+/// optionally using heavy box-drawing characters.
+fn draw_edge_with_weight(
+    buffer: &mut WorldBuffer,
+    source: WorldPos,
+    target: WorldPos,
+    color: Color,
+    heavy: bool,
+) {
+    let style = Style::default().fg(color);
+
+    let (v_ch, h_ch) = if heavy {
+        ('┃', '━')
+    } else {
+        ('│', '─')
+    };
 
     if source.x == target.x {
         // Vertical edge
@@ -286,8 +276,9 @@ fn draw_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, highl
         } else {
             (target.y, source.y)
         };
+
         for y in min_y..=max_y {
-            buffer.set_char_styled(WorldPos::new(source.x, y), '│', style);
+            buffer.set_char_styled(WorldPos::new(source.x, y), v_ch, style);
         }
     } else if source.y == target.y {
         // Horizontal edge
@@ -296,15 +287,27 @@ fn draw_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, highl
         } else {
             (target.x, source.x)
         };
+
         for x in min_x..=max_x {
             let pos = WorldPos::new(x, source.y);
-            // Don't overwrite a vertical line with a horizontal one
-            // Vertical edges take priority at crossings
-            if buffer.get_char(pos) != Some('│') {
-                buffer.set_char_styled(pos, '─', style);
+
+            // Don't overwrite a vertical line with a horizontal one.
+            // Vertical edges take priority at crossings (both normal and heavy).
+            if !matches!(buffer.get_char(pos), Some('│') | Some('┃')) {
+                buffer.set_char_styled(pos, h_ch, style);
             }
         }
     }
+}
+
+/// Draw a rectilinear edge using normal-weight box-drawing characters.
+fn draw_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, color: Color) {
+    draw_edge_with_weight(buffer, source, target, color, false);
+}
+
+/// Draw a rectilinear edge using heavy-weight box-drawing characters.
+fn draw_bold_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, color: Color) {
+    draw_edge_with_weight(buffer, source, target, color, true);
 }
 
 /// Render any graph widget to string representation using TestBackend

@@ -259,229 +259,76 @@ impl<'a> WorldBuffer<'a> {
     }
 
     /// Set a single character at the specified world position.
-    /// Returns true if the character was written (within viewport bounds), false otherwise.
-    pub fn set_char(&mut self, world_pos: WorldPos, ch: char) -> bool {
+    pub fn set_char(&mut self, world_pos: WorldPos, ch: char) {
         self.set_char_styled(world_pos, ch, Style::default())
     }
 
     /// Set a single character with style at the specified world position.
-    /// Returns true if the character was written (within viewport bounds), false otherwise.
-    pub fn set_char_styled(&mut self, world_pos: WorldPos, ch: char, style: Style) -> bool {
-        let viewport_size = self.get_viewport_size();
-        if let Some(viewport_pos) = self.viewport_state.world_to_viewport(world_pos)
-            && viewport_pos.x < viewport_size.0
-            && viewport_pos.y < viewport_size.1
-        {
-            let viewport_area = self.viewport_area();
-            let buffer_x = viewport_area.x + viewport_pos.x;
-            // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
-            let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
+    pub fn set_char_styled(&mut self, world_pos: WorldPos, ch: char, style: Style) {
+        let Some((buffer_x, buffer_y)) = self.viewport_state.world_to_terminal(world_pos) else {
+            return;
+        };
 
-            // Ensure we're within the buffer bounds
-            if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
-                let cell = self.buffer.cell_mut((buffer_x, buffer_y)).unwrap();
-                cell.set_char(ch);
-                cell.set_style(style);
-                return true;
-            }
+        if let Some(cell) = self.buffer.cell_mut((buffer_x, buffer_y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
         }
-        false
     }
 
     /// Set a string starting at the specified world position, advancing horizontally.
-    /// Returns the number of characters actually written (may be less due to clipping).
-    pub fn set_string(&mut self, world_pos: WorldPos, text: &str) -> usize {
+    pub fn set_string(&mut self, world_pos: WorldPos, text: &str) {
         self.set_string_styled(world_pos, text, Style::default())
     }
 
     /// Set a string with style starting at the specified world position, advancing horizontally.
-    /// Returns the number of characters actually written (may be less due to clipping).
-    pub fn set_string_styled(&mut self, world_pos: WorldPos, text: &str, style: Style) -> usize {
-        let mut written = 0;
+    pub fn set_string_styled(&mut self, world_pos: WorldPos, text: &str, style: Style) {
         for (i, ch) in text.chars().enumerate() {
             let char_world_pos = WorldPos::new(world_pos.x + i as i64, world_pos.y);
-            if self.set_char_styled(char_world_pos, ch, style) {
-                written += 1;
-            }
-            // Continue trying to write characters even if some are out of bounds
-            // This allows partial strings to render when only part of the string is visible
+            self.set_char_styled(char_world_pos, ch, style);
         }
-        written
     }
 
     /// Set a string vertically starting at the specified world position, advancing downward.
-    /// Returns the number of characters actually written (may be less due to clipping).
-    pub fn set_string_vertical(&mut self, world_pos: WorldPos, text: &str) -> usize {
+    pub fn set_string_vertical(&mut self, world_pos: WorldPos, text: &str) {
         self.set_string_vertical_styled(world_pos, text, Style::default())
     }
 
     /// Set a string vertically with style starting at the specified world position, advancing downward.
-    /// Returns the number of characters actually written (may be less due to clipping).
-    pub fn set_string_vertical_styled(
-        &mut self,
-        world_pos: WorldPos,
-        text: &str,
-        style: Style,
-    ) -> usize {
-        let mut written = 0;
+    pub fn set_string_vertical_styled(&mut self, world_pos: WorldPos, text: &str, style: Style) {
         for (i, ch) in text.chars().enumerate() {
             let char_world_pos = WorldPos::new(world_pos.x, world_pos.y - i as i64);
-            if self.set_char_styled(char_world_pos, ch, style) {
-                written += 1;
-            }
-            // Continue trying to write characters even if some are out of bounds
-            // This allows partial strings to render when only part of the string is visible
+            self.set_char_styled(char_world_pos, ch, style);
         }
-        written
     }
 
     /// Fill a rectangular area in world coordinates with the specified character.
-    /// Returns the number of characters actually written.
-    pub fn fill_rect(&mut self, world_rect: WorldRect, ch: char) -> usize {
+    pub fn fill_rect(&mut self, world_rect: WorldRect, ch: char) {
         self.fill_rect_styled(world_rect, ch, Style::default())
     }
 
     /// Fill a rectangular area in world coordinates with the specified character and style.
-    /// Returns the number of characters actually written.
-    pub fn fill_rect_styled(&mut self, world_rect: WorldRect, ch: char, style: Style) -> usize {
-        let mut written = 0;
+    pub fn fill_rect_styled(&mut self, world_rect: WorldRect, ch: char, style: Style) {
         for y in world_rect.min.y..=world_rect.max.y {
             for x in world_rect.min.x..=world_rect.max.x {
-                if self.set_char_styled(WorldPos::new(x, y), ch, style) {
-                    written += 1;
-                }
+                self.set_char_styled(WorldPos::new(x, y), ch, style);
             }
         }
-        written
     }
 
     /// Clear a single cell back to default (space character, default style).
-    /// Returns true if the cell was cleared (within viewport bounds), false otherwise.
-    pub fn clear_cell(&mut self, world_pos: WorldPos) -> bool {
+    pub fn clear_cell(&mut self, world_pos: WorldPos) {
         self.set_char_styled(world_pos, ' ', Style::default())
     }
 
     /// Clear a rectangular region back to default (space characters, default style).
-    /// Returns the number of cells actually cleared.
-    pub fn clear_rect(&mut self, world_rect: WorldRect) -> usize {
+    pub fn clear_rect(&mut self, world_rect: WorldRect) {
         self.fill_rect_styled(world_rect, ' ', Style::default())
     }
 
     /// Clear the entire visible viewport area back to default.
-    /// Returns the number of cells actually cleared.
-    pub fn clear_visible(&mut self) -> usize {
+    pub fn clear_visible(&mut self) {
         let target_area = self.viewport_state.camera_rect();
         self.clear_rect(target_area)
-    }
-
-    /// Set multiple characters at once with relative offsets from a base position.
-    /// Each entry in `chars` is (relative_offset, character).
-    /// Returns the number of characters actually written.
-    pub fn set_chars(&mut self, base_pos: WorldPos, chars: &[(WorldPos, char)]) -> usize {
-        let mut written = 0;
-        for (offset, ch) in chars {
-            let world_pos = WorldPos::new(base_pos.x + offset.x, base_pos.y + offset.y);
-            if self.set_char(world_pos, *ch) {
-                written += 1;
-            }
-        }
-        written
-    }
-
-    /// Set multiple characters with styles at once with relative offsets from a base position.
-    /// Each entry in `chars` is (relative_offset, character, style).
-    /// Returns the number of characters actually written.
-    pub fn set_chars_styled(
-        &mut self,
-        base_pos: WorldPos,
-        chars: &[(WorldPos, char, Style)],
-    ) -> usize {
-        let mut written = 0;
-        for (offset, ch, style) in chars {
-            let world_pos = WorldPos::new(base_pos.x + offset.x, base_pos.y + offset.y);
-            if self.set_char_styled(world_pos, *ch, *style) {
-                written += 1;
-            }
-        }
-        written
-    }
-
-    /// Get all content within a world rectangle as a 2D vector.
-    /// Returns Vec<Vec<(char, Style)>> where outer vec is rows, inner vec is columns.
-    /// Missing or out-of-bounds cells are returned as (' ', Style::default()).
-    pub fn get_rect_content(&self, world_rect: WorldRect) -> Vec<Vec<(char, Style)>> {
-        let mut result = Vec::new();
-        for y in world_rect.min.y..=world_rect.max.y {
-            let mut row = Vec::new();
-            for x in world_rect.min.x..=world_rect.max.x {
-                let world_pos = WorldPos::new(x, y);
-                let content = self
-                    .get_char_styled(world_pos)
-                    .unwrap_or((' ', Style::default()));
-                row.push(content);
-            }
-            result.push(row);
-        }
-        result
-    }
-
-    /// Set content for an entire rectangle from a 2D array.
-    /// `content` is organized as content[row][col] = (char, style).
-    /// Returns the number of characters actually written.
-    pub fn set_rect_content(
-        &mut self,
-        world_rect: WorldRect,
-        content: &[Vec<(char, Style)>],
-    ) -> usize {
-        let mut written = 0;
-        let rect_height = (world_rect.max.y - world_rect.min.y + 1) as usize;
-        let rect_width = (world_rect.max.x - world_rect.min.x + 1) as usize;
-
-        for (row_idx, row) in content.iter().enumerate().take(rect_height) {
-            for (col_idx, (ch, style)) in row.iter().enumerate().take(rect_width) {
-                let world_pos = WorldPos::new(
-                    world_rect.min.x + col_idx as i64,
-                    world_rect.min.y + row_idx as i64,
-                );
-                if self.set_char_styled(world_pos, *ch, *style) {
-                    written += 1;
-                }
-            }
-        }
-        written
-    }
-
-    /// Check if any non-space content exists in a region.
-    /// Returns true if any cell contains a character other than ' ' (space).
-    pub fn has_content(&self, world_rect: WorldRect) -> bool {
-        for y in world_rect.min.y..=world_rect.max.y {
-            for x in world_rect.min.x..=world_rect.max.x {
-                let world_pos = WorldPos::new(x, y);
-                if let Some(ch) = self.get_char(world_pos)
-                    && ch != ' '
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Count non-space content in a region.
-    /// Returns the number of cells that contain characters other than ' ' (space).
-    pub fn count_content(&self, world_rect: WorldRect) -> usize {
-        let mut count = 0;
-        for y in world_rect.min.y..=world_rect.max.y {
-            for x in world_rect.min.x..=world_rect.max.x {
-                let world_pos = WorldPos::new(x, y);
-                if let Some(ch) = self.get_char(world_pos)
-                    && ch != ' '
-                {
-                    count += 1;
-                }
-            }
-        }
-        count
     }
 
     /// Get the viewport size in cells
@@ -502,46 +349,18 @@ impl<'a> WorldBuffer<'a> {
     /// Get a single character at the specified world position.
     /// Returns Some(char) if the position is within viewport bounds, None otherwise.
     pub fn get_char(&self, world_pos: WorldPos) -> Option<char> {
-        let viewport_size = self.get_viewport_size();
-        if let Some(viewport_pos) = self.viewport_state.world_to_viewport(world_pos)
-            && viewport_pos.x < viewport_size.0
-            && viewport_pos.y < viewport_size.1
-        {
-            let viewport_area = self.viewport_area();
-            let buffer_x = viewport_area.x + viewport_pos.x;
-            // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
-            let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
-
-            // Ensure we're within the buffer bounds
-            if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
-                let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
-                return Some(cell.symbol().chars().next().unwrap_or(' '));
-            }
-        }
-        None
+        let (buffer_x, buffer_y) = self.viewport_state.world_to_terminal(world_pos)?;
+        let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
+        Some(cell.symbol().chars().next().unwrap_or(' '))
     }
 
     /// Get a single character and its style at the specified world position.
     /// Returns Some((char, Style)) if the position is within viewport bounds, None otherwise.
     pub fn get_char_styled(&self, world_pos: WorldPos) -> Option<(char, Style)> {
-        let viewport_size = self.get_viewport_size();
-        if let Some(viewport_pos) = self.world_to_viewport(world_pos)
-            && viewport_pos.x < viewport_size.0
-            && viewport_pos.y < viewport_size.1
-        {
-            let viewport_area = self.viewport_area();
-            let buffer_x = viewport_area.x + viewport_pos.x;
-            // Flip Y-axis: convert from world coordinates (upward Y) to terminal buffer coordinates (downward Y)
-            let buffer_y = viewport_area.y + (viewport_size.1 - 1 - viewport_pos.y);
-
-            // Ensure we're within the buffer bounds
-            if buffer_x < viewport_area.right() && buffer_y < viewport_area.bottom() {
-                let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
-                let ch = cell.symbol().chars().next().unwrap_or(' ');
-                return Some((ch, cell.style()));
-            }
-        }
-        None
+        let (buffer_x, buffer_y) = self.viewport_state.world_to_terminal(world_pos)?;
+        let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
+        let ch = cell.symbol().chars().next().unwrap_or(' ');
+        Some((ch, cell.style()))
     }
 
     /// Get a horizontal string starting at the specified world position.

@@ -153,16 +153,12 @@ where
         }
 
         let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
-        let highlighted_edges = controller.get_highlighted_edges();
-        let highlighted_positions = controller.get_highlighted_positions();
         plot_viewport_graph(
             viewport_graph,
             &mut buffer,
             &mut renderer,
             &controller.graph,
             detail_level,
-            highlighted_edges,
-            &highlighted_positions,
         );
     });
 

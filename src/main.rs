@@ -183,10 +183,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     match block_group {
                         Ok(bg) => {
                             let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                            let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
                             // Use a default height of 10 for now
-                            if let Err(e) =
-                                show_inline_gen_graph_widget(&block_graph, graph_conn, 10)
-                            {
+                            if let Err(e) = show_inline_gen_graph_widget(
+                                graph_conn,
+                                &block_graph,
+                                vec![current_path],
+                                10,
+                            ) {
                                 eprintln!("Error showing inline widget: {}", e);
                             }
                         }

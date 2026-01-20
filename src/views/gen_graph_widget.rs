@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
-use gen_graph::{GenGraph, GraphNode, project_path};
-use gen_models::{db::GraphConnection, node::Node, path::Path, traits::Query};
+use gen_graph::{GenGraph, GraphNode};
+use gen_models::{db::GraphConnection, node::Node};
 use gen_tui::{
     geometry::WorldRect,
     graph_controller::WorldBuffer,
@@ -12,8 +11,7 @@ use gen_tui::{
     theme::get_theme_color,
 };
 
-use ratatui::style::{Color, Style};
-use rusqlite::params;
+use ratatui::style::Style;
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
 /// based on genomic sequence length.
@@ -158,101 +156,6 @@ pub fn create_gen_graph_widget(
 ) -> GraphWidget<'_, &GenGraph, GenGraphNodeSizer, GenGraphNodeRenderer<'_>> {
     let renderer = GenGraphNodeRenderer::new(conn);
     GraphWidget::with_renderer(renderer)
-}
-
-/// Extension trait for GenGraphNodeRenderer to add path highlighting functionality
-pub trait GenGraphPathHighlighter<'a> {
-    /// Show a path in the graph with highlighting
-    ///
-    /// # Arguments
-    /// * `controller` - Graph controller to update with highlighting
-    /// * `path` - Path to highlight
-    /// * `color` - Color to use for highlighting
-    ///
-    /// # Returns
-    /// Result indicating success or error
-    fn show_path(
-        &mut self,
-        controller: &mut gen_tui::graph_controller::GraphController<&GenGraph, GenGraphNodeSizer>,
-        path: &Path,
-        color: Color,
-    ) -> Result<(), String>;
-
-    /// Toggle path highlighting for the current block group
-    ///
-    /// # Arguments
-    /// * `controller` - Graph controller to update
-    /// * `block_group_id` - ID of the block group to get path for
-    /// * `color` - Color to use for highlighting
-    ///
-    /// # Returns
-    /// Result indicating success or error
-    fn toggle_path_highlight(
-        &mut self,
-        controller: &mut gen_tui::graph_controller::GraphController<&GenGraph, GenGraphNodeSizer>,
-        block_group_id: &str,
-        color: Color,
-    ) -> Result<bool, String>;
-}
-
-impl<'a> GenGraphPathHighlighter<'a> for GenGraphNodeRenderer<'_> {
-    fn show_path(
-        &mut self,
-        controller: &mut gen_tui::graph_controller::GraphController<&GenGraph, GenGraphNodeSizer>,
-        path: &Path,
-        color: Color,
-    ) -> Result<(), String> {
-        // Get the path blocks from the database
-        let path_blocks = path.blocks(self.conn);
-
-        // Project the path blocks onto the current graph state
-        let projected_path = project_path(&controller.graph, &path_blocks);
-
-        // Filter out terminal nodes (start and end)
-        let path_nodes: Vec<GraphNode> = projected_path
-            .iter()
-            .filter_map(|(node, _)| {
-                // Filter out terminal nodes
-                if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
-                    Some(*node)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if path_nodes.is_empty() {
-            return Err("Path nodes not found in current graph state".to_string());
-        }
-
-        // Set the path highlight using GraphNodes directly
-        controller.set_path_highlight(color, path_nodes);
-        Ok(())
-    }
-
-    fn toggle_path_highlight(
-        &mut self,
-        controller: &mut gen_tui::graph_controller::GraphController<&GenGraph, GenGraphNodeSizer>,
-        block_group_id: &str,
-        color: Color,
-    ) -> Result<bool, String> {
-        // Check if highlighting is already active for this color
-        if controller.has_path_highlight(&color) {
-            controller.clear_path_highlight(&color);
-            Ok(false)
-        } else {
-            // Query the database for the most recent path for this block group
-            let path = Path::get(
-                self.conn,
-                "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
-                params![block_group_id],
-            )
-            .map_err(|e| format!("Failed to query path: {}", e))?;
-
-            self.show_path(controller, &path, color)?;
-            Ok(true)
-        }
-    }
 }
 
 #[cfg(test)]

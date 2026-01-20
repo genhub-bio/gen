@@ -11,8 +11,6 @@ use petgraph::{
         NodeCount, NodeIndexable, Visitable,
     },
 };
-#[cfg(test)]
-use ratatui::style::Color;
 use ratatui::style::Color;
 use std::collections::HashMap;
 
@@ -295,6 +293,7 @@ where
     /// - color: Color for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
     pub fn set_path_highlight(&mut self, color: Color, path_nodes: Vec<G::NodeId>) {
+        eprintln!("set_path_highlight: ");
         let mut path_graph = DiGraphMap::<G::NodeId, ()>::new();
 
         // Add all nodes to the path graph
@@ -970,8 +969,14 @@ mod tests {
         assert!(!state.is_visible(out_of_bounds));
 
         // Test writing a character
-        let result = writer.set_char(world_pos, 'X');
-        assert!(result, "Character should be written successfully");
+        writer.set_char(world_pos, 'X');
+        assert_eq!(
+            writer
+                .get_char(world_pos)
+                .expect("Position should be accessible"),
+            'X',
+            "Character should be written successfully"
+        );
     }
 
     #[test]
@@ -989,8 +994,7 @@ mod tests {
         // Test horizontal string writing - world (5,5) should map to viewport (0,0)
         let test_string = "Hello";
         let world_pos = WorldPos::new(5, 5); // Should be visible
-        let written = writer.set_string(world_pos, test_string);
-        assert_eq!(written, 5, "All characters should be written");
+        writer.set_string(world_pos, test_string);
 
         let read_string = writer.get_string(world_pos, 10);
         assert!(
@@ -1001,11 +1005,7 @@ mod tests {
         // Write a vertical string and read it back
         let vertical_string = "VERT";
         let vertical_pos = WorldPos::new(15, 6); // Should be visible
-        let written_vertical = writer.set_string_vertical(vertical_pos, vertical_string);
-        assert_eq!(
-            written_vertical, 4,
-            "All vertical characters should be written"
-        );
+        writer.set_string_vertical(vertical_pos, vertical_string);
 
         let read_vertical = writer.get_string_vertical(vertical_pos, 10);
         assert!(
@@ -1032,16 +1032,11 @@ mod tests {
 
         let mut writer = WorldBuffer::new(&mut buffer, &state);
 
-        // Try to write outside viewport bounds
-        let result = writer.set_char(WorldPos::new(100, 100), 'X');
-        assert!(!result, "Character outside bounds should not be written");
+        // Try to write outside viewport bounds, it shouldn't panic
+        writer.set_char(WorldPos::new(100, 100), 'X');
 
         // Try to write a string that goes beyond viewport
-        let written = writer.set_string(WorldPos::ZERO, "Hello World");
-        assert!(
-            written < 11,
-            "String should be clipped at viewport boundary"
-        );
+        writer.set_string(WorldPos::ZERO, "Hello World");
     }
 
     #[test]
@@ -1059,8 +1054,7 @@ mod tests {
         // Fill a small rectangle and read it back - use positions that should be visible
         let rect = WorldRect::from_corners(WorldPos::new(1, 1), WorldPos::new(3, 3));
         let fill_char = '#';
-        let filled = writer.fill_rect_styled(rect, fill_char, Style::default().fg(Color::Blue));
-        assert_eq!(filled, 9, "Should fill 3x3 rectangle (9 characters)");
+        writer.fill_rect_styled(rect, fill_char, Style::default().fg(Color::Blue));
 
         // Read back all the filled positions
         for y in rect.min.y..=rect.max.y {

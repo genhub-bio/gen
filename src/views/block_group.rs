@@ -8,14 +8,14 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::PATH_START_NODE_ID;
+use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
 use log::{info, warn};
 use ratatui::{
     layout::Constraint,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
 };
@@ -25,10 +25,7 @@ use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
-        gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, GenGraphPathHighlighter,
-            create_gen_graph_widget,
-        },
+        gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget},
     },
 };
 
@@ -66,6 +63,70 @@ fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<
         is_highlighted = !is_highlighted;
     }
     Line::from(spans)
+}
+
+/// Get the most recent path for a block group and map it to GraphNodes in the current graph
+fn get_block_group_path_nodes(
+    conn: &GraphConnection,
+    block_group_id: &gen_core::HashId,
+    graph: &GenGraph,
+) -> Result<Vec<gen_graph::GraphNode>, String> {
+    use gen_graph::project_path;
+    use gen_models::path::Path;
+
+    // Query the database for the most recent path for this block group
+    let path = Path::get(
+        conn,
+        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
+        rusqlite::params![block_group_id],
+    )
+    .map_err(|e| format!("Failed to query path: {}", e))?;
+
+    // Get the path blocks from the database
+    let path_blocks = path.blocks(conn);
+
+    // Project the path blocks onto the current graph state
+    let projected_path = project_path(graph, &path_blocks);
+
+    // Filter out terminal nodes (start and end) and convert to GraphNodes
+    let path_nodes: Vec<gen_graph::GraphNode> = projected_path
+        .iter()
+        .filter_map(|(node, _)| {
+            // Filter out terminal nodes
+            if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
+                Some(*node)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if path_nodes.is_empty() {
+        return Err("Path nodes not found in current graph state".to_string());
+    }
+
+    Ok(path_nodes)
+}
+
+/// Toggle path highlighting for a block group
+fn toggle_path_highlight(
+    conn: &GraphConnection,
+    controller: &mut gen_tui::graph_controller::GraphController<&GenGraph, GenGraphNodeSizer>,
+    block_group_id: &gen_core::HashId,
+    color: ratatui::style::Color,
+) -> Result<bool, String> {
+    // Check if highlighting is already active for this color
+    if controller.has_path_highlight(&color) {
+        controller.clear_path_highlight(&color);
+        Ok(false)
+    } else {
+        // Get the path nodes for this block group
+        let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph)?;
+
+        // Set the path highlight using GraphNodes directly
+        controller.set_path_highlight(color, path_nodes);
+        Ok(true)
+    }
 }
 
 pub fn view_block_group(
@@ -155,7 +216,7 @@ pub fn view_block_group(
     graph_controller.show_cursor();
 
     // Create a renderer for path highlighting functionality
-    let mut renderer = GenGraphNodeRenderer::new(conn);
+    let _renderer = GenGraphNodeRenderer::new(conn);
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if origin.is_some() {
@@ -469,12 +530,11 @@ pub fn view_block_group(
                     }
                     KeyCode::Char('p') => {
                         if let Some(ref block_group_id) = explorer_state.selected_block_group_id {
-                            let error_color =
-                                get_theme_color("error").unwrap_or(ratatui::style::Color::Red);
-                            match renderer.toggle_path_highlight(
+                            match toggle_path_highlight(
+                                conn,
                                 &mut graph_controller,
-                                block_group_id.to_string().as_str(),
-                                error_color,
+                                block_group_id,
+                                Color::Red,
                             ) {
                                 Ok(highlighting_enabled) => {
                                     if highlighting_enabled {
