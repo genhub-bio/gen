@@ -78,6 +78,7 @@ jobs:
     env:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+      REPO: ${{ github.repository }}
     steps:
       - name: Ensure tag is available
         run: |
@@ -91,4 +92,4 @@ jobs:
             echo "GIT_TAG_PUSH_TOKEN is required to trigger publish-pypi-tag." >&2
             exit 1
           fi
-          gh workflow run publish-pypi-tag.yaml --ref "$TAG" -f tag="$TAG"
+          gh workflow run publish-pypi-tag.yaml --repo "$REPO" --ref "$TAG" -f tag="$TAG"
