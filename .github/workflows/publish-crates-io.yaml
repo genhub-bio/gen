@@ -31,13 +31,7 @@ jobs:
 
       - name: Verify tag matches crate version
         run: |
-          version=$(python3 - <<'PY'
-import tomllib
-from pathlib import Path
-data = tomllib.loads(Path("Cargo.toml").read_text())
-print(data["package"]["version"])
-PY
-)
+          version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
           tag="${{ inputs.tag }}"
           tag_stripped="${tag#v}"
           if [ "$version" != "$tag_stripped" ]; then
