@@ -16,7 +16,7 @@ jobs:
       - name: Checkout tag
         uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
 
       - name: Install Rust
