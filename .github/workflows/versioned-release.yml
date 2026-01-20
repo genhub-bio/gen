@@ -46,8 +46,6 @@ jobs:
             --workspace \
             --config release.toml \
             --execute \
-            --skip-publish \
-            --no-dev-version \
             --no-confirm
 
       - name: Capture new version
