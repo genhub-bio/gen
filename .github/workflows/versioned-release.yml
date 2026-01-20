@@ -60,16 +60,16 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           git add Cargo.toml gen-core/Cargo.toml gen-graph/Cargo.toml gen-models/Cargo.toml gen-diff/Cargo.toml pyproject.toml gen-python/Cargo.toml
-          git commit -m "Release ${VERSION}"
-          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git commit -m "Release v${VERSION}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
           git push origin HEAD
-          git push origin "${VERSION}"
+          git push origin "v${VERSION}"
 
       - name: Generate release tarball
-        run: git archive --format=tar.gz -o "gen-${{ steps.version.outputs.version }}.tar.gz" --prefix=gen/ HEAD
+        run: git archive --format=tar.gz -o "gen-v${{ steps.version.outputs.version }}.tar.gz" --prefix=gen/ HEAD
 
       - name: Upload release tarball
         uses: actions/upload-artifact@v4
         with:
           name: gen-release-tarball
-          path: "gen-${{ steps.version.outputs.version }}.tar.gz"
+          path: "gen-v${{ steps.version.outputs.version }}.tar.gz"

@@ -1,17 +1,9 @@
 name: Publish Crates.io Tag
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Git tag to publish (e.g. v0.4.0)
-        required: true
-        type: string
-      dry-run:
-        description: Run cargo publish in dry-run mode
-        required: false
-        default: true
-        type: boolean
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read

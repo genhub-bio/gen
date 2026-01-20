@@ -1,19 +1,9 @@
 name: Publish PyPI Tag
 
 on:
-  workflow_dispatch:
-    inputs:
-      repository:
-        description: Target repository
-        required: false
-        default: pypi
-        type: choice
-        options:
-          - pypi
-          - testpypi
   push:
     tags:
-      - "*"
+      - "v*"
 
 permissions:
   contents: read

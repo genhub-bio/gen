@@ -3,7 +3,8 @@ name: Release GitHub Uploads
 on:
   push:
     branches: ["main"]
-    tags: ["*"]
+    tags:
+      - "v*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,7 +55,7 @@ jobs:
           mv gen-binary ./gen
           pkgbuild --root gen \
              --identifier bio.genhub.gen \
-             --version "1.0.0" \
+             --version "$RELEASE_NAME" \
              --install-location /usr/local/bin \
              gen-unsigned.pkg
       - name: Sign package file
