@@ -5,13 +5,26 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish (e.g. v0.4.0)
+        required: true
+        type: string
+      repository:
+        description: Target repository
+        required: false
+        default: pypi
+        type: choice
+        options:
+          - pypi
+          - testpypi
 
 permissions:
   contents: read
   actions: read
 
 env:
-  PUBLISH_TAG: ${{ (github.ref_type == 'tag' && github.ref_name) || '' }}
+  PUBLISH_TAG: ${{ github.event.inputs.tag || github.ref_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
   publish:
