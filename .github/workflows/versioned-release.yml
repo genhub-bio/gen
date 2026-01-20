@@ -28,31 +28,42 @@ jobs:
       - name: Set up Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Install cargo-release
+      - name: Install cargo-edit
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-release
+          tool: cargo-edit
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
       - name: Configure git author
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Run cargo-release (workspace + python)
+      - name: Bump Versions
         env:
-          CARGO_TERM_COLOR: always
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
         run: |
-          cargo release ${{ github.event.inputs.release_type }} \
-            --workspace \
-            --config release.toml \
-            --execute \
-            --no-confirm
+          cargo set-version -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen --bump "$RELEASE_TYPE"
+          cargo set-version --manifest-path gen-python/Cargo.toml --bump "$RELEASE_TYPE"
+          uv version --bump "$RELEASE_TYPE"
 
       - name: Capture new version
         id: version
         run: |
           version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag, and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git add Cargo.toml gen-core/Cargo.toml gen-graph/Cargo.toml gen-models/Cargo.toml gen-diff/Cargo.toml pyproject.toml gen-python/Cargo.toml
+          git commit -m "Release ${VERSION}"
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin HEAD
+          git push origin "${VERSION}"
 
       - name: Generate release tarball
         run: git archive --format=tar.gz -o "gen-${{ steps.version.outputs.version }}.tar.gz" --prefix=gen/ HEAD

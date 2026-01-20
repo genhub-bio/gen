@@ -1,6 +1,12 @@
 """Python bindings to the Gen version control system."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("gen")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
+
 
 # Bindings can come through a Python intermediate layer (helpers.py) or the compiled Rust library itself
 
@@ -8,12 +14,12 @@ try:
     # Directly from Rust
     from .gen import (
         DbContext,
-        Repository,
+        PyBaseLayout,
         PyBlockGroup,
         PyHashId,
-        PyBaseLayout,
-        PyScaledLayout,
         PyNodeKey,
+        PyScaledLayout,
+        Repository,
         export_fasta,
         export_genbank,
         export_gfa,
@@ -63,8 +69,8 @@ try:
     ]
 
 except ImportError as e:
-    import warnings
     import os
+    import warnings
 
     warnings.warn(f"Failed to import Gen modules: {e}")
 
