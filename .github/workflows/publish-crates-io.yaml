@@ -31,7 +31,9 @@ jobs:
         run: |
           version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
           tag="${{ inputs.tag }}"
+          echo "Tag: $tag"
           tag_stripped="${tag#v}"
+          echo "Tag stripped: $tag_stripped"
           if [ "$version" != "$tag_stripped" ]; then
             echo "Tag version ($tag_stripped) does not match Cargo.toml version ($version)" >&2
             exit 1
