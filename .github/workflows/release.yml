@@ -137,9 +137,18 @@ jobs:
     permissions:
       actions: write
       contents: write
+    env:
+      GIT_TAG_PUSH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
+      - name: Configure push authentication
+        run: |
+          if [ -z "$GIT_TAG_PUSH_TOKEN" ]; then
+            echo "GIT_TAG_PUSH_TOKEN secret is required to push tags and trigger downstream workflows." >&2
+            exit 1
+          fi
+          git remote set-url origin "https://x-access-token:${GIT_TAG_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
       - name: Set nightly tag to current head
         if: github.ref_type != 'tag'
         run: |

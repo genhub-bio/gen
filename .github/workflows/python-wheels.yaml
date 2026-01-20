@@ -1,15 +1,15 @@
 name: Python API Wheels
 
 on:
-  workflow_run:
-    workflows:
-      - Versioned Release
-    types:
-      - completed
+  push:
+    tags:
+      - v**
+  create:
+    tags:
+      - v**
 
 jobs:
   build-wheels:
-    if: github.ref_type == 'tag'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,10 +19,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # On workflow_run, default checkout would grab this workflow’s commit; pin to the triggering run’s commit instead.
-          repository: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name || github.repository }}
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
       - uses: actions/setup-python@v5
         id: setup-python
         with:
