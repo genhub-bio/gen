@@ -1,12 +1,14 @@
-name: Nightly Release
+name: Release GitHub Uploads
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
+    tags: ["*"]
 
 env:
   CARGO_TERM_COLOR: always
   GH_TOKEN: ${{ github.token }}
+  RELEASE_NAME: ${{ github.ref_type == 'tag' && github.ref_name || 'nightly' }}
 
 jobs:
   release-macos:
@@ -16,84 +18,87 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions-rust-lang/setup-rust-toolchain@v1
-      with:
-        rustflags: ""
-    - name: Install Dependencies
-      run: brew install capnp
-    - name: x86 toolchain
-      run: |
-        rustup target add x86_64-apple-darwin
-    - name: Build
-      run: |
-        cargo build --release --target x86_64-apple-darwin
-        cargo build --release --target aarch64-apple-darwin
-        lipo -create -output ./gen target/aarch64-apple-darwin/release/gen target/x86_64-apple-darwin/release/gen
-    - name: Code sign app
-      env:
-        MACOS_CERTIFICATE: ${{ secrets.PROD_MACOS_APP_CERTIFICATE }}
-        MACOS_CERTIFICATE_PWD: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_PWD }}
-        MACOS_CERTIFICATE_NAME: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_NAME }}
-        MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
-      run: |
-        echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
-        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
-        security default-keychain -s build.keychain
-        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
-        security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
-        /usr/bin/codesign --force --timestamp -s "$MACOS_CERTIFICATE_NAME" --options runtime ./gen -v
-        security delete-keychain build.keychain
-    - name: Build package file
-      run: |
-        mkdir gen-binary
-        mv ./gen gen-binary
-        mv gen-binary ./gen
-        pkgbuild --root gen \
-           --identifier bio.genhub.gen \
-           --version "1.0.0" \
-           --install-location /usr/local/bin \
-           gen-unsigned.pkg
-    - name: Sign package file
-      env:
-        MACOS_CERTIFICATE: ${{ secrets.PROD_MACOS_INSTALL_CERTIFICATE }}
-        MACOS_CERTIFICATE_PWD: ${{ secrets.PROD_MACOS_INSTALL_CERTIFICATE_PWD }}
-        MACOS_CERTIFICATE_NAME: ${{ secrets.PROD_MACOS_INSTALL_CERTIFICATE_NAME }}
-        MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_INSTALLER_KEYCHAIN_PWD }}
-      run: |
-        echo $MACOS_CERTIFICATE | base64 --decode > install-certificate.p12
-        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
-        security default-keychain -s install.keychain
-        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
-        security import install-certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/productsign
-        security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
-        security list-keychain -d user -s install.keychain
-        productsign --sign "$MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
-        security delete-keychain install.keychain
-    - name: Notarize package file
-      env:
-        MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
-        PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
-        PROD_MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_TEAM_ID }}
-        PROD_MACOS_NOTARIZATION_PWD: ${{ secrets.PROD_MACOS_NOTARIZATION_PWD }}
-      run: |
-        KEYCHAIN_PATH="$RUNNER_TEMP/notarize.keychain-db"
-        security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-        security default-keychain -s "$KEYCHAIN_PATH"
-        security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-        security list-keychain -d user -s "$KEYCHAIN_PATH"
-        xcrun notarytool store-credentials "notarytool-profile" \
-          --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
-          --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
-          --password "$PROD_MACOS_NOTARIZATION_PWD" \
-          --keychain "$KEYCHAIN_PATH"
-        xcrun notarytool submit "./gen.macos.pkg" --keychain-profile "notarytool-profile" --wait
-        xcrun stapler staple "./gen.macos.pkg"
-    - name: upload-binary
-      run: |
-        find . -name "gen"
-        gh release upload nightly gen.macos.pkg --clobber
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - name: Install Dependencies
+        run: brew install capnp
+      - name: x86 toolchain
+        run: |
+          rustup target add x86_64-apple-darwin
+      - name: Build
+        run: |
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          lipo -create -output ./gen target/aarch64-apple-darwin/release/gen target/x86_64-apple-darwin/release/gen
+      - name: Code sign app
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.PROD_MACOS_APP_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
+        run: |
+          echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          /usr/bin/codesign --force --timestamp -s "$MACOS_CERTIFICATE_NAME" --options runtime ./gen -v
+          security delete-keychain build.keychain
+      - name: Build package file
+        run: |
+          mkdir gen-binary
+          mv ./gen gen-binary
+          mv gen-binary ./gen
+          pkgbuild --root gen \
+             --identifier bio.genhub.gen \
+             --version "1.0.0" \
+             --install-location /usr/local/bin \
+             gen-unsigned.pkg
+      - name: Sign package file
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.PROD_MACOS_INSTALL_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.PROD_MACOS_INSTALL_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.PROD_MACOS_INSTALL_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_INSTALLER_KEYCHAIN_PWD }}
+        run: |
+          echo $MACOS_CERTIFICATE | base64 --decode > install-certificate.p12
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+          security default-keychain -s install.keychain
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+          security import install-certificate.p12 -k install.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CI_KEYCHAIN_PWD" install.keychain
+          security list-keychain -d user -s install.keychain
+          productsign --sign "$MACOS_CERTIFICATE_NAME" gen-unsigned.pkg gen.macos.pkg
+          security delete-keychain install.keychain
+      - name: Notarize package file
+        env:
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
+          PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
+          PROD_MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_TEAM_ID }}
+          PROD_MACOS_NOTARIZATION_PWD: ${{ secrets.PROD_MACOS_NOTARIZATION_PWD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/notarize.keychain-db"
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          xcrun notarytool store-credentials "notarytool-profile" \
+            --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
+            --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
+            --password "$PROD_MACOS_NOTARIZATION_PWD" \
+            --keychain "$KEYCHAIN_PATH"
+          xcrun notarytool submit "./gen.macos.pkg" --keychain-profile "notarytool-profile" --wait
+          xcrun stapler staple "./gen.macos.pkg"
+      - name: Ensure release exists
+        run: |
+          gh release view "$RELEASE_NAME" >/dev/null 2>&1 || gh release create "$RELEASE_NAME" --notes "" || gh release view "$RELEASE_NAME"
+      - name: upload-binary
+        run: |
+          find . -name "gen"
+          gh release upload "$RELEASE_NAME" gen.macos.pkg --clobber
 
   release-ubuntu:
     runs-on: ubuntu-latest
@@ -102,25 +107,28 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions-rust-lang/setup-rust-toolchain@v1
-    - name: Install Dependencies
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto
-    - name: arm toolchain
-      run: |
-        rustup target add aarch64-unknown-linux-gnu
-        sudo apt install gcc-aarch64-linux-gnu
-    - name: Build
-      run: |
-        RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target x86_64-unknown-linux-gnu --exclude gen-python --workspace
-        RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\" --exclude gen-python --workspace
-    - name: upload-binary
-      run: |
-        find -name gen
-        zip -j gen.linux-x86_64.zip target/x86_64-unknown-linux-gnu/release/gen
-        zip -j gen.linux-arm64.zip target/aarch64-unknown-linux-gnu/release/gen
-        gh release upload nightly gen.linux-x86_64.zip --clobber
-        gh release upload nightly gen.linux-arm64.zip --clobber
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto
+      - name: arm toolchain
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt install gcc-aarch64-linux-gnu
+      - name: Build
+        run: |
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target x86_64-unknown-linux-gnu --exclude gen-python --workspace
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\" --exclude gen-python --workspace
+      - name: Ensure release exists
+        run: |
+          gh release view "$RELEASE_NAME" >/dev/null 2>&1 || gh release create "$RELEASE_NAME" --notes "" || gh release view "$RELEASE_NAME"
+      - name: upload-binary
+        run: |
+          find -name gen
+          zip -j gen.linux-x86_64.zip target/x86_64-unknown-linux-gnu/release/gen
+          zip -j gen.linux-arm64.zip target/aarch64-unknown-linux-gnu/release/gen
+          gh release upload "$RELEASE_NAME" gen.linux-x86_64.zip --clobber
+          gh release upload "$RELEASE_NAME" gen.linux-arm64.zip --clobber
 
   update-release-source:
     runs-on: ubuntu-latest
@@ -132,6 +140,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set nightly tag to current head
+        if: github.ref_type != 'tag'
         run: |
           git tag -f nightly HEAD
           git push -f origin nightly
+      - name: upload-release-source
+        run: |
+          git archive --format=tar.gz -o gen-${RELEASE_NAME}.tar.gz HEAD
+          gh release upload "$RELEASE_NAME" gen-${RELEASE_NAME}.tar.gz --clobber
