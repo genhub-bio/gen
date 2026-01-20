@@ -83,3 +83,10 @@ jobs:
         with:
           name: gen-release-tarball
           path: "gen-v${{ steps.version.outputs.version }}.tar.gz"
+
+      - name: Trigger python wheels workflow on the tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: |
+          gh workflow run python-wheels.yaml --ref "v${VERSION}"
