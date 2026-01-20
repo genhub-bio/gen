@@ -30,30 +30,18 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve tag commit
-        id: tag
-        uses: actions/github-script@v7
-        env:
-          TAG: ${{ env.PUBLISH_TAG }}
-        with:
-          script: |
-            const tag = process.env.TAG;
-            if (!tag) {
-              core.setFailed("Tag is required. Provide the workflow_dispatch input `tag` or run this workflow from a tag ref.");
-              return;
-            }
-            const { data: ref } = await github.rest.git.getRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: `tags/${tag}`,
-            });
-            core.setOutput("sha", ref.object.sha);
+      - name: Ensure tag provided
+        run: |
+          if [ -z "${{ env.PUBLISH_TAG }}" ]; then
+            echo "PUBLISH_TAG is required. Run on a tag or provide the workflow_dispatch input 'tag'." >&2
+            exit 1
+          fi
 
       - name: Locate wheel build run
         id: wheels-run
         uses: actions/github-script@v7
         env:
-          WHEEL_SHA: ${{ steps.tag.outputs.sha }}
+          WHEEL_SHA: ${{ github.sha }}
           WHEEL_TAG: ${{ env.PUBLISH_TAG }}
         with:
           script: |
@@ -63,6 +51,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: "python-wheels.yaml",
+              head_sha: sha,
               per_page: 100,
             });
             const run = data.workflow_runs.find(
