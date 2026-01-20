@@ -3,10 +3,6 @@ name: Publish PyPI Tag
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: Git tag to publish (e.g. v0.4.0)
-        required: true
-        type: string
       repository:
         description: Target repository
         required: false
@@ -24,7 +20,7 @@ permissions:
   actions: read
 
 env:
-  PUBLISH_TAG: ${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+  PUBLISH_TAG: ${{ (github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
   publish:
@@ -96,7 +92,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
       - name: Install upload tooling
         run: python -m pip install --upgrade pip twine
