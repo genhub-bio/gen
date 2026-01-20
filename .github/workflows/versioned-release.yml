@@ -90,3 +90,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
         run: |
           gh workflow run python-wheels.yaml --ref "v${VERSION}"
+
+      - name: Trigger crates.io publish
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: |
+          gh workflow run publish-crates-io.yaml --ref "v${VERSION}"
