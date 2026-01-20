@@ -3,11 +3,10 @@ name: Python API Wheels
 on:
   push:
     tags:
-      - "v*"
+      - v*
 
 jobs:
   build-wheels:
-    if: github.ref_type == 'tag'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
