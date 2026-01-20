@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish (e.g. v0.4.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
