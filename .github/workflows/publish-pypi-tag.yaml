@@ -1,0 +1,106 @@
+name: Publish PyPI Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish (e.g. v0.4.0)
+        required: true
+        type: string
+      repository:
+        description: Target repository
+        required: false
+        default: pypi
+        type: choice
+        options:
+          - pypi
+          - testpypi
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag commit
+        id: tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = core.getInput("tag", { required: true });
+            const { data: ref } = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `tags/${tag}`,
+            });
+            core.setOutput("sha", ref.object.sha);
+
+      - name: Locate wheel build run
+        id: wheels-run
+        uses: actions/github-script@v7
+        env:
+          WHEEL_SHA: ${{ steps.tag.outputs.sha }}
+          WHEEL_TAG: ${{ inputs.tag }}
+        with:
+          script: |
+            const sha = process.env.WHEEL_SHA;
+            const tag = process.env.WHEEL_TAG;
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "python-wheels.yaml",
+              per_page: 100,
+            });
+            const run = data.workflow_runs.find(
+              (r) =>
+                r.head_sha === sha &&
+                r.status === "completed" &&
+                r.conclusion === "success"
+            );
+            if (!run) {
+              core.setFailed(
+                `No successful python-wheels run found for tag ${tag} (sha ${sha}). Trigger the wheel build for this tag first.`
+              );
+              return;
+            }
+            core.setOutput("run_id", run.id.toString());
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          run-id: ${{ steps.wheels-run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Collect wheels
+        run: |
+          mkdir -p dist
+          find wheelhouse -maxdepth 2 -type f -name '*.whl' -exec mv {} dist/ \;
+          ls -la dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install upload tooling
+        run: python -m pip install --upgrade pip twine
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${TWINE_PASSWORD}" ]; then
+            echo "PYPI_API_TOKEN secret is required" >&2
+            exit 1
+          fi
+          if [ "${{ inputs.repository }}" = "testpypi" ]; then
+            repo_url="https://test.pypi.org/legacy/"
+          else
+            repo_url="https://upload.pypi.org/legacy/"
+          fi
+          python -m twine upload --non-interactive --skip-existing --repository-url "${repo_url}" dist/*.whl
