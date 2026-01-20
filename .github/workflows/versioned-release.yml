@@ -47,7 +47,7 @@ jobs:
         run: |
           cargo set-version -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen --bump "$RELEASE_TYPE"
           cargo set-version --manifest-path gen-python/Cargo.toml --bump "$RELEASE_TYPE"
-          uv version --bump "$RELEASE_TYPE"
+          uv version --no-sync --bump "$RELEASE_TYPE"
 
       - name: Capture new version
         id: version
