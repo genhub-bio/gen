@@ -444,6 +444,6 @@ mod tests {
         graph.add_node(node);
 
         let state = InlineGenGraphState::new(&graph, &conn);
-        assert_eq!(state.controller.get_detail_level(), VisualDetail::Minimal);
+        assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
     }
 }

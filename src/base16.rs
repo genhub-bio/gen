@@ -1,11 +1,12 @@
-use figment::{providers::{Format, Yaml}, Figment};
+use std::{path::PathBuf, str::FromStr};
+
+use figment::{
+    Figment,
+    providers::{Format, Yaml},
+};
 use ratatui::style::Color;
-use serde::de;
-use serde::de::Deserializer;
-use serde::Deserialize;
+use serde::{Deserialize, de, de::Deserializer};
 use serde_with::serde_as;
-use std::path::PathBuf;
-use std::str::FromStr;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

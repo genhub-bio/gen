@@ -42,6 +42,26 @@ pub struct JunctionSymbol {
 }
 
 impl JunctionSymbol {
+    /// Heavy box-drawing characters for highlighted routing nodes
+    /// Index: 4-bit value where bits represent [North, East, South, West]
+    const HEAVY_ROUTING_GLYPHS: [char; 16] = [
+        '?', // 0000 ____
+        '╸', // 0001 ___W
+        '╻', // 0010 __S_
+        '┓', // 0011 __SW
+        '╺', // 0100 _E__
+        '━', // 0105 _E_W
+        '┏', // 0110 _ES_
+        '┳', // 0111 _ESW
+        '╹', // 1000 N___
+        '┛', // 1001 N__W
+        '┃', // 1010 N_S_
+        '┫', // 1011 N_SW
+        '┗', // 1100 NE__
+        '┻', // 1101 NE_W
+        '┣', // 1110 NES_
+        '╋', // 1111 NESW
+    ];
     /// Box-drawing characters for routing nodes based on connection directions
     /// Index: 4-bit value where bits represent [North, East, South, West]
     const ROUTING_GLYPHS: [char; 16] = [
@@ -70,27 +90,6 @@ impl JunctionSymbol {
             .copied()
             .unwrap_or('?')
     }
-
-    /// Heavy box-drawing characters for highlighted routing nodes
-    /// Index: 4-bit value where bits represent [North, East, South, West]
-    const HEAVY_ROUTING_GLYPHS: [char; 16] = [
-        '?', // 0000 ____
-        '╸', // 0001 ___W
-        '╻', // 0010 __S_
-        '┓', // 0011 __SW
-        '╺', // 0100 _E__
-        '━', // 0105 _E_W
-        '┏', // 0110 _ES_
-        '┳', // 0111 _ESW
-        '╹', // 1000 N___
-        '┛', // 1001 N__W
-        '┃', // 1010 N_S_
-        '┫', // 1011 N_SW
-        '┗', // 1100 NE__
-        '┻', // 1101 NE_W
-        '┣', // 1110 NES_
-        '╋', // 1111 NESW
-    ];
 
     /// Get the heavy routing glyph character for this index
     pub fn heavy_glyph(&self) -> char {

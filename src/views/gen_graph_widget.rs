@@ -10,7 +10,6 @@ use gen_tui::{
     plotter::{NodeRenderer, NodeSizer},
     theme::get_theme_color,
 };
-
 use ratatui::style::Style;
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
