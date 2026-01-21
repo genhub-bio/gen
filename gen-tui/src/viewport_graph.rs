@@ -566,6 +566,53 @@ impl CroppedGraph {
         domain_to_visual
     }
 
+    /// Create a subgraph containing only the edges (and their connected nodes)
+    /// that satisfy the given predicate.
+    pub fn subgraph<F>(&self, edge_predicate: F) -> Self
+    where
+        F: Fn(&Vec<(NodeIndex, NodeIndex)>) -> bool,
+    {
+        let mut new_graph = Self::empty();
+
+        // Iterate through all edges in the current graph
+        for (source, target, bundle) in self.edges() {
+            if edge_predicate(bundle) {
+                // Add source node if not already present
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    new_graph.node_data_by_pos.entry(source)
+                    && let Some(node) = self.node_data_by_pos.get(&source)
+                {
+                    e.insert(node.clone());
+                    new_graph.graph.add_node(source);
+
+                    // If it's a Data node, also update the node_positions map
+                    if let crate::layout::NodeRole::Data(domain_idx) = node.role {
+                        new_graph.node_positions.insert(domain_idx, source);
+                    }
+                }
+
+                // Add target node if not already present
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    new_graph.node_data_by_pos.entry(target)
+                    && let Some(node) = self.node_data_by_pos.get(&target)
+                {
+                    e.insert(node.clone());
+                    new_graph.graph.add_node(target);
+
+                    // If it's a Data node, also update the node_positions map
+                    if let crate::layout::NodeRole::Data(domain_idx) = node.role {
+                        new_graph.node_positions.insert(domain_idx, target);
+                    }
+                }
+
+                // Add the edge with its bundle
+                new_graph.graph.add_edge(source, target, bundle.clone());
+            }
+        }
+
+        new_graph
+    }
+
     /// Find the Data node closest to the centroid of all Data nodes in the viewport.
     /// Returns the world position and domain index of the center node.
     /// Returns None if there are no Data nodes in the viewport.

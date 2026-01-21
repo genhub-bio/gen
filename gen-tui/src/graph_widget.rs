@@ -1,4 +1,4 @@
-use std::{cmp, hash::Hash, marker::PhantomData};
+use std::{hash::Hash, marker::PhantomData};
 
 use petgraph::visit::{
     EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
@@ -16,7 +16,7 @@ use crate::{
     geometry::{WorldPos, WorldRect},
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
-    plotter::{NodeRenderer, NodeSizer, plot_viewport_graph, plot_viewport_graph_with_highlights},
+    plotter::{NodeRenderer, NodeSizer, plot_viewport_graph_with_highlights},
     theme::get_theme_color,
 };
 

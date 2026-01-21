@@ -236,22 +236,32 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
 {
+    // Project the highlight paths (consist of only data nodes) onto the rectilinear graph
+    // so that we end up with subgraphs that have all the routing done.
+    let projected_highlights: Vec<(CroppedGraph, Color)> = path_highlights
+        .iter()
+        .map(|(path_graph, color)| {
+            let projected = viewport_graph.subgraph(|bundle| {
+                bundle
+                    .iter()
+                    .any(|&(u, v)| path_graph.contains_edge(u, v) || path_graph.contains_edge(v, u))
+            });
+            (projected, *color)
+        })
+        .collect();
+
     // Draw edges first so nodes appear on top
     for (source, target, bundle) in viewport_graph.edges() {
         // Ommit the edges that don't actually represent an original edge
         // (edges to/from terminal source/sink nodes)
         if !bundle.is_empty() {
-            // Check if any edge in the bundle is highlighted in any path
+            // Check if edge is in any projected highlight
             // Later highlights in the vector take precedence over earlier ones
             let mut highlighted_color = None;
 
-            for &(src_idx, tgt_idx) in bundle.iter() {
-                for (path_graph, color) in path_highlights {
-                    if path_graph.contains_edge(src_idx, tgt_idx)
-                        || path_graph.contains_edge(tgt_idx, src_idx)
-                    {
-                        highlighted_color = Some(*color);
-                    }
+            for (graph, color) in &projected_highlights {
+                if graph.graph.contains_edge(source, target) {
+                    highlighted_color = Some(*color);
                 }
             }
 
@@ -273,10 +283,28 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
             }
             NodeRole::Routing => {
-                let glyph = compute_junction_glyph(viewport_graph, *world_pos);
-                let style = Style::default()
+                // By default, render the junction as it appears in the full graph
+                let mut glyph = compute_junction_glyph(viewport_graph, *world_pos);
+                let mut style = Style::default()
                     .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray));
-                buffer.set_char_styled(*world_pos, glyph.glyph(), style);
+                let mut is_highlighted = false;
+
+                // If this node is part of a highlighted path, overlay the bolded bends overtop.
+                for (graph, color) in &projected_highlights {
+                    if graph.contains_node(world_pos) {
+                        glyph = compute_junction_glyph(graph, *world_pos);
+                        style = Style::default().fg(*color);
+                        is_highlighted = true;
+                    }
+                }
+
+                let character = if is_highlighted {
+                    glyph.heavy_glyph()
+                } else {
+                    glyph.glyph()
+                };
+
+                buffer.set_char_styled(*world_pos, character, style);
             }
             NodeRole::Stitch(_) => {
                 // Stitch nodes should have been replaced by actual content in ViewportGraph
