@@ -8,6 +8,7 @@ use petgraph::visit::{
     NodeCount, NodeIndexable, Visitable,
 };
 use ratatui::style::{Color, Style};
+use ratatui::symbols::merge::MergeStrategy;
 
 use crate::{
     geometry::{BigRect, Point, WorldPos, WorldRect},
@@ -284,26 +285,34 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             }
             NodeRole::Routing => {
                 // By default, render the junction as it appears in the full graph
-                let mut glyph = compute_junction_glyph(viewport_graph, *world_pos);
-                let mut style = Style::default()
-                    .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray));
-                let mut is_highlighted = false;
+                let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
+                let mut highlighted_glyph = None;
+                let mut highlight_color = None;
 
-                // If this node is part of a highlighted path, overlay the bolded bends overtop.
+                // If this node is part of a highlighted path, merge the glyphs
                 for (graph, color) in &projected_highlights {
                     if graph.contains_node(world_pos) {
-                        glyph = compute_junction_glyph(graph, *world_pos);
-                        style = Style::default().fg(*color);
-                        is_highlighted = true;
+                        highlighted_glyph = Some(compute_junction_glyph(graph, *world_pos));
+                        highlight_color = Some(*color);
                     }
                 }
 
-                let character = if is_highlighted {
-                    glyph.heavy_glyph()
+                // Merge glyphs using fuzzy strategy to find best match
+                let character = if let Some(high_glyph) = highlighted_glyph {
+                    let base_str = base_glyph.glyph().to_string();
+                    let high_str = high_glyph.heavy_glyph().to_string();
+                    MergeStrategy::Fuzzy
+                        .merge(&base_str, &high_str)
+                        .chars()
+                        .next()
+                        .unwrap_or('?')
                 } else {
-                    glyph.glyph()
+                    base_glyph.glyph()
                 };
 
+                let style = Style::default().fg(highlight_color.unwrap_or_else(|| {
+                    get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray)
+                }));
                 buffer.set_char_styled(*world_pos, character, style);
             }
             NodeRole::Stitch(_) => {
