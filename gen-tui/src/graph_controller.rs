@@ -1,4 +1,4 @@
-use std::{collections::HashSet, hash::Hash};
+use std::hash::Hash;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
@@ -12,7 +12,6 @@ use petgraph::{
     },
 };
 use ratatui::style::Color;
-use std::collections::HashMap;
 
 // Re-export the core module types
 pub use crate::viewport_state::{ViewportState, WorldBuffer};
@@ -66,14 +65,8 @@ where
     /// Flag indicating that the viewport graph needs to be rebuilt
     rebuild_needed: bool,
 
-    /// Set of highlighted edges by domain node pairs (direction-agnostic)
-    highlighted_edges: HashSet<(NodeIndex, NodeIndex)>,
-
-    /// Path highlighting: maps colors to subgraphs representing highlighted paths
-    path_highlights: HashMap<Color, DiGraphMap<G::NodeId, ()>>,
-
-    /// Node highlighting: maps colors to sets of highlighted nodes
-    node_highlights: HashMap<Color, HashSet<G::NodeId>>,
+    /// Path highlighting: list of subgraphs with their associated colors
+    path_highlights: Vec<(DiGraphMap<NodeIndex, ()>, Color)>,
 }
 
 impl<G, S> GraphController<G, S>
@@ -132,9 +125,7 @@ where
             viewport_graph: CroppedGraph::empty(),
             last_rebuild_camera_center: WorldPos::ZERO,
             rebuild_needed: true, // Start with a rebuild required
-            highlighted_edges: HashSet::new(),
-            path_highlights: HashMap::new(),
-            node_highlights: HashMap::new(),
+            path_highlights: Vec::new(),
         };
 
         if let Err(e) = controller.partition_controller.set_anchor_partition(0) {
@@ -210,81 +201,9 @@ where
         self.detail_level
     }
 
-    /// Set edges to be highlighted during rendering
-    ///
-    /// # Parameters
-    /// - edges: Set of domain node pairs to highlight (direction-agnostic)
-    pub fn set_highlighted_edges(&mut self, edges: HashSet<(NodeIndex, NodeIndex)>) {
-        self.highlighted_edges = edges;
-        self.trigger_rebuild();
-    }
-
-    /// Add a single edge to highlights
-    ///
-    /// # Parameters
-    /// - source: Domain node index of source
-    /// - target: Domain node index of target
-    pub fn add_highlighted_edge(&mut self, source: NodeIndex, target: NodeIndex) {
-        self.highlighted_edges.insert((source, target));
-        self.highlighted_edges.insert((target, source)); // Direction-agnostic
-        self.trigger_rebuild();
-    }
-
-    /// Remove edge from highlights
-    ///
-    /// # Parameters
-    /// - source: Domain node index of source
-    /// - target: Domain node index of target
-    pub fn remove_highlighted_edge(&mut self, source: NodeIndex, target: NodeIndex) {
-        self.highlighted_edges.remove(&(source, target));
-        self.highlighted_edges.remove(&(target, source)); // Direction-agnostic
-        self.trigger_rebuild();
-    }
-
-    /// Clear all edge highlights
-    pub fn clear_highlighted_edges(&mut self) {
-        self.highlighted_edges.clear();
-        self.trigger_rebuild();
-    }
-
-    /// Get a reference to the highlighted edges set
-    pub fn get_highlighted_edges(&self) -> &HashSet<(NodeIndex, NodeIndex)> {
-        &self.highlighted_edges
-    }
-
-    /// Get all world positions (edge segments + junctions) that should be highlighted
-    /// This maps domain edges to their complete visual paths including junctions
-    pub fn get_highlighted_positions(&self) -> HashSet<WorldPos> {
-        let mut highlighted_positions = HashSet::new();
-
-        if self.highlighted_edges.is_empty() {
-            return highlighted_positions;
-        }
-
-        // Map domain edges to their visual segments
-        let domain_to_visual = self.viewport_graph.invert_edge_bundles();
-
-        // For each highlighted domain edge, collect all visual positions
-        for domain_edge in &self.highlighted_edges {
-            if let Some(visual_segments) = domain_to_visual.get(domain_edge) {
-                for (source_pos, target_pos) in visual_segments {
-                    highlighted_positions.insert(*source_pos);
-                    highlighted_positions.insert(*target_pos);
-                }
-            }
-        }
-
-        highlighted_positions
-    }
-
     /// Get a reference to the path highlights
-    pub fn get_path_highlights(&self) -> &HashMap<Color, DiGraphMap<G::NodeId, ()>> {
+    pub fn get_path_highlights(&self) -> &[(DiGraphMap<NodeIndex, ()>, Color)] {
         &self.path_highlights
-    }
-
-    /// Get a reference to the node highlights
-    pub fn get_node_highlights(&self) -> &HashMap<Color, HashSet<G::NodeId>> {
-        &self.node_highlights
     }
 
     /// Set a path highlight with a specific color
@@ -293,66 +212,42 @@ where
     /// - color: Color for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
     pub fn set_path_highlight(&mut self, color: Color, path_nodes: Vec<G::NodeId>) {
-        eprintln!("set_path_highlight: ");
-        let mut path_graph = DiGraphMap::<G::NodeId, ()>::new();
+        let mut path_graph = DiGraphMap::<NodeIndex, ()>::new();
 
-        // Add all nodes to the path graph
-        for node in &path_nodes {
-            path_graph.add_node(*node);
+        // Convert G::NodeId to NodeIndex and add all nodes to the path graph
+        let node_indices: Vec<NodeIndex> = path_nodes
+            .iter()
+            .map(|node_id| NodeIndex::new(<G as NodeIndexable>::to_index(&self.graph, *node_id)))
+            .collect();
+
+        for node_idx in &node_indices {
+            path_graph.add_node(*node_idx);
         }
 
         // Add edges between consecutive nodes in the path
-        for window in path_nodes.windows(2) {
+        for window in node_indices.windows(2) {
             if let [src, tgt] = window {
                 path_graph.add_edge(*src, *tgt, ());
             }
         }
 
-        self.path_highlights.insert(color, path_graph);
-        self.trigger_rebuild();
-    }
-
-    /// Add node highlight with a specific color
-    ///
-    /// # Parameters
-    /// - color: Color for highlighting nodes
-    /// - nodes: Set of nodes to highlight
-    pub fn set_node_highlight(&mut self, color: Color, nodes: HashSet<G::NodeId>) {
-        self.node_highlights.insert(color, nodes);
-        self.trigger_rebuild();
+        self.path_highlights.push((path_graph, color));
     }
 
     /// Check if a specific color has path highlighting
     pub fn has_path_highlight(&self, color: &Color) -> bool {
-        self.path_highlights.contains_key(color)
-    }
-
-    /// Check if a specific color has node highlighting
-    pub fn has_node_highlight(&self, color: &Color) -> bool {
-        self.node_highlights.contains_key(color)
+        self.path_highlights.iter().any(|(_, c)| c == color)
     }
 
     /// Clear path highlighting for a specific color
     pub fn clear_path_highlight(&mut self, color: &Color) {
-        self.path_highlights.remove(color);
-        self.trigger_rebuild();
-    }
-
-    /// Clear node highlighting for a specific color
-    pub fn clear_node_highlight(&mut self, color: &Color) {
-        self.node_highlights.remove(color);
+        self.path_highlights.retain(|(_, c)| c != color);
         self.trigger_rebuild();
     }
 
     /// Clear all path highlights
     pub fn clear_all_path_highlights(&mut self) {
         self.path_highlights.clear();
-        self.trigger_rebuild();
-    }
-
-    /// Clear all node highlights
-    pub fn clear_all_node_highlights(&mut self) {
-        self.node_highlights.clear();
         self.trigger_rebuild();
     }
 

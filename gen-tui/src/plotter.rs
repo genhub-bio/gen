@@ -198,13 +198,69 @@ pub fn plot_viewport_graph<R, G>(
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
 {
+    plot_viewport_graph_with_highlights(
+        viewport_graph,
+        buffer,
+        renderer,
+        original_graph,
+        detail_level,
+        &[],
+    )
+}
+
+/// Plot a single layout with path highlights
+///
+/// This is the main plotting function that bridges:
+/// - **Layout Graph** (Layer 3): Provides spatial positioning via `layout`
+/// - **Original Graph** (Layer 1): Provides NodeId conversion via `graph`
+/// - **Domain Renderer**: Transforms data into visual representation via `renderer`
+///
+/// # Parameters
+/// - `viewport_graph`: CroppedGraph containing only visible nodes and edges
+/// - `buffer`: World coordinate buffer writer for drawing to the viewport
+/// - `renderer`: Domain-specific rendering logic and data lookup
+/// - `original_graph`: Original graph for NodeIndex to NodeId conversion
+/// - `detail_level`: Level of detail for rendering
+/// - `path_highlights`: Path highlights with colors for emphasized rendering (later highlights take precedence)
+pub fn plot_viewport_graph_with_highlights<R, G>(
+    viewport_graph: &CroppedGraph,
+    buffer: &mut WorldBuffer<'_>,
+    renderer: &mut R,
+    original_graph: &G,
+    detail_level: VisualDetail,
+    path_highlights: &[(
+        petgraph::graphmap::DiGraphMap<petgraph::graph::NodeIndex, ()>,
+        Color,
+    )],
+) where
+    R: NodeRenderer<G>,
+    G: GraphBase + NodeIndexable,
+{
     // Draw edges first so nodes appear on top
     for (source, target, bundle) in viewport_graph.edges() {
         // Ommit the edges that don't actually represent an original edge
         // (edges to/from terminal source/sink nodes)
         if !bundle.is_empty() {
-            let color = get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray);
-            draw_edge(buffer, source, target, color);
+            // Check if any edge in the bundle is highlighted in any path
+            // Later highlights in the vector take precedence over earlier ones
+            let mut highlighted_color = None;
+
+            for &(src_idx, tgt_idx) in bundle.iter() {
+                for (path_graph, color) in path_highlights {
+                    if path_graph.contains_edge(src_idx, tgt_idx)
+                        || path_graph.contains_edge(tgt_idx, src_idx)
+                    {
+                        highlighted_color = Some(*color);
+                    }
+                }
+            }
+
+            if let Some(color) = highlighted_color {
+                draw_bold_edge(buffer, source, target, color);
+            } else {
+                let color = get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray);
+                draw_edge(buffer, source, target, color);
+            }
         }
     }
 

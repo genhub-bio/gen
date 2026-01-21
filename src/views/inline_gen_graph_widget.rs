@@ -28,15 +28,11 @@ fn get_path_nodes(
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
     use gen_graph::project_path;
 
-    eprintln!("DEBUG: Processing path '{}' for highlighting", path.name);
-
     // Get the path blocks from the database
     let path_blocks = path.blocks(conn);
-    eprintln!("DEBUG: Path has {} blocks", path_blocks.len());
 
     // Project the path blocks onto the current graph state
     let projected_path = project_path(graph, &path_blocks);
-    eprintln!("DEBUG: Projected path has {} nodes", projected_path.len());
 
     // Filter out terminal nodes (start and end) and convert to GraphNodes
     let path_nodes: Vec<gen_graph::GraphNode> = projected_path
@@ -50,11 +46,6 @@ fn get_path_nodes(
             }
         })
         .collect();
-
-    eprintln!(
-        "DEBUG: After filtering terminal nodes, path has {} nodes",
-        path_nodes.len()
-    );
 
     if path_nodes.is_empty() {
         return Err(Error::other(
@@ -130,7 +121,7 @@ impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &'a GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph, node_sizer);
-        graph_controller.set_detail_level(VisualDetail::Minimal);
+        graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
         let paths = Vec::new();
         Self {
@@ -177,12 +168,6 @@ pub fn show_inline_gen_graph_widget(
     paths: Vec<Path>,
     height: u16,
 ) -> Result<()> {
-    eprintln!(
-        "DEBUG: show_inline_gen_graph_widget called with graph having {} nodes and {} paths",
-        graph.node_count(),
-        paths.len()
-    );
-
     // Try to initialize the terminal - if it fails, fall back to text mode
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
@@ -211,23 +196,10 @@ fn show_interactive_widget(
     paths: Vec<Path>,
     _height: u16,
 ) -> Result<()> {
-    eprintln!(
-        "DEBUG: show_interactive_widget starting with graph having {} nodes and {} paths",
-        graph.node_count(),
-        paths.len()
-    );
     let mut state = InlineGenGraphState::new(graph, conn);
-    eprintln!(
-        "DEBUG: State created, controller has {} nodes",
-        state.controller.graph.node_count()
-    );
     for path in paths {
         state.add_path(&path, conn)?;
     }
-    eprintln!(
-        "DEBUG: State updated and holding {} paths",
-        state.paths.len()
-    );
     // Set up tick-based event loop for 60 FPS (16ms per frame)
     let tick_rate = Duration::from_millis(16);
     let mut events = TickEventSource::new(tick_rate);
