@@ -66,6 +66,9 @@ jobs:
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           working-directory: .
       - name: Upload wheels to releases
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
           gh release upload "${TAG}" gen-python/target/wheels/*.whl
       - uses: actions/upload-artifact@v4
