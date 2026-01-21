@@ -96,4 +96,4 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
         run: |
-          gh workflow run publish-crates-io.yaml --ref "v${VERSION}"
+          gh workflow run publish-crates-io.yaml --ref "v${VERSION}" -f tag="$TAG"
