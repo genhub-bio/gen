@@ -75,14 +75,16 @@ jobs:
           git push origin HEAD
           git push origin "v${VERSION}"
 
-      - name: Generate release tarball
-        run: git archive --format=tar.gz -o "gen-v${{ steps.version.outputs.version }}.tar.gz" --prefix=gen/ HEAD
+      - name: Generate Release
+        run: |
+          gh release create "v${VERSION}" --title "gen ${VERSION}" --notes "gen ${VERSION}"
 
-      - name: Upload release tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: gen-release-tarball
-          path: "gen-v${{ steps.version.outputs.version }}.tar.gz"
+      - name: Upload binaries to releases
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: |
+          gh workflow run release.yml --ref "v${VERSION}"
 
       - name: Trigger python wheels workflow on the tag
         env:
