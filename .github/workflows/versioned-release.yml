@@ -76,8 +76,11 @@ jobs:
           git push origin "v${VERSION}"
 
       - name: Generate Release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
         run: |
-          gh release create "v${VERSION}" --title "gen ${VERSION}" --notes "gen ${VERSION}"
+          gh release create "v${VERSION}" --title "v${VERSION}" --notes "gen ${VERSION}"
 
       - name: Upload binaries to releases
         env:
