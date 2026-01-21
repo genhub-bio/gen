@@ -3,7 +3,7 @@ use std::{env, path::PathBuf, string::ToString, sync::RwLock};
 use itertools::iproduct;
 use once_cell::sync::Lazy;
 use ratatui::style::Color;
-use ratatui_base16::Base16Palette;
+use crate::base16::Base16Palette;
 
 // Color theme support
 fn get_theme_path() -> &'static str {

@@ -6,6 +6,7 @@ use std::{
     str,
 };
 pub mod annotations;
+pub mod base16;
 pub mod commands;
 pub mod config;
 pub mod diffs;

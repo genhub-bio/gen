@@ -362,7 +362,7 @@ pub fn view_block_group(
                         .add_modifier(Modifier::BOLD),
                 );
                 let loading_para =
-                    Paragraph::new(loading_text).alignment(ratatui::layout::Alignment::Center);
+                    Paragraph::new(loading_text).alignment(ratatui::layout::HorizontalAlignment::Center);
 
                 // Center the loading message vertically in the canvas area
                 let loading_area = ratatui::layout::Layout::default()
@@ -444,7 +444,7 @@ pub fn view_block_group(
 
                 let panel_content = Paragraph::new(panel_text)
                     .wrap(Wrap { trim: true })
-                    .alignment(ratatui::layout::Alignment::Left)
+                    .alignment(ratatui::layout::HorizontalAlignment::Left)
                     .block(panel_block);
 
                 // Clear the panel area if we just changed the layout
