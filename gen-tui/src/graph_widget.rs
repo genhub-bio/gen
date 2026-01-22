@@ -17,7 +17,6 @@ use crate::{
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer, plot_viewport_graph_with_highlights},
-    theme::get_theme_color,
 };
 
 pub const NODE_GLYPH: char = '●'; // changed from '⏺', which renders as an emoji in some fonts;
@@ -261,6 +260,7 @@ where
             &controller.graph,
             detail_level,
             highlights,
+            &controller.theme,
         );
 
         // Call user supplied closure if provided
@@ -280,10 +280,12 @@ where
                 // Get the current character at cursor position
                 if let Some(current_char) = cursor_buffer.get_char(cursor_world_pos) {
                     // Get cursor colors from theme
-                    let cursor_bg =
-                        get_theme_color("cursor_bg").unwrap_or(ratatui::style::Color::White);
-                    let cursor_fg =
-                        get_theme_color("cursor_fg").unwrap_or(ratatui::style::Color::Black);
+                    let cursor_bg = controller
+                        .get_theme_color("cursor_bg")
+                        .unwrap_or(ratatui::style::Color::White);
+                    let cursor_fg = controller
+                        .get_theme_color("cursor_fg")
+                        .unwrap_or(ratatui::style::Color::Black);
 
                     let cursor_style = Style::default().bg(cursor_bg).fg(cursor_fg);
 

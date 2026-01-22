@@ -67,6 +67,9 @@ where
 
     /// Path highlighting: list of subgraphs with their associated colors
     path_highlights: Vec<(DiGraphMap<NodeIndex, ()>, Color)>,
+
+    /// Theme colors for rendering
+    pub theme: std::collections::HashMap<String, Color>,
 }
 
 impl<G, S> GraphController<G, S>
@@ -87,6 +90,33 @@ where
     for<'b> &'b G::EdgeId: Clone,
     S: NodeSizer<G>,
 {
+    /// Get the default theme (Catppuccin Mocha colors)
+    pub fn default_theme() -> std::collections::HashMap<String, Color> {
+        let mut theme = std::collections::HashMap::new();
+
+        // Functional mappings for colors actually used inside gen-tui
+        theme.insert("edge".to_string(), Color::Rgb(69, 71, 90)); // base03
+        theme.insert("cursor_fg".to_string(), Color::Rgb(88, 91, 112)); // base04
+        theme.insert("cursor_bg".to_string(), Color::Rgb(180, 190, 254)); // base07
+
+        theme
+    }
+
+    /// Set a custom theme
+    pub fn with_theme(mut self, theme: std::collections::HashMap<String, Color>) -> Self {
+        self.theme = theme;
+        self
+    }
+
+    /// Set a theme color
+    pub fn set_theme_color(&mut self, name: &str, color: Color) {
+        self.theme.insert(name.to_string(), color);
+    }
+
+    /// Get a theme color
+    pub fn get_theme_color(&self, name: &str) -> Option<Color> {
+        self.theme.get(name).copied()
+    }
     /// Create a new GraphController with a graph and node sizer
     ///
     /// # Parameters
@@ -126,6 +156,7 @@ where
             last_rebuild_camera_center: WorldPos::ZERO,
             rebuild_needed: true, // Start with a rebuild required
             path_highlights: Vec::new(),
+            theme: Self::default_theme(),
         };
 
         if let Err(e) = controller.partition_controller.set_anchor_partition(0) {

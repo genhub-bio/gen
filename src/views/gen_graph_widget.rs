@@ -8,9 +8,10 @@ use gen_tui::{
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer},
-    theme::get_theme_color,
 };
 use ratatui::style::Style;
+
+use crate::config::get_theme_color;
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
 /// based on genomic sequence length.

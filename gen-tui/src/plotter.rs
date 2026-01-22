@@ -15,7 +15,6 @@ use crate::{
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::GraphWidget,
     layout::{JunctionSymbol, NodeRole, VisualDetail},
-    theme::get_theme_color,
     viewport_graph::CroppedGraph,
 };
 
@@ -195,6 +194,7 @@ pub fn plot_viewport_graph<R, G>(
     renderer: &mut R,
     original_graph: &G,
     detail_level: VisualDetail,
+    theme: &std::collections::HashMap<String, Color>,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -206,6 +206,7 @@ pub fn plot_viewport_graph<R, G>(
         original_graph,
         detail_level,
         &[],
+        theme,
     )
 }
 
@@ -223,6 +224,7 @@ pub fn plot_viewport_graph<R, G>(
 /// - `original_graph`: Original graph for NodeIndex to NodeId conversion
 /// - `detail_level`: Level of detail for rendering
 /// - `path_highlights`: Path highlights with colors for emphasized rendering (later highlights take precedence)
+/// - `theme`: Theme colors for rendering
 pub fn plot_viewport_graph_with_highlights<R, G>(
     viewport_graph: &CroppedGraph,
     buffer: &mut WorldBuffer<'_>,
@@ -233,6 +235,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
         petgraph::graphmap::DiGraphMap<petgraph::graph::NodeIndex, ()>,
         Color,
     )],
+    theme: &std::collections::HashMap<String, Color>,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -269,7 +272,10 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             if let Some(color) = highlighted_color {
                 draw_bold_edge(buffer, source, target, color);
             } else {
-                let color = get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray);
+                let color = theme
+                    .get("edge")
+                    .copied()
+                    .unwrap_or(ratatui::style::Color::Gray);
                 draw_edge(buffer, source, target, color);
             }
         }
@@ -284,7 +290,10 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
             }
             NodeRole::Routing => {
-                let edge_color = get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray);
+                let edge_color = theme
+                    .get("edge")
+                    .copied()
+                    .unwrap_or(ratatui::style::Color::Gray);
                 let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
 
                 let (highlighted_glyph, highlight_color) = projected_highlights

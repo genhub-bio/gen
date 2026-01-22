@@ -2,7 +2,6 @@
 //! the Gen version control system for graph genome sequences.
 
 pub mod animation;
-pub mod base16;
 pub mod cursor;
 pub mod dot_export;
 pub mod edge_router; // Rust port of edge routing
@@ -15,7 +14,6 @@ pub mod partition;
 pub mod partition_controller;
 pub mod partition_table;
 pub mod plotter;
-pub mod theme;
 pub mod viewport_state;
 
 pub mod testing;

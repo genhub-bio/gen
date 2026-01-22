@@ -7,13 +7,14 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::{db::GraphConnection, path::Path};
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
+use gen_tui::{graph_controller::GraphController, layout::VisualDetail};
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
     widgets::{Block, Borders},
 };
 
+use crate::config::get_theme_color;
 use crate::views::gen_graph_widget::{
     GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget,
 };
@@ -119,7 +120,19 @@ pub struct InlineGenGraphState<'a> {
 impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &'a GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
-        let mut graph_controller = GraphController::new(graph, node_sizer);
+        let mut graph_controller = GraphController::new(graph, node_sizer).with_theme({
+            let mut map = std::collections::HashMap::new();
+            map.insert("edge".to_string(), get_theme_color("edge").unwrap());
+            map.insert(
+                "cursor_bg".to_string(),
+                get_theme_color("cursor_bg").unwrap(),
+            );
+            map.insert(
+                "cursor_fg".to_string(),
+                get_theme_color("cursor_fg").unwrap(),
+            );
+            map
+        });
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
         let paths = Vec::new();
@@ -298,7 +311,19 @@ pub fn plot_static(
 
     let node_sizer = GenGraphNodeSizer;
     let renderer = GenGraphNodeRenderer::new(conn);
-    let mut controller = GraphController::new(graph, node_sizer);
+    let mut controller = GraphController::new(graph, node_sizer).with_theme({
+        let mut map = std::collections::HashMap::new();
+        map.insert("edge".to_string(), get_theme_color("edge").unwrap());
+        map.insert(
+            "cursor_bg".to_string(),
+            get_theme_color("cursor_bg").unwrap(),
+        );
+        map.insert(
+            "cursor_fg".to_string(),
+            get_theme_color("cursor_fg").unwrap(),
+        );
+        map
+    });
     controller.set_detail_level(detail_level.unwrap_or(VisualDetail::Minimal));
     controller.show_cursor();
 
