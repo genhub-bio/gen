@@ -8,6 +8,7 @@ use crate::PyDbContext;
     clippy::too_many_arguments,
     reason = "Python API mirrors the CLI signature to avoid breaking changes"
 )]
+#[pyo3(signature = (context, filename, name=None, sample=None, new_sample=String::new(), region_name=String::new(), start=0, end=0))]
 pub fn update_with_fasta(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -65,6 +66,7 @@ pub fn update_with_fasta(
 }
 
 #[pyfunction]
+#[pyo3(signature = (context, filename, name=None, sample=None, new_sample=String::new()))]
 pub fn update_with_gfa(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -108,6 +110,7 @@ pub fn update_with_gfa(
 }
 
 #[pyfunction]
+#[pyo3(signature = (context, filename, csv, name=None, sample=None, parent_sample=None))]
 pub fn update_with_gaf(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -151,6 +154,7 @@ pub fn update_with_gaf(
 }
 
 #[pyfunction]
+#[pyo3(signature = (context, filename, name=None, genotype=None, sample=None, coordinate_frame=None))]
 pub fn update_with_vcf(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -203,6 +207,7 @@ pub fn update_with_vcf(
 }
 
 #[pyfunction]
+#[pyo3(signature = (context, filename, name=None, create_missing=false))]
 pub fn update_with_genbank(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -257,6 +262,7 @@ pub fn update_with_genbank(
     clippy::too_many_arguments,
     reason = "Python API mirrors the CLI signature to avoid breaking changes"
 )]
+#[pyo3(signature = (context, name=None, sample=None, new_sample=String::new(), path_name=String::new(), start=0, end=0, library=String::new(), parts=String::new()))]
 pub fn update_with_library(
     context: PyRef<'_, PyDbContext>,
     name: Option<String>,
@@ -310,6 +316,7 @@ pub fn update_with_library(
     clippy::too_many_arguments,
     reason = "Python API mirrors the CLI signature to avoid breaking changes"
 )]
+#[pyo3(signature = (context, sequence, name=None, sample=None, new_sample=String::new(), region_name=String::new(), start=0, end=0, no_reference_path_update=false))]
 pub fn update_with_sequence(
     context: PyRef<'_, PyDbContext>,
     sequence: String,

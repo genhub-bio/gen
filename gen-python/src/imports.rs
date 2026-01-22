@@ -10,6 +10,7 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use crate::PyDbContext;
 
 #[pyfunction]
+#[pyo3(signature = (context, filename, name=None, sample=None, shallow=false))]
 pub fn import_fasta(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -58,6 +59,7 @@ pub fn import_fasta(
 }
 
 #[pyfunction]
+#[pyo3(signature = (context, filename, name=None, sample=None))]
 pub fn import_gfa(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -104,6 +106,7 @@ pub fn import_gfa(
 }
 
 #[pyfunction]
+#[pyo3(signature = (context, filename, name=None, sample=None))]
 pub fn import_genbank(
     context: PyRef<'_, PyDbContext>,
     filename: String,
@@ -162,6 +165,7 @@ pub fn import_genbank(
 }
 
 #[pyfunction]
+#[pyo3(signature = (context, library_name, parts, library, name=None, sample=None))]
 pub fn import_library(
     context: PyRef<'_, PyDbContext>,
     library_name: String,
