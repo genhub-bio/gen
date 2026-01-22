@@ -8,7 +8,6 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::{db::GraphConnection, path::Path};
 use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
-use log::info;
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
@@ -243,7 +242,8 @@ fn show_interactive_widget(
                         }
                         KeyCode::Char('p') => {
                             // Toggle path highlighting
-                            let path_color = Color::Red;
+                            let path_color = get_theme_color("edge")
+                                .expect("Themes should be available from graph widget");
                             if state.controller.has_path_highlight(&path_color) {
                                 state.controller.clear_path_highlight(&path_color);
                             } else if let Some(last_path) = state.paths.last() {

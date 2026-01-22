@@ -284,35 +284,36 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
             }
             NodeRole::Routing => {
-                // By default, render the junction as it appears in the full graph
+                let edge_color = get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray);
                 let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
-                let mut highlighted_glyph = None;
-                let mut highlight_color = None;
 
-                // If this node is part of a highlighted path, merge the glyphs
-                for (graph, color) in &projected_highlights {
-                    if graph.contains_node(world_pos) {
-                        highlighted_glyph = Some(compute_junction_glyph(graph, *world_pos));
-                        highlight_color = Some(*color);
-                    }
-                }
+                let (highlighted_glyph, highlight_color) = projected_highlights
+                    .iter()
+                    .find(|(graph, _)| graph.contains_node(world_pos))
+                    .map(|(graph, color)| (compute_junction_glyph(graph, *world_pos), *color))
+                    .unzip();
 
-                // Merge glyphs using fuzzy strategy to find best match
-                let character = if let Some(high_glyph) = highlighted_glyph {
-                    let base_str = base_glyph.glyph().to_string();
-                    let high_str = high_glyph.heavy_glyph().to_string();
-                    MergeStrategy::Fuzzy
-                        .merge(&base_str, &high_str)
-                        .chars()
-                        .next()
-                        .unwrap_or('?')
-                } else {
-                    base_glyph.glyph()
+                // Decision tree:
+                // 1. Is this node part of any highlighted path?
+                // 2. If highlighted, do we merge with base glyph or replace it?
+                //    - Merge if highlight color matches edge color
+                //    - Replace if colors differ (otherwise you get spiney artefacts)
+                let character = match highlighted_glyph {
+                    Some(high_glyph) => match highlight_color {
+                        Some(color) if color == edge_color => MergeStrategy::Fuzzy
+                            .merge(
+                                &base_glyph.glyph().to_string(),
+                                &high_glyph.heavy_glyph().to_string(),
+                            )
+                            .chars()
+                            .next()
+                            .unwrap_or('?'),
+                        _ => high_glyph.heavy_glyph(),
+                    },
+                    None => base_glyph.glyph(),
                 };
 
-                let style = Style::default().fg(highlight_color.unwrap_or_else(|| {
-                    get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray)
-                }));
+                let style = Style::default().fg(highlight_color.unwrap_or(edge_color));
                 buffer.set_char_styled(*world_pos, character, style);
             }
             NodeRole::Stitch(_) => {
