@@ -11,6 +11,7 @@ use ratatui::style::{Color, Style};
 use ratatui::symbols::merge::MergeStrategy;
 
 use crate::{
+    color_utils::tint_colors,
     geometry::{BigRect, Point, WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::GraphWidget,
@@ -288,6 +289,31 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
+
+                // Check if this node is part of any highlighted path
+                let highlighted_color = path_highlights
+                    .iter()
+                    .find(|(path_graph, _)| {
+                        path_graph
+                            .contains_node(petgraph::graph::NodeIndex::new(domain_idx.index()))
+                    })
+                    .map(|(_, color)| *color);
+
+                // If highlighted, tint the colors of the rendered cells
+                if let Some(color) = highlighted_color {
+                    for y in world_rect.min.y..=world_rect.max.y {
+                        for x in world_rect.min.x..=world_rect.max.x {
+                            let pos = WorldPos::new(x, y);
+                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
+                                let fg = style.fg.unwrap_or(Color::Reset);
+                                let bg = style.bg.unwrap_or(Color::Reset);
+                                let (new_fg, new_bg) = tint_colors(fg, bg, color, 0.4);
+                                let new_style = style.fg(new_fg).bg(new_bg);
+                                buffer.set_char_styled(pos, ch, new_style);
+                            }
+                        }
+                    }
+                }
             }
             NodeRole::Routing => {
                 let edge_color = theme
