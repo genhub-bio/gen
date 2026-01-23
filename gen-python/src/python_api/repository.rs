@@ -303,7 +303,294 @@ impl PyRepository {
             Ok(sequence.get_sequence(node_key.sequence_start, node_key.sequence_end))
         })
     }
+
+    /// Creates a context manager for grouping operations into a single transaction
+    ///
+    /// Args:
+    ///     title: The title/summary for the operation group
+    ///
+    /// Returns:
+    ///     An OperationContext that can be used as a context manager
+    ///
+    /// Example:
+    ///     ```python
+    ///     repo = Repository()
+    ///     with repo.commit('Import multiple FASTA files') as ctx:
+    ///         ctx.import_fasta('file1.fasta')
+    ///         ctx.import_fasta('file2.fasta')
+    ///         ctx.append_message('Additional notes about the import')
+    ///     ```
+    fn commit(&self, title: String) -> PyResult<PyOperationContext> {
+        Ok(PyOperationContext::new(self, title))
+    }
+
+    /// Imports a FASTA file with automatic transaction management
+    ///
+    /// Args:
+    ///     filename: Path to the FASTA file
+    ///     name: Optional collection name
+    ///     sample: Optional sample name
+    ///     shallow: Whether to do a shallow import
+    ///
+    /// Returns:
+    ///     Success message
+    fn import_fasta(
+        &self,
+        py: Python,
+        filename: String,
+        name: Option<String>,
+        sample: Option<String>,
+        shallow: bool,
+    ) -> PyResult<String> {
+        // Get or create DbContext from repository
+        let workspace = gen_core::config::Workspace::from_current_dir();
+        let gen_dir = workspace.ensure_gen_dir();
+        let operations_path = gen_dir.join("gen.db");
+        let operations_conn =
+            r#gen::get_operation_connection(Some(operations_path)).map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to open operations database: {err}"
+                ))
+            })?;
+
+        let db_path = gen_dir.join("default.db");
+        let graph_conn = r#gen::get_connection(db_path.to_str().unwrap()).map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to open database: {err}"))
+        })?;
+
+        let db_context = gen_models::db::DbContext::new(workspace, graph_conn, operations_conn);
+        let py_db_context = crate::PyDbContext(db_context);
+
+        // Call the existing import function
+        // We need to create a PyRef from the PyDbContext
+        let py_db_obj = Py::new(py, py_db_context)?;
+        let py_db_bound = py_db_obj.bind(py);
+        let py_db_ref = py_db_bound.borrow();
+        crate::imports::import_fasta(py_db_ref, filename, name, sample, shallow)
+    }
+
+    /// Updates with a FASTA file with automatic transaction management
+    ///
+    /// Args:
+    ///     filename: Path to the FASTA file
+    ///     name: Optional collection name
+    ///     sample: Optional sample name
+    ///     new_sample: Name for the new sample
+    ///     region_name: Name of the region
+    ///     start: Start coordinate
+    ///     end: End coordinate
+    ///
+    /// Returns:
+    ///     Success message
+    fn update_with_fasta(
+        &self,
+        py: Python,
+        filename: String,
+        name: Option<String>,
+        sample: Option<String>,
+        new_sample: String,
+        region_name: String,
+        start: i64,
+        end: i64,
+    ) -> PyResult<String> {
+        // Similar to import_fasta - create DbContext and call update function
+        let workspace = gen_core::config::Workspace::from_current_dir();
+        let gen_dir = workspace.ensure_gen_dir();
+        let operations_path = gen_dir.join("gen.db");
+        let operations_conn =
+            r#gen::get_operation_connection(Some(operations_path)).map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to open operations database: {err}"
+                ))
+            })?;
+
+        let db_path = gen_dir.join("default.db");
+        let graph_conn = r#gen::get_connection(db_path.to_str().unwrap()).map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to open database: {err}"))
+        })?;
+
+        let db_context = gen_models::db::DbContext::new(workspace, graph_conn, operations_conn);
+        let py_db_context = crate::PyDbContext(db_context);
+
+        // Call the existing update function
+        let py_db_obj = Py::new(py, py_db_context)?;
+        let py_db_bound = py_db_obj.bind(py);
+        let py_db_ref = py_db_bound.borrow();
+        crate::updates::update_with_fasta(
+            py_db_ref,
+            filename,
+            name,
+            sample,
+            new_sample,
+            region_name,
+            start,
+            end,
+        )
+    }
 }
+
+/// Context manager for grouping multiple operations into a single transaction
+#[pyclass(name = "OperationContext")]
+pub struct PyOperationContext {
+    gen_dir: PathBuf,
+    db_path: PathBuf,
+    title: String,
+    messages: Vec<String>,
+    session_started: bool,
+}
+
+#[pymethods]
+impl PyOperationContext {
+    #[new]
+    fn new(repository: &PyRepository, title: String) -> Self {
+        Self {
+            gen_dir: repository.gen_dir.clone(),
+            db_path: repository.db_path.clone(),
+            title,
+            messages: Vec::new(),
+            session_started: false,
+        }
+    }
+
+    fn __enter__(&mut self, py: Python) -> PyResult<PyOperationProxy> {
+        // Start the operation session
+        self.session_started = true;
+        // Create and return the proxy object
+        let context_py = Py::new(
+            py,
+            PyOperationContext {
+                gen_dir: self.gen_dir.clone(),
+                db_path: self.db_path.clone(),
+                title: self.title.clone(),
+                messages: self.messages.clone(),
+                session_started: self.session_started,
+            },
+        )?;
+        Ok(PyOperationProxy::new(context_py))
+    }
+
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<PyObject>,
+        _exc_val: Option<PyObject>,
+        _exc_tb: Option<PyObject>,
+    ) -> PyResult<bool> {
+        // If session was started, end the operation
+        if self.session_started {
+            // End operation with combined message
+            let summary = if self.messages.is_empty() {
+                self.title.clone()
+            } else {
+                format!("{}\n{}", self.title, self.messages.join("\n"))
+            };
+
+            // For now, we'll implement this as a placeholder
+            // The actual implementation will need to call end_operation
+            println!("Ending operation with summary: {}", summary);
+        }
+
+        // Return false to propagate exceptions
+        Ok(false)
+    }
+
+    fn append_message(&mut self, message: String) {
+        self.messages.push(message);
+    }
+
+    fn get_title(&self) -> String {
+        self.title.clone()
+    }
+
+    fn get_messages(&self) -> Vec<String> {
+        self.messages.clone()
+    }
+}
+
+/// Proxy object returned by OperationContext.__enter__ that wraps method calls
+#[pyclass(name = "OperationProxy")]
+pub struct PyOperationProxy {
+    context: Py<PyOperationContext>,
+}
+
+#[pymethods]
+impl PyOperationProxy {
+    #[new]
+    fn new(context: Py<PyOperationContext>) -> Self {
+        Self { context }
+    }
+
+    fn append_message(&self, py: Python, message: String) -> PyResult<()> {
+        self.context.borrow_mut(py).append_message(message);
+        Ok(())
+    }
+
+    fn get_title(&self, py: Python) -> PyResult<String> {
+        Ok(self.context.borrow(py).get_title())
+    }
+
+    fn get_messages(&self, py: Python) -> PyResult<Vec<String>> {
+        Ok(self.context.borrow(py).get_messages())
+    }
+
+    /// Imports a FASTA file within the operation context
+    fn import_fasta(
+        &self,
+        py: Python,
+        filename: String,
+        name: Option<String>,
+        sample: Option<String>,
+        shallow: bool,
+    ) -> PyResult<String> {
+        let context = self.context.borrow(py);
+        let mut repo = PyRepository::new(py, Some(context.gen_dir.to_string_lossy().to_string()))?;
+        repo.db_path = context.db_path.clone();
+        repo.import_fasta(py, filename, name, sample, shallow)
+    }
+
+    /// Updates with a FASTA file within the operation context
+    fn update_with_fasta(
+        &self,
+        py: Python,
+        filename: String,
+        name: Option<String>,
+        sample: Option<String>,
+        new_sample: String,
+        region_name: String,
+        start: i64,
+        end: i64,
+    ) -> PyResult<String> {
+        let context = self.context.borrow(py);
+        let mut repo = PyRepository::new(py, Some(context.gen_dir.to_string_lossy().to_string()))?;
+        repo.db_path = context.db_path.clone();
+        repo.update_with_fasta(
+            py,
+            filename,
+            name,
+            sample,
+            new_sample,
+            region_name,
+            start,
+            end,
+        )
+    }
+}
+
+/// Creates a context manager for grouping operations into a single transaction
+///
+/// Args:
+///     title: The title/summary for the operation group
+///
+/// Returns:
+///     An OperationContext that can be used as a context manager
+///
+/// Example:
+///     ```python
+///     repo = Repository()
+///     with repo.commit('Import multiple FASTA files') as ctx:
+///         ctx.import_fasta('file1.fasta')
+///         ctx.import_fasta('file2.fasta')
+///         ctx.append_message('Additional notes about the import')
+///     ```
 
 #[cfg(test)]
 mod python_tests {

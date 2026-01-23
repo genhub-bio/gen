@@ -20,7 +20,7 @@ use crate::{
         hash_id::PyHashId,
         layouts::{PyBaseLayout, PyScaledLayout},
         node_key::PyNodeKey,
-        repository::PyRepository,
+        repository::{PyOperationContext, PyOperationProxy, PyRepository},
         utils::get_gen_dir_py,
     },
     updates::{
@@ -53,6 +53,8 @@ pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_gen_dir_py, m)?)?;
 
     m.add_class::<PyRepository>()?;
+    m.add_class::<PyOperationContext>()?;
+    m.add_class::<PyOperationProxy>()?;
     m.add_class::<PyBlockGroup>()?;
     m.add_class::<PyHashId>()?;
     m.add_class::<PyBaseLayout>()?;

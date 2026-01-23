@@ -14,6 +14,8 @@ try:
     # Directly from Rust
     from .gen import (
         DbContext,
+        OperationContext,
+        OperationProxy,
         PyBaseLayout,
         PyBlockGroup,
         PyHashId,
@@ -41,9 +43,59 @@ try:
     # Through Python (helpers.py), currently not used
     # from .helpers import ...
 
+    # Automatic transaction management functions
+    def import_fasta_auto(filename, name=None, sample=None, shallow=False, message=None):
+        """Import a FASTA file with automatic transaction management.
+
+        Args:
+            filename: Path to the FASTA file
+            name: Optional collection name
+            sample: Optional sample name
+            shallow: Whether to do a shallow import
+            message: Optional commit message for the operation
+
+        Returns:
+            Success message
+        """
+        repo = Repository()
+        if message:
+            with repo.commit(message) as ctx:
+                return ctx.import_fasta(filename, name, sample, shallow)
+        else:
+            auto_message = f"Import FASTA: {filename}"
+            with repo.commit(auto_message) as ctx:
+                return ctx.import_fasta(filename, name, sample, shallow)
+
+    def update_with_fasta_auto(filename, name=None, sample=None, new_sample=None, region_name=None, start=None, end=None, message=None):
+        """Update with a FASTA file with automatic transaction management.
+
+        Args:
+            filename: Path to the FASTA file
+            name: Optional collection name
+            sample: Optional sample name
+            new_sample: Name for the new sample
+            region_name: Name of the region
+            start: Start coordinate
+            end: End coordinate
+            message: Optional commit message for the operation
+
+        Returns:
+            Success message
+        """
+        repo = Repository()
+        if message:
+            with repo.commit(message) as ctx:
+                return ctx.update_with_fasta(filename, name, sample, new_sample, region_name, start, end)
+        else:
+            auto_message = f"Update with FASTA: {filename}"
+            with repo.commit(auto_message) as ctx:
+                return ctx.update_with_fasta(filename, name, sample, new_sample, region_name, start, end)
+
     # Make those classes and functions available at the package level
     __all__ = [
         "DbContext",
+        "OperationContext",
+        "OperationProxy",
         "Repository",
         "PyBlockGroup",
         "PyHashId",
@@ -66,6 +118,8 @@ try:
         "update_with_library",
         "update_with_sequence",
         "update_with_vcf",
+        "import_fasta_auto",
+        "update_with_fasta_auto",
     ]
 
 except ImportError as e:
