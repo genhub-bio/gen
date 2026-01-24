@@ -280,12 +280,8 @@ where
                 // Get the current character at cursor position
                 if let Some(current_char) = cursor_buffer.get_char(cursor_world_pos) {
                     // Get cursor colors from theme
-                    let cursor_bg = controller
-                        .get_theme_color("cursor_bg")
-                        .unwrap_or(ratatui::style::Color::White);
-                    let cursor_fg = controller
-                        .get_theme_color("cursor_fg")
-                        .unwrap_or(ratatui::style::Color::Black);
+                    let cursor_bg = controller.theme.cursor_bg;
+                    let cursor_fg = controller.theme.cursor_fg;
 
                     let cursor_style = Style::default().bg(cursor_bg).fg(cursor_fg);
 

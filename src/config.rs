@@ -83,19 +83,19 @@ pub fn get_theme_color(color_name: &str) -> Result<Color, String> {
         "sidebar" | "panel" | "statusbar" | "base00" => Ok(palette.base00), // Main background color
         "canvas" | "base01" => Ok(palette.base01), // Secondary (darker) background
         "separator" | "base02" => Ok(palette.base02), // Muted background
-        "edge" | "node" | "highlight_muted" | "base03" => Ok(palette.base03), // Edge lines and muted highlights
-        "text_muted" | "cursor_fg" | "base04" => Ok(palette.base04), // Secondary text, icons, cursor foreground
-        "text" | "base05" => Ok(palette.base05),                     // Primary text color
-        "text_bright" | "base06" => Ok(palette.base06),              // Bright text (rarely used)
-        "highlight" | "cursor" | "cursor_bg" | "base07" => Ok(palette.base07), // Selection highlight, cursor background
-        "error" | "base08" => Ok(palette.base08), // Errors, path highlighting
-        "warning" | "base09" => Ok(palette.base09), // Warnings
+        "edge" | "node" | "cursor_fg" | "highlight_muted" | "base03" => Ok(palette.base03), // Edge lines, node bg, cursor foreground (node bg)
+        "text_muted" | "base04" => Ok(palette.base04), // Secondary text, icons
+        "text" | "cursor_bg" | "base05" => Ok(palette.base05), // Primary text color, cursor background (node fg)
+        "text_bright" | "base06" => Ok(palette.base06),        // Bright text (rarely used)
+        "highlight" | "cursor" | "base07" => Ok(palette.base07), // Selection highlight
+        "error" | "base08" => Ok(palette.base08),              // Errors, path highlighting
+        "warning" | "base09" => Ok(palette.base09),            // Warnings
         "success" | "base0a" | "base0A" => Ok(palette.base0a), // Success indicators
-        "base0b" | "base0B" => Ok(palette.base0b), // Accent color 1
-        "base0c" | "base0C" => Ok(palette.base0c), // Accent color 2
-        "base0d" | "base0D" => Ok(palette.base0d), // Accent color 3
-        "base0e" | "base0E" => Ok(palette.base0e), // Accent color 4
-        "base0f" | "base0F" => Ok(palette.base0f), // Accent color 5
+        "base0b" | "base0B" => Ok(palette.base0b),             // Accent color 1
+        "base0c" | "base0C" => Ok(palette.base0c),             // Accent color 2
+        "base0d" | "base0D" => Ok(palette.base0d),             // Accent color 3
+        "base0e" | "base0E" => Ok(palette.base0e),             // Accent color 4
+        "base0f" | "base0F" => Ok(palette.base0f),             // Accent color 5
         _ => Err(format!("Color '{color_name}' not found in palette")),
     }
 }

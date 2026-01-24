@@ -7,7 +7,8 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::{db::GraphConnection, path::Path};
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail};
+use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
+use ratatui::style::Color;
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
@@ -120,18 +121,14 @@ pub struct InlineGenGraphState<'a> {
 impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &'a GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
-        let mut graph_controller = GraphController::new(graph, node_sizer).with_theme({
-            let mut map = std::collections::HashMap::new();
-            map.insert("edge".to_string(), get_theme_color("edge").unwrap());
-            map.insert(
-                "cursor_bg".to_string(),
-                get_theme_color("cursor_bg").unwrap(),
-            );
-            map.insert(
-                "cursor_fg".to_string(),
-                get_theme_color("cursor_fg").unwrap(),
-            );
-            map
+        let mut graph_controller = GraphController::new(graph, node_sizer).with_theme(Theme {
+            canvas: Color::Reset,
+            node_fg: get_theme_color("text").unwrap(),
+            node_bg: get_theme_color("node").unwrap(),
+            edge_fg: get_theme_color("edge").unwrap(),
+            edge_bg: Color::Reset,
+            cursor_fg: get_theme_color("cursor_fg").unwrap(),
+            cursor_bg: get_theme_color("cursor_bg").unwrap(),
         });
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
@@ -255,8 +252,7 @@ fn show_interactive_widget(
                         }
                         KeyCode::Char('p') => {
                             // Toggle path highlighting
-                            let path_color = get_theme_color("edge")
-                                .expect("Themes should be available from graph widget");
+                            let path_color = Color::Blue;
                             if state.controller.has_path_highlight(&path_color) {
                                 state.controller.clear_path_highlight(&path_color);
                             } else if let Some(last_path) = state.paths.last() {
@@ -311,18 +307,14 @@ pub fn plot_static(
 
     let node_sizer = GenGraphNodeSizer;
     let renderer = GenGraphNodeRenderer::new(conn);
-    let mut controller = GraphController::new(graph, node_sizer).with_theme({
-        let mut map = std::collections::HashMap::new();
-        map.insert("edge".to_string(), get_theme_color("edge").unwrap());
-        map.insert(
-            "cursor_bg".to_string(),
-            get_theme_color("cursor_bg").unwrap(),
-        );
-        map.insert(
-            "cursor_fg".to_string(),
-            get_theme_color("cursor_fg").unwrap(),
-        );
-        map
+    let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme {
+        canvas: Color::Reset,
+        node_fg: get_theme_color("text").unwrap(),
+        node_bg: get_theme_color("node").unwrap(),
+        edge_fg: get_theme_color("edge").unwrap(),
+        edge_bg: Color::Reset,
+        cursor_fg: get_theme_color("cursor_fg").unwrap(),
+        cursor_bg: get_theme_color("cursor_bg").unwrap(),
     });
     controller.set_detail_level(detail_level.unwrap_or(VisualDetail::Minimal));
     controller.show_cursor();

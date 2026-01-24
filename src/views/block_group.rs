@@ -11,7 +11,7 @@ use crossterm::{
 use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail};
+use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
 use log::{info, warn};
 use ratatui::{
     layout::Constraint,
@@ -212,20 +212,16 @@ pub fn view_block_group(
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
     let node_sizer = GenGraphNodeSizer;
-    let mut graph_controller = GraphController::new(&block_graph, node_sizer).with_theme({
-        let mut map = std::collections::HashMap::new();
-        map.insert("edge".to_string(), get_theme_color("edge").unwrap());
-        map.insert(
-            "cursor_bg".to_string(),
-            get_theme_color("cursor_bg").unwrap(),
-        );
-        map.insert(
-            "cursor_fg".to_string(),
-            get_theme_color("cursor_fg").unwrap(),
-        );
-        map
+    let mut graph_controller = GraphController::new(&block_graph, node_sizer).with_theme(Theme {
+        canvas: get_theme_color("canvas").unwrap(),
+        node_fg: get_theme_color("text").unwrap(),
+        node_bg: get_theme_color("node").unwrap(),
+        edge_fg: get_theme_color("edge").unwrap(),
+        edge_bg: get_theme_color("canvas").unwrap(),
+        cursor_fg: get_theme_color("cursor_fg").unwrap(),
+        cursor_bg: get_theme_color("cursor_bg").unwrap(),
     });
-    graph_controller.set_detail_level(VisualDetail::Minimal);
+    graph_controller.set_detail_level(VisualDetail::Truncated);
     graph_controller.show_cursor();
 
     // Create a renderer for path highlighting functionality
@@ -478,20 +474,16 @@ pub fn view_block_group(
             connect_all_boundary_edges(&mut block_graph);
             // Update the graph controller
             let node_sizer = GenGraphNodeSizer;
-            graph_controller = GraphController::new(&block_graph, node_sizer).with_theme({
-                let mut map = std::collections::HashMap::new();
-                map.insert("edge".to_string(), get_theme_color("edge").unwrap());
-                map.insert(
-                    "cursor_bg".to_string(),
-                    get_theme_color("cursor_bg").unwrap(),
-                );
-                map.insert(
-                    "cursor_fg".to_string(),
-                    get_theme_color("cursor_fg").unwrap(),
-                );
-                map
+            graph_controller = GraphController::new(&block_graph, node_sizer).with_theme(Theme {
+                canvas: get_theme_color("canvas").unwrap(),
+                node_fg: get_theme_color("text").unwrap(),
+                node_bg: get_theme_color("node").unwrap(),
+                edge_fg: get_theme_color("edge").unwrap(),
+                edge_bg: get_theme_color("canvas").unwrap(),
+                cursor_fg: get_theme_color("cursor_fg").unwrap(),
+                cursor_bg: get_theme_color("cursor_bg").unwrap(),
             });
-            graph_controller.set_detail_level(VisualDetail::Minimal);
+            graph_controller.set_detail_level(VisualDetail::Truncated);
             graph_controller.show_cursor();
 
             is_loading = false;

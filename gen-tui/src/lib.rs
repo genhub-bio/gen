@@ -15,6 +15,7 @@ pub mod partition;
 pub mod partition_controller;
 pub mod partition_table;
 pub mod plotter;
+pub mod theme;
 pub mod viewport_state;
 
 pub mod testing;

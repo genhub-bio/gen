@@ -11,11 +11,12 @@ use ratatui::style::{Color, Style};
 use ratatui::symbols::merge::MergeStrategy;
 
 use crate::{
-    color_utils::tint_colors,
+    color_utils::{brighten_colors, tint_colors},
     geometry::{BigRect, Point, WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::GraphWidget,
     layout::{JunctionSymbol, NodeRole, VisualDetail},
+    theme::Theme,
     viewport_graph::CroppedGraph,
 };
 
@@ -195,7 +196,7 @@ pub fn plot_viewport_graph<R, G>(
     renderer: &mut R,
     original_graph: &G,
     detail_level: VisualDetail,
-    theme: &std::collections::HashMap<String, Color>,
+    theme: &Theme,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -236,7 +237,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
         petgraph::graphmap::DiGraphMap<petgraph::graph::NodeIndex, ()>,
         Color,
     )],
-    theme: &std::collections::HashMap<String, Color>,
+    theme: &Theme,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -270,13 +271,25 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 }
             }
 
-            if let Some(color) = highlighted_color {
-                draw_bold_edge(buffer, source, target, color);
+            if let Some(tint_color) = highlighted_color {
+                let edge_color = match tint_color {
+                    Color::Reset => {
+                        // Brighten the edge color instead of tinting
+                        let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.2);
+                        brightened
+                    }
+                    _ => {
+                        // Compute tinted colors as they would be applied to nodes
+                        let (_, tinted_bg) =
+                            tint_colors(theme.node_fg, theme.node_bg, tint_color, 0.4);
+                        // Use the tinted bg as the edge fg color
+                        tinted_bg
+                    }
+                };
+                draw_edge(buffer, source, target, edge_color);
+                draw_bold_edge(buffer, source, target, edge_color);
             } else {
-                let color = theme
-                    .get("edge")
-                    .copied()
-                    .unwrap_or(ratatui::style::Color::Gray);
+                let color = theme.edge_fg;
                 draw_edge(buffer, source, target, color);
             }
         }
@@ -299,7 +312,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     })
                     .map(|(_, color)| *color);
 
-                // If highlighted, tint the colors of the rendered cells
+                // If highlighted, either tint with color or brighten (for Color::Reset)
                 if let Some(color) = highlighted_color {
                     for y in world_rect.min.y..=world_rect.max.y {
                         for x in world_rect.min.x..=world_rect.max.x {
@@ -307,7 +320,10 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let fg = style.fg.unwrap_or(Color::Reset);
                                 let bg = style.bg.unwrap_or(Color::Reset);
-                                let (new_fg, new_bg) = tint_colors(fg, bg, color, 0.4);
+                                let (new_fg, new_bg) = match color {
+                                    Color::Reset => brighten_colors(fg, bg, 0.2),
+                                    _ => tint_colors(fg, bg, color, 0.4),
+                                };
                                 let new_style = style.fg(new_fg).bg(new_bg);
                                 buffer.set_char_styled(pos, ch, new_style);
                             }
@@ -316,10 +332,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 }
             }
             NodeRole::Routing => {
-                let edge_color = theme
-                    .get("edge")
-                    .copied()
-                    .unwrap_or(ratatui::style::Color::Gray);
+                let edge_color = theme.edge_fg;
                 let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
 
                 let (highlighted_glyph, highlight_color) = projected_highlights
@@ -329,13 +342,13 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     .unzip();
 
                 // Decision tree:
-                // 1. Is this node part of any highlighted path?
-                // 2. If highlighted, do we merge with base glyph or replace it?
-                //    - Merge if highlight color matches edge color
-                //    - Replace if colors differ (otherwise you get spiney artefacts)
+                // 1. Is this routing node part of any highlighted path?
+                // 2. If it is, do we merge with the current glyph or replace it?
+                //    - Merge if highlight color is Reset => no color artefacts
+                //    - Replace if there's a tint color (otherwise you get spiney artefacts)
                 let character = match highlighted_glyph {
                     Some(high_glyph) => match highlight_color {
-                        Some(color) if color == edge_color => MergeStrategy::Fuzzy
+                        Some(Color::Reset) => MergeStrategy::Fuzzy
                             .merge(
                                 &base_glyph.glyph().to_string(),
                                 &high_glyph.heavy_glyph().to_string(),
@@ -348,7 +361,22 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     None => base_glyph.glyph(),
                 };
 
-                let style = Style::default().fg(highlight_color.unwrap_or(edge_color));
+                let fg_color = match highlight_color {
+                    None => edge_color,
+                    Some(Color::Reset) => {
+                        // Brighten the edge color instead of tinting
+                        let (brightened, _) = brighten_colors(edge_color, edge_color, 0.2);
+                        brightened
+                    }
+                    Some(tint_color) => {
+                        // Compute tinted colors as they would be applied to nodes
+                        let (_, tinted_bg) =
+                            tint_colors(theme.node_fg, theme.node_bg, tint_color, 0.4);
+                        // Use the tinted bg as the edge fg color
+                        tinted_bg
+                    }
+                };
+                let style = Style::default().fg(fg_color);
                 buffer.set_char_styled(*world_pos, character, style);
             }
             NodeRole::Stitch(_) => {
