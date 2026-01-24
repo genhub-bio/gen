@@ -20,6 +20,49 @@ use crate::{
     viewport_graph::CroppedGraph,
 };
 
+/// Line style for path highlighting
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineStyle {
+    /// Normal weight box-drawing characters
+    Normal,
+    /// Heavy weight box-drawing characters
+    Bold,
+}
+
+/// Style specification for highlighted paths
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathStyle {
+    /// Color to use for tinting (Color::Reset means brighten instead)
+    pub color: Color,
+    /// Line weight style for edges and routing nodes
+    pub line_style: LineStyle,
+    /// Whether to merge glyphs with base layer or replace them outright
+    pub merge_glyphs: bool,
+}
+
+impl PathStyle {
+    /// Create a new PathStyle with default settings
+    pub fn new(color: Color) -> Self {
+        Self {
+            color,
+            line_style: LineStyle::Bold,
+            merge_glyphs: false,
+        }
+    }
+
+    /// Set the line style
+    pub fn with_line_style(mut self, line_style: LineStyle) -> Self {
+        self.line_style = line_style;
+        self
+    }
+
+    /// Set whether to merge glyphs
+    pub fn with_merge_glyphs(mut self, merge_glyphs: bool) -> Self {
+        self.merge_glyphs = merge_glyphs;
+        self
+    }
+}
+
 // # Graph Rendering Architecture
 //
 // This module implements a three-layer graph rendering system that separates
@@ -225,7 +268,7 @@ pub fn plot_viewport_graph<R, G>(
 /// - `renderer`: Domain-specific rendering logic and data lookup
 /// - `original_graph`: Original graph for NodeIndex to NodeId conversion
 /// - `detail_level`: Level of detail for rendering
-/// - `path_highlights`: Path highlights with colors for emphasized rendering (later highlights take precedence)
+/// - `path_highlights`: Path highlights with styles for emphasized rendering (later highlights take precedence)
 /// - `theme`: Theme colors for rendering
 pub fn plot_viewport_graph_with_highlights<R, G>(
     viewport_graph: &CroppedGraph,
@@ -235,7 +278,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     detail_level: VisualDetail,
     path_highlights: &[(
         petgraph::graphmap::DiGraphMap<petgraph::graph::NodeIndex, ()>,
-        Color,
+        PathStyle,
     )],
     theme: &Theme,
 ) where
@@ -244,15 +287,15 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
 {
     // Project the highlight paths (consist of only data nodes) onto the rectilinear graph
     // so that we end up with subgraphs that have all the routing done.
-    let projected_highlights: Vec<(CroppedGraph, Color)> = path_highlights
+    let projected_highlights: Vec<(CroppedGraph, PathStyle)> = path_highlights
         .iter()
-        .map(|(path_graph, color)| {
+        .map(|(path_graph, style)| {
             let projected = viewport_graph.subgraph(|bundle| {
                 bundle
                     .iter()
                     .any(|&(u, v)| path_graph.contains_edge(u, v) || path_graph.contains_edge(v, u))
             });
-            (projected, *color)
+            (projected, *style)
         })
         .collect();
 
@@ -263,16 +306,16 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
         if !bundle.is_empty() {
             // Check if edge is in any projected highlight
             // Later highlights in the vector take precedence over earlier ones
-            let mut highlighted_color = None;
+            let mut highlighted_style = None;
 
-            for (graph, color) in &projected_highlights {
+            for (graph, style) in &projected_highlights {
                 if graph.graph.contains_edge(source, target) {
-                    highlighted_color = Some(*color);
+                    highlighted_style = Some(*style);
                 }
             }
 
-            if let Some(tint_color) = highlighted_color {
-                let edge_color = match tint_color {
+            if let Some(style) = highlighted_style {
+                let edge_color = match style.color {
                     Color::Reset => {
                         // Brighten the edge color instead of tinting
                         let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.2);
@@ -281,13 +324,15 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     _ => {
                         // Compute tinted colors as they would be applied to nodes
                         let (_, tinted_bg) =
-                            tint_colors(theme.node_fg, theme.node_bg, tint_color, 0.4);
+                            tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
                         // Use the tinted bg as the edge fg color
                         tinted_bg
                     }
                 };
-                draw_edge(buffer, source, target, edge_color);
-                draw_bold_edge(buffer, source, target, edge_color);
+                match style.line_style {
+                    LineStyle::Normal => draw_edge(buffer, source, target, edge_color),
+                    LineStyle::Bold => draw_bold_edge(buffer, source, target, edge_color),
+                }
             } else {
                 let color = theme.edge_fg;
                 draw_edge(buffer, source, target, color);
@@ -304,25 +349,25 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
 
                 // Check if this node is part of any highlighted path
-                let highlighted_color = path_highlights
+                let highlighted_style = path_highlights
                     .iter()
                     .find(|(path_graph, _)| {
                         path_graph
                             .contains_node(petgraph::graph::NodeIndex::new(domain_idx.index()))
                     })
-                    .map(|(_, color)| *color);
+                    .map(|(_, style)| *style);
 
                 // If highlighted, either tint with color or brighten (for Color::Reset)
-                if let Some(color) = highlighted_color {
+                if let Some(path_style) = highlighted_style {
                     for y in world_rect.min.y..=world_rect.max.y {
                         for x in world_rect.min.x..=world_rect.max.x {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let fg = style.fg.unwrap_or(Color::Reset);
                                 let bg = style.bg.unwrap_or(Color::Reset);
-                                let (new_fg, new_bg) = match color {
+                                let (new_fg, new_bg) = match path_style.color {
                                     Color::Reset => brighten_colors(fg, bg, 0.2),
-                                    _ => tint_colors(fg, bg, color, 0.4),
+                                    _ => tint_colors(fg, bg, path_style.color, 0.4),
                                 };
                                 let new_style = style.fg(new_fg).bg(new_bg);
                                 buffer.set_char_styled(pos, ch, new_style);
@@ -335,46 +380,52 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let edge_color = theme.edge_fg;
                 let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
 
-                let (highlighted_glyph, highlight_color) = projected_highlights
+                let (highlighted_glyph, highlight_style) = projected_highlights
                     .iter()
                     .find(|(graph, _)| graph.contains_node(world_pos))
-                    .map(|(graph, color)| (compute_junction_glyph(graph, *world_pos), *color))
+                    .map(|(graph, style)| (compute_junction_glyph(graph, *world_pos), *style))
                     .unzip();
 
                 // Decision tree:
                 // 1. Is this routing node part of any highlighted path?
                 // 2. If it is, do we merge with the current glyph or replace it?
-                //    - Merge if highlight color is Reset => no color artefacts
-                //    - Replace if there's a tint color (otherwise you get spiney artefacts)
-                let character = match highlighted_glyph {
-                    Some(high_glyph) => match highlight_color {
-                        Some(Color::Reset) => MergeStrategy::Fuzzy
-                            .merge(
-                                &base_glyph.glyph().to_string(),
-                                &high_glyph.heavy_glyph().to_string(),
-                            )
+                //    - Merge if merge_glyphs is true
+                //    - Replace if merge_glyphs is false (avoids spiney artefacts with color tinting)
+                let character = match (highlighted_glyph, highlight_style) {
+                    (Some(high_glyph), Some(style)) if style.merge_glyphs => {
+                        let high_char = match style.line_style {
+                            LineStyle::Normal => high_glyph.glyph(),
+                            LineStyle::Bold => high_glyph.heavy_glyph(),
+                        };
+                        MergeStrategy::Fuzzy
+                            .merge(&base_glyph.glyph().to_string(), &high_char.to_string())
                             .chars()
                             .next()
-                            .unwrap_or('?'),
-                        _ => high_glyph.heavy_glyph(),
+                            .unwrap_or('?')
+                    }
+                    (Some(high_glyph), Some(style)) => match style.line_style {
+                        LineStyle::Normal => high_glyph.glyph(),
+                        LineStyle::Bold => high_glyph.heavy_glyph(),
                     },
-                    None => base_glyph.glyph(),
+                    _ => base_glyph.glyph(),
                 };
 
-                let fg_color = match highlight_color {
+                let fg_color = match highlight_style {
                     None => edge_color,
-                    Some(Color::Reset) => {
-                        // Brighten the edge color instead of tinting
-                        let (brightened, _) = brighten_colors(edge_color, edge_color, 0.2);
-                        brightened
-                    }
-                    Some(tint_color) => {
-                        // Compute tinted colors as they would be applied to nodes
-                        let (_, tinted_bg) =
-                            tint_colors(theme.node_fg, theme.node_bg, tint_color, 0.4);
-                        // Use the tinted bg as the edge fg color
-                        tinted_bg
-                    }
+                    Some(style) => match style.color {
+                        Color::Reset => {
+                            // Brighten the edge color instead of tinting
+                            let (brightened, _) = brighten_colors(edge_color, edge_color, 0.2);
+                            brightened
+                        }
+                        _ => {
+                            // Compute tinted colors as they would be applied to nodes
+                            let (_, tinted_bg) =
+                                tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
+                            // Use the tinted bg as the edge fg color
+                            tinted_bg
+                        }
+                    },
                 };
                 let style = Style::default().fg(fg_color);
                 buffer.set_char_styled(*world_pos, character, style);

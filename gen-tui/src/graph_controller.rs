@@ -21,7 +21,7 @@ use crate::{
     layout::{NodeRole, PartitionLayout, VisualDetail},
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
-    plotter::NodeSizer,
+    plotter::{NodeSizer, PathStyle},
     theme::Theme,
     viewport_graph::CroppedGraph,
 };
@@ -66,8 +66,8 @@ where
     /// Flag indicating that the viewport graph needs to be rebuilt
     rebuild_needed: bool,
 
-    /// Path highlighting: list of subgraphs with their associated colors
-    path_highlights: Vec<(DiGraphMap<NodeIndex, ()>, Color)>,
+    /// Path highlighting: list of subgraphs with their associated styles
+    path_highlights: Vec<(DiGraphMap<NodeIndex, ()>, PathStyle)>,
 
     /// Theme colors for rendering
     pub theme: Theme,
@@ -218,16 +218,16 @@ where
     }
 
     /// Get a reference to the path highlights
-    pub fn get_path_highlights(&self) -> &[(DiGraphMap<NodeIndex, ()>, Color)] {
+    pub fn get_path_highlights(&self) -> &[(DiGraphMap<NodeIndex, ()>, PathStyle)] {
         &self.path_highlights
     }
 
-    /// Set a path highlight with a specific color
+    /// Set a path highlight with a specific style
     ///
     /// # Parameters
-    /// - color: Color for highlighting the path
+    /// - style: PathStyle for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
-    pub fn set_path_highlight(&mut self, color: Color, path_nodes: Vec<G::NodeId>) {
+    pub fn set_path_highlight(&mut self, style: PathStyle, path_nodes: Vec<G::NodeId>) {
         let mut path_graph = DiGraphMap::<NodeIndex, ()>::new();
 
         // Convert G::NodeId to NodeIndex and add all nodes to the path graph
@@ -247,17 +247,26 @@ where
             }
         }
 
-        self.path_highlights.push((path_graph, color));
+        self.path_highlights.push((path_graph, style));
     }
 
-    /// Check if a specific color has path highlighting
-    pub fn has_path_highlight(&self, color: &Color) -> bool {
-        self.path_highlights.iter().any(|(_, c)| c == color)
+    /// Set a path highlight with a specific color (convenience method)
+    ///
+    /// # Parameters
+    /// - color: Color for highlighting the path
+    /// - path_nodes: Sequence of nodes that form the path
+    pub fn set_path_highlight_color(&mut self, color: Color, path_nodes: Vec<G::NodeId>) {
+        self.set_path_highlight(PathStyle::new(color), path_nodes);
     }
 
-    /// Clear path highlighting for a specific color
-    pub fn clear_path_highlight(&mut self, color: &Color) {
-        self.path_highlights.retain(|(_, c)| c != color);
+    /// Check if a specific style has path highlighting
+    pub fn has_path_highlight(&self, style: &PathStyle) -> bool {
+        self.path_highlights.iter().any(|(_, s)| s == style)
+    }
+
+    /// Clear path highlighting for a specific style
+    pub fn clear_path_highlight(&mut self, style: &PathStyle) {
+        self.path_highlights.retain(|(_, s)| s != style);
         self.trigger_rebuild();
     }
 

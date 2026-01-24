@@ -46,3 +46,4 @@ pub use graph_widget::GraphWidget;
 pub use layout::{LayoutEdge, LayoutEngine, LayoutNode};
 pub use partition::{PartitionEdge, PartitionNode};
 pub use partition_controller::PartitionController;
+pub use plotter::{LineStyle, PathStyle};

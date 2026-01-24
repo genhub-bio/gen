@@ -11,7 +11,9 @@ use crossterm::{
 use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
+use gen_tui::{
+    graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle, theme::Theme,
+};
 use log::{info, warn};
 use ratatui::{
     layout::Constraint,
@@ -116,16 +118,17 @@ fn toggle_path_highlight(
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
 ) -> Result<bool, String> {
-    // Check if highlighting is already active for this color
-    if controller.has_path_highlight(&color) {
-        controller.clear_path_highlight(&color);
+    let style = PathStyle::new(color);
+    // Check if highlighting is already active for this style
+    if controller.has_path_highlight(&style) {
+        controller.clear_path_highlight(&style);
         Ok(false)
     } else {
         // Get the path nodes for this block group
         let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph)?;
 
         // Set the path highlight using GraphNodes directly
-        controller.set_path_highlight(color, path_nodes);
+        controller.set_path_highlight(style, path_nodes);
         Ok(true)
     }
 }

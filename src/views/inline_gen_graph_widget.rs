@@ -7,7 +7,12 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::{db::GraphConnection, path::Path};
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
+use gen_tui::{
+    graph_controller::GraphController,
+    layout::VisualDetail,
+    plotter::{LineStyle, PathStyle},
+    theme::Theme,
+};
 use ratatui::style::Color;
 use ratatui::{
     TerminalOptions, Viewport,
@@ -252,13 +257,16 @@ fn show_interactive_widget(
                         }
                         KeyCode::Char('p') => {
                             // Toggle path highlighting
-                            let path_color = Color::Blue;
-                            if state.controller.has_path_highlight(&path_color) {
-                                state.controller.clear_path_highlight(&path_color);
+                            let path_style = PathStyle::new(Color::Blue)
+                                .with_line_style(LineStyle::Bold)
+                                .with_merge_glyphs(true);
+
+                            if state.controller.has_path_highlight(&path_style) {
+                                state.controller.clear_path_highlight(&path_style);
                             } else if let Some(last_path) = state.paths.last() {
                                 state
                                     .controller
-                                    .set_path_highlight(path_color, last_path.clone());
+                                    .set_path_highlight(path_style, last_path.clone());
                             } else {
                                 eprintln!("No paths available for path highlighting");
                             }
