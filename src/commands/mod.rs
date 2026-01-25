@@ -55,9 +55,9 @@ pub enum Commands {
         /// Position as "node id:coordinate" to center the graph on
         #[arg(short, long)]
         position: Option<String>,
-        /// Use inline widget view instead of full-screen view
+        /// Show the full TUI explorer instead of the inline preview. Includes sidebar explorer and additional interactive features.
         #[arg(short, long)]
-        inline: bool,
+        full: bool,
     },
     // /// Show a diff of operations and render the consolidated graph
     // #[command(name = "view-diff", arg_required_else_help(true))]

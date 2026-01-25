@@ -156,75 +156,71 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             sample,
             collection,
             position,
-            inline,
+            full,
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
                 None => get_default_collection(operation_conn)?,
             });
 
-            if inline {
-                // Use the inline widget
-                if let Some(ref name) = graph {
-                    let block_group = if let Some(ref sample_name) = sample {
-                        BlockGroup::get(
-                            graph_conn,
-                            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                            params![collection_name, sample_name, name],
-                        )
-                    } else {
-                        BlockGroup::get(
-                            graph_conn,
-                            "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
-                            params![collection_name, name],
-                        )
-                    };
+            if !full && graph.is_some() {
+                // Use the inline widget by default if a graph is specified
+                let name = graph.as_ref().unwrap();
+                let block_group = if let Some(ref sample_name) = sample {
+                    BlockGroup::get(
+                        graph_conn,
+                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+                        params![collection_name, sample_name, name],
+                    )
+                } else {
+                    BlockGroup::get(
+                        graph_conn,
+                        "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
+                        params![collection_name, name],
+                    )
+                };
 
-                    match block_group {
-                        Ok(bg) => {
-                            let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
-                            let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
-                            // Use a default height of 10 for now
-                            if let Err(e) = show_inline_gen_graph_widget(
-                                graph_conn,
-                                &block_graph,
-                                vec![current_path],
-                                10,
-                            ) {
+                match block_group {
+                    Ok(bg) => {
+                        let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                        let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
+                        // Use a default height of 10 for now
+                        match show_inline_gen_graph_widget(
+                            graph_conn,
+                            &block_graph,
+                            vec![current_path],
+                            10,
+                        ) {
+                            Ok(true) => {
+                                // User requested upgrade to full TUI
+                                view_block_group(
+                                    graph_conn,
+                                    graph,
+                                    sample,
+                                    collection_name,
+                                    position,
+                                )?;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
                                 eprintln!("Error showing inline widget: {}", e);
                             }
                         }
-                        Err(_) => {
-                            eprintln!(
-                                "No block group found with name {:?} and sample {:?} in collection {}",
-                                name,
-                                sample.clone().unwrap_or_else(|| "null".to_string()),
-                                collection_name
-                            );
-                        }
                     }
-                } else {
-                    eprintln!("Graph name is required for inline view");
+                    Err(_) => {
+                        eprintln!(
+                            "No block group found with name {:?} and sample {:?} in collection {}",
+                            name,
+                            sample.clone().unwrap_or_else(|| "null".to_string()),
+                            collection_name
+                        );
+                    }
                 }
             } else {
-                // Use the original full-screen viewer
-                if let Err(e) = view_block_group(
-                    graph_conn,
-                    graph.clone(),
-                    sample.clone(),
-                    collection_name,
-                    position.clone(),
-                ) {
-                    eprintln!("Error: {}", e);
-                }
+                // Use the full-screen viewer if --full is specified or no graph is provided
+                view_block_group(graph_conn, graph, sample, collection_name, position)?;
             }
-            Ok(view_block_group(
-                graph_conn,
-                graph.clone(),
-                sample.clone(),
-                collection_name,
-                position.clone(),
-            )?)
+            Ok(())
         }
         // Some(Commands::ViewDiff { from, to }) => {
         //     let to_ref = to.clone().unwrap_or_else(|| {
