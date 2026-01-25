@@ -45,7 +45,7 @@ impl PathStyle {
     pub fn new(color: Color) -> Self {
         Self {
             color,
-            line_style: LineStyle::Bold,
+            line_style: LineStyle::Normal,
             merge_glyphs: false,
         }
     }
