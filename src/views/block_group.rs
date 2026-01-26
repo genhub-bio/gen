@@ -23,8 +23,8 @@ use ratatui::{
 };
 use rusqlite::params;
 
-use crate::config::get_theme_color;
 use crate::{
+    config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},

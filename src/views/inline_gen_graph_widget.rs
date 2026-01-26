@@ -13,15 +13,17 @@ use gen_tui::{
     plotter::{LineStyle, PathStyle},
     theme::Theme,
 };
-use ratatui::style::Color;
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
+    style::Color,
     widgets::{Block, Borders},
 };
 
-use crate::config::get_theme_color;
-use crate::views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget};
+use crate::{
+    config::get_theme_color,
+    views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
+};
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
 fn get_path_nodes(

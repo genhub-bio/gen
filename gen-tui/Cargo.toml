@@ -17,7 +17,7 @@ serde_json = "1.0.140"
 thiserror = "2.0.12"
 log = "0.4.26"
 ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
-crossterm = "0.28.1"
+crossterm = "0.29.0"
 rstar = { version = "0.12.2", features = ["serde"] }
 ftree = "1.2.0"
 rand = { version = "0.9.1", features = ["std"] }

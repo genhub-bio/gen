@@ -1,5 +1,6 @@
-use ratatui::style::Color;
 use std::str::FromStr;
+
+use ratatui::style::Color;
 
 /// Theme configuration for graph rendering
 #[derive(Debug, Clone, PartialEq)]

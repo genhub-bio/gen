@@ -59,10 +59,10 @@ indicatif = "0.18.3"
 html-escape = "0.2.13"
 rust-sugiyama = {git = "https://github.com/paddison/rust-sugiyama", rev = "4d15b35124adac1de3a3b2cc42af8d68290935f2" }
 ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
-crossterm = "0.28.1"
+crossterm = "0.29.0"
 log = "0.4.26"
 env_logger = "0.11.7"
-tui-textarea = "0.7.0"
+tui-textarea = { git = "https://github.com/phsym/tui-textarea", branch = "main" }
 tui-widget-list = "0.15.0"
 paste = "1.0.15"
 url-parse = "1.0.10"

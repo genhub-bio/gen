@@ -26,7 +26,8 @@ use r#gen::{
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::view_block_group, // diff::view_diff, // temporarily disabled
-        inline_gen_graph_widget::show_inline_gen_graph_widget, // operations::view_operations, // temporarily disabled
+        inline_gen_graph_widget::show_inline_gen_graph_widget,
+        operations::view_operations,
         patch::view_patches,
     },
 };
@@ -307,11 +308,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .id,
                 );
                 if interactive {
-                    // return Ok(view_operations(&db_context, &operations)?); // temporarily disabled
-                    eprintln!(
-                        "Interactive operations view temporarily disabled due to merge conflicts"
-                    );
-                    return Ok(());
+                    return Ok(view_operations(&db_context, &operations)?);
                 } else {
                     let mut indicator = "";
                     println!(

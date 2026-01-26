@@ -7,8 +7,10 @@ use petgraph::visit::{
     EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
     NodeCount, NodeIndexable, Visitable,
 };
-use ratatui::style::{Color, Style};
-use ratatui::symbols::merge::MergeStrategy;
+use ratatui::{
+    style::{Color, Style},
+    symbols::merge::MergeStrategy,
+};
 
 use crate::{
     color_utils::{brighten_colors, tint_colors},
