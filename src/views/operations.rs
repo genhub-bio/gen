@@ -120,6 +120,10 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
     });
     graph_controller.set_detail_level(VisualDetail::Truncated);
     graph_controller.show_cursor();
+    graph_controller.initialize_cursor();
+    graph_controller
+        .rebuild_viewport_graph()
+        .map_err(io::Error::other)?;
 
     let mut view_message_panel = false;
     let mut view_graph = false;
@@ -235,6 +239,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
                     // Update graph controller viewport and render widget
                     let canvas_area = sub_chunk[1];
+                    graph_controller.viewport_state.focus();
                     graph_controller.viewport_state.viewport_bounds = canvas_area;
                     graph_controller.update_animations(frame_delta);
 
@@ -277,6 +282,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
                 // Update graph controller viewport and render widget
                 let canvas_area = chunks[1];
+                graph_controller.viewport_state.focus();
                 graph_controller.viewport_state.viewport_bounds = canvas_area;
                 graph_controller.update_animations(frame_delta);
 
@@ -411,6 +417,9 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         });
                         graph_controller.set_detail_level(VisualDetail::Truncated);
                         graph_controller.show_cursor();
+                        graph_controller.initialize_cursor();
+                        // Ignore rebuild errors during block group switching
+                        let _ = graph_controller.rebuild_viewport_graph();
                     } else {
                         let _ = graph_controller.handle_key_event(key);
                     }
@@ -494,6 +503,9 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                     });
                                 graph_controller.set_detail_level(VisualDetail::Truncated);
                                 graph_controller.show_cursor();
+                                graph_controller.initialize_cursor();
+                                // Ignore rebuild errors for empty graph
+                                let _ = graph_controller.rebuild_viewport_graph();
                             } else {
                                 let node_sizer = GenGraphNodeSizer;
                                 graph_controller = GraphController::new(
@@ -511,6 +523,9 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 });
                                 graph_controller.set_detail_level(VisualDetail::Truncated);
                                 graph_controller.show_cursor();
+                                graph_controller.initialize_cursor();
+                                // Ignore rebuild errors when initially loading graph
+                                let _ = graph_controller.rebuild_viewport_graph();
                             }
                         }
                         _ => {}
