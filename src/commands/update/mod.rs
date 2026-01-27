@@ -12,7 +12,7 @@ mod library;
 mod sequence;
 mod vcf;
 
-/// Import commands
+/// Update commands
 #[derive(Debug, Args)]
 pub struct Command {
     #[command(subcommand)]

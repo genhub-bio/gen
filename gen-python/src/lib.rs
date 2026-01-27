@@ -5,6 +5,7 @@ use gen_models::db::DbContext;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 pub mod exports;
+pub mod graph_operations;
 pub mod imports;
 pub mod python_api;
 pub mod updates;

@@ -3,6 +3,7 @@ use gen_models::db::OperationsConnection;
 
 pub mod cli_context;
 pub mod export;
+pub mod graph_operations;
 pub mod import;
 pub mod remote;
 pub mod update;

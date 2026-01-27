@@ -84,7 +84,7 @@ capnpc = "0.24"
 
 [dev-dependencies]
 cargo-llvm-cov = "0.6.16"
-cargo-deny = "0.18.5"
+cargo-deny = "0.19.0"
 more-asserts = "0.3.1"
 
 [profile.release]

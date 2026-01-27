@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "gen"
-version = "0.1.0"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "base64",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "gen-core"
-version = "0.1.0"
+version = "0.1.21"
 dependencies = [
  "capnp",
  "capnpc",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "gen-diff"
-version = "0.1.0"
+version = "0.1.21"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "gen-graph"
-version = "0.1.0"
+version = "0.1.21"
 dependencies = [
  "gen-core",
  "interavl",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models"
-version = "0.1.0"
+version = "0.1.21"
 dependencies = [
  "cached",
  "capnp",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "gen-python"
-version = "0.1.0"
+version = "0.1.21"
 dependencies = [
  "flate2",
  "gen",
