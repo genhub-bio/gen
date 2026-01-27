@@ -278,8 +278,8 @@ pub fn view_block_group(
                         .fg(get_theme_color("text").unwrap())
                         .add_modifier(Modifier::BOLD),
                 );
-                let loading_para =
-                    Paragraph::new(loading_text).alignment(ratatui::layout::HorizontalAlignment::Center);
+                let loading_para = Paragraph::new(loading_text)
+                    .alignment(ratatui::layout::HorizontalAlignment::Center);
 
                 // Center the loading message vertically in the canvas area
                 let loading_area = ratatui::layout::Layout::default()

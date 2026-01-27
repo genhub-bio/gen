@@ -87,6 +87,7 @@ impl Default for Base16Palette {
 }
 
 impl Base16Palette {
+    #[allow(clippy::result_large_err)]
     pub fn from_yaml(file: impl Into<PathBuf>) -> Result<Self, Base16PaletteError> {
         Figment::new()
             .merge(Yaml::file(file.into()))
