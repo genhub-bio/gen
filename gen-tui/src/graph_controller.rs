@@ -5,7 +5,6 @@ use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
 use log::trace;
 use petgraph::{
     graph::NodeIndex,
-    graphmap::DiGraphMap,
     visit::{
         EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
         NodeCount, NodeIndexable, Visitable,
@@ -66,11 +65,22 @@ where
     /// Flag indicating that the viewport graph needs to be rebuilt
     rebuild_needed: bool,
 
-    /// Path highlighting: list of subgraphs with their associated styles
-    path_highlights: Vec<(DiGraphMap<NodeIndex, ()>, PathStyle)>,
+    /// Persistent requested highlights in domain terms
+    pub highlights: Vec<(HighlightKind<G::NodeId>, PathStyle)>,
 
     /// Theme colors for rendering
     pub theme: Theme,
+}
+
+/// Type of element to highlight in the graph
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HighlightKind<N> {
+    /// A single node
+    Node(N),
+    /// An edge between two nodes (source, target)
+    Edge(N, N),
+    /// A path consisting of a sequence of nodes
+    Path(Vec<N>),
 }
 
 impl<G, S> GraphController<G, S>
@@ -140,7 +150,7 @@ where
             viewport_graph: CroppedGraph::empty(),
             last_rebuild_camera_center: WorldPos::ZERO,
             rebuild_needed: true, // Start with a rebuild required
-            path_highlights: Vec::new(),
+            highlights: Vec::new(),
             theme: Self::default_theme(),
         };
 
@@ -217,9 +227,87 @@ where
         self.detail_level
     }
 
-    /// Get a reference to the path highlights
-    pub fn get_path_highlights(&self) -> &[(DiGraphMap<NodeIndex, ()>, PathStyle)] {
-        &self.path_highlights
+    /// Get a reference to the node highlights in the current viewport
+    pub fn get_node_highlights(&self) -> &[(WorldPos, PathStyle)] {
+        &self.viewport_graph.node_highlights
+    }
+
+    /// Get a reference to the edge highlights in the current viewport
+    pub fn get_edge_highlights(&self) -> &[((WorldPos, WorldPos), PathStyle)] {
+        &self.viewport_graph.edge_highlights
+    }
+
+    /// Internal helper to apply a node highlight to the viewport graph
+    fn apply_node_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        node_id: G::NodeId,
+        style: PathStyle,
+    ) {
+        let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
+        if let Some(pos) = viewport_graph.node_positions.get(&node_idx) {
+            viewport_graph.node_highlights.push((*pos, style));
+        }
+    }
+
+    /// Internal helper to apply an edge highlight to the viewport graph
+    fn apply_edge_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        src_id: G::NodeId,
+        tgt_id: G::NodeId,
+        style: PathStyle,
+    ) {
+        let u = NodeIndex::new(<G as NodeIndexable>::to_index(graph, src_id));
+        let v = NodeIndex::new(<G as NodeIndexable>::to_index(graph, tgt_id));
+
+        // Find all visual edges that contain this domain edge in their bundle
+        // Collect first to avoid mutable borrow of viewport_graph while iterating
+        let edges_to_highlight: Vec<(WorldPos, WorldPos)> = viewport_graph
+            .edges()
+            .filter(|(_, _, bundle)| bundle.contains(&(u, v)) || bundle.contains(&(v, u)))
+            .map(|(s, t, _)| (s, t))
+            .collect();
+
+        for (source_pos, target_pos) in edges_to_highlight {
+            viewport_graph
+                .edge_highlights
+                .push(((source_pos, target_pos), style));
+        }
+    }
+
+    /// Internal helper to apply a path highlight to the viewport graph
+    fn apply_path_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        nodes: &[G::NodeId],
+        style: PathStyle,
+    ) {
+        // Highlight all nodes
+        for &node_id in nodes {
+            Self::apply_node_highlight(viewport_graph, graph, node_id, style);
+        }
+
+        // Highlight all consecutive edges
+        for window in nodes.windows(2) {
+            if let [src, tgt] = window {
+                Self::apply_edge_highlight(viewport_graph, graph, *src, *tgt, style);
+            }
+        }
+    }
+
+    /// Set a node highlight
+    pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
+        Self::apply_node_highlight(&mut self.viewport_graph, &self.graph, node_id, style);
+        let kind = HighlightKind::Node(node_id);
+        self.highlights.push((kind, style));
+    }
+
+    /// Set an edge highlight
+    pub fn set_edge_highlight(&mut self, edge: (G::NodeId, G::NodeId), style: PathStyle) {
+        Self::apply_edge_highlight(&mut self.viewport_graph, &self.graph, edge.0, edge.1, style);
+        let kind = HighlightKind::Edge(edge.0, edge.1);
+        self.highlights.push((kind, style));
     }
 
     /// Set a path highlight with a specific style
@@ -228,26 +316,9 @@ where
     /// - style: PathStyle for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
     pub fn set_path_highlight(&mut self, style: PathStyle, path_nodes: Vec<G::NodeId>) {
-        let mut path_graph = DiGraphMap::<NodeIndex, ()>::new();
-
-        // Convert G::NodeId to NodeIndex and add all nodes to the path graph
-        let node_indices: Vec<NodeIndex> = path_nodes
-            .iter()
-            .map(|node_id| NodeIndex::new(<G as NodeIndexable>::to_index(&self.graph, *node_id)))
-            .collect();
-
-        for node_idx in &node_indices {
-            path_graph.add_node(*node_idx);
-        }
-
-        // Add edges between consecutive nodes in the path
-        for window in node_indices.windows(2) {
-            if let [src, tgt] = window {
-                path_graph.add_edge(*src, *tgt, ());
-            }
-        }
-
-        self.path_highlights.push((path_graph, style));
+        Self::apply_path_highlight(&mut self.viewport_graph, &self.graph, &path_nodes, style);
+        let kind = HighlightKind::Path(path_nodes);
+        self.highlights.push((kind, style));
     }
 
     /// Set a path highlight with a specific color (convenience method)
@@ -259,20 +330,29 @@ where
         self.set_path_highlight(PathStyle::new(color), path_nodes);
     }
 
-    /// Check if a specific style has path highlighting
-    pub fn has_path_highlight(&self, style: &PathStyle) -> bool {
-        self.path_highlights.iter().any(|(_, s)| s == style)
+    /// Check if a specific style has any highlighting
+    pub fn has_highlight(&self, style: &PathStyle) -> bool {
+        self.highlights.iter().any(|(_, s)| s == style)
     }
 
-    /// Clear path highlighting for a specific style
-    pub fn clear_path_highlight(&mut self, style: &PathStyle) {
-        self.path_highlights.retain(|(_, s)| s != style);
+    /// Clear highlighting for a specific style
+    pub fn clear_highlight(&mut self, style: &PathStyle) {
+        self.highlights.retain(|(_, s)| s != style);
+        // Also clear from viewport graph
+        self.viewport_graph
+            .node_highlights
+            .retain(|(_, s)| s != style);
+        self.viewport_graph
+            .edge_highlights
+            .retain(|(_, s)| s != style);
         self.trigger_rebuild();
     }
 
-    /// Clear all path highlights
-    pub fn clear_all_path_highlights(&mut self) {
-        self.path_highlights.clear();
+    /// Clear all highlights
+    pub fn clear_all_highlights(&mut self) {
+        self.highlights.clear();
+        self.viewport_graph.node_highlights.clear();
+        self.viewport_graph.edge_highlights.clear();
         self.trigger_rebuild();
     }
 
@@ -732,6 +812,37 @@ where
             &active_partitions,
             detail_level,
         );
+
+        // Apply persistent highlights to the new viewport graph
+        for (kind, style) in &self.highlights {
+            match kind {
+                HighlightKind::Node(node_id) => {
+                    Self::apply_node_highlight(
+                        &mut self.viewport_graph,
+                        &self.graph,
+                        *node_id,
+                        *style,
+                    );
+                }
+                HighlightKind::Edge(src, tgt) => {
+                    Self::apply_edge_highlight(
+                        &mut self.viewport_graph,
+                        &self.graph,
+                        *src,
+                        *tgt,
+                        *style,
+                    );
+                }
+                HighlightKind::Path(nodes) => {
+                    Self::apply_path_highlight(
+                        &mut self.viewport_graph,
+                        &self.graph,
+                        nodes,
+                        *style,
+                    );
+                }
+            }
+        }
 
         // Update rebuild tracking
         self.last_rebuild_camera_center = self.viewport_state.camera_current;

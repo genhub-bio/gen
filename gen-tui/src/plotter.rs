@@ -253,6 +253,7 @@ pub fn plot_viewport_graph<R, G>(
         original_graph,
         detail_level,
         &[],
+        &[],
         theme,
     )
 }
@@ -270,7 +271,8 @@ pub fn plot_viewport_graph<R, G>(
 /// - `renderer`: Domain-specific rendering logic and data lookup
 /// - `original_graph`: Original graph for NodeIndex to NodeId conversion
 /// - `detail_level`: Level of detail for rendering
-/// - `path_highlights`: Path highlights with styles for emphasized rendering (later highlights take precedence)
+/// - `node_highlights`: List of node positions to highlight with their styles
+/// - `edge_highlights`: List of edge segments to highlight with their styles
 /// - `theme`: Theme colors for rendering
 pub fn plot_viewport_graph_with_highlights<R, G>(
     viewport_graph: &CroppedGraph,
@@ -278,43 +280,27 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     renderer: &mut R,
     original_graph: &G,
     detail_level: VisualDetail,
-    path_highlights: &[(
-        petgraph::graphmap::DiGraphMap<petgraph::graph::NodeIndex, ()>,
-        PathStyle,
-    )],
+    node_highlights: &[(WorldPos, PathStyle)],
+    edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
     theme: &Theme,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
 {
-    // Project the highlight paths (consist of only data nodes) onto the rectilinear graph
-    // so that we end up with subgraphs that have all the routing done.
-    let projected_highlights: Vec<(CroppedGraph, PathStyle)> = path_highlights
-        .iter()
-        .map(|(path_graph, style)| {
-            let projected = viewport_graph.subgraph(|bundle| {
-                bundle
-                    .iter()
-                    .any(|&(u, v)| path_graph.contains_edge(u, v) || path_graph.contains_edge(v, u))
-            });
-            (projected, *style)
-        })
-        .collect();
-
     // Draw edges first so nodes appear on top
     for (source, target, bundle) in viewport_graph.edges() {
         // Ommit the edges that don't actually represent an original edge
         // (edges to/from terminal source/sink nodes)
         if !bundle.is_empty() {
-            // Check if edge is in any projected highlight
+            // Check if edge is in any highlighted path
             // Later highlights in the vector take precedence over earlier ones
-            let mut highlighted_style = None;
-
-            for (graph, style) in &projected_highlights {
-                if graph.graph.contains_edge(source, target) {
-                    highlighted_style = Some(*style);
-                }
-            }
+            let highlighted_style = edge_highlights
+                .iter()
+                .filter(|((s, t), _)| {
+                    (*s == source && *t == target) || (*s == target && *t == source)
+                })
+                .map(|(_, style)| *style)
+                .last();
 
             if let Some(style) = highlighted_style {
                 let edge_color = match style.color {
@@ -350,14 +336,12 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
 
-                // Check if this node is part of any highlighted path
-                let highlighted_style = path_highlights
+                // Check if this node is highlighted
+                let highlighted_style = node_highlights
                     .iter()
-                    .find(|(path_graph, _)| {
-                        path_graph
-                            .contains_node(petgraph::graph::NodeIndex::new(domain_idx.index()))
-                    })
-                    .map(|(_, style)| *style);
+                    .filter(|(pos, _)| pos == world_pos)
+                    .map(|(_, style)| *style)
+                    .last();
 
                 // If highlighted, either tint with color or brighten (for Color::Reset)
                 if let Some(path_style) = highlighted_style {
@@ -382,22 +366,42 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let edge_color = theme.edge_fg;
                 let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
 
-                let (highlighted_glyph, highlight_style) = projected_highlights
+                // Check if this routing node is part of any highlighted edge
+                let highlighted_style = edge_highlights
                     .iter()
-                    .find(|(graph, _)| graph.contains_node(world_pos))
-                    .map(|(graph, style)| (compute_junction_glyph(graph, *world_pos), *style))
-                    .unzip();
+                    .filter(|((s, t), _)| {
+                        // A routing node is highlighted if it lies on a highlighted edge segment
+                        // Since edges are either horizontal or vertical, we can check if the point lies between endpoints
+                        if s.x == t.x {
+                            // Vertical edge
+                            world_pos.x == s.x
+                                && world_pos.y >= s.y.min(t.y)
+                                && world_pos.y <= s.y.max(t.y)
+                        } else {
+                            // Horizontal edge
+                            world_pos.y == s.y
+                                && world_pos.x >= s.x.min(t.x)
+                                && world_pos.x <= s.x.max(t.x)
+                        }
+                    })
+                    .map(|(_, style)| *style)
+                    .last();
 
                 // Decision tree:
                 // 1. Is this routing node part of any highlighted path?
                 // 2. If it is, do we merge with the current glyph or replace it?
                 //    - Merge if merge_glyphs is true
                 //    - Replace if merge_glyphs is false (avoids spiney artefacts with color tinting)
-                let character = match (highlighted_glyph, highlight_style) {
-                    (Some(high_glyph), Some(style)) if style.merge_glyphs => {
+                let character = match highlighted_style {
+                    Some(style) if style.merge_glyphs => {
+                        // For merged glyphs, we need to know the 'highlighted' connections.
+                        // Since we don't have a separate graph for highlights anymore, we use the base glyph
+                        // but rendered with heavier weight if requested.
+                        // Ideally we'd calculate the union of connections from all overlapping highlights,
+                        // but checking if it's on a highlighted edge is a good approximation.
                         let high_char = match style.line_style {
-                            LineStyle::Normal => high_glyph.glyph(),
-                            LineStyle::Bold => high_glyph.heavy_glyph(),
+                            LineStyle::Normal => base_glyph.glyph(),
+                            LineStyle::Bold => base_glyph.heavy_glyph(),
                         };
                         MergeStrategy::Fuzzy
                             .merge(&base_glyph.glyph().to_string(), &high_char.to_string())
@@ -405,14 +409,14 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             .next()
                             .unwrap_or('?')
                     }
-                    (Some(high_glyph), Some(style)) => match style.line_style {
-                        LineStyle::Normal => high_glyph.glyph(),
-                        LineStyle::Bold => high_glyph.heavy_glyph(),
+                    Some(style) => match style.line_style {
+                        LineStyle::Normal => base_glyph.glyph(),
+                        LineStyle::Bold => base_glyph.heavy_glyph(),
                     },
-                    _ => base_glyph.glyph(),
+                    None => base_glyph.glyph(),
                 };
 
-                let fg_color = match highlight_style {
+                let fg_color = match highlighted_style {
                     None => edge_color,
                     Some(style) => match style.color {
                         Color::Reset => {
@@ -546,7 +550,7 @@ where
     S: NodeSizer<G>,
     R: NodeRenderer<G>,
 {
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     if let Some(s) = detail_level {
         controller.set_detail_level(s);

@@ -252,14 +252,16 @@ where
         // Extract data from controller and render directly via ViewportGraph
         let viewport_graph = controller.get_viewport_graph();
         let detail_level = controller.get_detail_level();
-        let highlights = controller.get_path_highlights();
+        let node_highlights = controller.get_node_highlights();
+        let edge_highlights = controller.get_edge_highlights();
         plot_viewport_graph_with_highlights(
             viewport_graph,
             &mut world_buffer,
             &mut self.renderer,
             &controller.graph,
             detail_level,
-            highlights,
+            node_highlights,
+            edge_highlights,
             &controller.theme,
         );
 

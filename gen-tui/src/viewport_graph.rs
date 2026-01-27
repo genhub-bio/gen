@@ -28,6 +28,11 @@ pub struct CroppedGraph {
 
     /// Track which nodes we've added from which partitions
     pub included_nodes: HashSet<(PartitionIndex, NodeIndex<u32>)>,
+
+    /// Node highlights: list of world positions with their associated styles
+    pub node_highlights: Vec<(WorldPos, crate::plotter::PathStyle)>,
+    /// Edge highlights: list of world position pairs with their associated styles
+    pub edge_highlights: Vec<((WorldPos, WorldPos), crate::plotter::PathStyle)>,
 }
 
 impl CroppedGraph {
@@ -41,6 +46,8 @@ impl CroppedGraph {
             node_positions: HashMap::new(),
             layers: Vec::new(),
             included_nodes: HashSet::new(),
+            node_highlights: Vec::new(),
+            edge_highlights: Vec::new(),
         }
     }
 
@@ -78,6 +85,7 @@ impl CroppedGraph {
         let mut this = Self::empty();
 
         for &partition_idx in active_partitions {
+
             if let Some(partition_layout) =
                 &partition_table.partitions[partition_idx].layouts[detail_level.as_index()]
             {
@@ -519,6 +527,7 @@ impl CroppedGraph {
     /// and values are vectors of visual edge segments (WorldPos, WorldPos) that
     /// represent that domain edge.
     pub fn invert_edge_bundles(
+
         &self,
     ) -> HashMap<(NodeIndex, NodeIndex), Vec<(WorldPos, WorldPos)>> {
         debug!(

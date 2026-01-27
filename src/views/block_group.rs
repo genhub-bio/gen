@@ -120,8 +120,8 @@ fn toggle_path_highlight(
 ) -> Result<bool, String> {
     let style = PathStyle::new(color);
     // Check if highlighting is already active for this style
-    if controller.has_path_highlight(&style) {
-        controller.clear_path_highlight(&style);
+    if controller.has_highlight(&style) {
+        controller.clear_highlight(&style);
         Ok(false)
     } else {
         // Get the path nodes for this block group

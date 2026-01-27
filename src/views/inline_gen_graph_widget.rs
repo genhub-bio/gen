@@ -14,15 +14,15 @@ use gen_tui::{
     theme::Theme,
 };
 use ratatui::{
-    TerminalOptions, Viewport,
     prelude::*,
     style::Color,
     widgets::{Block, Borders},
+    TerminalOptions, Viewport,
 };
 
 use crate::{
     config::get_theme_color,
-    views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
+    views::gen_graph_widget::{create_gen_graph_widget, GenGraphNodeSizer},
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -247,8 +247,8 @@ pub fn show_inline_gen_graph_widget(
                                     .with_line_style(LineStyle::Normal)
                                     .with_merge_glyphs(false);
 
-                                    if state.controller.has_path_highlight(&path_style) {
-                                        state.controller.clear_path_highlight(&path_style);
+                                    if state.controller.has_highlight(&path_style) {
+                                        state.controller.clear_highlight(&path_style);
                                     } else if let Some(last_path) = state.paths.last() {
                                         state
                                             .controller
@@ -350,7 +350,7 @@ fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
 }
 
 fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    let help_text = if state.controller.get_path_highlights().is_empty() {
+    let help_text = if state.controller.highlights.is_empty() {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
     } else {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
