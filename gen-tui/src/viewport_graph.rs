@@ -522,6 +522,16 @@ impl CroppedGraph {
         results
     }
 
+    /// Create a new CroppedGraph from a list of visual edges.
+    /// This is useful for creating temporary graphs for highlighting.
+    pub fn from_visual_edges(edges: &[((WorldPos, WorldPos), crate::plotter::PathStyle)]) -> Self {
+        let mut new_graph = Self::empty();
+        for ((source, target), _) in edges {
+            new_graph.graph.add_edge(*source, *target, Vec::new());
+        }
+        new_graph
+    }
+
     /// Invert edge bundle information to map domain edges to their visual segments.
     /// Returns a HashMap where keys are domain edge pairs (NodeIndex, NodeIndex)
     /// and values are vectors of visual edge segments (WorldPos, WorldPos) that

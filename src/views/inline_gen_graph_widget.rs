@@ -14,15 +14,15 @@ use gen_tui::{
     theme::Theme,
 };
 use ratatui::{
+    TerminalOptions, Viewport,
     prelude::*,
     style::Color,
     widgets::{Block, Borders},
-    TerminalOptions, Viewport,
 };
 
 use crate::{
     config::get_theme_color,
-    views::gen_graph_widget::{create_gen_graph_widget, GenGraphNodeSizer},
+    views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -231,7 +231,7 @@ pub fn show_inline_gen_graph_widget(
                         AppEvent::KeyPress(key) => {
                             // Intercept quit signal and path highlighting
                             match key.code {
-                                KeyCode::Esc | KeyCode::Char('q') => {
+                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
                                     break;
                                 }
                                 KeyCode::Char('f') => {
@@ -359,14 +359,6 @@ fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphS
     let paragraph =
         ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));
 
-    frame.render_widget(paragraph, area);
-}
-
-#[allow(dead_code)]
-fn draw_final_message(frame: &mut Frame, area: Rect, _state: &mut InlineGenGraphState) {
-    let final_text = "GenGraph viewing completed".to_string();
-    let paragraph =
-        ratatui::widgets::Paragraph::new(final_text).style(Style::default().fg(Color::Green));
     frame.render_widget(paragraph, area);
 }
 

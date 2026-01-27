@@ -341,7 +341,9 @@ pub fn view_block_group(
 
             // Status bar
             let mut status_message = match focus_zone {
-                FocusZone::Canvas => "*←→↑↓* pan | *+/-* zoom | *esc* back to sidebar".to_string(),
+                FocusZone::Canvas => {
+                    "*←→↑↓* pan | *+/-* zoom | *p* toggle path | *esc* back to sidebar".to_string()
+                }
                 FocusZone::Panel => "*esc* close panel".to_string(),
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };

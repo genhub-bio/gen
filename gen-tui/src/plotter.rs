@@ -387,33 +387,41 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     .map(|(_, style)| *style)
                     .last();
 
-                // Decision tree:
-                // 1. Is this routing node part of any highlighted path?
-                // 2. If it is, do we merge with the current glyph or replace it?
-                //    - Merge if merge_glyphs is true
-                //    - Replace if merge_glyphs is false (avoids spiney artefacts with color tinting)
-                let character = match highlighted_style {
-                    Some(style) if style.merge_glyphs => {
-                        // For merged glyphs, we need to know the 'highlighted' connections.
-                        // Since we don't have a separate graph for highlights anymore, we use the base glyph
-                        // but rendered with heavier weight if requested.
-                        // Ideally we'd calculate the union of connections from all overlapping highlights,
-                        // but checking if it's on a highlighted edge is a good approximation.
+                let character = if let Some(style) = highlighted_style {
+                    // Create a temporary graph for the active highlight style
+                    // to compute the correct glyph
+                    let active_edges: Vec<_> = edge_highlights
+                        .iter()
+                        .filter(|(_, s)| *s == style)
+                        .cloned()
+                        .collect();
+                    let highlight_graph = CroppedGraph::from_visual_edges(&active_edges);
+                    let high_glyph = compute_junction_glyph(&highlight_graph, *world_pos);
+
+                    // Decision tree:
+                    // 1. Is this routing node part of any highlighted path?
+                    // 2. If it is, do we merge with the current glyph or replace it?
+                    //    - Merge if merge_glyphs is true
+                    //    - Replace if merge_glyphs is false (avoids spiney artefacts with color tinting)
+                    if style.merge_glyphs {
                         let high_char = match style.line_style {
-                            LineStyle::Normal => base_glyph.glyph(),
-                            LineStyle::Bold => base_glyph.heavy_glyph(),
+                            LineStyle::Normal => high_glyph.glyph(),
+                            LineStyle::Bold => high_glyph.heavy_glyph(),
                         };
                         MergeStrategy::Fuzzy
                             .merge(&base_glyph.glyph().to_string(), &high_char.to_string())
                             .chars()
                             .next()
                             .unwrap_or('?')
+                    } else {
+                        // Replace mode: use the highlight glyph directly
+                        match style.line_style {
+                            LineStyle::Normal => high_glyph.glyph(),
+                            LineStyle::Bold => high_glyph.heavy_glyph(),
+                        }
                     }
-                    Some(style) => match style.line_style {
-                        LineStyle::Normal => base_glyph.glyph(),
-                        LineStyle::Bold => base_glyph.heavy_glyph(),
-                    },
-                    None => base_glyph.glyph(),
+                } else {
+                    base_glyph.glyph()
                 };
 
                 let fg_color = match highlighted_style {
