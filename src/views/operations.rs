@@ -6,7 +6,7 @@ use std::{backtrace::Backtrace, collections::HashMap, io, rc::Rc, time::Instant}
 use crossterm::{
     event::{self, KeyCode, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
@@ -19,12 +19,12 @@ use gen_models::{
 use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
 use itertools::Itertools;
 use ratatui::{
-    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     prelude::{Color, Style, Text},
     style::Modifier,
     widgets::{Block, Borders, Paragraph, Row, Table},
+    Terminal,
 };
 use rusqlite::{params, types::Value};
 use tui_textarea::TextArea;
@@ -32,7 +32,7 @@ use tui_textarea::TextArea;
 use crate::{
     config::get_theme_color,
     views::{
-        gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
+        gen_graph_widget::{create_gen_graph_widget, GenGraphNodeSizer},
         patch::get_change_graph_from_hash,
     },
 };
@@ -120,10 +120,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
     });
     graph_controller.set_detail_level(VisualDetail::Truncated);
     graph_controller.show_cursor();
-    graph_controller.initialize_cursor();
-    graph_controller
-        .rebuild_viewport_graph()
-        .map_err(io::Error::other)?;
 
     let mut view_message_panel = false;
     let mut view_graph = false;
@@ -239,9 +235,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
                     // Update graph controller viewport and render widget
                     let canvas_area = sub_chunk[1];
-                    graph_controller.viewport_state.focus();
-                    graph_controller.viewport_state.viewport_bounds = canvas_area;
-                    graph_controller.update_animations(frame_delta);
 
                     let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
                     let graph_title = if blockgroup_graphs.is_empty() {
@@ -262,6 +255,11 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         });
 
                     let inner_canvas = graph_block.inner(canvas_area);
+
+                    graph_controller.viewport_state.focus();
+                    graph_controller.viewport_state.viewport_bounds = inner_canvas;
+                    graph_controller.update_animations(frame_delta);
+
                     f.render_widget(graph_block, canvas_area);
 
                     let widget = create_gen_graph_widget(conn)
@@ -282,9 +280,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
                 // Update graph controller viewport and render widget
                 let canvas_area = chunks[1];
-                graph_controller.viewport_state.focus();
-                graph_controller.viewport_state.viewport_bounds = canvas_area;
-                graph_controller.update_animations(frame_delta);
 
                 let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
                 let graph_title = if blockgroup_graphs.is_empty() {
@@ -305,6 +300,11 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     });
 
                 let inner_canvas = graph_block.inner(canvas_area);
+
+                graph_controller.viewport_state.focus();
+                graph_controller.viewport_state.viewport_bounds = inner_canvas;
+                graph_controller.update_animations(frame_delta);
+
                 f.render_widget(graph_block, canvas_area);
 
                 let widget = create_gen_graph_widget(conn)
@@ -417,9 +417,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         });
                         graph_controller.set_detail_level(VisualDetail::Truncated);
                         graph_controller.show_cursor();
-                        graph_controller.initialize_cursor();
-                        // Ignore rebuild errors during block group switching
-                        let _ = graph_controller.rebuild_viewport_graph();
                     } else {
                         let _ = graph_controller.handle_key_event(key);
                     }
@@ -503,9 +500,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                     });
                                 graph_controller.set_detail_level(VisualDetail::Truncated);
                                 graph_controller.show_cursor();
-                                graph_controller.initialize_cursor();
-                                // Ignore rebuild errors for empty graph
-                                let _ = graph_controller.rebuild_viewport_graph();
                             } else {
                                 let node_sizer = GenGraphNodeSizer;
                                 graph_controller = GraphController::new(
@@ -523,9 +517,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 });
                                 graph_controller.set_detail_level(VisualDetail::Truncated);
                                 graph_controller.show_cursor();
-                                graph_controller.initialize_cursor();
-                                // Ignore rebuild errors when initially loading graph
-                                let _ = graph_controller.rebuild_viewport_graph();
                             }
                         }
                         _ => {}
