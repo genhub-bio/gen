@@ -6,7 +6,7 @@ use std::{backtrace::Backtrace, collections::HashMap, io, rc::Rc, time::Instant}
 use crossterm::{
     event::{self, KeyCode, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
@@ -19,12 +19,12 @@ use gen_models::{
 use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
 use itertools::Itertools;
 use ratatui::{
-    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    prelude::{Color, Style, Text},
+    prelude::{Color, Line, Span, Style},
     style::Modifier,
     widgets::{Block, Borders, Paragraph, Row, Table},
+    Terminal,
 };
 use rusqlite::{params, types::Value};
 use tui_textarea::TextArea;
@@ -32,7 +32,7 @@ use tui_textarea::TextArea;
 use crate::{
     config::get_theme_color,
     views::{
-        gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
+        gen_graph_widget::{create_gen_graph_widget, GenGraphNodeSizer},
         patch::get_change_graph_from_hash,
     },
 };
@@ -44,6 +44,28 @@ fn clip_text(t: &str, limit: usize) -> String {
     } else {
         t.to_string()
     }
+}
+
+/// Parses a string with markdown-like asterisk syntax for highlighting.
+/// Segments surrounded by '*' are styled with `highlight_style`.
+/// Other segments are styled with `default_style`.
+fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<'_> {
+    let mut spans = Vec::new();
+    let mut is_highlighted = false;
+    for part in text.split('*') {
+        if !part.is_empty() {
+            spans.push(Span::styled(
+                part,
+                if is_highlighted {
+                    highlight_style
+                } else {
+                    default_style
+                },
+            ));
+        }
+        is_highlighted = !is_highlighted;
+    }
+    Line::from(spans)
 }
 
 struct OperationRow<'a> {
@@ -209,22 +231,23 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
             let panel_messages = if !panel_activated {
                 // NAVIGATION MODE - show cycling and panel management controls
-                let mut msg = " tab=next panel | enter=activate panel".to_string();
+                let mut msg = "*tab/arrows* navigate | *enter* activate panel".to_string();
                 if panel_focus == "message_editor" || panel_focus == "graph_view" {
-                    msg.push_str(" | x=close panel");
+                    msg.push_str(" | *x* close panel");
                 }
-                msg.push_str(" | q=quit");
+                msg.push_str(" | *q* quit");
                 msg
             } else {
                 // ACTIVE MODE - show panel-specific controls
                 if panel_focus == "operations" {
-                    " up/down=select | e=edit msg | v=view graph | esc=leave panel".to_string()
+                    "*↑↓* select | *e* edit msg | *v* view graph | *esc* leave panel".to_string()
                 } else if panel_focus == "message_editor" {
-                    " ctrl+s=save | esc=leave panel".to_string()
+                    "*ctrl+s* save | *esc* leave panel".to_string()
                 } else if panel_focus == "graph_view" {
-                    " tab=cycle block groups | ←→↑↓=pan | +/-=zoom | esc=leave panel".to_string()
+                    "*tab* cycle block groups | *←→↑↓* pan | *+/-* zoom | *esc* leave panel"
+                        .to_string()
                 } else {
-                    " esc=leave panel".to_string()
+                    "*esc* leave panel".to_string()
                 }
             };
 
@@ -369,13 +392,16 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 f.render_widget(table, chunks[0]);
             };
             let status_bar_contents = format!(
-                "{panel_messages:width$}",
+                "{panel_messages:^width$}",
                 width = status_bar_area.width as usize
             );
-            let status_bar = Paragraph::new(Text::styled(
-                status_bar_contents,
-                Style::default().bg(Color::DarkGray).fg(Color::White),
-            ));
+            let status_line = style_text(
+                &status_bar_contents,
+                Style::default().fg(get_theme_color("text_muted").unwrap()),
+                Style::default().fg(get_theme_color("highlight").unwrap()),
+            );
+            let status_bar = Paragraph::new(status_line)
+                .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
             f.render_widget(status_bar, status_bar_area);
         })?;
 
@@ -400,6 +426,54 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 focus_index = focus_rotation.len() - 1;
                             }
                             panel_focus = focus_rotation[focus_index];
+                        }
+                        // *   Down from "Operations" moves to the first available bottom panel ("Message Editor" or "Graph View").
+                        //     *   Up from any bottom panel returns to "Operations".
+                        //     *   Right moves from "Message Editor" to "Graph View" (if visible).
+                        //     *   Left moves from "Graph View" to "Message Editor" (if visible).
+                        KeyCode::Up => {
+                            if panel_focus != "operations" {
+                                panel_focus = "operations";
+                                if let Some(idx) =
+                                    focus_rotation.iter().position(|&s| s == panel_focus)
+                                {
+                                    focus_index = idx;
+                                }
+                            }
+                        }
+                        KeyCode::Down => {
+                            if panel_focus == "operations" {
+                                if view_message_panel {
+                                    panel_focus = "message_editor";
+                                } else if view_graph {
+                                    panel_focus = "graph_view";
+                                }
+                                if let Some(idx) =
+                                    focus_rotation.iter().position(|&s| s == panel_focus)
+                                {
+                                    focus_index = idx;
+                                }
+                            }
+                        }
+                        KeyCode::Left => {
+                            if panel_focus == "graph_view" && view_message_panel {
+                                panel_focus = "message_editor";
+                                if let Some(idx) =
+                                    focus_rotation.iter().position(|&s| s == panel_focus)
+                                {
+                                    focus_index = idx;
+                                }
+                            }
+                        }
+                        KeyCode::Right => {
+                            if panel_focus == "message_editor" && view_graph {
+                                panel_focus = "graph_view";
+                                if let Some(idx) =
+                                    focus_rotation.iter().position(|&s| s == panel_focus)
+                                {
+                                    focus_index = idx;
+                                }
+                            }
                         }
                         KeyCode::Enter => {
                             // Activate the currently selected panel
