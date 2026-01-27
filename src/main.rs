@@ -164,9 +164,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 None => get_default_collection(operation_conn)?,
             });
 
-            if !full && graph.is_some() {
+            if !full && let Some(name) = graph.as_ref() {
                 // Use the inline widget by default if a graph is specified
-                let name = graph.as_ref().unwrap();
                 let block_group = if let Some(ref sample_name) = sample {
                     BlockGroup::get(
                         graph_conn,

@@ -85,7 +85,6 @@ impl CroppedGraph {
         let mut this = Self::empty();
 
         for &partition_idx in active_partitions {
-
             if let Some(partition_layout) =
                 &partition_table.partitions[partition_idx].layouts[detail_level.as_index()]
             {
@@ -537,7 +536,6 @@ impl CroppedGraph {
     /// and values are vectors of visual edge segments (WorldPos, WorldPos) that
     /// represent that domain edge.
     pub fn invert_edge_bundles(
-
         &self,
     ) -> HashMap<(NodeIndex, NodeIndex), Vec<(WorldPos, WorldPos)>> {
         debug!(

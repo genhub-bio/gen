@@ -6,7 +6,7 @@ use std::{backtrace::Backtrace, collections::HashMap, io, rc::Rc, time::Instant}
 use crossterm::{
     event::{self, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
@@ -19,12 +19,12 @@ use gen_models::{
 use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
 use itertools::Itertools;
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     prelude::{Color, Line, Span, Style},
     style::Modifier,
     widgets::{Block, Borders, Paragraph, Row, Table},
-    Terminal,
 };
 use rusqlite::{params, types::Value};
 use tui_textarea::TextArea;
@@ -32,7 +32,7 @@ use tui_textarea::TextArea;
 use crate::{
     config::get_theme_color,
     views::{
-        gen_graph_widget::{create_gen_graph_widget, GenGraphNodeSizer},
+        gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
         patch::get_change_graph_from_hash,
     },
 };
@@ -405,296 +405,286 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
             f.render_widget(status_bar, status_bar_area);
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let event::Event::Key(key) = event::read()? {
-                if !panel_activated {
-                    // NAVIGATION MODE - handle Tab/Shift+Tab, Enter, x, q
-                    match key.code {
-                        KeyCode::Tab => {
-                            // Cycle forward through focus_rotation
-                            focus_index += 1;
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let event::Event::Key(key) = event::read()?
+        {
+            if !panel_activated {
+                // NAVIGATION MODE - handle Tab/Shift+Tab, Enter, x, q
+                match key.code {
+                    KeyCode::Tab => {
+                        // Cycle forward through focus_rotation
+                        focus_index += 1;
+                        if focus_index >= focus_rotation.len() {
+                            focus_index = 0;
+                        }
+                        panel_focus = focus_rotation[focus_index];
+                    }
+                    KeyCode::BackTab => {
+                        // Cycle backward through focus_rotation
+                        if focus_index > 0 {
+                            focus_index -= 1;
+                        } else {
+                            focus_index = focus_rotation.len() - 1;
+                        }
+                        panel_focus = focus_rotation[focus_index];
+                    }
+                    // *   Down from "Operations" moves to the first available bottom panel ("Message Editor" or "Graph View").
+                    //     *   Up from any bottom panel returns to "Operations".
+                    //     *   Right moves from "Message Editor" to "Graph View" (if visible).
+                    //     *   Left moves from "Graph View" to "Message Editor" (if visible).
+                    KeyCode::Up => {
+                        if panel_focus != "operations" {
+                            panel_focus = "operations";
+                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
+                            {
+                                focus_index = idx;
+                            }
+                        }
+                    }
+                    KeyCode::Down => {
+                        if panel_focus == "operations" {
+                            if view_message_panel {
+                                panel_focus = "message_editor";
+                            } else if view_graph {
+                                panel_focus = "graph_view";
+                            }
+                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
+                            {
+                                focus_index = idx;
+                            }
+                        }
+                    }
+                    KeyCode::Left => {
+                        if panel_focus == "graph_view" && view_message_panel {
+                            panel_focus = "message_editor";
+                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
+                            {
+                                focus_index = idx;
+                            }
+                        }
+                    }
+                    KeyCode::Right => {
+                        if panel_focus == "message_editor" && view_graph {
+                            panel_focus = "graph_view";
+                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
+                            {
+                                focus_index = idx;
+                            }
+                        }
+                    }
+                    KeyCode::Enter => {
+                        // Activate the currently selected panel
+                        panel_activated = true;
+                    }
+                    KeyCode::Char('x') => {
+                        // Close the currently selected panel
+                        if panel_focus == "message_editor" {
+                            view_message_panel = false;
+                            // Remove from focus_rotation
+                            if let Some((p, _)) = focus_rotation
+                                .iter()
+                                .find_position(|s| **s == "message_editor")
+                            {
+                                focus_rotation.remove(p);
+                            }
+                            // Adjust focus_index and cycle to next panel
+                            if focus_index >= focus_rotation.len() {
+                                focus_index = 0;
+                            }
+                            panel_focus = focus_rotation[focus_index];
+                        } else if panel_focus == "graph_view" {
+                            view_graph = false;
+                            // Remove from focus_rotation
+                            if let Some((p, _)) =
+                                focus_rotation.iter().find_position(|s| **s == "graph_view")
+                            {
+                                focus_rotation.remove(p);
+                            }
+                            // Adjust focus_index and cycle to next panel
                             if focus_index >= focus_rotation.len() {
                                 focus_index = 0;
                             }
                             panel_focus = focus_rotation[focus_index];
                         }
-                        KeyCode::BackTab => {
-                            // Cycle backward through focus_rotation
-                            if focus_index > 0 {
-                                focus_index -= 1;
+                        // Operations panel cannot be closed
+                    }
+                    KeyCode::Char('q') => {
+                        // Exit application
+                        break;
+                    }
+                    _ => {}
+                }
+            } else {
+                // ACTIVE MODE - delegate to active panel, Esc leaves (doesn't close)
+                if key.code == KeyCode::Esc {
+                    panel_activated = false;
+                } else {
+                    match panel_focus {
+                        "operations" => {
+                            // Operations table in active mode handles: e, v, up/down
+                            match key.code {
+                                KeyCode::Up => {
+                                    if selected > 0 {
+                                        selected = selected.saturating_sub(1);
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if selected < operations.len() - 1 {
+                                        selected += 1;
+                                    }
+                                }
+                                KeyCode::Char('e') => {
+                                    // Open message editor
+                                    textarea = TextArea::from_iter(
+                                        operation_summaries[selected].summary.summary.split("\n"),
+                                    );
+                                    view_message_panel = true;
+                                    // Add to focus_rotation if not present
+                                    focus_index = if let Some((i, _)) = focus_rotation
+                                        .iter()
+                                        .find_position(|s| **s == "message_editor")
+                                    {
+                                        i
+                                    } else {
+                                        focus_rotation.push("message_editor");
+                                        focus_rotation.len() - 1
+                                    };
+                                    panel_focus = focus_rotation[focus_index];
+                                    // panel_activated remains true (auto-activate new panel)
+                                }
+                                KeyCode::Char('v') => {
+                                    // Open graph view
+                                    view_graph = true;
+                                    // Add to focus_rotation if not present
+                                    focus_index = if let Some((i, _)) =
+                                        focus_rotation.iter().find_position(|s| **s == "graph_view")
+                                    {
+                                        i
+                                    } else {
+                                        focus_rotation.push("graph_view");
+                                        focus_rotation.len() - 1
+                                    };
+                                    panel_focus = focus_rotation[focus_index];
+                                    // Load graphs for selected operation
+                                    let hash = operation_summaries[selected].operation.hash;
+                                    let graphs =
+                                        get_change_graph_from_hash(context, &hash).unwrap();
+                                    blockgroup_graphs.clear();
+                                    let bg_info = BlockGroup::query_by_ids(
+                                        conn,
+                                        &graphs.keys().cloned().collect::<Vec<_>>(),
+                                    );
+                                    let bg_map: HashMap<HashId, &BlockGroup> =
+                                        HashMap::from_iter(bg_info.iter().map(|k| (k.id, k)));
+                                    for (i, v) in graphs {
+                                        blockgroup_graphs.push((
+                                            i,
+                                            format!(
+                                                "{collection} {sample} {name}",
+                                                collection = bg_map[&i].collection_name.clone(),
+                                                sample = bg_map[&i]
+                                                    .sample_name
+                                                    .clone()
+                                                    .unwrap_or("Reference".to_string()),
+                                                name = bg_map[&i].name.clone()
+                                            ),
+                                            v,
+                                        ));
+                                    }
+                                    selected_blockgroup_graph = 0;
+                                    if blockgroup_graphs.is_empty() {
+                                        let node_sizer = GenGraphNodeSizer;
+                                        graph_controller =
+                                            GraphController::new(&empty_graph, node_sizer)
+                                                .with_theme(Theme {
+                                                    canvas: get_theme_color("canvas").unwrap(),
+                                                    node_fg: get_theme_color("text").unwrap(),
+                                                    node_bg: get_theme_color("node").unwrap(),
+                                                    edge_fg: get_theme_color("edge").unwrap(),
+                                                    edge_bg: get_theme_color("canvas").unwrap(),
+                                                    cursor_fg: get_theme_color("cursor_fg")
+                                                        .unwrap(),
+                                                    cursor_bg: get_theme_color("cursor_bg")
+                                                        .unwrap(),
+                                                });
+                                        graph_controller.set_detail_level(VisualDetail::Truncated);
+                                        graph_controller.show_cursor();
+                                    } else {
+                                        let node_sizer = GenGraphNodeSizer;
+                                        graph_controller = GraphController::new(
+                                            &blockgroup_graphs[selected_blockgroup_graph].2,
+                                            node_sizer,
+                                        )
+                                        .with_theme(Theme {
+                                            canvas: get_theme_color("canvas").unwrap(),
+                                            node_fg: get_theme_color("text").unwrap(),
+                                            node_bg: get_theme_color("node").unwrap(),
+                                            edge_fg: get_theme_color("edge").unwrap(),
+                                            edge_bg: get_theme_color("canvas").unwrap(),
+                                            cursor_fg: get_theme_color("cursor_fg").unwrap(),
+                                            cursor_bg: get_theme_color("cursor_bg").unwrap(),
+                                        });
+                                        graph_controller.set_detail_level(VisualDetail::Truncated);
+                                        graph_controller.show_cursor();
+                                    }
+                                    // panel_activated remains true (auto-activate new panel)
+                                }
+                                _ => {}
+                            }
+                        }
+                        "message_editor" => {
+                            if key.code == KeyCode::Char('s')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                // Save message
+                                let new_summary = textarea.lines().iter().join("\n");
+                                let _ = OperationSummary::set_message(
+                                    op_conn,
+                                    operation_summaries[selected].summary.id,
+                                    &new_summary,
+                                );
+                                operation_summaries[selected].summary.summary = new_summary;
                             } else {
-                                focus_index = focus_rotation.len() - 1;
-                            }
-                            panel_focus = focus_rotation[focus_index];
-                        }
-                        // *   Down from "Operations" moves to the first available bottom panel ("Message Editor" or "Graph View").
-                        //     *   Up from any bottom panel returns to "Operations".
-                        //     *   Right moves from "Message Editor" to "Graph View" (if visible).
-                        //     *   Left moves from "Graph View" to "Message Editor" (if visible).
-                        KeyCode::Up => {
-                            if panel_focus != "operations" {
-                                panel_focus = "operations";
-                                if let Some(idx) =
-                                    focus_rotation.iter().position(|&s| s == panel_focus)
-                                {
-                                    focus_index = idx;
-                                }
+                                textarea.input(key);
                             }
                         }
-                        KeyCode::Down => {
-                            if panel_focus == "operations" {
-                                if view_message_panel {
-                                    panel_focus = "message_editor";
-                                } else if view_graph {
-                                    panel_focus = "graph_view";
+                        "graph_view" => {
+                            if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+                                // Cycle block groups
+                                if key.code == KeyCode::BackTab {
+                                    if selected_blockgroup_graph == 0 {
+                                        selected_blockgroup_graph = blockgroup_graphs.len() - 1;
+                                    } else {
+                                        selected_blockgroup_graph -= 1;
+                                    }
+                                } else {
+                                    selected_blockgroup_graph += 1;
+                                    if selected_blockgroup_graph >= blockgroup_graphs.len() {
+                                        selected_blockgroup_graph = 0;
+                                    }
                                 }
-                                if let Some(idx) =
-                                    focus_rotation.iter().position(|&s| s == panel_focus)
-                                {
-                                    focus_index = idx;
-                                }
+                                // Update the graph controller with the new graph
+                                let node_sizer = GenGraphNodeSizer;
+                                graph_controller = GraphController::new(
+                                    &blockgroup_graphs[selected_blockgroup_graph].2,
+                                    node_sizer,
+                                )
+                                .with_theme(Theme {
+                                    canvas: get_theme_color("canvas").unwrap(),
+                                    node_fg: get_theme_color("text").unwrap(),
+                                    node_bg: get_theme_color("node").unwrap(),
+                                    edge_fg: get_theme_color("edge").unwrap(),
+                                    edge_bg: get_theme_color("canvas").unwrap(),
+                                    cursor_fg: get_theme_color("cursor_fg").unwrap(),
+                                    cursor_bg: get_theme_color("cursor_bg").unwrap(),
+                                });
+                                graph_controller.set_detail_level(VisualDetail::Truncated);
+                                graph_controller.show_cursor();
+                            } else {
+                                let _ = graph_controller.handle_key_event(key);
                             }
-                        }
-                        KeyCode::Left => {
-                            if panel_focus == "graph_view" && view_message_panel {
-                                panel_focus = "message_editor";
-                                if let Some(idx) =
-                                    focus_rotation.iter().position(|&s| s == panel_focus)
-                                {
-                                    focus_index = idx;
-                                }
-                            }
-                        }
-                        KeyCode::Right => {
-                            if panel_focus == "message_editor" && view_graph {
-                                panel_focus = "graph_view";
-                                if let Some(idx) =
-                                    focus_rotation.iter().position(|&s| s == panel_focus)
-                                {
-                                    focus_index = idx;
-                                }
-                            }
-                        }
-                        KeyCode::Enter => {
-                            // Activate the currently selected panel
-                            panel_activated = true;
-                        }
-                        KeyCode::Char('x') => {
-                            // Close the currently selected panel
-                            if panel_focus == "message_editor" {
-                                view_message_panel = false;
-                                // Remove from focus_rotation
-                                if let Some((p, _)) = focus_rotation
-                                    .iter()
-                                    .find_position(|s| **s == "message_editor")
-                                {
-                                    focus_rotation.remove(p);
-                                }
-                                // Adjust focus_index and cycle to next panel
-                                if focus_index >= focus_rotation.len() {
-                                    focus_index = 0;
-                                }
-                                panel_focus = focus_rotation[focus_index];
-                            } else if panel_focus == "graph_view" {
-                                view_graph = false;
-                                // Remove from focus_rotation
-                                if let Some((p, _)) =
-                                    focus_rotation.iter().find_position(|s| **s == "graph_view")
-                                {
-                                    focus_rotation.remove(p);
-                                }
-                                // Adjust focus_index and cycle to next panel
-                                if focus_index >= focus_rotation.len() {
-                                    focus_index = 0;
-                                }
-                                panel_focus = focus_rotation[focus_index];
-                            }
-                            // Operations panel cannot be closed
-                        }
-                        KeyCode::Char('q') => {
-                            // Exit application
-                            break;
                         }
                         _ => {}
-                    }
-                } else {
-                    // ACTIVE MODE - delegate to active panel, Esc leaves (doesn't close)
-                    if key.code == KeyCode::Esc {
-                        panel_activated = false;
-                    } else {
-                        match panel_focus {
-                            "operations" => {
-                                // Operations table in active mode handles: e, v, up/down
-                                match key.code {
-                                    KeyCode::Up => {
-                                        if selected > 0 {
-                                            selected = selected.saturating_sub(1);
-                                        }
-                                    }
-                                    KeyCode::Down => {
-                                        if selected < operations.len() - 1 {
-                                            selected += 1;
-                                        }
-                                    }
-                                    KeyCode::Char('e') => {
-                                        // Open message editor
-                                        textarea = TextArea::from_iter(
-                                            operation_summaries[selected]
-                                                .summary
-                                                .summary
-                                                .split("\n"),
-                                        );
-                                        view_message_panel = true;
-                                        // Add to focus_rotation if not present
-                                        focus_index = if let Some((i, _)) = focus_rotation
-                                            .iter()
-                                            .find_position(|s| **s == "message_editor")
-                                        {
-                                            i
-                                        } else {
-                                            focus_rotation.push("message_editor");
-                                            focus_rotation.len() - 1
-                                        };
-                                        panel_focus = focus_rotation[focus_index];
-                                        // panel_activated remains true (auto-activate new panel)
-                                    }
-                                    KeyCode::Char('v') => {
-                                        // Open graph view
-                                        view_graph = true;
-                                        // Add to focus_rotation if not present
-                                        focus_index = if let Some((i, _)) = focus_rotation
-                                            .iter()
-                                            .find_position(|s| **s == "graph_view")
-                                        {
-                                            i
-                                        } else {
-                                            focus_rotation.push("graph_view");
-                                            focus_rotation.len() - 1
-                                        };
-                                        panel_focus = focus_rotation[focus_index];
-                                        // Load graphs for selected operation
-                                        let hash = operation_summaries[selected].operation.hash;
-                                        let graphs =
-                                            get_change_graph_from_hash(context, &hash).unwrap();
-                                        blockgroup_graphs.clear();
-                                        let bg_info = BlockGroup::query_by_ids(
-                                            conn,
-                                            &graphs.keys().cloned().collect::<Vec<_>>(),
-                                        );
-                                        let bg_map: HashMap<HashId, &BlockGroup> =
-                                            HashMap::from_iter(bg_info.iter().map(|k| (k.id, k)));
-                                        for (i, v) in graphs {
-                                            blockgroup_graphs.push((
-                                                i,
-                                                format!(
-                                                    "{collection} {sample} {name}",
-                                                    collection = bg_map[&i].collection_name.clone(),
-                                                    sample = bg_map[&i]
-                                                        .sample_name
-                                                        .clone()
-                                                        .unwrap_or("Reference".to_string()),
-                                                    name = bg_map[&i].name.clone()
-                                                ),
-                                                v,
-                                            ));
-                                        }
-                                        selected_blockgroup_graph = 0;
-                                        if blockgroup_graphs.is_empty() {
-                                            let node_sizer = GenGraphNodeSizer;
-                                            graph_controller =
-                                                GraphController::new(&empty_graph, node_sizer)
-                                                    .with_theme(Theme {
-                                                        canvas: get_theme_color("canvas").unwrap(),
-                                                        node_fg: get_theme_color("text").unwrap(),
-                                                        node_bg: get_theme_color("node").unwrap(),
-                                                        edge_fg: get_theme_color("edge").unwrap(),
-                                                        edge_bg: get_theme_color("canvas").unwrap(),
-                                                        cursor_fg: get_theme_color("cursor_fg")
-                                                            .unwrap(),
-                                                        cursor_bg: get_theme_color("cursor_bg")
-                                                            .unwrap(),
-                                                    });
-                                            graph_controller
-                                                .set_detail_level(VisualDetail::Truncated);
-                                            graph_controller.show_cursor();
-                                        } else {
-                                            let node_sizer = GenGraphNodeSizer;
-                                            graph_controller = GraphController::new(
-                                                &blockgroup_graphs[selected_blockgroup_graph].2,
-                                                node_sizer,
-                                            )
-                                            .with_theme(Theme {
-                                                canvas: get_theme_color("canvas").unwrap(),
-                                                node_fg: get_theme_color("text").unwrap(),
-                                                node_bg: get_theme_color("node").unwrap(),
-                                                edge_fg: get_theme_color("edge").unwrap(),
-                                                edge_bg: get_theme_color("canvas").unwrap(),
-                                                cursor_fg: get_theme_color("cursor_fg").unwrap(),
-                                                cursor_bg: get_theme_color("cursor_bg").unwrap(),
-                                            });
-                                            graph_controller
-                                                .set_detail_level(VisualDetail::Truncated);
-                                            graph_controller.show_cursor();
-                                        }
-                                        // panel_activated remains true (auto-activate new panel)
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            "message_editor" => {
-                                if key.code == KeyCode::Char('s')
-                                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                                {
-                                    // Save message
-                                    let new_summary = textarea.lines().iter().join("\n");
-                                    let _ = OperationSummary::set_message(
-                                        op_conn,
-                                        operation_summaries[selected].summary.id,
-                                        &new_summary,
-                                    );
-                                    operation_summaries[selected].summary.summary = new_summary;
-                                } else {
-                                    textarea.input(key);
-                                }
-                            }
-                            "graph_view" => {
-                                if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-                                    // Cycle block groups
-                                    if key.code == KeyCode::BackTab {
-                                        if selected_blockgroup_graph == 0 {
-                                            selected_blockgroup_graph = blockgroup_graphs.len() - 1;
-                                        } else {
-                                            selected_blockgroup_graph -= 1;
-                                        }
-                                    } else {
-                                        selected_blockgroup_graph += 1;
-                                        if selected_blockgroup_graph >= blockgroup_graphs.len() {
-                                            selected_blockgroup_graph = 0;
-                                        }
-                                    }
-                                    // Update the graph controller with the new graph
-                                    let node_sizer = GenGraphNodeSizer;
-                                    graph_controller = GraphController::new(
-                                        &blockgroup_graphs[selected_blockgroup_graph].2,
-                                        node_sizer,
-                                    )
-                                    .with_theme(Theme {
-                                        canvas: get_theme_color("canvas").unwrap(),
-                                        node_fg: get_theme_color("text").unwrap(),
-                                        node_bg: get_theme_color("node").unwrap(),
-                                        edge_fg: get_theme_color("edge").unwrap(),
-                                        edge_bg: get_theme_color("canvas").unwrap(),
-                                        cursor_fg: get_theme_color("cursor_fg").unwrap(),
-                                        cursor_bg: get_theme_color("cursor_bg").unwrap(),
-                                    });
-                                    graph_controller.set_detail_level(VisualDetail::Truncated);
-                                    graph_controller.show_cursor();
-                                } else {
-                                    let _ = graph_controller.handle_key_event(key);
-                                }
-                            }
-                            _ => {}
-                        }
                     }
                 }
             }

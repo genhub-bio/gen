@@ -269,8 +269,14 @@ impl Cursor {
         camera_rect: crate::geometry::BigRect<i64>,
     ) {
         // Convert world position to viewport coordinates: viewport = world - camera_origin
-        let viewport_x = (world_pos.x - camera_rect.min.x) as u16;
-        let viewport_y = (world_pos.y - camera_rect.min.y) as u16;
+        // Use i64 for calculation to avoid wrapping, then clamp to u16 range
+        let relative_x = world_pos.x - camera_rect.min.x;
+        let relative_y = world_pos.y - camera_rect.min.y;
+
+        // We use saturating casts/clamps to prevent wrapping artifacts (e.g. negative -> huge positive)
+        let viewport_x = relative_x.clamp(0, u16::MAX as i64) as u16;
+        let viewport_y = relative_y.clamp(0, u16::MAX as i64) as u16;
+
         self.viewport_pos = crate::geometry::ViewportPos::new(viewport_x, viewport_y);
     }
 

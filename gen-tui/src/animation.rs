@@ -154,12 +154,27 @@ impl ViewportState {
                 height: height.saturating_sub(2 * hard_zone_y),
             };
 
-            let cursor_viewport = cursor.viewport_pos();
-            let cursor_point = (cursor_viewport.x, cursor_viewport.y);
+            let (cursor_vp_x, cursor_vp_y) =
+                if let Some(world) = cursor.to_world_pos(viewport_graph) {
+                    // Calculate position relative to camera rect top-left
+                    let cam_rect = self.camera_rect();
+                    (world.x - cam_rect.min.x, world.y - cam_rect.min.y)
+                } else {
+                    let vp = cursor.viewport_pos();
+                    (vp.x as i64, vp.y as i64)
+                };
 
-            // Determine which zone the cursor is in using Rect::contains
-            let in_dead_zone = dead_zone.contains(cursor_point.into());
-            let in_soft_zone = soft_zone_rect.contains(cursor_point.into());
+            // Determine which zone the cursor is in manually since we have i64 coords
+            // Zone rects are in viewport coordinates (0-based)
+            let in_dead_zone = cursor_vp_x >= dead_zone.x as i64
+                && cursor_vp_x < (dead_zone.x + dead_zone.width) as i64
+                && cursor_vp_y >= dead_zone.y as i64
+                && cursor_vp_y < (dead_zone.y + dead_zone.height) as i64;
+
+            let in_soft_zone = cursor_vp_x >= soft_zone_rect.x as i64
+                && cursor_vp_x < (soft_zone_rect.x + soft_zone_rect.width) as i64
+                && cursor_vp_y >= soft_zone_rect.y as i64
+                && cursor_vp_y < (soft_zone_rect.y + soft_zone_rect.height) as i64;
 
             let mut desired_cam = self.camera_current;
             let mut needs_smooth_follow = false;
@@ -172,28 +187,28 @@ impl ViewportState {
                 // Smooth follow: calculate exact amount to move cursor to dead zone edge
 
                 // Handle X-axis
-                if cursor_viewport.x < dead_zone.x {
+                if cursor_vp_x < dead_zone.x as i64 {
                     // Cursor is left of dead zone - move camera left to push cursor right
-                    let distance = dead_zone.x - cursor_viewport.x;
-                    desired_cam.x -= distance as i64;
+                    let distance = dead_zone.x as i64 - cursor_vp_x;
+                    desired_cam.x -= distance;
                     needs_smooth_follow = true;
-                } else if cursor_viewport.x >= dead_zone.x + dead_zone.width {
+                } else if cursor_vp_x >= (dead_zone.x + dead_zone.width) as i64 {
                     // Cursor is right of dead zone - move camera right to push cursor left
-                    let distance = cursor_viewport.x - (dead_zone.x + dead_zone.width - 1);
-                    desired_cam.x += distance as i64;
+                    let distance = cursor_vp_x - (dead_zone.x + dead_zone.width - 1) as i64;
+                    desired_cam.x += distance;
                     needs_smooth_follow = true;
                 }
 
                 // Handle Y-axis
-                if cursor_viewport.y < dead_zone.y {
+                if cursor_vp_y < dead_zone.y as i64 {
                     // Cursor is above dead zone - move camera up to push cursor down
-                    let distance = dead_zone.y - cursor_viewport.y;
-                    desired_cam.y -= distance as i64;
+                    let distance = dead_zone.y as i64 - cursor_vp_y;
+                    desired_cam.y -= distance;
                     needs_smooth_follow = true;
-                } else if cursor_viewport.y >= dead_zone.y + dead_zone.height {
+                } else if cursor_vp_y >= (dead_zone.y + dead_zone.height) as i64 {
                     // Cursor is below dead zone - move camera down to push cursor up
-                    let distance = cursor_viewport.y - (dead_zone.y + dead_zone.height - 1);
-                    desired_cam.y += distance as i64;
+                    let distance = cursor_vp_y - (dead_zone.y + dead_zone.height - 1) as i64;
+                    desired_cam.y += distance;
                     needs_smooth_follow = true;
                 }
             } else {
@@ -201,30 +216,30 @@ impl ViewportState {
                 // Immediate snap: move cursor exactly to soft zone boundary
 
                 // Handle X-axis
-                if cursor_viewport.x < soft_zone_rect.x {
+                if cursor_vp_x < soft_zone_rect.x as i64 {
                     // Cursor is left of soft zone - snap camera to bring cursor to left edge of soft zone
-                    let distance = soft_zone_rect.x - cursor_viewport.x;
-                    desired_cam.x -= distance as i64;
+                    let distance = soft_zone_rect.x as i64 - cursor_vp_x;
+                    desired_cam.x -= distance;
                     needs_snap = true;
-                } else if cursor_viewport.x >= soft_zone_rect.x + soft_zone_rect.width {
+                } else if cursor_vp_x >= (soft_zone_rect.x + soft_zone_rect.width) as i64 {
                     // Cursor is right of soft zone - snap camera to bring cursor to right edge of soft zone
                     let distance =
-                        cursor_viewport.x - (soft_zone_rect.x + soft_zone_rect.width - 1);
-                    desired_cam.x += distance as i64;
+                        cursor_vp_x - (soft_zone_rect.x + soft_zone_rect.width - 1) as i64;
+                    desired_cam.x += distance;
                     needs_snap = true;
                 }
 
                 // Handle Y-axis
-                if cursor_viewport.y < soft_zone_rect.y {
+                if cursor_vp_y < soft_zone_rect.y as i64 {
                     // Cursor is above soft zone - snap camera to bring cursor to top edge of soft zone
-                    let distance = soft_zone_rect.y - cursor_viewport.y;
-                    desired_cam.y -= distance as i64;
+                    let distance = soft_zone_rect.y as i64 - cursor_vp_y;
+                    desired_cam.y -= distance;
                     needs_snap = true;
-                } else if cursor_viewport.y >= soft_zone_rect.y + soft_zone_rect.height {
+                } else if cursor_vp_y >= (soft_zone_rect.y + soft_zone_rect.height) as i64 {
                     // Cursor is below soft zone - snap camera to bring cursor to bottom edge of soft zone
                     let distance =
-                        cursor_viewport.y - (soft_zone_rect.y + soft_zone_rect.height - 1);
-                    desired_cam.y += distance as i64;
+                        cursor_vp_y - (soft_zone_rect.y + soft_zone_rect.height - 1) as i64;
+                    desired_cam.y += distance;
                     needs_snap = true;
                 }
             }

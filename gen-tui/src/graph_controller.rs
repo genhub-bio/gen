@@ -510,26 +510,40 @@ where
         self.partition_controller.get_vertex_spacing()
     }
 
-    /// Initialize cursor at soft_zone + 1 from left edge, associated with the node closest to origin in anchor partition
-    /// This should be called once when the controller is first created or when cursor needs reset
-    pub fn initialize_cursor(&mut self) {
+    /// Place cursor at soft_zone + 1 from left edge, vertically centered.
+    /// This positions the cursor in a comfortable viewing position within the viewport.
+    /// Should be called when viewport bounds are first established (transition from 0x0).
+    pub fn place_cursor(&mut self) {
         let viewport_center_y = self.viewport_state.viewport_bounds.height as i64 / 2;
         let desired_viewport_x = self.viewport_state.soft_zone + 1;
         let desired_viewport_y = viewport_center_y as u16;
         let desired_viewport_pos = ViewportPos::new(desired_viewport_x, desired_viewport_y);
         self.cursor.set_viewport_pos(desired_viewport_pos);
 
+        trace!("Cursor placed: viewport={:?}", desired_viewport_pos);
+    }
+
+    /// Associate cursor with default node (node closest to origin).
+    /// Call this only if no node has been explicitly set.
+    pub fn associate_cursor(&mut self) {
         // Find the node closest to partition origin (0, 0) and associate cursor with it
         if let Some(node_idx) = self.find_node_closest_to_origin() {
             // Set cursor to track this node at fractional (0.0, 0.5) = left edge, vertical middle
             self.cursor.set_node(node_idx, (0.0, 0.5));
             trace!(
-                "Cursor initialized: viewport={:?}, node={:?}, fractional=(0.0, 0.5)",
-                desired_viewport_pos, node_idx
+                "Cursor associated: node={:?}, fractional=(0.0, 0.5)",
+                node_idx
             );
         } else {
-            trace!("Warning: No data nodes found in anchor partition for cursor initialization");
+            trace!("Warning: No data nodes found in anchor partition for cursor association");
         }
+    }
+
+    /// Initialize cursor completely: viewport position + node association.
+    /// This is a convenience method for the common case where both need initialization.
+    pub fn initialize_cursor(&mut self) {
+        self.place_cursor();
+        self.associate_cursor();
     }
 
     /// Find the data node closest to the origin (0, 0) in local coordinates of the anchor partition
@@ -646,9 +660,26 @@ where
 
         trace!("rebuild_viewport_graph: starting cursor-anchored rebuild");
 
-        // Step 1: Initialize cursor if it has no node association
-        if self.cursor.node_idx().is_none() {
-            trace!("rebuild_viewport_graph: cursor has no node, initializing");
+        // Step 1: Handle first-time viewport initialization
+        // When transitioning from 0x0 viewport to real bounds, cursor viewport position needs setup
+        let viewport_was_uninitialized =
+            viewport_bounds_snapshot.width == 0 || viewport_bounds_snapshot.height == 0;
+
+        if viewport_was_uninitialized {
+            // First rebuild with valid viewport bounds - establish cursor viewport position
+            trace!(
+                "rebuild_viewport_graph: first rebuild with valid viewport bounds (was 0x0), placing cursor"
+            );
+            self.place_cursor();
+
+            // If cursor also lacks a node (wasn't set before first render), find one
+            if self.cursor.node_idx().is_none() {
+                trace!("rebuild_viewport_graph: cursor also has no node, associating with default");
+                self.associate_cursor();
+            }
+        } else if self.cursor.node_idx().is_none() {
+            // Viewport was already valid but cursor lost its node somehow - reinitialize completely
+            trace!("rebuild_viewport_graph: cursor has no node (unusual), reinitializing");
             self.initialize_cursor();
         }
 

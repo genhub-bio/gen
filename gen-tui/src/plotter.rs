@@ -274,6 +274,7 @@ pub fn plot_viewport_graph<R, G>(
 /// - `node_highlights`: List of node positions to highlight with their styles
 /// - `edge_highlights`: List of edge segments to highlight with their styles
 /// - `theme`: Theme colors for rendering
+#[allow(clippy::too_many_arguments)]
 pub fn plot_viewport_graph_with_highlights<R, G>(
     viewport_graph: &CroppedGraph,
     buffer: &mut WorldBuffer<'_>,
@@ -300,7 +301,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     (*s == source && *t == target) || (*s == target && *t == source)
                 })
                 .map(|(_, style)| *style)
-                .last();
+                .next_back();
 
             if let Some(style) = highlighted_style {
                 let edge_color = match style.color {
@@ -341,7 +342,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     .iter()
                     .filter(|(pos, _)| pos == world_pos)
                     .map(|(_, style)| *style)
-                    .last();
+                    .next_back();
 
                 // If highlighted, either tint with color or brighten (for Color::Reset)
                 if let Some(path_style) = highlighted_style {
@@ -385,7 +386,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         }
                     })
                     .map(|(_, style)| *style)
-                    .last();
+                    .next_back();
 
                 let character = if let Some(style) = highlighted_style {
                     // Create a temporary graph for the active highlight style
@@ -558,7 +559,7 @@ where
     S: NodeSizer<G>,
     R: NodeRenderer<G>,
 {
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     if let Some(s) = detail_level {
         controller.set_detail_level(s);
