@@ -1,7 +1,6 @@
 use core::ops::Range;
 
 use anyhow::{Error, Result};
-use clap::Args;
 use gen_models::{
     db::DbContext,
     errors::OperationError,
@@ -12,26 +11,6 @@ use noodles::core::Region;
 use thiserror::Error;
 
 use crate::{commands::get_default_collection, graph_operators::derive_chunks};
-
-/// Replace a sequence graph with a subgraph in the range of the specified coordinates
-#[derive(Debug, Args)]
-pub struct Command {
-    /// The name of the collection to derive the subgraph from
-    #[arg(short, long)]
-    name: Option<String>,
-    /// The name of the parent sample
-    #[arg(short, long)]
-    sample: Option<String>,
-    /// The name of the new sample
-    #[arg(long)]
-    new_sample: String,
-    /// The name of the region to derive the subgraph from
-    #[arg(short, long)]
-    region: String,
-    /// Name of alternate path (not current) to use
-    #[arg(long)]
-    backbone: Option<String>,
-}
 
 #[derive(Debug, Error, PartialEq)]
 pub enum DeriveSubgraphOperationError {
