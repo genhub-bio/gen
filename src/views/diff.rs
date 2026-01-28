@@ -22,7 +22,7 @@ use ratatui::{
 
 use crate::{core::HashId, models::node::Node};
 
-// Temporary stubs for deprecated types
+// Temporary no-op stubs to keep build green while TUI parts are disabled
 #[derive(Clone)]
 struct PlotParameters;
 impl PlotParameters {
@@ -32,6 +32,7 @@ impl PlotParameters {
 }
 
 struct Viewer<'a> {
+    has_focus: bool,
     _phantom: std::marker::PhantomData<&'a ()>,
 }
 
@@ -40,9 +41,11 @@ impl<'a> Viewer<'a> {
         _graph: &'a gen_graph::GenGraph,
         _conn: &'a GraphConnection,
         _params: PlotParameters,
-        _origin: Option<HashId>,
+        _origin: (Node, i64),
     ) -> Self {
+        let _ = _origin;
         Viewer {
+            has_focus: false,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -51,9 +54,28 @@ impl<'a> Viewer<'a> {
         "diff viewer"
     }
 
-    fn set_highlights(&mut self, _highlights: Vec<(HashId, HashId, Color)>) {}
+    // Accept the shapes used below and ignore them
+    fn set_highlights(
+        &mut self,
+        _highlights: Vec<(
+            Color,
+            petgraph::graphmap::DiGraphMap<gen_graph::GraphNode, ()>,
+        )>,
+    ) {
+    }
 
-    fn set_node_highlights(&mut self, _highlights: Vec<HashId>) {}
+    fn set_node_highlights(
+        &mut self,
+        _highlights: Vec<(Color, std::collections::HashSet<gen_graph::GraphNode>)>,
+    ) {
+    }
+
+    // Generic args so the signature stays permissive
+    fn set_block<T>(&mut self, _block: T) {}
+
+    fn draw<T>(&self, _f: &mut T, _area: ratatui::layout::Rect) {}
+
+    fn handle_input<T>(&mut self, _key: T) {}
 }
 
 struct DiffComponent {

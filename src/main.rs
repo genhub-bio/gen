@@ -221,6 +221,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        #[cfg(any())] // REMOVE THIS once viewdiff is reimplemented
         Some(Commands::ViewDiff { from, to }) => {
             let to_ref = to.clone().unwrap_or_else(|| {
                 OperationState::get_operation(operation_conn)
