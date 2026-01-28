@@ -25,9 +25,8 @@ use r#gen::{
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, // diff::view_diff, // temporarily disabled
-        inline_gen_graph_widget::show_inline_gen_graph_widget,
-        operations::view_operations,
+        block_group::view_block_group, diff::view_diff,
+        inline_gen_graph_widget::show_inline_gen_graph_widget, operations::view_operations,
         patch::view_patches,
     },
 };
@@ -222,31 +221,31 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        // Some(Commands::ViewDiff { from, to }) => {
-        //     let to_ref = to.clone().unwrap_or_else(|| {
-        //         OperationState::get_operation(operation_conn)
-        //             .map(|h| format!("{h}"))
-        //             .unwrap_or_else(|| "HEAD".to_string())
-        //     });
-        //     let from_range = parse_hash(operation_conn, &from)?;
-        //     let from_hash = from_range
-        //         .from
-        //         .or(from_range.to)
-        //         .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
-        //     let to_range = parse_hash(operation_conn, &to_ref)?;
-        //     let to_hash = to_range
-        //         .to
-        //         .or(to_range.from)
-        //         .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
-        //     let diffs =
-        //         collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
-        //     if diffs.is_empty() {
-        //         println!("No differences found between {from} and {to_ref}.");
-        //     } else {
-        //         view_diff(graph_conn, &diffs)?;
-        //     }
-        //     Ok(())
-        // }
+        Some(Commands::ViewDiff { from, to }) => {
+            let to_ref = to.clone().unwrap_or_else(|| {
+                OperationState::get_operation(operation_conn)
+                    .map(|h| format!("{h}"))
+                    .unwrap_or_else(|| "HEAD".to_string())
+            });
+            let from_range = parse_hash(operation_conn, &from)?;
+            let from_hash = from_range
+                .from
+                .or(from_range.to)
+                .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
+            let to_range = parse_hash(operation_conn, &to_ref)?;
+            let to_hash = to_range
+                .to
+                .or(to_range.from)
+                .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
+            let diffs =
+                collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
+            if diffs.is_empty() {
+                println!("No differences found between {from} and {to_ref}.");
+            } else {
+                view_diff(graph_conn, &diffs)?;
+            }
+            Ok(())
+        }
         Some(Commands::Translate {
             bed,
             gff,
