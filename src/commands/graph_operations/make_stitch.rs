@@ -92,7 +92,10 @@ pub fn make_stitch_operation(
     graph_conn.execute("END TRANSACTION;", [])?;
     operation_conn.execute("END TRANSACTION;", [])?;
 
-    println!("Make stitch finished.");
+    println!(
+        "Stitched chunks successfully into new region {} in sample {}.",
+        new_region, new_sample_name
+    );
 
     Ok(())
 }

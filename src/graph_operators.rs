@@ -1,7 +1,7 @@
-use core::ops::Range as RustRange;
+use core::ops::Range;
 use std::collections::{HashMap, HashSet};
 
-use gen_core::{HashId, Strand, is_end_node, is_start_node, range::Range};
+use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -112,7 +112,7 @@ pub fn derive_chunks(
         }
 
         let mut blocks = current_intervaltree
-            .query(RustRange {
+            .query(Range {
                 start: start_coordinate,
                 end: end_coordinate,
             })
@@ -449,29 +449,6 @@ pub fn make_stitch(
         new_region_name,
         &child_block_group.id,
         &new_path_edge_ids,
-    );
-
-    let summary_str = format!(
-        " {}: stitched {} chunks into new graph",
-        new_sample_name,
-        region_names.len()
-    );
-
-    let _op = end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
-            files: vec![],
-            description: "make stitch".to_string(),
-        },
-        &summary_str,
-        None,
-    )
-    .map_err(GraphOperationError::OperationError);
-
-    println!(
-        "Stitched chunks successfully into new region {} in sample {}.",
-        new_region_name, new_sample_name
     );
 
     Ok(())

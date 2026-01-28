@@ -1,6 +1,6 @@
+use core::ops::Range;
 use std::str;
 
-use gen_core::range::Range;
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
@@ -88,7 +88,7 @@ pub fn update_with_library(
         });
     }
 
-    let _chunks_result = derive_chunks(
+    derive_chunks(
         context,
         collection_name,
         parent_sample_name,
@@ -125,7 +125,7 @@ pub fn update_with_library(
 
     let str_chunk_names = chunk_names.iter().map(|n| n.as_str()).collect();
 
-    let _stitch_result = make_stitch(
+    make_stitch(
         context,
         collection_name,
         Some(&intermediate_sample_name),
