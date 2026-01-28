@@ -213,8 +213,10 @@ fn get_paths(
         let projected_path = project_path(graph, &path_blocks);
 
         if !projected_path.is_empty() {
-            let full_path_name = if sample_name.is_some() && sample_name.clone().unwrap() != "" {
-                format!("{}.{}", path.name, sample_name.unwrap()).to_string()
+            let full_path_name = if let Some(sample_name) = sample_name
+                && !sample_name.is_empty()
+            {
+                format!("{}.{}", path.name, sample_name)
             } else {
                 path.name
             };

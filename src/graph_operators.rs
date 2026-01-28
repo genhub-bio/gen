@@ -8,12 +8,9 @@ use gen_models::{
     db::{DbContext, GraphConnection},
     edge::{Edge, EdgeData},
     errors::OperationError,
-    file_types::FileTypes,
-    operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     path_edge::PathEdge,
     sample::Sample,
-    session_operations::{end_operation, start_operation},
     traits::Query,
 };
 use itertools::Itertools;
@@ -53,6 +50,14 @@ pub fn get_path(
     }
 }
 
+/// Given a path (default or specified by backbone) and a sample, splits the default block group of that sample into
+/// multiple chunks specified by chunk_ranges occurring along the path.
+///
+/// We currently assume each chunk boundary creates a partition in the graph.  To put
+/// it another way, we assume each boundary is on an edge that is the only one connecting the upstream part of the graph
+/// to the downstream part.  TODO: Add guardrails that confirm this assumption.
+///
+/// The resulting new "chunk" block groups are created in the new sample.
 #[allow(clippy::too_many_arguments)]
 pub fn derive_chunks(
     context: &DbContext,
@@ -62,9 +67,8 @@ pub fn derive_chunks(
     region_name: &str,
     backbone: Option<&str>,
     chunk_ranges: Vec<Range<i64>>,
-) -> Result<Operation, GraphOperationError> {
+) -> Result<(), GraphOperationError> {
     let conn = context.graph().conn();
-    let mut session = start_operation(conn);
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
 
     let parent_block_group_id =
@@ -210,29 +214,7 @@ pub fn derive_chunks(
         );
     }
 
-    let summary_str = format!(
-        " {}: {} new derived block group(s)",
-        new_sample_name,
-        chunk_ranges.len()
-    );
-    let op = end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
-            files: vec![OperationFile {
-                file_path: "".to_string(),
-                file_type: FileTypes::None,
-            }],
-            description: "derive chunks".to_string(),
-        },
-        &summary_str,
-        None,
-    )
-    .map_err(GraphOperationError::OperationError);
-
-    println!("Derived chunks successfully.");
-
-    op
+    Ok(())
 }
 
 fn get_block_group_id(
@@ -254,6 +236,9 @@ fn get_block_group_id(
     )))
 }
 
+/// Given a sample and one or more region (block group) names, creates a new graph where all the end nodes of one block
+/// group are connected to all the start nodes of the next block group.  Saves the result as a block group with
+/// new_region_name in a new sample with the specified name.
 pub fn make_stitch(
     context: &DbContext,
     collection_name: &str,
@@ -261,9 +246,8 @@ pub fn make_stitch(
     new_sample_name: &str,
     region_names: &Vec<&str>,
     new_region_name: &str,
-) -> Result<Operation, GraphOperationError> {
+) -> Result<(), GraphOperationError> {
     let conn = context.graph().conn();
-    let mut session = start_operation(conn);
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
@@ -467,26 +451,7 @@ pub fn make_stitch(
         &new_path_edge_ids,
     );
 
-    let summary_str = format!(
-        " {}: stitched {} chunks into new graph",
-        new_sample_name,
-        region_names.len()
-    );
-
-    end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
-            files: vec![OperationFile {
-                file_path: "".to_string(),
-                file_type: FileTypes::None,
-            }],
-            description: "make stitch".to_string(),
-        },
-        &summary_str,
-        None,
-    )
-    .map_err(GraphOperationError::OperationError)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -858,7 +823,7 @@ mod tests {
         assert_eq!(path3.sequence(conn), "ATCGATCAAGGAACACA");
 
         // Stitch the two main chunks back together in same order
-        let _res = make_stitch(
+        make_stitch(
             &context,
             collection,
             Some("test3"),
