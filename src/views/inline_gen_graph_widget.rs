@@ -7,16 +7,22 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::{db::GraphConnection, path::Path};
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
-use log::info;
+use gen_tui::{
+    graph_controller::GraphController,
+    layout::VisualDetail,
+    plotter::{LineStyle, PathStyle},
+    theme::Theme,
+};
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
+    style::Color,
     widgets::{Block, Borders},
 };
 
-use crate::views::gen_graph_widget::{
-    GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget,
+use crate::{
+    config::get_theme_color,
+    views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -120,7 +126,15 @@ pub struct InlineGenGraphState<'a> {
 impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &'a GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
-        let mut graph_controller = GraphController::new(graph, node_sizer);
+        let mut graph_controller = GraphController::new(graph, node_sizer).with_theme(Theme {
+            canvas: Color::Reset,
+            node_fg: get_theme_color("text").unwrap(),
+            node_bg: get_theme_color("node").unwrap(),
+            edge_fg: get_theme_color("edge").unwrap(),
+            edge_bg: Color::Reset,
+            cursor_fg: get_theme_color("cursor_fg").unwrap(),
+            cursor_bg: get_theme_color("cursor_bg").unwrap(),
+        });
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
         let paths = Vec::new();
@@ -145,30 +159,27 @@ impl<'a> InlineGenGraphState<'a> {
 /// with full navigation and zoom controls. The widget appears inline in the terminal
 /// without taking over the entire screen.
 ///
-/// If the terminal doesn't support interactive features (like in some development environments),
-/// it will fall back to a text-based representation.
-///
 /// # Controls
 /// * Arrow keys: Navigate cursor between nodes and pan the view
 /// * +/-: Zoom in/out (Minimal → Truncated → Full)
-/// * Home: Reset view to origin
 /// * q/Enter/Esc: Exit the widget (auto-exports DOT file if RUST_LOG is set)
 ///
 /// # Arguments
 /// * `graph` - The GenGraph to visualize
 /// * `conn` - Database connection for sequence data
+/// * `paths` - Paths to highlight when asked to
 /// * `height` - Height of the inline viewport (in terminal rows, typically 10-20)
 ///
 /// # Returns
-/// * `Ok(())` if completed successfully
+/// * `Ok(true)` if the user requested to transition to full-screen view
+/// * `Ok(false)` if completed successfully and exited
 ///
 pub fn show_inline_gen_graph_widget(
     conn: &GraphConnection,
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
-) -> Result<()> {
-    // Try to initialize the terminal - if it fails, fall back to text mode
+) -> Result<bool> {
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(height),
@@ -176,165 +187,115 @@ pub fn show_inline_gen_graph_widget(
     });
 
     match terminal_result {
-        Ok(terminal) => {
-            // Interactive mode - full widget functionality
-            show_interactive_widget(terminal, conn, graph, paths, height)
-        }
-        Err(_) => {
-            // Fallback mode - text-based representation
-            eprintln!("Interactive terminal not available, falling back to text mode");
-            show_text_fallback(graph, conn)
-        }
-    }
-}
+        Ok(mut terminal) => {
+            let mut state = InlineGenGraphState::new(graph, conn);
+            for path in paths {
+                state.add_path(&path, conn)?;
+            }
+            // Set up tick-based event loop for 60 FPS (16ms per frame)
+            let tick_rate = Duration::from_millis(16);
+            let mut events = TickEventSource::new(tick_rate);
+            let mut last_frame_time = Instant::now();
+            let mut upgrade_requested = false;
 
-/// Interactive widget implementation with tick-based event loop
-fn show_interactive_widget(
-    mut terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-    conn: &GraphConnection,
-    graph: &GenGraph,
-    paths: Vec<Path>,
-    _height: u16,
-) -> Result<()> {
-    let mut state = InlineGenGraphState::new(graph, conn);
-    for path in paths {
-        state.add_path(&path, conn)?;
-    }
-    // Set up tick-based event loop for 60 FPS (16ms per frame)
-    let tick_rate = Duration::from_millis(16);
-    let mut events = TickEventSource::new(tick_rate);
-    let mut last_frame_time = Instant::now();
+            loop {
+                // Process events with a reasonable timeout
+                if let Some(event) = events.poll_next(Duration::from_millis(250)) {
+                    match event {
+                        AppEvent::Tick => {
+                            // Calculate time delta since last frame
+                            let now = Instant::now();
+                            let frame_delta = now.duration_since(last_frame_time);
+                            last_frame_time = now;
 
-    loop {
-        // Process events with a reasonable timeout
-        if let Some(event) = events.poll_next(Duration::from_millis(250)) {
-            match event {
-                AppEvent::Tick => {
-                    // Calculate time delta since last frame
-                    let now = Instant::now();
-                    let frame_delta = now.duration_since(last_frame_time);
-                    last_frame_time = now;
+                            // Draw the frame
+                            terminal.draw(|frame| {
+                                let area = frame.area();
+                                // Calculate the actual widget area first
+                                let main_layout = Layout::default()
+                                    .direction(Direction::Vertical)
+                                    .constraints([Constraint::Min(0), Constraint::Length(1)])
+                                    .split(area);
+                                let block = Block::default().borders(Borders::ALL);
+                                let inner_area = block.inner(main_layout[0]);
 
-                    // Draw the frame
-                    terminal.draw(|frame| {
-                        // Calculate the actual widget area first
-                        let area = frame.area();
-                        let main_layout = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints([Constraint::Min(0), Constraint::Length(1)])
-                            .split(area);
-                        let block = Block::default().borders(Borders::ALL);
-                        let inner_area = block.inner(main_layout[0]);
+                                // Set viewport bounds to the actual inner area before updating animations
+                                state.controller.viewport_state.viewport_bounds = inner_area;
 
-                        // Set viewport bounds to the actual inner area before updating animations
-                        state.controller.viewport_state.viewport_bounds = inner_area;
+                                // Update animations with frame delta for smooth camera and cursor animations
+                                state.controller.update_animations(frame_delta);
 
-                        // Update animations with frame delta for smooth camera and cursor animations
-                        state.controller.update_animations(frame_delta);
-
-                        render_inline(frame, &mut state);
-                    })?;
-                }
-                AppEvent::KeyPress(key) => {
-                    // Intercept quit signal and path highlighting
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            break;
+                                render_inline(frame, &mut state);
+                            })?;
                         }
-                        KeyCode::Char('p') => {
-                            // Toggle path highlighting
-                            let path_color = Color::Red;
-                            if state.controller.has_path_highlight(&path_color) {
-                                state.controller.clear_path_highlight(&path_color);
-                            } else if let Some(last_path) = state.paths.last() {
-                                state
-                                    .controller
-                                    .set_path_highlight(path_color, last_path.clone());
-                            } else {
-                                eprintln!("No paths available for path highlighting");
+                        AppEvent::KeyPress(key) => {
+                            // Intercept quit signal and path highlighting
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                                    break;
+                                }
+                                KeyCode::Char('f') => {
+                                    upgrade_requested = true;
+                                    break;
+                                }
+                                KeyCode::Char('p') => {
+                                    // Toggle path highlighting
+                                    let path_style = PathStyle::new(
+                                        get_theme_color("base09")
+                                            .expect("Theme should use base16 system"),
+                                    )
+                                    .with_line_style(LineStyle::Normal)
+                                    .with_merge_glyphs(false);
+
+                                    if state.controller.has_highlight(&path_style) {
+                                        state.controller.clear_highlight(&path_style);
+                                    } else if let Some(last_path) = state.paths.last() {
+                                        state
+                                            .controller
+                                            .set_path_highlight(path_style, last_path.clone());
+                                    } else {
+                                        eprintln!("No paths available for path highlighting");
+                                    }
+                                }
+                                _ => {
+                                    let _ = state.controller.handle_key_event(key);
+                                }
                             }
                         }
-                        _ => {
-                            let _ = state.controller.handle_key_event(key);
+                        AppEvent::Resize(w, _h) => {
+                            // Update viewport width, but keep the fixed inline height
+                            state.controller.viewport_state.viewport_bounds.width = w;
                         }
                     }
                 }
-                AppEvent::Resize(w, h) => {
-                    // Update viewport bounds to match new terminal size
-                    state.controller.viewport_state.viewport_bounds =
-                        ratatui::layout::Rect::new(0, 0, w, h);
-                }
             }
+
+            // Final render without border -> capture the viewport area
+            let viewport_area = terminal.get_frame().area();
+
+            terminal.draw(|frame| render_final(frame, &mut state))?;
+
+            // For inline viewports, we need to manually restore terminal state
+            // (ratatui::restore() loses the cursor which resets cursor position incorrectly.
+
+            // Position cursor at the end of the viewport BEFORE restoring terminal mode
+            let target_line = viewport_area.y + viewport_area.height;
+            let _ =
+                crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, target_line));
+
+            // Now restore terminal modes manually (show cursor, disable raw mode)
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+            let _ = crossterm::terminal::disable_raw_mode();
+
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+
+            Ok(upgrade_requested)
+        }
+        Err(_) => {
+            eprintln!("Interactive terminal not available, omitting visualization.");
+            Ok(false)
         }
     }
-
-    // Final render without border
-    terminal.draw(|frame| render_final(frame, &mut state))?;
-
-    ratatui::restore();
-
-    Ok(())
-}
-
-/// Core static plotting functionality for GenGraph
-///
-/// This function provides the core static text rendering of a GenGraph using TestBackend.
-/// It can be called directly for --static flag or by fallback scenarios.
-///
-/// # Arguments
-/// * `graph` - The GenGraph to visualize
-/// * `conn` - Database connection for sequence data
-/// * `show_comparison` - Whether to show both Minimal and Full scale renders
-/// * `bounds` - Optional custom bounds (bottom_left, top_right), uses auto-calculated if None
-///
-/// # Returns
-/// * `Ok(())` if rendering succeeded
-pub fn plot_static(
-    graph: &GenGraph,
-    conn: &GraphConnection,
-    detail_level: Option<VisualDetail>,
-) -> Result<()> {
-    use gen_tui::plotter::plot_graph_to_string;
-
-    let node_sizer = GenGraphNodeSizer;
-    let renderer = GenGraphNodeRenderer::new(conn);
-    let mut controller = GraphController::new(graph, node_sizer);
-    controller.set_detail_level(detail_level.unwrap_or(VisualDetail::Minimal));
-    controller.show_cursor();
-
-    let plot_string = plot_graph_to_string(&mut controller, renderer, detail_level, None, None);
-
-    match plot_string {
-        Ok((plot_string, width, _height)) => {
-            println!("┌{}┐", "─".repeat(width as usize));
-            for line in plot_string.lines() {
-                println!("│{}│", line);
-            }
-            println!("└{}┘", "─".repeat(width as usize));
-        }
-        Err(e) => {
-            eprintln!("Failed to render graph: {}", e);
-            // Fallback to basic info
-            println!("Graph nodes: {}", graph.node_count());
-            println!("Graph edges: {}", graph.edge_count());
-            return Err(std::io::Error::other(e));
-        }
-    }
-
-    Ok(())
-}
-
-/// Text-based fallback for environments without interactive terminal support
-/// Uses TestBackend to render graph and provide visual debugging output
-fn show_text_fallback(graph: &GenGraph, conn: &GraphConnection) -> Result<()> {
-    println!("GenGraph Text View (with TestBackend visualization)");
-    println!("==================================================");
-
-    plot_static(graph, conn, Some(VisualDetail::Full))?;
-
-    println!("Try running this in a regular terminal for the full interactive experience.");
-
-    Ok(())
 }
 
 /// Draw the inline widget with a border and controls help
@@ -352,36 +313,9 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
 
     // Render the border and content
     frame.render_widget(block, main_layout[0]);
-    draw_gen_graph(frame, inner_area, state);
-    draw_controls_help(frame, main_layout[1], state);
-}
 
-/// Draw the final plot after the widget is done
-fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
-    let area = frame.area();
-
-    // Final layout - split main area for graph box and potential future final message
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-
-    // Add margin to offset content to where it was with border (just for the graph area)
-    let padded_area = Rect {
-        x: main_layout[0].x + 1,                         // Offset by border width
-        y: main_layout[0].y + 1,                         // Offset by border height
-        width: main_layout[0].width.saturating_sub(2),   // Reduce by both sides
-        height: main_layout[0].height.saturating_sub(2), // Reduce by top and bottom
-    };
-
-    // For final render, we can now render the actual graph
-    draw_gen_graph(frame, padded_area, state);
-    // draw_final_message(frame, main_layout[1], state); // Disabled - scaffolding preserved for future use
-}
-
-fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
     // Set viewport bounds and focus for the current area
-    state.controller.viewport_state.viewport_bounds = area;
+    state.controller.viewport_state.viewport_bounds = inner_area;
     state.controller.viewport_state.focus();
 
     // Create the GenGraph widget with current level of detail
@@ -391,33 +325,40 @@ fn draw_gen_graph(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState
         .cursor();
 
     // Render the graph widget
-    frame.render_stateful_widget(widget, area, &mut state.controller);
+    frame.render_stateful_widget(widget, inner_area, &mut state.controller);
+    draw_controls_help(frame, main_layout[1], state);
+}
+
+/// Draw the final plot after the widget is done
+fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
+    let area = frame.area();
+    // Set viewport bounds and focus for the current area
+    state.controller.viewport_state.viewport_bounds =
+        area.offset(ratatui::layout::Offset { x: 0, y: -1 });
+    state.controller.viewport_state.blur();
+
+    // Create the GenGraph widget with current level of detail
+    let detail_level = state.controller.get_detail_level();
+    let widget = create_gen_graph_widget(state.conn).detail_level(detail_level);
+
+    // Render the graph widget
+    frame.render_stateful_widget(
+        widget,
+        area.offset(ratatui::layout::Offset { x: 0, y: -1 }),
+        &mut state.controller,
+    );
 }
 
 fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    // Check if path highlighting is currently enabled
-    let _path_status = if state.controller.get_path_highlights().is_empty() {
-        "Path: Off"
+    let help_text = if state.controller.highlights.is_empty() {
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
     } else {
-        "Path: On"
-    };
-
-    let help_text = if state.controller.get_path_highlights().is_empty() {
-        "←→↑↓: Navigate/Pan | +/-: Zoom | Path: Off | q/Esc: Exit".to_string()
-    } else {
-        "←→↑↓: Navigate/Pan | +/-: Zoom | Path: On | q/Esc: Exit".to_string()
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
     };
 
     let paragraph =
         ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));
-    frame.render_widget(paragraph, area);
-}
 
-#[allow(dead_code)]
-fn draw_final_message(frame: &mut Frame, area: Rect, _state: &mut InlineGenGraphState) {
-    let final_text = "GenGraph viewing completed".to_string();
-    let paragraph =
-        ratatui::widgets::Paragraph::new(final_text).style(Style::default().fg(Color::Green));
     frame.render_widget(paragraph, area);
 }
 
@@ -444,6 +385,6 @@ mod tests {
         graph.add_node(node);
 
         let state = InlineGenGraphState::new(&graph, &conn);
-        assert_eq!(state.controller.get_detail_level(), VisualDetail::Minimal);
+        assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
     }
 }

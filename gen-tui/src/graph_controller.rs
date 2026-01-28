@@ -5,7 +5,6 @@ use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
 use log::trace;
 use petgraph::{
     graph::NodeIndex,
-    graphmap::DiGraphMap,
     visit::{
         EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
         NodeCount, NodeIndexable, Visitable,
@@ -21,7 +20,8 @@ use crate::{
     layout::{NodeRole, PartitionLayout, VisualDetail},
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
-    plotter::NodeSizer,
+    plotter::{NodeSizer, PathStyle},
+    theme::Theme,
     viewport_graph::CroppedGraph,
 };
 
@@ -65,8 +65,22 @@ where
     /// Flag indicating that the viewport graph needs to be rebuilt
     rebuild_needed: bool,
 
-    /// Path highlighting: list of subgraphs with their associated colors
-    path_highlights: Vec<(DiGraphMap<NodeIndex, ()>, Color)>,
+    /// Persistent requested highlights in domain terms
+    pub highlights: Vec<(HighlightKind<G::NodeId>, PathStyle)>,
+
+    /// Theme colors for rendering
+    pub theme: Theme,
+}
+
+/// Type of element to highlight in the graph
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HighlightKind<N> {
+    /// A single node
+    Node(N),
+    /// An edge between two nodes (source, target)
+    Edge(N, N),
+    /// A path consisting of a sequence of nodes
+    Path(Vec<N>),
 }
 
 impl<G, S> GraphController<G, S>
@@ -87,6 +101,17 @@ where
     for<'b> &'b G::EdgeId: Clone,
     S: NodeSizer<G>,
 {
+    /// Get the default theme (Catppuccin Mocha colors)
+    pub fn default_theme() -> Theme {
+        Theme::default()
+    }
+
+    /// Set a custom theme
+    pub fn with_theme(mut self, theme: Theme) -> Self {
+        self.theme = theme;
+        self
+    }
+
     /// Create a new GraphController with a graph and node sizer
     ///
     /// # Parameters
@@ -125,7 +150,8 @@ where
             viewport_graph: CroppedGraph::empty(),
             last_rebuild_camera_center: WorldPos::ZERO,
             rebuild_needed: true, // Start with a rebuild required
-            path_highlights: Vec::new(),
+            highlights: Vec::new(),
+            theme: Self::default_theme(),
         };
 
         if let Err(e) = controller.partition_controller.set_anchor_partition(0) {
@@ -201,53 +227,132 @@ where
         self.detail_level
     }
 
-    /// Get a reference to the path highlights
-    pub fn get_path_highlights(&self) -> &[(DiGraphMap<NodeIndex, ()>, Color)] {
-        &self.path_highlights
+    /// Get a reference to the node highlights in the current viewport
+    pub fn get_node_highlights(&self) -> &[(WorldPos, PathStyle)] {
+        &self.viewport_graph.node_highlights
     }
 
-    /// Set a path highlight with a specific color
+    /// Get a reference to the edge highlights in the current viewport
+    pub fn get_edge_highlights(&self) -> &[((WorldPos, WorldPos), PathStyle)] {
+        &self.viewport_graph.edge_highlights
+    }
+
+    /// Internal helper to apply a node highlight to the viewport graph
+    fn apply_node_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        node_id: G::NodeId,
+        style: PathStyle,
+    ) {
+        let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
+        if let Some(pos) = viewport_graph.node_positions.get(&node_idx) {
+            viewport_graph.node_highlights.push((*pos, style));
+        }
+    }
+
+    /// Internal helper to apply an edge highlight to the viewport graph
+    fn apply_edge_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        src_id: G::NodeId,
+        tgt_id: G::NodeId,
+        style: PathStyle,
+    ) {
+        let u = NodeIndex::new(<G as NodeIndexable>::to_index(graph, src_id));
+        let v = NodeIndex::new(<G as NodeIndexable>::to_index(graph, tgt_id));
+
+        // Find all visual edges that contain this domain edge in their bundle
+        // Collect first to avoid mutable borrow of viewport_graph while iterating
+        let edges_to_highlight: Vec<(WorldPos, WorldPos)> = viewport_graph
+            .edges()
+            .filter(|(_, _, bundle)| bundle.contains(&(u, v)) || bundle.contains(&(v, u)))
+            .map(|(s, t, _)| (s, t))
+            .collect();
+
+        for (source_pos, target_pos) in edges_to_highlight {
+            viewport_graph
+                .edge_highlights
+                .push(((source_pos, target_pos), style));
+        }
+    }
+
+    /// Internal helper to apply a path highlight to the viewport graph
+    fn apply_path_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        nodes: &[G::NodeId],
+        style: PathStyle,
+    ) {
+        // Highlight all nodes
+        for &node_id in nodes {
+            Self::apply_node_highlight(viewport_graph, graph, node_id, style);
+        }
+
+        // Highlight all consecutive edges
+        for window in nodes.windows(2) {
+            if let [src, tgt] = window {
+                Self::apply_edge_highlight(viewport_graph, graph, *src, *tgt, style);
+            }
+        }
+    }
+
+    /// Set a node highlight
+    pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
+        Self::apply_node_highlight(&mut self.viewport_graph, &self.graph, node_id, style);
+        let kind = HighlightKind::Node(node_id);
+        self.highlights.push((kind, style));
+    }
+
+    /// Set an edge highlight
+    pub fn set_edge_highlight(&mut self, edge: (G::NodeId, G::NodeId), style: PathStyle) {
+        Self::apply_edge_highlight(&mut self.viewport_graph, &self.graph, edge.0, edge.1, style);
+        let kind = HighlightKind::Edge(edge.0, edge.1);
+        self.highlights.push((kind, style));
+    }
+
+    /// Set a path highlight with a specific style
+    ///
+    /// # Parameters
+    /// - style: PathStyle for highlighting the path
+    /// - path_nodes: Sequence of nodes that form the path
+    pub fn set_path_highlight(&mut self, style: PathStyle, path_nodes: Vec<G::NodeId>) {
+        Self::apply_path_highlight(&mut self.viewport_graph, &self.graph, &path_nodes, style);
+        let kind = HighlightKind::Path(path_nodes);
+        self.highlights.push((kind, style));
+    }
+
+    /// Set a path highlight with a specific color (convenience method)
     ///
     /// # Parameters
     /// - color: Color for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
-    pub fn set_path_highlight(&mut self, color: Color, path_nodes: Vec<G::NodeId>) {
-        let mut path_graph = DiGraphMap::<NodeIndex, ()>::new();
-
-        // Convert G::NodeId to NodeIndex and add all nodes to the path graph
-        let node_indices: Vec<NodeIndex> = path_nodes
-            .iter()
-            .map(|node_id| NodeIndex::new(<G as NodeIndexable>::to_index(&self.graph, *node_id)))
-            .collect();
-
-        for node_idx in &node_indices {
-            path_graph.add_node(*node_idx);
-        }
-
-        // Add edges between consecutive nodes in the path
-        for window in node_indices.windows(2) {
-            if let [src, tgt] = window {
-                path_graph.add_edge(*src, *tgt, ());
-            }
-        }
-
-        self.path_highlights.push((path_graph, color));
+    pub fn set_path_highlight_color(&mut self, color: Color, path_nodes: Vec<G::NodeId>) {
+        self.set_path_highlight(PathStyle::new(color), path_nodes);
     }
 
-    /// Check if a specific color has path highlighting
-    pub fn has_path_highlight(&self, color: &Color) -> bool {
-        self.path_highlights.iter().any(|(_, c)| c == color)
+    /// Check if a specific style has any highlighting
+    pub fn has_highlight(&self, style: &PathStyle) -> bool {
+        self.highlights.iter().any(|(_, s)| s == style)
     }
 
-    /// Clear path highlighting for a specific color
-    pub fn clear_path_highlight(&mut self, color: &Color) {
-        self.path_highlights.retain(|(_, c)| c != color);
+    /// Clear highlighting for a specific style
+    pub fn clear_highlight(&mut self, style: &PathStyle) {
+        self.highlights.retain(|(_, s)| s != style);
+        // Also clear from viewport graph
+        self.viewport_graph
+            .node_highlights
+            .retain(|(_, s)| s != style);
+        self.viewport_graph
+            .edge_highlights
+            .retain(|(_, s)| s != style);
         self.trigger_rebuild();
     }
 
-    /// Clear all path highlights
-    pub fn clear_all_path_highlights(&mut self) {
-        self.path_highlights.clear();
+    /// Clear all highlights
+    pub fn clear_all_highlights(&mut self) {
+        self.highlights.clear();
+        self.viewport_graph.node_highlights.clear();
+        self.viewport_graph.edge_highlights.clear();
         self.trigger_rebuild();
     }
 
@@ -405,26 +510,40 @@ where
         self.partition_controller.get_vertex_spacing()
     }
 
-    /// Initialize cursor at soft_zone + 1 from left edge, associated with the node closest to origin in anchor partition
-    /// This should be called once when the controller is first created or when cursor needs reset
-    pub fn initialize_cursor(&mut self) {
+    /// Place cursor at soft_zone + 1 from left edge, vertically centered.
+    /// This positions the cursor in a comfortable viewing position within the viewport.
+    /// Should be called when viewport bounds are first established (transition from 0x0).
+    pub fn place_cursor(&mut self) {
         let viewport_center_y = self.viewport_state.viewport_bounds.height as i64 / 2;
         let desired_viewport_x = self.viewport_state.soft_zone + 1;
         let desired_viewport_y = viewport_center_y as u16;
         let desired_viewport_pos = ViewportPos::new(desired_viewport_x, desired_viewport_y);
         self.cursor.set_viewport_pos(desired_viewport_pos);
 
+        trace!("Cursor placed: viewport={:?}", desired_viewport_pos);
+    }
+
+    /// Associate cursor with default node (node closest to origin).
+    /// Call this only if no node has been explicitly set.
+    pub fn associate_cursor(&mut self) {
         // Find the node closest to partition origin (0, 0) and associate cursor with it
         if let Some(node_idx) = self.find_node_closest_to_origin() {
             // Set cursor to track this node at fractional (0.0, 0.5) = left edge, vertical middle
             self.cursor.set_node(node_idx, (0.0, 0.5));
             trace!(
-                "Cursor initialized: viewport={:?}, node={:?}, fractional=(0.0, 0.5)",
-                desired_viewport_pos, node_idx
+                "Cursor associated: node={:?}, fractional=(0.0, 0.5)",
+                node_idx
             );
         } else {
-            trace!("Warning: No data nodes found in anchor partition for cursor initialization");
+            trace!("Warning: No data nodes found in anchor partition for cursor association");
         }
+    }
+
+    /// Initialize cursor completely: viewport position + node association.
+    /// This is a convenience method for the common case where both need initialization.
+    pub fn initialize_cursor(&mut self) {
+        self.place_cursor();
+        self.associate_cursor();
     }
 
     /// Find the data node closest to the origin (0, 0) in local coordinates of the anchor partition
@@ -541,9 +660,26 @@ where
 
         trace!("rebuild_viewport_graph: starting cursor-anchored rebuild");
 
-        // Step 1: Initialize cursor if it has no node association
-        if self.cursor.node_idx().is_none() {
-            trace!("rebuild_viewport_graph: cursor has no node, initializing");
+        // Step 1: Handle first-time viewport initialization
+        // When transitioning from 0x0 viewport to real bounds, cursor viewport position needs setup
+        let viewport_was_uninitialized =
+            viewport_bounds_snapshot.width == 0 || viewport_bounds_snapshot.height == 0;
+
+        if viewport_was_uninitialized {
+            // First rebuild with valid viewport bounds - establish cursor viewport position
+            trace!(
+                "rebuild_viewport_graph: first rebuild with valid viewport bounds (was 0x0), placing cursor"
+            );
+            self.place_cursor();
+
+            // If cursor also lacks a node (wasn't set before first render), find one
+            if self.cursor.node_idx().is_none() {
+                trace!("rebuild_viewport_graph: cursor also has no node, associating with default");
+                self.associate_cursor();
+            }
+        } else if self.cursor.node_idx().is_none() {
+            // Viewport was already valid but cursor lost its node somehow - reinitialize completely
+            trace!("rebuild_viewport_graph: cursor has no node (unusual), reinitializing");
             self.initialize_cursor();
         }
 
@@ -707,6 +843,37 @@ where
             &active_partitions,
             detail_level,
         );
+
+        // Apply persistent highlights to the new viewport graph
+        for (kind, style) in &self.highlights {
+            match kind {
+                HighlightKind::Node(node_id) => {
+                    Self::apply_node_highlight(
+                        &mut self.viewport_graph,
+                        &self.graph,
+                        *node_id,
+                        *style,
+                    );
+                }
+                HighlightKind::Edge(src, tgt) => {
+                    Self::apply_edge_highlight(
+                        &mut self.viewport_graph,
+                        &self.graph,
+                        *src,
+                        *tgt,
+                        *style,
+                    );
+                }
+                HighlightKind::Path(nodes) => {
+                    Self::apply_path_highlight(
+                        &mut self.viewport_graph,
+                        &self.graph,
+                        nodes,
+                        *style,
+                    );
+                }
+            }
+        }
 
         // Update rebuild tracking
         self.last_rebuild_camera_center = self.viewport_state.camera_current;

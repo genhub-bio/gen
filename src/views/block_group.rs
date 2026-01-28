@@ -11,7 +11,9 @@ use crossterm::{
 use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::get_theme_color};
+use gen_tui::{
+    graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle, theme::Theme,
+};
 use log::{info, warn};
 use ratatui::{
     layout::Constraint,
@@ -22,6 +24,7 @@ use ratatui::{
 use rusqlite::params;
 
 use crate::{
+    config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
@@ -115,16 +118,17 @@ fn toggle_path_highlight(
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
 ) -> Result<bool, String> {
-    // Check if highlighting is already active for this color
-    if controller.has_path_highlight(&color) {
-        controller.clear_path_highlight(&color);
+    let style = PathStyle::new(color);
+    // Check if highlighting is already active for this style
+    if controller.has_highlight(&style) {
+        controller.clear_highlight(&style);
         Ok(false)
     } else {
         // Get the path nodes for this block group
         let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph)?;
 
         // Set the path highlight using GraphNodes directly
-        controller.set_path_highlight(color, path_nodes);
+        controller.set_path_highlight(style, path_nodes);
         Ok(true)
     }
 }
@@ -211,8 +215,16 @@ pub fn view_block_group(
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
     let node_sizer = GenGraphNodeSizer;
-    let mut graph_controller = GraphController::new(&block_graph, node_sizer);
-    graph_controller.set_detail_level(VisualDetail::Minimal);
+    let mut graph_controller = GraphController::new(&block_graph, node_sizer).with_theme(Theme {
+        canvas: get_theme_color("canvas").unwrap(),
+        node_fg: get_theme_color("text").unwrap(),
+        node_bg: get_theme_color("node").unwrap(),
+        edge_fg: get_theme_color("edge").unwrap(),
+        edge_bg: get_theme_color("canvas").unwrap(),
+        cursor_fg: get_theme_color("cursor_fg").unwrap(),
+        cursor_bg: get_theme_color("cursor_bg").unwrap(),
+    });
+    graph_controller.set_detail_level(VisualDetail::Truncated);
     graph_controller.show_cursor();
 
     // Create a renderer for path highlighting functionality
@@ -329,7 +341,9 @@ pub fn view_block_group(
 
             // Status bar
             let mut status_message = match focus_zone {
-                FocusZone::Canvas => "*←→↑↓* pan | *+/-* zoom | *esc* back to sidebar".to_string(),
+                FocusZone::Canvas => {
+                    "*←→↑↓* pan | *+/-* zoom | *p* toggle path | *esc* back to sidebar".to_string()
+                }
                 FocusZone::Panel => "*esc* close panel".to_string(),
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
@@ -361,8 +375,8 @@ pub fn view_block_group(
                         .fg(get_theme_color("text").unwrap())
                         .add_modifier(Modifier::BOLD),
                 );
-                let loading_para =
-                    Paragraph::new(loading_text).alignment(ratatui::layout::Alignment::Center);
+                let loading_para = Paragraph::new(loading_text)
+                    .alignment(ratatui::layout::HorizontalAlignment::Center);
 
                 // Center the loading message vertically in the canvas area
                 let loading_area = ratatui::layout::Layout::default()
@@ -444,7 +458,7 @@ pub fn view_block_group(
 
                 let panel_content = Paragraph::new(panel_text)
                     .wrap(Wrap { trim: true })
-                    .alignment(ratatui::layout::Alignment::Left)
+                    .alignment(ratatui::layout::HorizontalAlignment::Left)
                     .block(panel_block);
 
                 // Clear the panel area if we just changed the layout
@@ -465,8 +479,16 @@ pub fn view_block_group(
             connect_all_boundary_edges(&mut block_graph);
             // Update the graph controller
             let node_sizer = GenGraphNodeSizer;
-            graph_controller = GraphController::new(&block_graph, node_sizer);
-            graph_controller.set_detail_level(VisualDetail::Minimal);
+            graph_controller = GraphController::new(&block_graph, node_sizer).with_theme(Theme {
+                canvas: get_theme_color("canvas").unwrap(),
+                node_fg: get_theme_color("text").unwrap(),
+                node_bg: get_theme_color("node").unwrap(),
+                edge_fg: get_theme_color("edge").unwrap(),
+                edge_bg: get_theme_color("canvas").unwrap(),
+                cursor_fg: get_theme_color("cursor_fg").unwrap(),
+                cursor_bg: get_theme_color("cursor_bg").unwrap(),
+            });
+            graph_controller.set_detail_level(VisualDetail::Truncated);
             graph_controller.show_cursor();
 
             is_loading = false;

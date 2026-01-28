@@ -1,4 +1,4 @@
-use std::{cmp, hash::Hash, marker::PhantomData};
+use std::{hash::Hash, marker::PhantomData};
 
 use petgraph::visit::{
     EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
@@ -13,11 +13,10 @@ use ratatui::{
 };
 
 use crate::{
-    geometry::{WorldPos, WorldRect},
+    geometry::WorldRect,
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
-    plotter::{NodeRenderer, NodeSizer, plot_viewport_graph, plot_viewport_graph_with_highlights},
-    theme::get_theme_color,
+    plotter::{NodeRenderer, NodeSizer, plot_viewport_graph_with_highlights},
 };
 
 pub const NODE_GLYPH: char = '●'; // changed from '⏺', which renders as an emoji in some fonts;
@@ -253,14 +252,17 @@ where
         // Extract data from controller and render directly via ViewportGraph
         let viewport_graph = controller.get_viewport_graph();
         let detail_level = controller.get_detail_level();
-        let highlights = controller.get_path_highlights();
+        let node_highlights = controller.get_node_highlights();
+        let edge_highlights = controller.get_edge_highlights();
         plot_viewport_graph_with_highlights(
             viewport_graph,
             &mut world_buffer,
             &mut self.renderer,
             &controller.graph,
             detail_level,
-            highlights,
+            node_highlights,
+            edge_highlights,
+            &controller.theme,
         );
 
         // Call user supplied closure if provided
@@ -280,10 +282,8 @@ where
                 // Get the current character at cursor position
                 if let Some(current_char) = cursor_buffer.get_char(cursor_world_pos) {
                     // Get cursor colors from theme
-                    let cursor_bg =
-                        get_theme_color("cursor_bg").unwrap_or(ratatui::style::Color::White);
-                    let cursor_fg =
-                        get_theme_color("cursor_fg").unwrap_or(ratatui::style::Color::Black);
+                    let cursor_bg = controller.theme.cursor_bg;
+                    let cursor_fg = controller.theme.cursor_fg;
 
                     let cursor_style = Style::default().bg(cursor_bg).fg(cursor_fg);
 

@@ -25,8 +25,8 @@ use r#gen::{
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, // diff::view_diff, // temporarily disabled
-        inline_gen_graph_widget::show_inline_gen_graph_widget, // operations::view_operations, // temporarily disabled
+        block_group::view_block_group, diff::view_diff,
+        inline_gen_graph_widget::show_inline_gen_graph_widget, operations::view_operations,
         patch::view_patches,
     },
 };
@@ -156,101 +156,96 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             sample,
             collection,
             position,
-            inline,
+            full,
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
                 None => get_default_collection(operation_conn)?,
             });
 
-            if inline {
-                // Use the inline widget
-                if let Some(ref name) = graph {
-                    let block_group = if let Some(ref sample_name) = sample {
-                        BlockGroup::get(
-                            graph_conn,
-                            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                            params![collection_name, sample_name, name],
-                        )
-                    } else {
-                        BlockGroup::get(
-                            graph_conn,
-                            "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
-                            params![collection_name, name],
-                        )
-                    };
+            if !full && let Some(name) = graph.as_ref() {
+                // Use the inline widget by default if a graph is specified
+                let block_group = if let Some(ref sample_name) = sample {
+                    BlockGroup::get(
+                        graph_conn,
+                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+                        params![collection_name, sample_name, name],
+                    )
+                } else {
+                    BlockGroup::get(
+                        graph_conn,
+                        "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
+                        params![collection_name, name],
+                    )
+                };
 
-                    match block_group {
-                        Ok(bg) => {
-                            let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
-                            let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
-                            // Use a default height of 10 for now
-                            if let Err(e) = show_inline_gen_graph_widget(
-                                graph_conn,
-                                &block_graph,
-                                vec![current_path],
-                                10,
-                            ) {
+                match block_group {
+                    Ok(bg) => {
+                        let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                        let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
+                        // Use a default height of 10 for now
+                        match show_inline_gen_graph_widget(
+                            graph_conn,
+                            &block_graph,
+                            vec![current_path],
+                            10,
+                        ) {
+                            Ok(true) => {
+                                // User requested upgrade to full TUI
+                                view_block_group(
+                                    graph_conn,
+                                    graph,
+                                    sample,
+                                    collection_name,
+                                    position,
+                                )?;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
                                 eprintln!("Error showing inline widget: {}", e);
                             }
                         }
-                        Err(_) => {
-                            eprintln!(
-                                "No block group found with name {:?} and sample {:?} in collection {}",
-                                name,
-                                sample.clone().unwrap_or_else(|| "null".to_string()),
-                                collection_name
-                            );
-                        }
                     }
-                } else {
-                    eprintln!("Graph name is required for inline view");
+                    Err(_) => {
+                        eprintln!(
+                            "No block group found with name {:?} and sample {:?} in collection {}",
+                            name,
+                            sample.clone().unwrap_or_else(|| "null".to_string()),
+                            collection_name
+                        );
+                    }
                 }
             } else {
-                // Use the original full-screen viewer
-                if let Err(e) = view_block_group(
-                    graph_conn,
-                    graph.clone(),
-                    sample.clone(),
-                    collection_name,
-                    position.clone(),
-                ) {
-                    eprintln!("Error: {}", e);
-                }
+                // Use the full-screen viewer if --full is specified or no graph is provided
+                view_block_group(graph_conn, graph, sample, collection_name, position)?;
             }
-            Ok(view_block_group(
-                graph_conn,
-                graph.clone(),
-                sample.clone(),
-                collection_name,
-                position.clone(),
-            )?)
+            Ok(())
         }
-        // Some(Commands::ViewDiff { from, to }) => {
-        //     let to_ref = to.clone().unwrap_or_else(|| {
-        //         OperationState::get_operation(operation_conn)
-        //             .map(|h| format!("{h}"))
-        //             .unwrap_or_else(|| "HEAD".to_string())
-        //     });
-        //     let from_range = parse_hash(operation_conn, &from)?;
-        //     let from_hash = from_range
-        //         .from
-        //         .or(from_range.to)
-        //         .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
-        //     let to_range = parse_hash(operation_conn, &to_ref)?;
-        //     let to_hash = to_range
-        //         .to
-        //         .or(to_range.from)
-        //         .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
-        //     let diffs =
-        //         collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
-        //     if diffs.is_empty() {
-        //         println!("No differences found between {from} and {to_ref}.");
-        //     } else {
-        //         view_diff(graph_conn, &diffs)?;
-        //     }
-        //     Ok(())
-        // }
+        Some(Commands::ViewDiff { from, to }) => {
+            let to_ref = to.clone().unwrap_or_else(|| {
+                OperationState::get_operation(operation_conn)
+                    .map(|h| format!("{h}"))
+                    .unwrap_or_else(|| "HEAD".to_string())
+            });
+            let from_range = parse_hash(operation_conn, &from)?;
+            let from_hash = from_range
+                .from
+                .or(from_range.to)
+                .ok_or_else(|| anyhow!("No operation resolved for {from}"))?;
+            let to_range = parse_hash(operation_conn, &to_ref)?;
+            let to_hash = to_range
+                .to
+                .or(to_range.from)
+                .ok_or_else(|| anyhow!("No operation resolved for {to_ref}"))?;
+            let diffs =
+                collect_operation_diff(&workspace, operation_conn, from_hash, to_hash, None)?;
+            if diffs.is_empty() {
+                println!("No differences found between {from} and {to_ref}.");
+            } else {
+                view_diff(graph_conn, &diffs)?;
+            }
+            Ok(())
+        }
         Some(Commands::Translate {
             bed,
             gff,
@@ -311,11 +306,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .id,
                 );
                 if interactive {
-                    // return Ok(view_operations(&db_context, &operations)?); // temporarily disabled
-                    eprintln!(
-                        "Interactive operations view temporarily disabled due to merge conflicts"
-                    );
-                    return Ok(());
+                    return Ok(view_operations(&db_context, &operations)?);
                 } else {
                     let mut indicator = "";
                     println!(

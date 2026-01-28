@@ -159,6 +159,7 @@ where
             &mut renderer,
             &controller.graph,
             detail_level,
+            &controller.theme,
         );
     });
 

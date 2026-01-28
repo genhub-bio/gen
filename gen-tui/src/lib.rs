@@ -2,6 +2,7 @@
 //! the Gen version control system for graph genome sequences.
 
 pub mod animation;
+pub mod color_utils;
 pub mod cursor;
 pub mod dot_export;
 pub mod edge_router; // Rust port of edge routing
@@ -45,3 +46,4 @@ pub use graph_widget::GraphWidget;
 pub use layout::{LayoutEdge, LayoutEngine, LayoutNode};
 pub use partition::{PartitionEdge, PartitionNode};
 pub use partition_controller::PartitionController;
+pub use plotter::{LineStyle, PathStyle};

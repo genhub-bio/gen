@@ -7,16 +7,63 @@ use petgraph::visit::{
     EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
     NodeCount, NodeIndexable, Visitable,
 };
-use ratatui::style::{Color, Style};
+use ratatui::{
+    style::{Color, Style},
+    symbols::merge::MergeStrategy,
+};
 
 use crate::{
+    color_utils::{brighten_colors, tint_colors},
     geometry::{BigRect, Point, WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::GraphWidget,
     layout::{JunctionSymbol, NodeRole, VisualDetail},
-    theme::get_theme_color,
+    theme::Theme,
     viewport_graph::CroppedGraph,
 };
+
+/// Line style for path highlighting
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineStyle {
+    /// Normal weight box-drawing characters
+    Normal,
+    /// Heavy weight box-drawing characters
+    Bold,
+}
+
+/// Style specification for highlighted paths
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathStyle {
+    /// Color to use for tinting (Color::Reset means brighten instead)
+    pub color: Color,
+    /// Line weight style for edges and routing nodes
+    pub line_style: LineStyle,
+    /// Whether to merge glyphs with base layer or replace them outright
+    pub merge_glyphs: bool,
+}
+
+impl PathStyle {
+    /// Create a new PathStyle with default settings
+    pub fn new(color: Color) -> Self {
+        Self {
+            color,
+            line_style: LineStyle::Normal,
+            merge_glyphs: false,
+        }
+    }
+
+    /// Set the line style
+    pub fn with_line_style(mut self, line_style: LineStyle) -> Self {
+        self.line_style = line_style;
+        self
+    }
+
+    /// Set whether to merge glyphs
+    pub fn with_merge_glyphs(mut self, merge_glyphs: bool) -> Self {
+        self.merge_glyphs = merge_glyphs;
+        self
+    }
+}
 
 // # Graph Rendering Architecture
 //
@@ -194,6 +241,7 @@ pub fn plot_viewport_graph<R, G>(
     renderer: &mut R,
     original_graph: &G,
     detail_level: VisualDetail,
+    theme: &Theme,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -205,6 +253,8 @@ pub fn plot_viewport_graph<R, G>(
         original_graph,
         detail_level,
         &[],
+        &[],
+        theme,
     )
 }
 
@@ -221,17 +271,19 @@ pub fn plot_viewport_graph<R, G>(
 /// - `renderer`: Domain-specific rendering logic and data lookup
 /// - `original_graph`: Original graph for NodeIndex to NodeId conversion
 /// - `detail_level`: Level of detail for rendering
-/// - `path_highlights`: Path highlights with colors for emphasized rendering (later highlights take precedence)
+/// - `node_highlights`: List of node positions to highlight with their styles
+/// - `edge_highlights`: List of edge segments to highlight with their styles
+/// - `theme`: Theme colors for rendering
+#[allow(clippy::too_many_arguments)]
 pub fn plot_viewport_graph_with_highlights<R, G>(
     viewport_graph: &CroppedGraph,
     buffer: &mut WorldBuffer<'_>,
     renderer: &mut R,
     original_graph: &G,
     detail_level: VisualDetail,
-    path_highlights: &[(
-        petgraph::graphmap::DiGraphMap<petgraph::graph::NodeIndex, ()>,
-        Color,
-    )],
+    node_highlights: &[(WorldPos, PathStyle)],
+    edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
+    theme: &Theme,
 ) where
     R: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -241,24 +293,37 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
         // Ommit the edges that don't actually represent an original edge
         // (edges to/from terminal source/sink nodes)
         if !bundle.is_empty() {
-            // Check if any edge in the bundle is highlighted in any path
+            // Check if edge is in any highlighted path
             // Later highlights in the vector take precedence over earlier ones
-            let mut highlighted_color = None;
+            let highlighted_style = edge_highlights
+                .iter()
+                .filter(|((s, t), _)| {
+                    (*s == source && *t == target) || (*s == target && *t == source)
+                })
+                .map(|(_, style)| *style)
+                .next_back();
 
-            for &(src_idx, tgt_idx) in bundle.iter() {
-                for (path_graph, color) in path_highlights {
-                    if path_graph.contains_edge(src_idx, tgt_idx)
-                        || path_graph.contains_edge(tgt_idx, src_idx)
-                    {
-                        highlighted_color = Some(*color);
+            if let Some(style) = highlighted_style {
+                let edge_color = match style.color {
+                    Color::Reset => {
+                        // Brighten the edge color instead of tinting
+                        let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.2);
+                        brightened
                     }
+                    _ => {
+                        // Compute tinted colors as they would be applied to nodes
+                        let (_, tinted_bg) =
+                            tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
+                        // Use the tinted bg as the edge fg color
+                        tinted_bg
+                    }
+                };
+                match style.line_style {
+                    LineStyle::Normal => draw_edge(buffer, source, target, edge_color),
+                    LineStyle::Bold => draw_bold_edge(buffer, source, target, edge_color),
                 }
-            }
-
-            if let Some(color) = highlighted_color {
-                draw_bold_edge(buffer, source, target, color);
             } else {
-                let color = get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray);
+                let color = theme.edge_fg;
                 draw_edge(buffer, source, target, color);
             }
         }
@@ -271,12 +336,114 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
+
+                // Check if this node is highlighted
+                let highlighted_style = node_highlights
+                    .iter()
+                    .filter(|(pos, _)| pos == world_pos)
+                    .map(|(_, style)| *style)
+                    .next_back();
+
+                // If highlighted, either tint with color or brighten (for Color::Reset)
+                if let Some(path_style) = highlighted_style {
+                    for y in world_rect.min.y..=world_rect.max.y {
+                        for x in world_rect.min.x..=world_rect.max.x {
+                            let pos = WorldPos::new(x, y);
+                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
+                                let fg = style.fg.unwrap_or(Color::Reset);
+                                let bg = style.bg.unwrap_or(Color::Reset);
+                                let (new_fg, new_bg) = match path_style.color {
+                                    Color::Reset => brighten_colors(fg, bg, 0.2),
+                                    _ => tint_colors(fg, bg, path_style.color, 0.4),
+                                };
+                                let new_style = style.fg(new_fg).bg(new_bg);
+                                buffer.set_char_styled(pos, ch, new_style);
+                            }
+                        }
+                    }
+                }
             }
             NodeRole::Routing => {
-                let glyph = compute_junction_glyph(viewport_graph, *world_pos);
-                let style = Style::default()
-                    .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::Gray));
-                buffer.set_char_styled(*world_pos, glyph.glyph(), style);
+                let edge_color = theme.edge_fg;
+                let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
+
+                // Check if this routing node is part of any highlighted edge
+                let highlighted_style = edge_highlights
+                    .iter()
+                    .filter(|((s, t), _)| {
+                        // A routing node is highlighted if it lies on a highlighted edge segment
+                        // Since edges are either horizontal or vertical, we can check if the point lies between endpoints
+                        if s.x == t.x {
+                            // Vertical edge
+                            world_pos.x == s.x
+                                && world_pos.y >= s.y.min(t.y)
+                                && world_pos.y <= s.y.max(t.y)
+                        } else {
+                            // Horizontal edge
+                            world_pos.y == s.y
+                                && world_pos.x >= s.x.min(t.x)
+                                && world_pos.x <= s.x.max(t.x)
+                        }
+                    })
+                    .map(|(_, style)| *style)
+                    .next_back();
+
+                let character = if let Some(style) = highlighted_style {
+                    // Create a temporary graph for the active highlight style
+                    // to compute the correct glyph
+                    let active_edges: Vec<_> = edge_highlights
+                        .iter()
+                        .filter(|(_, s)| *s == style)
+                        .cloned()
+                        .collect();
+                    let highlight_graph = CroppedGraph::from_visual_edges(&active_edges);
+                    let high_glyph = compute_junction_glyph(&highlight_graph, *world_pos);
+
+                    // Decision tree:
+                    // 1. Is this routing node part of any highlighted path?
+                    // 2. If it is, do we merge with the current glyph or replace it?
+                    //    - Merge if merge_glyphs is true
+                    //    - Replace if merge_glyphs is false (avoids spiney artefacts with color tinting)
+                    if style.merge_glyphs {
+                        let high_char = match style.line_style {
+                            LineStyle::Normal => high_glyph.glyph(),
+                            LineStyle::Bold => high_glyph.heavy_glyph(),
+                        };
+                        MergeStrategy::Fuzzy
+                            .merge(&base_glyph.glyph().to_string(), &high_char.to_string())
+                            .chars()
+                            .next()
+                            .unwrap_or('?')
+                    } else {
+                        // Replace mode: use the highlight glyph directly
+                        match style.line_style {
+                            LineStyle::Normal => high_glyph.glyph(),
+                            LineStyle::Bold => high_glyph.heavy_glyph(),
+                        }
+                    }
+                } else {
+                    base_glyph.glyph()
+                };
+
+                let fg_color = match highlighted_style {
+                    None => edge_color,
+                    Some(style) => match style.color {
+                        Color::Reset => {
+                            // Brighten the edge color instead of tinting
+                            let (brightened, _) = brighten_colors(edge_color, edge_color, 0.2);
+                            brightened
+                        }
+                        _ => {
+                            // Compute tinted colors as they would be applied to nodes
+                            let (_, tinted_bg) =
+                                tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
+                            // Use the tinted bg as the edge fg color
+                            tinted_bg
+                        }
+                    },
+                };
+                let style = Style::default().fg(fg_color);
+                buffer.set_char_styled(*world_pos, character, style);
             }
             NodeRole::Stitch(_) => {
                 // Stitch nodes should have been replaced by actual content in ViewportGraph
