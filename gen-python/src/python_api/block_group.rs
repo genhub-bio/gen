@@ -1,11 +1,12 @@
 use r#gen::core::HashId;
 use pyo3::prelude::*;
 
+use super::hash_id::PyHashId;
+
 /// Exposes a BlockGroup to Python.
 #[pyclass]
 #[derive(Clone)]
 pub struct PyBlockGroup {
-    #[pyo3(get)]
     pub id: HashId,
     #[pyo3(get)]
     pub collection_name: String,
@@ -30,6 +31,11 @@ impl PyBlockGroup {
             sample_name,
             name,
         }
+    }
+
+    #[getter]
+    fn id(&self) -> PyHashId {
+        PyHashId::new(self.id)
     }
 
     fn __repr__(&self) -> PyResult<String> {

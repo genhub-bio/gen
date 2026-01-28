@@ -2,7 +2,12 @@ name: Python API Wheels
 
 on:
   push:
-    branches: ["main"]
+    tags:
+      - v**
+  create:
+    tags:
+      - v**
+  workflow_dispatch:
 
 jobs:
   build-wheels:
@@ -60,8 +65,47 @@ jobs:
           command: build
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           working-directory: .
+      - name: Upload wheels to releases
+        if: runner.os != 'Windows'
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release upload "${TAG}" gen-python/target/wheels/*.whl
+      - name: Upload wheels to releases (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release upload "$env:TAG" "gen-python/target/wheels/*.whl"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
           path: gen-python/target/wheels/*.whl
           if-no-files-found: error
+
+  trigger-pypi-publish:
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    if: ${{ needs.build-wheels.result == 'success' }}
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Ensure tag is available
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "TAG is empty; cannot trigger publish-pypi-tag workflow." >&2
+            exit 1
+          fi
+      - name: Trigger publish-pypi-tag workflow
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GIT_TAG_PUSH_TOKEN is required to trigger publish-pypi-tag." >&2
+            exit 1
+          fi
+          gh workflow run publish-pypi-tag.yaml --repo "$REPO" --ref "$TAG" -f tag="$TAG"

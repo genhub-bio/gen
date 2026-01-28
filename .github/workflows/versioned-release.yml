@@ -1,0 +1,104 @@
+name: Versioned Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        required: true
+        type: choice
+        description: "The semver bump level"
+        options:
+          - "patch"
+          - "minor"
+          - "major"
+        default: "patch"
+
+jobs:
+  versioned-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GIT_TAG_PUSH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-edit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Configure push authentication
+        run: |
+          if [ -z "$GIT_TAG_PUSH_TOKEN" ]; then
+            echo "GIT_TAG_PUSH_TOKEN secret is required to push tags and trigger downstream workflows." >&2
+            exit 1
+          fi
+          git remote set-url origin "https://x-access-token:${GIT_TAG_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+      - name: Bump Versions
+        env:
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+        run: |
+          cargo set-version -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen --bump "$RELEASE_TYPE"
+          cargo set-version --manifest-path gen-python/Cargo.toml --bump "$RELEASE_TYPE"
+          uv version --no-sync --bump "$RELEASE_TYPE"
+
+      - name: Capture new version
+        id: version
+        run: |
+          version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag, and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git add Cargo.toml gen-core/Cargo.toml gen-graph/Cargo.toml gen-models/Cargo.toml gen-diff/Cargo.toml pyproject.toml gen-python/Cargo.toml
+          git commit -m "Release v${VERSION}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin HEAD
+          git push origin "v${VERSION}"
+
+      - name: Generate Release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: |
+          gh release create "v${VERSION}" --title "v${VERSION}" --notes "gen ${VERSION}"
+
+      - name: Upload binaries to releases
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: |
+          gh workflow run release.yml --ref "v${VERSION}"
+
+      - name: Trigger python wheels workflow on the tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: |
+          gh workflow run python-wheels.yaml --ref "v${VERSION}"
+
+      - name: Trigger crates.io publish
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: |
+          gh workflow run publish-crates-io.yaml --ref "v${VERSION}" -f tag="v$VERSION"

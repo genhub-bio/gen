@@ -283,18 +283,18 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 
 [[package]]
 name = "capnp"
-version = "0.21.7"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e92edec8974fcd7ece90bb021db782abe14a61c10c817f197f700fef7430eb8"
+checksum = "3fe67a3f89b693d2163cf3d94129125463ac5913e1c4322f2db905aa631d3c67"
 dependencies = [
  "embedded-io",
 ]
 
 [[package]]
 name = "capnpc"
-version = "0.21.4"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6da96dcb0a0e0c526daf42bac55e1550f18ad973df9ef9ba75204f332c80ad16"
+checksum = "642d771bf5096ad1963fdbb9839f22e7bb1e308a2d1456fb1ad6cc99bb691115"
 dependencies = [
  "capnp",
 ]
@@ -744,9 +744,9 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embedded-io"
-version = "0.6.1"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
 
 [[package]]
 name = "encode_unicode"
@@ -983,6 +983,7 @@ dependencies = [
  "flate2",
  "gb-io",
  "gen-core",
+ "gen-diff",
  "gen-graph",
  "gen-models",
  "getrandom 0.3.4",
@@ -1039,6 +1040,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gen-diff"
+version = "0.1.0"
+dependencies = [
+ "gen-core",
+ "gen-graph",
+ "gen-models",
+ "itertools 0.14.0",
+ "petgraph",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "gen-graph"
 version = "0.1.0"
 dependencies = [
@@ -1085,6 +1100,7 @@ dependencies = [
  "gen-core",
  "gen-graph",
  "gen-models",
+ "log",
  "pyo3",
  "pyo3-build-config 0.26.0",
  "rusqlite",
@@ -2819,9 +2835,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.2"
+version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd15f8a2c5551a84d56efdc1cd049089e409ac19a3072d5037a17fd70719ff3e"
+checksum = "146c9e247ccc180c1f61615433868c99f3de3ae256a30a43b49f67c2d9171f34"
 dependencies = [
  "bitflags",
  "errno",
@@ -3225,14 +3241,14 @@ checksum = "b1dd07eb858a2067e2f3c7155d54e929265c264e6f37efe3ee7a8d1b5a1dd0ba"
 
 [[package]]
 name = "tempfile"
-version = "3.23.0"
+version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d31c77bdf42a745371d260a26ca7163f1e0924b64afa0b688e61b5a9fa02f16"
+checksum = "655da9c7eb6305c55742045d5a8d2037996d61d8de95806335c7c86ce0f82e9c"
 dependencies = [
  "fastrand",
  "getrandom 0.3.4",
  "once_cell",
- "rustix 1.1.2",
+ "rustix 1.1.3",
  "windows-sys 0.61.2",
 ]
 
