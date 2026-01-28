@@ -13,6 +13,7 @@ pub mod utils;
 use crate::{
     PyDbContext,
     exports::{export_fasta, export_genbank, export_gfa},
+    graph_operations::{derive_chunks, derive_subgraph, make_stitch},
     imports::{import_fasta, import_genbank, import_gfa, import_library},
     init,
     python_api::{
@@ -51,6 +52,9 @@ pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(export_gfa, m)?)?;
     m.add_function(wrap_pyfunction!(export_genbank, m)?)?;
     m.add_function(wrap_pyfunction!(get_gen_dir_py, m)?)?;
+    m.add_function(wrap_pyfunction!(derive_chunks, m)?)?;
+    m.add_function(wrap_pyfunction!(derive_subgraph, m)?)?;
+    m.add_function(wrap_pyfunction!(make_stitch, m)?)?;
 
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBlockGroup>()?;
