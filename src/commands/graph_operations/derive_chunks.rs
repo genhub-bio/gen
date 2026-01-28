@@ -40,8 +40,6 @@ pub fn derive_chunks_operation(
     breakpoints: Option<String>,
     chunk_size: Option<i64>,
 ) -> Result<(), Error> {
-    println!("Derive chunks called");
-
     let operation_conn = db_context.operations().conn();
     let graph_conn = db_context.graph().conn();
 

@@ -28,8 +28,6 @@ pub fn make_stitch_operation(
     regions: String,
     new_region: String,
 ) -> Result<(), Error> {
-    println!("Make stitch called");
-
     let operation_conn = db_context.operations().conn();
     let graph_conn = db_context.graph().conn();
 

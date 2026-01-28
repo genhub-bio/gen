@@ -50,6 +50,14 @@ pub fn get_path(
     }
 }
 
+/// Given a path (default or specified by backbone) and a sample, splits the default block group of that sample into
+/// multiple chunks specified by chunk_ranges occurring along the path.
+///
+/// We currently assume each chunk boundary creates a partition in the graph.  To put
+/// it another way, we assume each boundary is on an edge that is the only one connecting the upstream part of the graph
+/// to the downstream part.  TODO: Add guardrails that confirm this assumption.
+///
+/// The resulting new "chunk" block groups are created in the new sample.
 #[allow(clippy::too_many_arguments)]
 pub fn derive_chunks(
     context: &DbContext,
@@ -228,6 +236,9 @@ fn get_block_group_id(
     )))
 }
 
+/// Given a sample and one or more region (block group) names, creates a new graph where all the end nodes of one block
+/// group are connected to all the start nodes of the next block group.  Saves the result as a block group with
+/// new_region_name in a new sample with the specified name.
 pub fn make_stitch(
     context: &DbContext,
     collection_name: &str,

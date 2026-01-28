@@ -28,8 +28,6 @@ pub fn derive_subgraph_operation(
     region: String,
     backbone: Option<String>,
 ) -> Result<(), Error> {
-    println!("Derive subgraph called");
-
     let operation_conn = db_context.operations().conn();
     let graph_conn = db_context.graph().conn();
 
