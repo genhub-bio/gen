@@ -36,16 +36,16 @@ pub fn get_change_graph_from_hash(
 pub fn get_change_graph(
     changes: &ChangesetModels,
     dependencies: &DependencyModels,
-) -> HashMap<gen_core::HashId, GenGraph> {
+) -> HashMap<HashId, GenGraph> {
     let start_node = Node::get_start_node();
     let end_node = Node::get_end_node();
-    let mut bges_by_bg: HashMap<gen_core::HashId, Vec<&BlockGroupEdge>> = HashMap::new();
-    let mut edges_by_id: HashMap<gen_core::HashId, &Edge> = HashMap::new();
-    let mut nodes_by_id: HashMap<gen_core::HashId, &Node> = HashMap::new();
+    let mut bges_by_bg: HashMap<HashId, Vec<&BlockGroupEdge>> = HashMap::new();
+    let mut edges_by_id: HashMap<HashId, &Edge> = HashMap::new();
+    let mut nodes_by_id: HashMap<HashId, &Node> = HashMap::new();
     nodes_by_id.insert(start_node.id, &start_node);
     nodes_by_id.insert(end_node.id, &end_node);
-    let mut sequences_by_hash: HashMap<&gen_core::HashId, &Sequence> = HashMap::new();
-    let mut block_graphs: HashMap<gen_core::HashId, GenGraph> = HashMap::new();
+    let mut sequences_by_hash: HashMap<HashId, &Sequence> = HashMap::new();
+    let mut block_graphs: HashMap<HashId, GenGraph> = HashMap::new();
 
     for bge in changes.block_group_edges.iter() {
         bges_by_bg
@@ -64,7 +64,7 @@ pub fn get_change_graph(
         .iter()
         .chain(dependencies.sequences.iter())
     {
-        sequences_by_hash.insert(&seq.hash, seq);
+        sequences_by_hash.insert(seq.hash, seq);
     }
 
     for (bg_id, bg_edges) in bges_by_bg.iter() {
@@ -156,7 +156,7 @@ pub fn get_change_graph(
                     *i,
                     *j,
                     vec![GraphEdge {
-                        edge_id: gen_core::HashId::pad_str(-1),
+                        edge_id: HashId::pad_str(1),
                         source_strand: Strand::Forward,
                         target_strand: Forward,
                         chromosome_index: 0,
@@ -204,12 +204,12 @@ pub fn view_patches(
 ) -> HashMap<HashId, HashMap<HashId, String>> {
     // For each blockgroup in a patch, a .dot file is generated showing how the base sequence
     // has been updated.
-    let mut diagrams: HashMap<gen_core::HashId, HashMap<gen_core::HashId, String>> = HashMap::new();
+    let mut diagrams: HashMap<HashId, HashMap<HashId, String>> = HashMap::new();
 
     for patch in patches {
         // The beginning work is loading the models from the patch as well as dependencies. Once
         // loaded, a graph is created of the added nodes and returned as a dot string
-        let mut bg_dots: HashMap<gen_core::HashId, String> = HashMap::new();
+        let mut bg_dots: HashMap<HashId, String> = HashMap::new();
 
         let op_info = &patch.operation;
         let changeset = op_info.get_changeset(workspace);
@@ -217,23 +217,23 @@ pub fn view_patches(
 
         let block_graphs = get_change_graph(&changeset.changes, &dependencies);
 
-        let mut sequences_by_hash: HashMap<&gen_core::HashId, &Sequence> = HashMap::new();
+        let mut sequences_by_hash: HashMap<HashId, &Sequence> = HashMap::new();
         for seq in changeset
             .changes
             .sequences
             .iter()
             .chain(dependencies.sequences.iter())
         {
-            sequences_by_hash.insert(&seq.hash, seq);
+            sequences_by_hash.insert(seq.hash, seq);
         }
-        let mut node_sequence_hashes: HashMap<gen_core::HashId, &gen_core::HashId> = HashMap::new();
+        let mut node_sequence_hashes: HashMap<HashId, HashId> = HashMap::new();
         for node in changeset
             .changes
             .nodes
             .iter()
             .chain(dependencies.nodes.iter())
         {
-            node_sequence_hashes.insert(node.id, &node.sequence_hash);
+            node_sequence_hashes.insert(node.id, node.sequence_hash);
         }
 
         for (bg_id, block_graph) in block_graphs.iter() {
@@ -256,17 +256,17 @@ pub fn view_patches(
                 }
 
                 let seq_hash = *node_sequence_hashes.get(&node.node_id).unwrap();
-                let seq = *sequences_by_hash.get(seq_hash).unwrap();
+                let seq = *sequences_by_hash.get(&seq_hash).unwrap();
                 let len = end - start;
 
                 let formatted_seq = if len > 7 {
                     format!(
                         "{s}...{e}",
                         s = seq.get_sequence(start, start + 3),
-                        e = seq.get_sequence(end - 2, end + 1)
+                        e = seq.get_sequence(end - 3, end)
                     )
                 } else {
-                    seq.get_sequence(start, end + 1)
+                    seq.get_sequence(start, end)
                 };
 
                 let coordinates = format!("{node_id}:{start}-{end}");
