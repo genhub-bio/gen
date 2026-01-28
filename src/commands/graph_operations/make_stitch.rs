@@ -20,6 +20,10 @@ pub enum MakeStitchOperationError {
     StitchingError(String),
 }
 
+/// Given a sample and regions (sequence graph names) in the sample, creates a
+/// new sequence graph in the new sample that is the result of "concatenating"
+/// each region with the next.  The end nodes of each preceding region are given
+/// edges to all the start nodes of the following region.
 pub fn make_stitch_operation(
     db_context: &DbContext,
     name: Option<String>,

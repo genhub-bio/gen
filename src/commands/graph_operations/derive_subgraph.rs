@@ -20,6 +20,10 @@ pub enum DeriveSubgraphOperationError {
     RegionBoundary(String),
 }
 
+/// Given a sample and region (sequence graph name plus a coordinate range), creates a new sample and sequence graph
+/// that is the result of cutting a subgraph out of the sequence graph of the parent sample.  The cutting part is
+/// defined by the coordinates given by the region parameter, and can either be along the latest path or one specified
+/// by the backbone parameter.
 pub fn derive_subgraph_operation(
     db_context: &DbContext,
     name: Option<String>,

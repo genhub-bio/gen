@@ -29,6 +29,11 @@ pub enum DeriveChunksOperationError {
     PathLengthExceeded(String),
 }
 
+/// Given a sample and region (block group), splits the block group into subgraphs based on coordinates along a path.  A
+/// path can be specified by the backbone parameter, otherwise we use the latest path for the block group.  The chunk
+/// boundaries can be specified either with breakpoints (specific coordinates given as a comma separated string) or with
+/// chunk_size.  Given a chunk size of n, we split up the sequence graph into subgraphs of length n along the input
+/// path, along with some remainder graph of length <= n at the downstream end.
 #[allow(clippy::too_many_arguments)]
 pub fn derive_chunks_operation(
     db_context: &DbContext,
