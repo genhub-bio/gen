@@ -22,4 +22,4 @@ readme = "README.md"
 manifest-path = "gen-python/Cargo.toml"
 features = ["extension-module"]
 python-source = "gen-python/python"
-module-name = "gen.gen" # TODO: pick a name available on pypi
+module-name = "gen.gen"
