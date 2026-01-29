@@ -22,8 +22,8 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::Text,
+    prelude::{Line, Span, Style},
+    style::{Color, Modifier},
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
@@ -112,6 +112,28 @@ fn block_group_label(diff: &BlockGroupDiff) -> String {
     }
 }
 
+/// Parses a string with markdown-like asterisk syntax for highlighting.
+/// Segments surrounded by '*' are styled with `highlight_style`.
+/// Other segments are styled with `default_style`.
+fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<'_> {
+    let mut spans = Vec::new();
+    let mut is_highlighted = false;
+    for part in text.split('*') {
+        if !part.is_empty() {
+            spans.push(Span::styled(
+                part,
+                if is_highlighted {
+                    highlight_style
+                } else {
+                    default_style
+                },
+            ));
+        }
+        is_highlighted = !is_highlighted;
+    }
+    Line::from(spans)
+}
+
 pub fn view_diff(
     conn: &GraphConnection,
     diffs: &HashMap<String, OperationDiff>,
@@ -153,6 +175,7 @@ pub fn view_diff(
     let mut expanded_db = db_order.first().cloned();
     let mut graph_focus = false;
     let mut current_component_idx = 0usize;
+    let status_bar_height: u16 = 1;
 
     // Initial controller setup
     let node_sizer = GenGraphNodeSizer;
@@ -218,15 +241,18 @@ pub fn view_diff(
         last_frame_time = now;
 
         terminal.draw(|f| {
-            let outer = Layout::default()
+            let outer_layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .constraints([Constraint::Min(1), Constraint::Length(status_bar_height)])
                 .split(f.area());
+
+            let main_area = outer_layout[0];
+            let status_bar_area = outer_layout[1];
 
             let main = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(45), Constraint::Min(1)])
-                .split(outer[0]);
+                .split(main_area);
 
             let list_items: Vec<ListItem> = entries
                 .iter()
@@ -285,11 +311,26 @@ pub fn view_diff(
                 .cursor();
             f.render_stateful_widget(widget, canvas_area, &mut graph_controller);
 
-            let status = Paragraph::new(Text::styled(
-                "↑/↓ select | tab toggle focus | graph: ←→↑↓ pan, +/- zoom | q to exit",
-                Style::default().bg(Color::DarkGray).fg(Color::White),
-            ));
-            f.render_widget(status, outer[1]);
+            // Status bar with context-dependent content
+            let panel_messages = if graph_focus {
+                // Graph mode - show graph controls
+                "*tab* switch panels | *←→↑↓* pan | *+/-* zoom | *q* to exit".to_string()
+            } else {
+                // List mode - show list controls
+                "*↑/↓* select | *tab* switch panels | *q* to exit".to_string()
+            };
+            let status_bar_contents = format!(
+                "{panel_messages:^width$}",
+                width = status_bar_area.width as usize
+            );
+            let status_line = style_text(
+                &status_bar_contents,
+                Style::default().fg(get_theme_color("text_muted").unwrap()),
+                Style::default().fg(get_theme_color("highlight").unwrap()),
+            );
+            let status_bar = Paragraph::new(status_line)
+                .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
+            f.render_widget(status_bar, status_bar_area);
         })?;
 
         // Input handling
