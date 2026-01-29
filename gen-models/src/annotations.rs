@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, rc::Rc};
 
-use gen_core::{HashId, calculate_hash, config::Workspace};
+use gen_core::{HashId, calculate_hash, config::Workspace, traits::Capnp};
 use rusqlite::{
     Row, params,
     types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef},
@@ -12,6 +12,7 @@ use crate::{
     db::{GraphConnection, OperationsConnection},
     errors::FileAdditionError,
     file_types::FileTypes,
+    gen_models_capnp::{annotation_sample, stored_annotation},
     operations::FileAddition,
     traits::Query,
 };
@@ -89,6 +90,44 @@ pub struct Annotation {
     pub accession_id: HashId,
 }
 
+impl<'a> Capnp<'a> for Annotation {
+    type Builder = stored_annotation::Builder<'a>;
+    type Reader = stored_annotation::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        builder.set_id(&self.id.0).unwrap();
+        builder.set_name(&self.name);
+        builder.set_annotation_type(self.kind.as_str());
+        builder.set_accession_id(&self.accession_id.0).unwrap();
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        let id = reader
+            .get_id()
+            .unwrap()
+            .as_slice()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let name = reader.get_name().unwrap().to_string().unwrap();
+        let kind = AnnotationKind::new(reader.get_annotation_type().unwrap().to_string().unwrap());
+        let accession_id = reader
+            .get_accession_id()
+            .unwrap()
+            .as_slice()
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        Annotation {
+            id,
+            name,
+            kind,
+            accession_id,
+        }
+    }
+}
+
 impl Query for Annotation {
     type Model = Annotation;
 
@@ -101,6 +140,63 @@ impl Query for Annotation {
             kind: row.get(2).unwrap(),
             accession_id: row.get(3).unwrap(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AnnotationSample {
+    pub annotation_id: HashId,
+    pub sample_name: String,
+}
+
+impl<'a> Capnp<'a> for AnnotationSample {
+    type Builder = annotation_sample::Builder<'a>;
+    type Reader = annotation_sample::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        builder.set_annotation_id(&self.annotation_id.0).unwrap();
+        builder.set_sample_name(&self.sample_name);
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        let annotation_id = reader
+            .get_annotation_id()
+            .unwrap()
+            .as_slice()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let sample_name = reader.get_sample_name().unwrap().to_string().unwrap();
+        AnnotationSample {
+            annotation_id,
+            sample_name,
+        }
+    }
+}
+
+impl AnnotationSample {
+    pub fn create(
+        conn: &GraphConnection,
+        annotation_id: &HashId,
+        sample_name: &str,
+    ) -> Result<(), AnnotationError> {
+        let query =
+            "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
+        let mut stmt = conn.prepare(query)?;
+        stmt.execute(params![annotation_id, sample_name])?;
+        Ok(())
+    }
+
+    pub fn delete(
+        conn: &GraphConnection,
+        annotation_id: &HashId,
+        sample_name: &str,
+    ) -> Result<(), AnnotationError> {
+        let query =
+            "DELETE FROM annotations_sample WHERE annotation_id = ?1 AND sample_name = ?2;";
+        let mut stmt = conn.prepare(query)?;
+        stmt.execute(params![annotation_id, sample_name])?;
+        Ok(())
     }
 }
 

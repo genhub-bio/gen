@@ -165,6 +165,8 @@ pub fn attach_session(session: &mut session::Session) {
         "accessions",
         "accession_edges",
         "accession_paths",
+        "annotations",
+        "annotations_sample",
     ] {
         session.attach(Some(table)).unwrap();
     }
