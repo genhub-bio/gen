@@ -210,6 +210,19 @@ pub enum Commands {
         #[arg(short, long)]
         output_gff: String,
     },
+    /// Add an annotation file without importing its intervals
+    #[command(name = "add-annotation-file", arg_required_else_help(true))]
+    AddAnnotationFile {
+        /// The annotation file path
+        #[clap(index = 1)]
+        path: String,
+        /// The annotation file format (gff3, bed, genbank)
+        #[arg(short, long)]
+        format: String,
+        /// Optional operation summary message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
     /// List all samples in the current collection
     ListSamples {},
     #[command()]

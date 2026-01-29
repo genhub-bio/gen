@@ -15,6 +15,8 @@ pub enum FileTypes {
     VCF,
     Changeset,
     CSV,
+    Gff3,
+    Bed,
     None,
 }
 
@@ -28,6 +30,8 @@ impl ToSql for FileTypes {
             FileTypes::Changeset => "changeset".into(),
             FileTypes::CSV => "csv".into(),
             FileTypes::GAF => "gaf".into(),
+            FileTypes::Gff3 => "gff3".into(),
+            FileTypes::Bed => "bed".into(),
             FileTypes::None => "none".into(),
         };
         Ok(result)
@@ -44,6 +48,8 @@ impl From<FileTypes> for Value {
             FileTypes::Changeset => "changeset",
             FileTypes::CSV => "csv",
             FileTypes::GAF => "gaf",
+            FileTypes::Gff3 => "gff3",
+            FileTypes::Bed => "bed",
             FileTypes::None => "none",
         };
         Value::Text(result.to_string())
@@ -60,6 +66,8 @@ impl FromSql for FileTypes {
             Ok("changeset") => FileTypes::Changeset,
             Ok("csv") => FileTypes::CSV,
             Ok("gaf") => FileTypes::GAF,
+            Ok("gff3") => FileTypes::Gff3,
+            Ok("bed") => FileTypes::Bed,
             Ok("none") => FileTypes::None,
             _ => panic!("Invalid entry in database"),
         };
@@ -76,6 +84,8 @@ impl From<FileTypes> for gen_models_capnp::FileType {
             FileTypes::VCF => gen_models_capnp::FileType::Vcf,
             FileTypes::Changeset => gen_models_capnp::FileType::Changeset,
             FileTypes::CSV => gen_models_capnp::FileType::Csv,
+            FileTypes::Gff3 => gen_models_capnp::FileType::Gff3,
+            FileTypes::Bed => gen_models_capnp::FileType::Bed,
             FileTypes::None => gen_models_capnp::FileType::None,
         }
     }
@@ -91,6 +101,8 @@ impl From<gen_models_capnp::FileType> for FileTypes {
             gen_models_capnp::FileType::Vcf => FileTypes::VCF,
             gen_models_capnp::FileType::Changeset => FileTypes::Changeset,
             gen_models_capnp::FileType::Csv => FileTypes::CSV,
+            gen_models_capnp::FileType::Gff3 => FileTypes::Gff3,
+            gen_models_capnp::FileType::Bed => FileTypes::Bed,
             gen_models_capnp::FileType::None => FileTypes::None,
         }
     }
@@ -106,6 +118,8 @@ impl FileTypes {
             FileTypes::Changeset => "cs",
             FileTypes::CSV => "csv",
             FileTypes::GAF => "gaf",
+            FileTypes::Gff3 => "gff3",
+            FileTypes::Bed => "bed",
             FileTypes::None => "none",
         };
 

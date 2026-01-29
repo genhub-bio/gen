@@ -2,6 +2,7 @@ use gen_core::{HashId, traits::Capnp};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    annotations::AnnotationFile,
     db::OperationsConnection,
     gen_models_capnp::{manifest, manifest_diff, manifest_operation},
     operations::{FileAddition, Operation, OperationSummary},
@@ -12,6 +13,7 @@ use crate::{
 pub struct ManifestOperation {
     pub operation: Operation,
     pub file_additions: Vec<FileAddition>,
+    pub annotation_file_additions: Vec<FileAddition>,
     pub operation_summary: Option<OperationSummary>,
 }
 
@@ -28,6 +30,15 @@ impl<'a> Capnp<'a> for ManifestOperation {
             .init_file_additions(self.file_additions.len() as u32);
         for (i, file_addition) in self.file_additions.iter().enumerate() {
             let mut file_addition_builder = file_additions_builder.reborrow().get(i as u32);
+            file_addition.write_capnp(&mut file_addition_builder);
+        }
+
+        let mut annotation_file_additions_builder = builder
+            .reborrow()
+            .init_annotation_file_additions(self.annotation_file_additions.len() as u32);
+        for (i, file_addition) in self.annotation_file_additions.iter().enumerate() {
+            let mut file_addition_builder =
+                annotation_file_additions_builder.reborrow().get(i as u32);
             file_addition.write_capnp(&mut file_addition_builder);
         }
 
@@ -50,6 +61,12 @@ impl<'a> Capnp<'a> for ManifestOperation {
             file_additions.push(FileAddition::read_capnp(file_addition_reader));
         }
 
+        let annotation_file_additions_reader = reader.get_annotation_file_additions().unwrap();
+        let mut annotation_file_additions = Vec::new();
+        for file_addition_reader in annotation_file_additions_reader.iter() {
+            annotation_file_additions.push(FileAddition::read_capnp(file_addition_reader));
+        }
+
         let operation_summary = match reader.get_operation_summary().which().unwrap() {
             manifest_operation::operation_summary::None(()) => None,
             manifest_operation::operation_summary::Some(summary_reader) => {
@@ -60,6 +77,7 @@ impl<'a> Capnp<'a> for ManifestOperation {
         ManifestOperation {
             operation,
             file_additions,
+            annotation_file_additions,
             operation_summary,
         }
     }
@@ -197,6 +215,8 @@ impl<'a> ManifestGenerator<'a> {
             for hash in hashes.iter() {
                 if let Some(op) = operations_map.get(hash) {
                     let file_additions = FileAddition::get_files_for_operation(self.conn, &op.hash);
+                    let annotation_file_additions =
+                        AnnotationFile::get_files_for_operation(self.conn, &op.hash);
                     let operation_summary = OperationSummary::query(
                         self.conn,
                         "select * from operation_summaries where operation_hash = ?1",
@@ -208,6 +228,7 @@ impl<'a> ManifestGenerator<'a> {
                     manifest_operations.push(ManifestOperation {
                         operation: op.clone(),
                         file_additions,
+                        annotation_file_additions,
                         operation_summary,
                     });
                 }
@@ -286,10 +307,13 @@ pub enum ManifestDiffError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use capnp::message::TypedBuilder;
 
     use super::*;
     use crate::{
+        annotations::AnnotationFile,
         file_types::FileTypes,
         operations::OperationInfo,
         session_operations::{end_operation, start_operation},
@@ -323,6 +347,12 @@ mod tests {
                 file_path: "/path/to/file.fa".to_string(),
                 file_type: FileTypes::Fasta,
                 checksum: HashId([2u8; 32]),
+            }],
+            annotation_file_additions: vec![FileAddition {
+                id: HashId([3u8; 32]),
+                file_path: "/path/to/annotation.gff3".to_string(),
+                file_type: FileTypes::Gff3,
+                checksum: HashId([4u8; 32]),
             }],
             operation_summary: Some(OperationSummary {
                 id: 1,
@@ -366,6 +396,7 @@ mod tests {
             operations: vec![ManifestOperation {
                 operation,
                 file_additions: vec![],
+                annotation_file_additions: vec![],
                 operation_summary: None,
             }],
         };
@@ -401,6 +432,7 @@ mod tests {
         let manifest_operation = ManifestOperation {
             operation,
             file_additions: vec![],
+            annotation_file_additions: vec![],
             operation_summary: None,
         };
 
@@ -466,6 +498,53 @@ mod tests {
     }
 
     #[test]
+    fn test_manifest_generator_includes_annotation_files() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let mut session = start_operation(conn);
+        crate::sequence::Sequence::new()
+            .sequence("ACGT")
+            .sequence_type("DNA")
+            .save(conn);
+        let op_info = OperationInfo {
+            files: vec![],
+            description: "annotation op".to_string(),
+        };
+        let operation = end_operation(&context, &mut session, &op_info, "test", None).unwrap();
+
+        let repo_root = context.workspace().repo_root().unwrap();
+        let annotation_path = repo_root.join("fixtures").join("manifest_annotation.gff3");
+        fs::create_dir_all(annotation_path.parent().unwrap()).unwrap();
+        fs::write(&annotation_path, "##gff-version 3\n").unwrap();
+
+        let file_addition = AnnotationFile::add_to_operation(
+            context.workspace(),
+            op_conn,
+            &operation.hash,
+            "fixtures/manifest_annotation.gff3",
+            FileTypes::Gff3,
+            None,
+        )
+        .unwrap();
+
+        let generator = ManifestGenerator::new(op_conn);
+        let manifest = generator
+            .generate_manifest("main", Some(&operation.hash))
+            .unwrap();
+
+        assert_eq!(manifest.operations.len(), 1);
+        assert_eq!(
+            manifest.operations[0].annotation_file_additions,
+            vec![file_addition]
+        );
+    }
+
+    #[test]
     fn test_manifest_comparer() {
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -515,11 +594,13 @@ mod tests {
                 ManifestOperation {
                     operation: op1.clone(),
                     file_additions: vec![],
+                    annotation_file_additions: vec![],
                     operation_summary: None,
                 },
                 ManifestOperation {
                     operation: op2.clone(),
                     file_additions: vec![],
+                    annotation_file_additions: vec![],
                     operation_summary: None,
                 },
             ],
@@ -533,11 +614,13 @@ mod tests {
                 ManifestOperation {
                     operation: op2.clone(),
                     file_additions: vec![],
+                    annotation_file_additions: vec![],
                     operation_summary: None,
                 },
                 ManifestOperation {
                     operation: op3.clone(),
                     file_additions: vec![],
+                    annotation_file_additions: vec![],
                     operation_summary: None,
                 },
             ],
