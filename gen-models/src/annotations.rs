@@ -175,6 +175,20 @@ impl<'a> Capnp<'a> for AnnotationSample {
 }
 
 impl AnnotationSample {
+    pub fn insert(
+        conn: &GraphConnection,
+        annotation_sample: &AnnotationSample,
+    ) -> Result<(), AnnotationError> {
+        let query =
+            "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
+        let mut stmt = conn.prepare(query)?;
+        stmt.execute(params![
+            annotation_sample.annotation_id,
+            annotation_sample.sample_name
+        ])?;
+        Ok(())
+    }
+
     pub fn create(
         conn: &GraphConnection,
         annotation_id: &HashId,
@@ -209,6 +223,18 @@ pub enum AnnotationError {
 impl Annotation {
     pub fn generate_id(name: &str, kind: &AnnotationKind, accession_id: &HashId) -> HashId {
         HashId(calculate_hash(&format!("{accession_id}:{name}:{kind}",)))
+    }
+
+    pub fn insert(conn: &GraphConnection, annotation: &Annotation) -> Result<(), AnnotationError> {
+        let query = "INSERT OR IGNORE INTO annotations (id, name, annotation_type, accession_id) VALUES (?1, ?2, ?3, ?4);";
+        let mut stmt = conn.prepare(query)?;
+        stmt.execute(params![
+            annotation.id,
+            annotation.name,
+            annotation.kind,
+            annotation.accession_id
+        ])?;
+        Ok(())
     }
 
     pub fn create(

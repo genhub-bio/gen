@@ -888,19 +888,13 @@ pub fn apply_changeset(
     }
 
     for annotation in &changeset.annotations {
-        Annotation::create(conn, &annotation.name, annotation.kind.clone(), &annotation.accession_id)
-            .map_err(|err| match err {
-                AnnotationError::DatabaseError(inner) => inner,
-            })?;
+        Annotation::insert(conn, annotation).map_err(|err| match err {
+            AnnotationError::DatabaseError(inner) => inner,
+        })?;
     }
 
     for annotation_sample in &changeset.annotation_samples {
-        AnnotationSample::create(
-            conn,
-            &annotation_sample.annotation_id,
-            &annotation_sample.sample_name,
-        )
-        .map_err(|err| match err {
+        AnnotationSample::insert(conn, annotation_sample).map_err(|err| match err {
             AnnotationError::DatabaseError(inner) => inner,
         })?;
     }

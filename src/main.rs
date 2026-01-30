@@ -35,11 +35,11 @@ use r#gen::{
         patch::view_patches,
     },
 };
-use gen_core::{HashId, config::Workspace};
+use gen_core::{HashId, calculate_hash, config::Workspace};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     annotations::{AnnotationFile, parse_annotation_file_type},
-    block_group::BlockGroup,
+    block_group::{BlockGroup, PathCache},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
@@ -51,7 +51,7 @@ use gen_models::{
         OperationSummary, parse_hash,
     },
     sample::Sample,
-    session_operations::DependencyModels,
+    session_operations::{DependencyModels, end_operation, start_operation},
     traits::Query,
 };
 use itertools::Itertools;
@@ -536,6 +536,83 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             graph_conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
+        }
+        Some(Commands::AddAnnotation {
+            name,
+            sample,
+            region,
+        }) => {
+            let collection_name = get_default_collection(operation_conn)?;
+            let parsed_region = region.parse::<Region>()?;
+            let interval = parsed_region.interval();
+            let start = interval.start().ok_or("Region missing start")?.get() as i64;
+            let end = interval.end().ok_or("Region missing end")?.get() as i64;
+
+            let block_groups =
+                Sample::get_block_groups(graph_conn, &collection_name, sample.as_deref());
+            let block_group = block_groups
+                .iter()
+                .find(|bg| bg.name == parsed_region.name())
+                .ok_or_else(|| {
+                    let sample_label = match &sample {
+                        Some(name) => format!("sample {name}"),
+                        None => "default sample".to_string(),
+                    };
+                    format!(
+                        "Graph {} not found for {sample_label}",
+                        parsed_region.name()
+                    )
+                })?;
+            let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
+            let path_length = path.length(graph_conn);
+            if start < 0 || end < 0 || start > end || end > path_length {
+                return Err(format!(
+                    "Region {region} is outside the path bounds (0-{path_length})"
+                )
+                .into());
+            }
+
+            let mut session = start_operation(graph_conn);
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
+
+            let mut cache = PathCache::new(graph_conn);
+            let _ = PathCache::lookup(&mut cache, &block_group.id, path.name.clone());
+            let accession =
+                BlockGroup::add_accession(graph_conn, &path, &name, start, end, &mut cache);
+
+            let annotation_type = "generic";
+            let annotation_id = HashId(calculate_hash(&format!(
+                "{}:{name}:{annotation_type}",
+                accession.id
+            )));
+            graph_conn.execute(
+                "INSERT OR IGNORE INTO annotations (id, name, annotation_type, accession_id) VALUES (?1, ?2, ?3, ?4);",
+                params![annotation_id, name, annotation_type, accession.id],
+            )?;
+            if let Some(sample_name) = &sample {
+                graph_conn.execute(
+                    "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);",
+                    params![annotation_id, sample_name],
+                )?;
+            }
+
+            let operation = end_operation(
+                &db_context,
+                &mut session,
+                &OperationInfo {
+                    files: vec![],
+                    description: format!("add annotation {name}"),
+                },
+                &format!("add annotation {name}"),
+                None,
+            )?;
+
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+
+            println!("Annotation {name} added in operation {}", operation.hash);
             Ok(())
         }
         Some(Commands::AddAnnotationFile {
