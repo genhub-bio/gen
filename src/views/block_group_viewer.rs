@@ -716,26 +716,16 @@ impl<'a> Viewer<'a> {
         ctx.print(visible_start as f64, y, Span::styled(label, style));
     }
 
-    fn draw_annotations(&self, ctx: &mut ratatui::widgets::canvas::Context) {
+    fn collect_annotation_segments(
+        &self,
+    ) -> (Vec<usize>, HashMap<usize, Vec<(f64, f64)>>) {
         if self.annotations.is_empty() {
-            return;
+            return (Vec::new(), HashMap::new());
         }
-
-        #[derive(Clone)]
-        struct AnnotationDrawSegment {
-            x1: f64,
-            x2: f64,
-            y: f64,
-        }
-
-        let zoomed_out = self.parameters.label_width < 5;
-        let annotation_color = get_theme_color("base0b").unwrap_or(Color::Green);
-        let annotation_label_style = Style::default().fg(annotation_color);
-        let annotation_bar_style = Style::default().bg(annotation_color);
 
         let mut visible_indices = Vec::new();
         let mut visible_index_set = HashSet::new();
-        let mut segments_by_annotation: HashMap<usize, Vec<AnnotationDrawSegment>> = HashMap::new();
+        let mut segments_by_annotation: HashMap<usize, Vec<(f64, f64)>> = HashMap::new();
 
         for &block in self.scaled_layout.labels.keys() {
             if is_start_node(block.node_id) || is_end_node(block.node_id) {
@@ -750,7 +740,7 @@ impl<'a> Viewer<'a> {
                 continue;
             };
 
-            let ((x1, y), (x2, _)) = self.scaled_layout.labels[&block];
+            let ((x1, _y), (x2, _)) = self.scaled_layout.labels[&block];
             let node_len = block.sequence_end - block.sequence_start;
             if node_len <= 0 {
                 continue;
@@ -781,84 +771,125 @@ impl<'a> Viewer<'a> {
                 segments_by_annotation
                     .entry(*idx)
                     .or_default()
-                    .push(AnnotationDrawSegment {
-                        x1: seg_x1,
-                        x2: seg_x2,
-                        y,
-                    });
+                    .push((seg_x1, seg_x2));
             }
         }
 
+        visible_indices.sort_unstable();
+        (visible_indices, segments_by_annotation)
+    }
+
+    pub fn annotation_panel_height(&self, max_height: u16) -> u16 {
+        if self.annotations.is_empty() || max_height < 3 {
+            return 0;
+        }
+        let desired = self.annotations.len().saturating_add(1) as u16;
+        let cap = max_height.saturating_div(3).max(3);
+        desired.min(cap).min(max_height)
+    }
+
+    pub fn draw_annotations_panel(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if area.height < 2 || self.annotations.is_empty() {
+            return;
+        }
+
+        let divider_style = Style::default().fg(get_theme_color("separator").unwrap());
+        let divider_y = area.y;
+        let divider = "─".repeat(area.width as usize);
+        frame
+            .buffer_mut()
+            .set_string(area.x, divider_y, divider, divider_style);
+
+        let title = "Annotations";
+        frame.buffer_mut().set_string(
+            area.x + 1,
+            divider_y,
+            title,
+            Style::default().fg(get_theme_color("text_muted").unwrap()),
+        );
+
+        let inner = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height - 1,
+        };
+
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+
+        let x_min = self.state.offset_x as f64;
+        let x_max = x_min + inner.width as f64 - 1.0 + 1.0 / 2.0;
+        let y_min = 0.0;
+        let y_max = inner.height as f64 - 1.0 + 3.0 / 4.0;
+
+        let zoomed_out = self.parameters.label_width < 5;
+        let annotation_color = get_theme_color("base0b").unwrap_or(Color::Green);
+        let annotation_label_style = Style::default().fg(annotation_color);
+        let annotation_bar_style = Style::default().bg(annotation_color);
+
+        let (visible_indices, segments_by_annotation) = self.collect_annotation_segments();
         if visible_indices.is_empty() {
             return;
         }
 
-        visible_indices.sort_unstable();
-        let mut row_by_idx = HashMap::new();
-        for (row, idx) in visible_indices.iter().enumerate() {
-            row_by_idx.insert(*idx, row);
-        }
+        let max_rows = inner.height as usize;
+        let row_count = visible_indices.len().min(max_rows);
 
-        let base_row_offset = 1.0;
-
-        for (idx, mut segments) in segments_by_annotation {
-            let Some(row) = row_by_idx.get(&idx).copied() else {
-                continue;
-            };
-
-            for seg in &mut segments {
-                seg.y += base_row_offset + row as f64;
-            }
-
-            let mut segments_by_row: HashMap<i64, Vec<(f64, f64)>> = HashMap::new();
-            for seg in &segments {
-                let key = seg.y.round() as i64;
-                segments_by_row.entry(key).or_default().push((seg.x1, seg.x2));
-            }
-
-            for (row_key, mut row_segments) in segments_by_row {
-                row_segments.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let y = row_key as f64;
-                let annotation_name = &self.annotations[idx].name;
-                if let Some((first_x1, _)) = row_segments.first() {
-                    let label_offset = annotation_name.chars().count() as f64 + 1.0;
-                    let label_x = first_x1 - label_offset;
-                    self.place_label(ctx, annotation_name, (label_x, y), annotation_label_style);
-                }
-
-                let mut prev_end: Option<f64> = None;
-                for (x1, x2) in row_segments {
-                    if zoomed_out {
-                        let center = (x1 + x2) / 2.0;
-                        ctx.draw(&Points {
-                            coords: &[(center, y)],
-                            color: annotation_color,
-                        });
-                    } else {
-                        let start_cell = x1.floor();
-                        let end_cell = x2.ceil();
-                        let width = ((end_cell - start_cell).max(1.0)) as usize;
-                        self.place_bar(ctx, start_cell, y, width, annotation_bar_style);
+        let canvas = Canvas::default()
+            .background_color(get_theme_color("canvas").unwrap())
+            .x_bounds([x_min, x_max])
+            .y_bounds([y_min, y_max])
+            .paint(|ctx| {
+                for (row, idx) in visible_indices.iter().take(row_count).enumerate() {
+                    let Some(mut segments) = segments_by_annotation.get(idx).cloned() else {
+                        continue;
+                    };
+                    segments.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let y = (inner.height as i64 - 1 - row as i64) as f64;
+                    let annotation_name = &self.annotations[*idx].name;
+                    if let Some((first_x1, _)) = segments.first() {
+                        let label_offset = annotation_name.chars().count() as f64 + 1.0;
+                        let label_x = first_x1 - label_offset;
+                        self.place_label(ctx, annotation_name, (label_x, y), annotation_label_style);
                     }
 
-                    if !zoomed_out {
-                        if let Some(prev) = prev_end {
-                            if x1 - prev > 1.0 {
-                                self.draw_dashed_connector(
-                                    ctx,
-                                    prev + 1.0,
-                                    x1 - 1.0,
-                                    y,
-                                    annotation_label_style,
-                                );
+                    let mut prev_end: Option<f64> = None;
+                    for (x1, x2) in segments {
+                        if zoomed_out {
+                            let center = (x1 + x2) / 2.0;
+                            ctx.draw(&Points {
+                                coords: &[(center, y)],
+                                color: annotation_color,
+                            });
+                        } else {
+                            let start_cell = x1.floor();
+                            let end_cell = x2.ceil();
+                            let width = ((end_cell - start_cell).max(1.0)) as usize;
+                            self.place_bar(ctx, start_cell, y, width, annotation_bar_style);
+                        }
+
+                        if !zoomed_out {
+                            if let Some(prev) = prev_end {
+                                if x1 - prev > 1.0 {
+                                    self.draw_dashed_connector(
+                                        ctx,
+                                        prev + 1.0,
+                                        x1 - 1.0,
+                                        y,
+                                        annotation_label_style,
+                                    );
+                                }
                             }
                         }
-                    }
 
-                    prev_end = Some(x2);
+                        prev_end = Some(x2);
+                    }
                 }
-            }
-        }
+            });
+
+        frame.render_widget(canvas, inner);
     }
 
     /// Draw and render blocks and lines to a canvas through a scrollable window.
@@ -1076,7 +1107,6 @@ impl<'a> Viewer<'a> {
                     }
                 }
 
-                self.draw_annotations(ctx);
             });
         frame.render_widget(canvas, area);
 

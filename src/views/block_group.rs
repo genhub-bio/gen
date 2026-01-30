@@ -21,7 +21,7 @@ use gen_models::{
 };
 use log::warn;
 use ratatui::{
-    layout::Constraint,
+    layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
@@ -328,6 +328,22 @@ pub fn view_block_group(
                 sidebar_layout[1]
             };
 
+            let annotation_panel_height = viewer.annotation_panel_height(canvas_area.height);
+            let (graph_area, annotation_area) = if annotation_panel_height > 0
+                && annotation_panel_height < canvas_area.height
+            {
+                let graph_layout = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(annotation_panel_height),
+                    ])
+                    .split(canvas_area);
+                (graph_layout[0], graph_layout[1])
+            } else {
+                (canvas_area, Rect::default())
+            };
+
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;
             if show_sidebar {
@@ -404,7 +420,10 @@ pub fn view_block_group(
             } else {
                 // Ask the viewer to paint the canvas
                 viewer.has_focus = focus_zone == FocusZone::Canvas;
-                viewer.draw(frame, canvas_area);
+                viewer.draw(frame, graph_area);
+                if annotation_area.height > 0 {
+                    viewer.draw_annotations_panel(frame, annotation_area);
+                }
             }
 
             // Panel
