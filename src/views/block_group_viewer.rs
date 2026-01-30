@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::cmp::{max, min};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node, is_terminal};
@@ -31,6 +32,20 @@ pub mod label {
     pub const END: &str = "> End";
     pub const NODE: &str = "⏺";
     pub const SELECTED: &str = "█";
+}
+
+#[derive(Clone, Debug)]
+pub struct AnnotationSegment {
+    pub node_id: HashId,
+    pub start: i64,
+    pub end: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnnotationSpan {
+    pub id: HashId,
+    pub name: String,
+    pub segments: Vec<AnnotationSegment>,
 }
 
 /// Used for scrolling through the graph.
@@ -265,6 +280,8 @@ pub struct Viewer<'a> {
     pub has_focus: bool,
     highlights: Vec<(Color, DiGraphMap<GraphNode, ()>)>,
     node_highlights: Vec<(Color, HashSet<GraphNode>)>,
+    annotations: Vec<AnnotationSpan>,
+    annotation_segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>>,
 }
 
 impl<'a> Viewer<'a> {
@@ -341,6 +358,8 @@ impl<'a> Viewer<'a> {
             has_focus: false,
             highlights: Vec::new(),
             node_highlights: Vec::new(),
+            annotations: Vec::new(),
+            annotation_segments_by_node: HashMap::new(),
         }
     }
 
@@ -387,6 +406,20 @@ impl<'a> Viewer<'a> {
 
     pub fn set_node_highlights(&mut self, highlights: Vec<(Color, HashSet<GraphNode>)>) {
         self.node_highlights = highlights;
+    }
+
+    pub fn set_annotations(&mut self, annotations: Vec<AnnotationSpan>) {
+        let mut segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>> = HashMap::new();
+        for (idx, annotation) in annotations.iter().enumerate() {
+            for segment in &annotation.segments {
+                segments_by_node
+                    .entry(segment.node_id)
+                    .or_default()
+                    .push((idx, segment.clone()));
+            }
+        }
+        self.annotations = annotations;
+        self.annotation_segments_by_node = segments_by_node;
     }
 
     /// Check if we currently have highlights of a specific color.
@@ -610,6 +643,224 @@ impl<'a> Viewer<'a> {
         }
     }
 
+    fn place_bar(
+        &self,
+        ctx: &mut ratatui::widgets::canvas::Context,
+        start_x: f64,
+        y: f64,
+        width: usize,
+        style: ratatui::style::Style,
+    ) {
+        if width == 0 {
+            return;
+        }
+
+        let start = start_x.floor() as i64;
+        let end = start + width as i64 - 1;
+        let window_start = (self.state.offset_x + 1) as i64;
+        let window_end = (self.state.offset_x + self.state.viewport.width as i32 - 1) as i64;
+
+        if end < window_start || start > window_end {
+            return;
+        }
+
+        let visible_start = start.max(window_start);
+        let visible_end = end.min(window_end);
+        let visible_width = (visible_end - visible_start + 1) as usize;
+        if visible_width == 0 {
+            return;
+        }
+
+        let label = " ".repeat(visible_width);
+        ctx.print(visible_start as f64, y, Span::styled(label, style));
+    }
+
+    fn draw_dashed_connector(
+        &self,
+        ctx: &mut ratatui::widgets::canvas::Context,
+        start_x: f64,
+        end_x: f64,
+        y: f64,
+        style: ratatui::style::Style,
+    ) {
+        let start = start_x.ceil() as i64;
+        let end = end_x.floor() as i64;
+        if end <= start {
+            return;
+        }
+
+        let window_start = (self.state.offset_x + 1) as i64;
+        let window_end = (self.state.offset_x + self.state.viewport.width as i32 - 1) as i64;
+        if end < window_start || start > window_end {
+            return;
+        }
+
+        let visible_start = start.max(window_start);
+        let visible_end = end.min(window_end);
+        let visible_width = (visible_end - visible_start + 1) as usize;
+        if visible_width == 0 {
+            return;
+        }
+
+        let mut label = String::with_capacity(visible_width);
+        let mut idx = (visible_start - start) as usize;
+        for _ in 0..visible_width {
+            if idx % 2 == 0 {
+                label.push('-');
+            } else {
+                label.push(' ');
+            }
+            idx += 1;
+        }
+
+        ctx.print(visible_start as f64, y, Span::styled(label, style));
+    }
+
+    fn draw_annotations(&self, ctx: &mut ratatui::widgets::canvas::Context) {
+        if self.annotations.is_empty() {
+            return;
+        }
+
+        #[derive(Clone)]
+        struct AnnotationDrawSegment {
+            x1: f64,
+            x2: f64,
+            y: f64,
+        }
+
+        let zoomed_out = self.parameters.label_width < 5;
+        let annotation_color = get_theme_color("base0b").unwrap_or(Color::Green);
+        let annotation_label_style = Style::default().fg(annotation_color);
+        let annotation_bar_style = Style::default().bg(annotation_color);
+
+        let mut visible_indices = Vec::new();
+        let mut visible_index_set = HashSet::new();
+        let mut segments_by_annotation: HashMap<usize, Vec<AnnotationDrawSegment>> = HashMap::new();
+
+        for &block in self.scaled_layout.labels.keys() {
+            if is_start_node(block.node_id) || is_end_node(block.node_id) {
+                continue;
+            }
+
+            if !self.is_block_visible(block) {
+                continue;
+            }
+
+            let Some(segments) = self.annotation_segments_by_node.get(&block.node_id) else {
+                continue;
+            };
+
+            let ((x1, y), (x2, _)) = self.scaled_layout.labels[&block];
+            let node_len = block.sequence_end - block.sequence_start;
+            if node_len <= 0 {
+                continue;
+            }
+
+            let label_len = x2 - x1;
+            for (idx, segment) in segments {
+                let overlap_start = max(segment.start, block.sequence_start);
+                let overlap_end = min(segment.end, block.sequence_end);
+                if overlap_end <= overlap_start {
+                    continue;
+                }
+
+                if visible_index_set.insert(*idx) {
+                    visible_indices.push(*idx);
+                }
+
+                let relative_start = (overlap_start - block.sequence_start) as f64
+                    / node_len as f64;
+                let relative_end =
+                    (overlap_end - block.sequence_start) as f64 / node_len as f64;
+                let mut seg_x1 = x1 + relative_start * label_len;
+                let mut seg_x2 = x1 + relative_end * label_len;
+                if seg_x2 < seg_x1 {
+                    std::mem::swap(&mut seg_x1, &mut seg_x2);
+                }
+
+                segments_by_annotation
+                    .entry(*idx)
+                    .or_default()
+                    .push(AnnotationDrawSegment {
+                        x1: seg_x1,
+                        x2: seg_x2,
+                        y,
+                    });
+            }
+        }
+
+        if visible_indices.is_empty() {
+            return;
+        }
+
+        visible_indices.sort_unstable();
+        let mut row_by_idx = HashMap::new();
+        for (row, idx) in visible_indices.iter().enumerate() {
+            row_by_idx.insert(*idx, row);
+        }
+
+        let base_row_offset = 1.0;
+
+        for (idx, mut segments) in segments_by_annotation {
+            let Some(row) = row_by_idx.get(&idx).copied() else {
+                continue;
+            };
+
+            for seg in &mut segments {
+                seg.y += base_row_offset + row as f64;
+            }
+
+            let mut segments_by_row: HashMap<i64, Vec<(f64, f64)>> = HashMap::new();
+            for seg in &segments {
+                let key = seg.y.round() as i64;
+                segments_by_row.entry(key).or_default().push((seg.x1, seg.x2));
+            }
+
+            for (row_key, mut row_segments) in segments_by_row {
+                row_segments.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let y = row_key as f64;
+                let annotation_name = &self.annotations[idx].name;
+                if let Some((first_x1, _)) = row_segments.first() {
+                    let label_offset = annotation_name.chars().count() as f64 + 1.0;
+                    let label_x = first_x1 - label_offset;
+                    self.place_label(ctx, annotation_name, (label_x, y), annotation_label_style);
+                }
+
+                let mut prev_end: Option<f64> = None;
+                for (x1, x2) in row_segments {
+                    if zoomed_out {
+                        let center = (x1 + x2) / 2.0;
+                        ctx.draw(&Points {
+                            coords: &[(center, y)],
+                            color: annotation_color,
+                        });
+                    } else {
+                        let start_cell = x1.floor();
+                        let end_cell = x2.ceil();
+                        let width = ((end_cell - start_cell).max(1.0)) as usize;
+                        self.place_bar(ctx, start_cell, y, width, annotation_bar_style);
+                    }
+
+                    if !zoomed_out {
+                        if let Some(prev) = prev_end {
+                            if x1 - prev > 1.0 {
+                                self.draw_dashed_connector(
+                                    ctx,
+                                    prev + 1.0,
+                                    x1 - 1.0,
+                                    y,
+                                    annotation_label_style,
+                                );
+                            }
+                        }
+                    }
+
+                    prev_end = Some(x2);
+                }
+            }
+        }
+    }
+
     /// Draw and render blocks and lines to a canvas through a scrollable window.
     /// TODO: turn this into the render function of a custom stateful widget
     pub fn draw(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -824,6 +1075,8 @@ impl<'a> Viewer<'a> {
                         );
                     }
                 }
+
+                self.draw_annotations(ctx);
             });
         frame.render_widget(canvas, area);
 

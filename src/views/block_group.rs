@@ -8,10 +8,16 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::{HashId, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{
-    block_group::BlockGroup, db::GraphConnection, node::Node, path::Path, traits::Query,
+    accession::AccessionEdge,
+    annotations::Annotation,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    node::Node,
+    path::Path,
+    traits::Query,
 };
 use log::warn;
 use ratatui::{
@@ -26,7 +32,7 @@ use crate::{
     config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        block_group_viewer::{PlotParameters, Viewer},
+        block_group_viewer::{AnnotationSegment, AnnotationSpan, PlotParameters, Viewer},
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
     },
 };
@@ -65,6 +71,100 @@ fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<
         is_highlighted = !is_highlighted;
     }
     Line::from(spans)
+}
+
+fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
+    let mut segments = Vec::new();
+    let mut current_node: Option<HashId> = None;
+    let mut current_start: Option<i64> = None;
+
+    for edge in edges {
+        if is_start_node(edge.source_node_id) {
+            current_node = Some(edge.target_node_id);
+            current_start = Some(edge.target_coordinate);
+            continue;
+        }
+
+        if is_end_node(edge.target_node_id) {
+            if let (Some(node_id), Some(start)) = (current_node, current_start) {
+                let (segment_start, segment_end) = if start <= edge.source_coordinate {
+                    (start, edge.source_coordinate)
+                } else {
+                    (edge.source_coordinate, start)
+                };
+                segments.push(AnnotationSegment {
+                    node_id,
+                    start: segment_start,
+                    end: segment_end,
+                });
+            }
+            break;
+        }
+
+        if let (Some(node_id), Some(start)) = (current_node, current_start) {
+            let (segment_start, segment_end) = if start <= edge.source_coordinate {
+                (start, edge.source_coordinate)
+            } else {
+                (edge.source_coordinate, start)
+            };
+            segments.push(AnnotationSegment {
+                node_id,
+                start: segment_start,
+                end: segment_end,
+            });
+        }
+
+        current_node = Some(edge.target_node_id);
+        current_start = Some(edge.target_coordinate);
+    }
+
+    segments
+}
+
+fn load_annotations_for_block_group(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+) -> Vec<AnnotationSpan> {
+    let path = <Path as Query>::get(
+        conn,
+        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
+        params![block_group_id],
+    );
+
+    let path = match path {
+        Ok(path) => path,
+        Err(err) => {
+            warn!("No path found for block group {block_group_id}: {err}");
+            return Vec::new();
+        }
+    };
+
+    let annotations = Annotation::query(
+        conn,
+        "SELECT a.* FROM annotations a JOIN accessions acc ON acc.id = a.accession_id WHERE acc.path_id = ?1",
+        params![path.id],
+    );
+
+    annotations
+        .into_iter()
+        .filter_map(|annotation| {
+            let edges = AccessionEdge::query(
+                conn,
+                "SELECT ae.* FROM accession_edges ae JOIN accession_paths ap ON ap.edge_id = ae.id WHERE ap.accession_id = ?1 ORDER BY ap.index_in_path ASC",
+                params![annotation.accession_id],
+            );
+            let segments = accession_edges_to_segments(&edges);
+            if segments.is_empty() {
+                None
+            } else {
+                Some(AnnotationSpan {
+                    id: annotation.id,
+                    name: annotation.name,
+                    segments,
+                })
+            }
+        })
+        .collect()
 }
 
 pub fn view_block_group(
@@ -155,6 +255,10 @@ pub fn view_block_group(
     };
 
     bar.finish();
+
+    if let Some(ref bg_id) = block_group_id {
+        viewer.set_annotations(load_annotations_for_block_group(conn, bg_id));
+    }
 
     // Setup terminal
     enable_raw_mode()?;
@@ -378,6 +482,7 @@ pub fn view_block_group(
             connect_all_boundary_edges(&mut block_graph);
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
+            viewer.set_annotations(load_annotations_for_block_group(conn, new_block_group_id));
             viewer.state.selected_block = None;
             is_loading = false;
         }
