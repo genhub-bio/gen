@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "gen"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "base64",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "gen-core"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "capnp",
  "capnpc",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "gen-diff"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "gen-graph"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "gen-core",
  "interavl",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "cached",
  "capnp",

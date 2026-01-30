@@ -224,6 +224,18 @@ struct Annotation {
   end @2 :Int64;
 }
 
+struct StoredAnnotation {
+  id @0 :List(UInt8);
+  name @1 :Text;
+  annotationType @2 :Text;
+  accessionId @3 :List(UInt8);
+}
+
+struct AnnotationSample {
+  annotationId @0 :List(UInt8);
+  sampleName @1 :Text;
+}
+
 struct ChangesetModels {
   collections @0 :List(Collection);
   samples @1 :List(Sample);
@@ -237,6 +249,8 @@ struct ChangesetModels {
   accessions @9 :List(Accession);
   accessionEdges @10 :List(AccessionEdge);
   accessionPaths @11 :List(AccessionPath);
+  annotations @12 :List(StoredAnnotation);
+  annotationSamples @13 :List(AnnotationSample);
 }
 
 struct DependencyModels {

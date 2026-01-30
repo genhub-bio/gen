@@ -210,6 +210,19 @@ pub enum Commands {
         #[arg(short, long)]
         output_gff: String,
     },
+    /// Add an annotation and accession for a region
+    #[command(name = "add-annotation", arg_required_else_help(true))]
+    AddAnnotation {
+        /// The annotation name
+        #[arg(short, long)]
+        name: String,
+        /// The sample name to annotate (defaults to the collection's default sample)
+        #[arg(short, long)]
+        sample: Option<String>,
+        /// The region to annotate (region:start-end)
+        #[clap(index = 1)]
+        region: String,
+    },
     /// List all samples in the current collection
     ListSamples {},
     #[command()]

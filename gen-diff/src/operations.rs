@@ -379,6 +379,8 @@ mod tests {
             accessions: vec![],
             accession_edges: vec![],
             accession_paths: vec![],
+            annotations: vec![],
+            annotation_samples: vec![],
         };
         let dependencies = base_dependencies(start_node, end_node);
         (changeset, dependencies)

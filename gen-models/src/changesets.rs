@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    annotations::{Annotation, AnnotationError, AnnotationSample},
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -89,6 +90,8 @@ pub struct ChangesetModels {
     pub accessions: Vec<Accession>,
     pub accession_edges: Vec<AccessionEdge>,
     pub accession_paths: Vec<AccessionPath>,
+    pub annotations: Vec<Annotation>,
+    pub annotation_samples: Vec<AnnotationSample>,
 }
 
 impl<'a> Capnp<'a> for ChangesetModels {
@@ -195,6 +198,24 @@ impl<'a> Capnp<'a> for ChangesetModels {
             let mut accession_path_builder = accession_paths_builder.reborrow().get(i as u32);
             accession_path.write_capnp(&mut accession_path_builder);
         }
+
+        // Write annotations
+        let mut annotations_builder = builder
+            .reborrow()
+            .init_annotations(self.annotations.len() as u32);
+        for (i, annotation) in self.annotations.iter().enumerate() {
+            let mut annotation_builder = annotations_builder.reborrow().get(i as u32);
+            annotation.write_capnp(&mut annotation_builder);
+        }
+
+        // Write annotation samples
+        let mut annotation_samples_builder = builder
+            .reborrow()
+            .init_annotation_samples(self.annotation_samples.len() as u32);
+        for (i, annotation_sample) in self.annotation_samples.iter().enumerate() {
+            let mut annotation_sample_builder = annotation_samples_builder.reborrow().get(i as u32);
+            annotation_sample.write_capnp(&mut annotation_sample_builder);
+        }
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -284,6 +305,20 @@ impl<'a> Capnp<'a> for ChangesetModels {
             accession_paths.push(AccessionPath::read_capnp(accession_path_reader));
         }
 
+        // Read annotations
+        let annotations_reader = reader.get_annotations().unwrap();
+        let mut annotations = Vec::new();
+        for annotation_reader in annotations_reader.iter() {
+            annotations.push(Annotation::read_capnp(annotation_reader));
+        }
+
+        // Read annotation samples
+        let annotation_samples_reader = reader.get_annotation_samples().unwrap();
+        let mut annotation_samples = Vec::new();
+        for annotation_sample_reader in annotation_samples_reader.iter() {
+            annotation_samples.push(AnnotationSample::read_capnp(annotation_sample_reader));
+        }
+
         ChangesetModels {
             collections,
             samples,
@@ -297,6 +332,8 @@ impl<'a> Capnp<'a> for ChangesetModels {
             accessions,
             accession_edges,
             accession_paths,
+            annotations,
+            annotation_samples,
         }
     }
 }
@@ -377,6 +414,8 @@ pub fn process_changesetiter(
     let mut created_accessions = vec![];
     let mut created_accession_edges = vec![];
     let mut created_accession_paths = vec![];
+    let mut created_annotations = vec![];
+    let mut created_annotation_samples = vec![];
 
     // Initialize collections for dependency tracking
     let mut previous_collections = HashSet::new();
@@ -621,6 +660,36 @@ pub fn process_changesetiter(
                         previous_accession_edges.insert(edge_id);
                     }
                 }
+                "annotations" => {
+                    let id = parse_hashid(item, pk_column);
+                    let name = parse_string(item, 1);
+                    let annotation_type = parse_string(item, 2);
+                    let accession_id = parse_hashid(item, 3);
+
+                    created_annotations.push(Annotation {
+                        id,
+                        name,
+                        annotation_type,
+                        accession_id,
+                    });
+
+                    if !created_accessions_set.contains(&accession_id) {
+                        previous_accessions.insert(accession_id);
+                    }
+                }
+                "annotations_sample" => {
+                    let annotation_id = parse_hashid(item, 0);
+                    let sample_name = parse_string(item, 1);
+
+                    created_annotation_samples.push(AnnotationSample {
+                        annotation_id,
+                        sample_name: sample_name.clone(),
+                    });
+
+                    if !created_samples_set.contains(&sample_name) {
+                        previous_samples.insert(sample_name);
+                    }
+                }
                 t => {
                     println!("unhandled table {t}")
                 }
@@ -661,6 +730,8 @@ pub fn process_changesetiter(
         accessions: created_accessions,
         accession_edges: created_accession_edges,
         accession_paths: created_accession_paths,
+        annotations: created_annotations,
+        annotation_samples: created_annotation_samples,
     };
 
     let dependency_models = DependencyModels {
@@ -814,6 +885,18 @@ pub fn apply_changeset(
             .map(|ap| ap.edge_id);
         AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>());
     }
+
+    for annotation in &changeset.annotations {
+        Annotation::insert(conn, annotation).map_err(|err| match err {
+            AnnotationError::DatabaseError(inner) => inner,
+        })?;
+    }
+
+    for annotation_sample in &changeset.annotation_samples {
+        AnnotationSample::insert(conn, annotation_sample).map_err(|err| match err {
+            AnnotationError::DatabaseError(inner) => inner,
+        })?;
+    }
     Ok(())
 }
 
@@ -821,6 +904,24 @@ pub fn revert_changeset(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
 ) -> Result<(), ChangesetError> {
+    for annotation_sample in &changeset.annotation_samples {
+        AnnotationSample::delete(
+            conn,
+            &annotation_sample.annotation_id,
+            &annotation_sample.sample_name,
+        )
+        .map_err(|err| match err {
+            AnnotationError::DatabaseError(inner) => inner,
+        })?;
+    }
+    Annotation::delete_by_ids(
+        conn,
+        &changeset
+            .annotations
+            .iter()
+            .map(|obj| obj.id)
+            .collect::<Vec<_>>(),
+    );
     AccessionPath::delete_by_ids(
         conn,
         &changeset
@@ -1066,6 +1167,16 @@ mod tests {
                 index_in_path: 0,
                 edge_id: HashId::pad_str(1),
             }],
+            annotations: vec![Annotation {
+                id: HashId::pad_str(1),
+                name: "test_annotation".to_string(),
+                annotation_type: "generic".to_string(),
+                accession_id: HashId::pad_str(1),
+            }],
+            annotation_samples: vec![AnnotationSample {
+                annotation_id: HashId::pad_str(1),
+                sample_name: "test_sample".to_string(),
+            }],
         };
 
         let changeset = DatabaseChangeset {
@@ -1104,6 +1215,8 @@ mod tests {
                 accessions: vec![],
                 accession_edges: vec![],
                 accession_paths: vec![],
+                annotations: vec![],
+                annotation_samples: vec![],
             },
         };
 
@@ -1208,6 +1321,16 @@ mod tests {
                 index_in_path: 0,
                 edge_id: HashId::pad_str(1),
             }],
+            annotations: vec![Annotation {
+                id: HashId::pad_str(1),
+                name: "test_annotation".to_string(),
+                annotation_type: "generic".to_string(),
+                accession_id: HashId::pad_str(1),
+            }],
+            annotation_samples: vec![AnnotationSample {
+                annotation_id: HashId::pad_str(1),
+                sample_name: "test_sample".to_string(),
+            }],
         };
 
         let mut message = TypedBuilder::<changeset_models::Owned>::new_default();
@@ -1217,6 +1340,57 @@ mod tests {
         let deserialized = ChangesetModels::read_capnp(root.into_reader());
 
         assert_eq!(changeset_models, deserialized);
+    }
+
+    #[test]
+    fn test_changeset_tracks_annotations() {
+        use crate::block_group::PathCache;
+
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let _ = Sample::create(conn, "sample-1").unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let mut cache = PathCache::new(conn);
+        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
+
+        let mut session = start_operation(conn);
+        let accession = BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache);
+        let annotation = Annotation {
+            id: HashId::pad_str(1),
+            name: "gene-a".to_string(),
+            annotation_type: "generic".to_string(),
+            accession_id: accession.id,
+        };
+        Annotation::insert(conn, &annotation).unwrap();
+        let annotation_sample = AnnotationSample {
+            annotation_id: annotation.id,
+            sample_name: "sample-1".to_string(),
+        };
+        AnnotationSample::insert(conn, &annotation_sample).unwrap();
+
+        let operation = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![],
+                description: "annotation op".to_string(),
+            },
+            "annotation op",
+            None,
+        )
+        .unwrap();
+
+        let changeset = operation.get_changeset(context.workspace());
+        assert_eq!(changeset.changes.annotations, vec![annotation]);
+        assert_eq!(
+            changeset.changes.annotation_samples,
+            vec![annotation_sample]
+        );
     }
 
     #[cfg(test)]
