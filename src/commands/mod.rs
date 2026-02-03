@@ -235,6 +235,9 @@ pub enum Commands {
         /// The annotation file format (gff3, bed, genbank)
         #[arg(short, long)]
         format: String,
+        /// Optional annotation file name
+        #[arg(short, long)]
+        name: Option<String>,
         /// Optional operation summary message
         #[arg(short, long)]
         message: Option<String>,

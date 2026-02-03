@@ -529,6 +529,7 @@ mod tests {
             "fixtures/manifest_annotation.gff3",
             FileTypes::Gff3,
             None,
+            None,
         )
         .unwrap();
 

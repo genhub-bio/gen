@@ -337,11 +337,11 @@ impl AnnotationFile {
         conn: &OperationsConnection,
         operation_hash: &HashId,
         file_addition_id: &HashId,
+        name: Option<&str>,
     ) -> Result<(), AnnotationFileError> {
-        let query =
-            "INSERT INTO annotation_files (operation_hash, file_addition_id) VALUES (?1, ?2);";
+        let query = "INSERT INTO annotation_files (operation_hash, file_addition_id, name) VALUES (?1, ?2, ?3);";
         let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![operation_hash, file_addition_id])?;
+        stmt.execute(params![operation_hash, file_addition_id, name])?;
         Ok(())
     }
 
@@ -352,10 +352,11 @@ impl AnnotationFile {
         file_path: &str,
         file_type: FileTypes,
         checksum_override: Option<HashId>,
+        name: Option<&str>,
     ) -> Result<FileAddition, AnnotationFileError> {
         let file_addition =
             FileAddition::get_or_create(workspace, conn, file_path, file_type, checksum_override)?;
-        AnnotationFile::link_to_operation(conn, operation_hash, &file_addition.id)?;
+        AnnotationFile::link_to_operation(conn, operation_hash, &file_addition.id, name)?;
         Ok(file_addition)
     }
 
@@ -465,6 +466,7 @@ mod tests {
             annotation_path.to_string_lossy().as_ref(),
             FileTypes::Gff3,
             None,
+            Some("fixtures-annotation"),
         )
         .unwrap();
 

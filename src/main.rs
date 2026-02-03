@@ -610,6 +610,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::AddAnnotationFile {
             path,
             format,
+            name,
             message,
         }) => {
             let file_type = parse_annotation_file_type(&format)?;
@@ -622,6 +623,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &path,
                 file_type,
                 None,
+                name.as_deref(),
             )?;
             Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
             let summary = message.unwrap_or_else(|| format!("Add annotation file {path}"));

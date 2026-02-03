@@ -636,6 +636,7 @@ fn apply_operations_to_remote(
                         remote_op_conn,
                         &operation.hash,
                         &remote_file_addition.id,
+                        None,
                     )?;
                 }
                 Operation::add_database(remote_op_conn, &operation.hash, &remote_db_uuid)?;
@@ -1062,6 +1063,7 @@ fn ingest_manifest_operation(
                     operation_conn,
                     &operation.hash,
                     &local_file_addition.id,
+                    None,
                 )?;
             }
             Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
