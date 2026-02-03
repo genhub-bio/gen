@@ -174,6 +174,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(view_block_group(
                 graph_conn,
+                operation_conn,
+                &workspace,
                 graph.clone(),
                 sample.clone(),
                 collection_name,

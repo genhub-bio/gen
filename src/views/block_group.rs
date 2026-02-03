@@ -1,5 +1,9 @@
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
+    fs::File,
+    io::{BufRead, BufReader, Cursor},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -8,13 +12,21 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
+use gen_core::{HashId, PATH_START_NODE_ID, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{
-    accession::AccessionEdge, annotations::Annotation, block_group::BlockGroup,
-    db::GraphConnection, node::Node, path::Path, traits::Query,
+    accession::AccessionEdge,
+    annotations::Annotation,
+    block_group::BlockGroup,
+    db::{GraphConnection, OperationsConnection},
+    file_types::FileTypes,
+    node::Node,
+    operations::FileAddition,
+    path::Path,
+    traits::Query,
 };
 use log::warn;
+use noodles::{bed, gff};
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
@@ -27,13 +39,68 @@ use crate::{
     config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        block_group_viewer::{AnnotationSegment, AnnotationSpan, PlotParameters, Viewer},
+        annotation_files::AnnotationFileEntry,
+        block_group_viewer::{
+            AnnotationSegment, AnnotationSpan, AnnotationTrack, PlotParameters, Viewer,
+        },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
     },
 };
 
+use crate::translate::{bed::translate_bed, gff::translate_gff};
+
 // Frequency by which we check for external updates to the db
 const REFRESH_INTERVAL: u64 = 3; // seconds
+const MESSAGE_BUFFER_LIMIT: usize = 10;
+
+struct MessageBuffer {
+    entries: VecDeque<String>,
+    capacity: usize,
+}
+
+impl MessageBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn push_warn(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        warn!("{message}");
+        if self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(message);
+    }
+
+    fn latest(&self) -> Option<&String> {
+        self.entries.back()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &String> {
+        self.entries.iter()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelMode {
+    Details,
+    Messages,
+}
 
 fn get_empty_graph() -> GenGraph {
     let mut g = GenGraph::new();
@@ -119,6 +186,7 @@ fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment
 fn load_annotations_for_block_group(
     conn: &GraphConnection,
     block_group_id: &HashId,
+    messages: &mut MessageBuffer,
 ) -> Vec<AnnotationSpan> {
     let path = <Path as Query>::get(
         conn,
@@ -129,7 +197,9 @@ fn load_annotations_for_block_group(
     let path = match path {
         Ok(path) => path,
         Err(err) => {
-            warn!("No path found for block group {block_group_id}: {err}");
+            messages.push_warn(format!(
+                "No path found for block group {block_group_id}: {err}"
+            ));
             return Vec::new();
         }
     };
@@ -162,8 +232,223 @@ fn load_annotations_for_block_group(
         .collect()
 }
 
+fn resolve_annotation_file_path(
+    workspace: &Workspace,
+    file_addition: &FileAddition,
+) -> Option<PathBuf> {
+    if let Ok(repo_root) = workspace.repo_root() {
+        let repo_path = repo_root.join(&file_addition.file_path);
+        if repo_path.exists() {
+            return Some(repo_path);
+        }
+    }
+    let gen_dir = workspace.find_gen_dir()?;
+    let asset_path = gen_dir
+        .join("assets")
+        .join(file_addition.clone().hashed_filename());
+    if asset_path.exists() {
+        return Some(asset_path);
+    }
+    None
+}
+
+fn gff_attribute_value_to_string(
+    value: &gff::feature::record_buf::attributes::field::Value,
+) -> String {
+    if let Some(value) = value.as_string() {
+        String::from_utf8_lossy(value.as_ref()).to_string()
+    } else {
+        value
+            .iter()
+            .next()
+            .map(|item| String::from_utf8_lossy(item.as_ref()).to_string())
+            .unwrap_or_default()
+    }
+}
+
+fn build_annotation_spans(
+    track_label: &str,
+    segments_by_name: HashMap<String, Vec<AnnotationSegment>>,
+) -> Vec<AnnotationSpan> {
+    segments_by_name
+        .into_iter()
+        .map(|(name, segments)| AnnotationSpan {
+            id: HashId::convert_str(&format!("{track_label}:{name}")),
+            name,
+            segments,
+        })
+        .collect()
+}
+
+fn parse_translated_gff<R: BufRead>(
+    reader: R,
+    node_filter: &HashSet<HashId>,
+    track_label: &str,
+) -> Vec<AnnotationSpan> {
+    let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
+    let mut reader = gff::io::Reader::new(reader);
+    for result in reader.record_bufs() {
+        let record = match result {
+            Ok(record) => record,
+            Err(_) => continue,
+        };
+        let ref_name = record.reference_sequence_name().to_string();
+        let node_id = match HashId::try_from(ref_name) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        if !node_filter.contains(&node_id) {
+            continue;
+        }
+        let start = record.start().get() as i64;
+        let end = record.end().get() as i64;
+        if end <= 0 {
+            continue;
+        }
+        let start = start.saturating_sub(1);
+        let (seg_start, seg_end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let attrs = record.attributes();
+        let name = attrs
+            .get(b"Name")
+            .map(gff_attribute_value_to_string)
+            .or_else(|| attrs.get(b"ID").map(gff_attribute_value_to_string))
+            .or_else(|| attrs.get(b"gene").map(gff_attribute_value_to_string))
+            .or_else(|| attrs.get(b"db_xref").map(gff_attribute_value_to_string))
+            .unwrap_or_else(|| record.ty().to_string());
+        segments_by_name
+            .entry(name)
+            .or_default()
+            .push(AnnotationSegment {
+                node_id,
+                start: seg_start,
+                end: seg_end,
+            });
+    }
+    build_annotation_spans(track_label, segments_by_name)
+}
+
+fn parse_translated_bed<R: BufRead>(
+    reader: R,
+    node_filter: &HashSet<HashId>,
+    track_label: &str,
+) -> Vec<AnnotationSpan> {
+    let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
+    let mut bed_reader = bed::io::reader::Builder::<3>.build_from_reader(reader);
+    let mut record = bed::Record::<3>::default();
+    loop {
+        let read = match bed_reader.read_record(&mut record) {
+            Ok(count) => count,
+            Err(_) => break,
+        };
+        if read == 0 {
+            break;
+        }
+        let ref_name = String::from_utf8_lossy(record.reference_sequence_name().as_ref());
+        let node_id = match HashId::try_from(ref_name.to_string()) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        if !node_filter.contains(&node_id) {
+            continue;
+        }
+        let start = match record.feature_start() {
+            Ok(pos) => pos.get() as i64,
+            Err(_) => continue,
+        };
+        let end = match record.feature_end() {
+            Some(Ok(pos)) => pos.get() as i64,
+            _ => continue,
+        };
+        if end <= 0 {
+            continue;
+        }
+        let start = start.saturating_sub(1);
+        let (seg_start, seg_end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let name = record
+            .other_fields()
+            .get(0)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("feature")
+            .to_string();
+        segments_by_name
+            .entry(name)
+            .or_default()
+            .push(AnnotationSegment {
+                node_id,
+                start: seg_start,
+                end: seg_end,
+            });
+    }
+    build_annotation_spans(track_label, segments_by_name)
+}
+
+fn load_annotation_file_track(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    collection_name: &str,
+    sample_name: Option<&str>,
+    block_graph: &GenGraph,
+    entry: &AnnotationFileEntry,
+) -> Result<AnnotationTrack, Box<dyn Error>> {
+    let file_path = resolve_annotation_file_path(workspace, &entry.file_addition)
+        .ok_or("Annotation file not found in repo or assets")?;
+    let file = File::open(&file_path)?;
+    let mut buffer = Vec::new();
+    match entry.file_addition.file_type {
+        FileTypes::Gff3 => translate_gff(
+            conn,
+            collection_name,
+            sample_name,
+            BufReader::new(file),
+            &mut buffer,
+        )?,
+        FileTypes::Bed => translate_bed(
+            conn,
+            collection_name,
+            sample_name,
+            BufReader::new(file),
+            &mut buffer,
+        )?,
+        other => {
+            return Err(format!("Unsupported annotation file type: {other:?}").into());
+        }
+    }
+    let node_filter: HashSet<HashId> = block_graph.nodes().map(|node| node.node_id).collect();
+    let spans = match entry.file_addition.file_type {
+        FileTypes::Gff3 => {
+            if buffer.is_empty() {
+                let reader = BufReader::new(File::open(&file_path)?);
+                parse_translated_gff(reader, &node_filter, &entry.display_name)
+            } else {
+                parse_translated_gff(Cursor::new(buffer), &node_filter, &entry.display_name)
+            }
+        }
+        FileTypes::Bed => {
+            if buffer.is_empty() {
+                let reader = BufReader::new(File::open(&file_path)?);
+                parse_translated_bed(reader, &node_filter, &entry.display_name)
+            } else {
+                parse_translated_bed(Cursor::new(buffer), &node_filter, &entry.display_name)
+            }
+        }
+        _ => Vec::new(),
+    };
+    Ok(AnnotationTrack::new(entry.display_name.clone(), spans))
+}
+
 pub fn view_block_group(
     conn: &GraphConnection,
+    op_conn: &OperationsConnection,
+    workspace: &Workspace,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,
@@ -190,7 +475,7 @@ pub fn view_block_group(
     };
 
     // Create explorer and its state that persists across frames
-    let mut explorer = CollectionExplorer::new(conn, collection_name);
+    let mut explorer = CollectionExplorer::new(conn, op_conn, collection_name);
     let mut explorer_state = CollectionExplorerState::new();
     if let Some(ref s) = sample_name {
         explorer_state.toggle_sample(s);
@@ -251,9 +536,15 @@ pub fn view_block_group(
 
     bar.finish();
 
-    if let Some(ref bg_id) = block_group_id {
-        viewer.set_annotations(load_annotations_for_block_group(conn, bg_id));
-    }
+    let mut messages = MessageBuffer::new(MESSAGE_BUFFER_LIMIT);
+    let mut annotation_file_tracks: HashMap<HashId, AnnotationTrack> = HashMap::new();
+    let mut current_block_group = block_group_id.map(|bg_id| BlockGroup::get_by_id(conn, &bg_id));
+    let mut base_track = current_block_group.as_ref().map(|bg| {
+        AnnotationTrack::new(
+            String::new(),
+            load_annotations_for_block_group(conn, &bg.id, &mut messages),
+        )
+    });
 
     // Setup terminal
     enable_raw_mode()?;
@@ -265,6 +556,7 @@ pub fn view_block_group(
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
     let mut show_panel = false;
+    let mut panel_mode = PanelMode::Details;
     let show_sidebar = true;
     let mut tui_layout_change = false;
 
@@ -277,8 +569,10 @@ pub fn view_block_group(
         // Refresh explorer data and force reload on change
         // I do this every REFRESH_INTERVAL seconds.
         if last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
-            if explorer.refresh(conn, collection_name) {
+            if explorer.refresh(conn, op_conn, collection_name) {
                 explorer.force_reload(&mut explorer_state);
+                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                annotation_file_tracks.retain(|id, _| explorer_state.is_annotation_file_active(id));
             }
             last_refresh = Instant::now();
         }
@@ -292,16 +586,25 @@ pub fn view_block_group(
         // Draw the UI
         terminal.draw(|frame| {
             let status_bar_height: u16 = 1;
+            let show_message_bar = !messages.is_empty();
 
             // The outer layout is a vertical split between the status bar and everything else
+            let mut outer_constraints = vec![ratatui::layout::Constraint::Min(1)];
+            if show_message_bar {
+                outer_constraints.push(ratatui::layout::Constraint::Length(1));
+            }
+            outer_constraints.push(ratatui::layout::Constraint::Length(status_bar_height));
+
             let outer_layout = ratatui::layout::Layout::default()
                 .direction(ratatui::layout::Direction::Vertical)
-                .constraints(vec![
-                    ratatui::layout::Constraint::Min(1),
-                    ratatui::layout::Constraint::Length(status_bar_height),
-                ])
+                .constraints(outer_constraints)
                 .split(frame.area());
-            let status_bar_area = outer_layout[1];
+            let status_bar_area = *outer_layout.last().unwrap();
+            let message_bar_area = if show_message_bar {
+                Some(outer_layout[1])
+            } else {
+                None
+            };
 
             // The sidebar is a horizontal split of the area above the status bar
             let sidebar_layout = ratatui::layout::Layout::default()
@@ -310,33 +613,55 @@ pub fn view_block_group(
                 .split(outer_layout[0]);
             let sidebar_area = sidebar_layout[0];
 
-            // The panel pops up in the canvas area, it does not overlap with the sidebar
+            let viewer_root_area = sidebar_layout[1];
+
+            // The panel pops up in the viewer area, it does not overlap with the sidebar
             let panel_layout = ratatui::layout::Layout::default()
                 .direction(ratatui::layout::Direction::Vertical)
                 .constraints(vec![Constraint::Percentage(80), Constraint::Percentage(20)])
-                .split(sidebar_layout[1]);
+                .split(viewer_root_area);
             let panel_area = panel_layout[1];
 
             let canvas_area = if show_panel {
                 panel_layout[0]
             } else {
-                sidebar_layout[1]
+                viewer_root_area
             };
 
-            let annotation_panel_height = viewer.annotation_panel_height(canvas_area.height);
-            let (graph_area, annotation_area) =
-                if annotation_panel_height > 0 && annotation_panel_height < canvas_area.height {
-                    let graph_layout = ratatui::layout::Layout::default()
-                        .direction(ratatui::layout::Direction::Vertical)
-                        .constraints([
-                            Constraint::Min(1),
-                            Constraint::Length(annotation_panel_height),
-                        ])
-                        .split(canvas_area);
-                    (graph_layout[0], graph_layout[1])
-                } else {
-                    (canvas_area, Rect::default())
-                };
+            let mut annotation_tracks: Vec<&AnnotationTrack> = Vec::new();
+            if let Some(track) = base_track.as_ref() {
+                if !track.annotations.is_empty() {
+                    annotation_tracks.push(track);
+                }
+            }
+            for entry in explorer.data.annotation_files.iter() {
+                if let Some(track) = annotation_file_tracks.get(&entry.file_addition.id) {
+                    annotation_tracks.push(track);
+                }
+            }
+
+            let min_graph_height = 1;
+            let mut remaining_height = canvas_area.height;
+            let mut track_panels: Vec<(&AnnotationTrack, u16)> = Vec::new();
+            for track in annotation_tracks {
+                if remaining_height <= min_graph_height {
+                    break;
+                }
+                let max_for_track = remaining_height - min_graph_height;
+                let height = viewer.annotation_panel_height(track, max_for_track);
+                if height == 0 {
+                    continue;
+                }
+                track_panels.push((track, height));
+                remaining_height = remaining_height.saturating_sub(height);
+            }
+
+            let graph_area = Rect {
+                x: canvas_area.x,
+                y: canvas_area.y,
+                width: canvas_area.width,
+                height: remaining_height.max(1),
+            };
 
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;
@@ -363,9 +688,13 @@ pub fn view_block_group(
             // Status bar
             let mut status_message = match focus_zone {
                 FocusZone::Canvas => {
-                    Viewer::get_status_line() + " | *p* toggle current path | *esc* back to sidebar"
+                    Viewer::get_status_line()
+                        + " | *p* toggle current path | *m* messages | *esc* back to sidebar"
                 }
-                FocusZone::Panel => "*esc* close panel".to_string(),
+                FocusZone::Panel => match panel_mode {
+                    PanelMode::Messages => "*c* clear | *esc* close panel".to_string(),
+                    PanelMode::Details => "*esc* close panel".to_string(),
+                },
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
             status_message.push_str(" | *q* quit"); // Universal controls
@@ -386,6 +715,25 @@ pub fn view_block_group(
                 .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
 
             frame.render_widget(status_bar, status_bar_area);
+
+            // Message bar (latest warning)
+            if let Some(area) = message_bar_area {
+                if let Some(latest) = messages.latest() {
+                    let extra = messages.len().saturating_sub(1);
+                    let suffix = if extra > 0 {
+                        format!(" (+{extra})")
+                    } else {
+                        String::new()
+                    };
+                    let message_line = format!("WARN: {latest}{suffix}");
+                    let message_bar = Paragraph::new(message_line).style(
+                        Style::default()
+                            .fg(get_theme_color("error").unwrap())
+                            .bg(get_theme_color("statusbar").unwrap()),
+                    );
+                    frame.render_widget(message_bar, area);
+                }
+            }
 
             // Canvas area
             if is_loading {
@@ -415,16 +763,30 @@ pub fn view_block_group(
                 // Ask the viewer to paint the canvas
                 viewer.has_focus = focus_zone == FocusZone::Canvas;
                 viewer.draw(frame, graph_area);
-                if annotation_area.height > 0 {
-                    viewer.draw_annotations_panel(frame, annotation_area);
+                if !track_panels.is_empty() {
+                    let mut current_y = graph_area.y + graph_area.height;
+                    for (track, height) in track_panels.iter() {
+                        let panel_area = Rect {
+                            x: canvas_area.x,
+                            y: current_y,
+                            width: canvas_area.width,
+                            height: *height,
+                        };
+                        viewer.draw_annotations_panel(frame, panel_area, track);
+                        current_y = current_y.saturating_add(*height);
+                    }
                 }
             }
 
             // Panel
             if show_panel {
+                let panel_title = match panel_mode {
+                    PanelMode::Details => "Details",
+                    PanelMode::Messages => "Messages",
+                };
                 let panel_block = Block::bordered()
                     .padding(Padding::new(2, 2, 1, 1))
-                    .title("Details")
+                    .title(panel_title)
                     .style(
                         Style::default()
                             .bg(get_theme_color("panel").unwrap())
@@ -438,38 +800,67 @@ pub fn view_block_group(
                         Style::default().fg(get_theme_color("text").unwrap())
                     });
 
-                let panel_text = if let Some(selected_block) = viewer.state.selected_block {
-                    vec![
-                        Line::from(vec![
-                            Span::styled(
-                                "Block ID: ",
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(selected_block.block_id.to_string()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled(
-                                "Node ID: ",
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(selected_block.node_id.to_string()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("Start: ", Style::default().add_modifier(Modifier::BOLD)),
-                            Span::raw(selected_block.sequence_start.to_string()),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("End: ", Style::default().add_modifier(Modifier::BOLD)),
-                            Span::raw(selected_block.sequence_end.to_string()),
-                        ]),
-                    ]
-                } else {
-                    vec![Line::from(vec![Span::styled(
-                        "No block selected",
-                        Style::default()
-                            .fg(get_theme_color("text").unwrap())
-                            .add_modifier(Modifier::BOLD),
-                    )])]
+                let panel_text = match panel_mode {
+                    PanelMode::Details => {
+                        if let Some(selected_block) = viewer.state.selected_block {
+                            vec![
+                                Line::from(vec![
+                                    Span::styled(
+                                        "Block ID: ",
+                                        Style::default().add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::raw(selected_block.block_id.to_string()),
+                                ]),
+                                Line::from(vec![
+                                    Span::styled(
+                                        "Node ID: ",
+                                        Style::default().add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::raw(selected_block.node_id.to_string()),
+                                ]),
+                                Line::from(vec![
+                                    Span::styled(
+                                        "Start: ",
+                                        Style::default().add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::raw(selected_block.sequence_start.to_string()),
+                                ]),
+                                Line::from(vec![
+                                    Span::styled(
+                                        "End: ",
+                                        Style::default().add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::raw(selected_block.sequence_end.to_string()),
+                                ]),
+                            ]
+                        } else {
+                            vec![Line::from(vec![Span::styled(
+                                "No block selected",
+                                Style::default()
+                                    .fg(get_theme_color("text").unwrap())
+                                    .add_modifier(Modifier::BOLD),
+                            )])]
+                        }
+                    }
+                    PanelMode::Messages => {
+                        if messages.is_empty() {
+                            vec![Line::from(vec![Span::styled(
+                                "No messages",
+                                Style::default().fg(get_theme_color("text_muted").unwrap()),
+                            )])]
+                        } else {
+                            messages
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, message)| {
+                                    Line::from(vec![Span::raw(format!(
+                                        "{:>2}. {message}",
+                                        idx + 1
+                                    ))])
+                                })
+                                .collect()
+                        }
+                    }
                 };
 
                 let panel_content = Paragraph::new(panel_text)
@@ -495,7 +886,37 @@ pub fn view_block_group(
             connect_all_boundary_edges(&mut block_graph);
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
-            viewer.set_annotations(load_annotations_for_block_group(conn, new_block_group_id));
+            current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
+            base_track = current_block_group.as_ref().map(|bg| {
+                AnnotationTrack::new(
+                    String::new(),
+                    load_annotations_for_block_group(conn, &bg.id, &mut messages),
+                )
+            });
+            annotation_file_tracks.clear();
+            if let Some(bg) = current_block_group.as_ref() {
+                for entry in explorer.data.annotation_files.iter() {
+                    let id = entry.file_addition.id;
+                    if explorer_state.is_annotation_file_active(&id) {
+                        match load_annotation_file_track(
+                            conn,
+                            workspace,
+                            collection_name,
+                            bg.sample_name.as_deref(),
+                            &block_graph,
+                            entry,
+                        ) {
+                            Ok(track) => {
+                                annotation_file_tracks.insert(id, track);
+                            }
+                            Err(err) => {
+                                messages.push_warn(format!("{err}"));
+                                explorer_state.deactivate_annotation_file(&id);
+                            }
+                        }
+                    }
+                }
+            }
             viewer.state.selected_block = None;
             is_loading = false;
         }
@@ -514,6 +935,17 @@ pub fn view_block_group(
                 // Global handlers
                 match key.code {
                     KeyCode::Char('q') => break,
+                    KeyCode::Char('m') => {
+                        if show_panel && panel_mode == PanelMode::Messages {
+                            show_panel = false;
+                            focus_zone = FocusZone::Canvas;
+                        } else {
+                            show_panel = true;
+                            panel_mode = PanelMode::Messages;
+                            focus_zone = FocusZone::Panel;
+                        }
+                        tui_layout_change = true;
+                    }
                     KeyCode::Tab => {
                         // Tab - cycle forwards
                         focus_zone = match focus_zone {
@@ -524,8 +956,8 @@ pub fn view_block_group(
                                     FocusZone::Sidebar
                                 }
                             }
-                            FocusZone::Sidebar => FocusZone::Canvas,
                             FocusZone::Panel => FocusZone::Sidebar,
+                            FocusZone::Sidebar => FocusZone::Canvas,
                         }
                     }
                     KeyCode::BackTab => {
@@ -551,6 +983,7 @@ pub fn view_block_group(
                         KeyCode::Enter => {
                             if viewer.state.selected_block.is_some() {
                                 show_panel = true;
+                                panel_mode = PanelMode::Details;
                                 focus_zone = FocusZone::Panel;
                                 tui_layout_change = true;
                             }
@@ -580,34 +1013,71 @@ pub fn view_block_group(
                                             .show_path(&path, get_theme_color("error").unwrap())
                                         {
                                             // todo: pop up a message in the panel
-                                            warn!("{err}");
+                                            messages.push_warn(format!("{err}"));
                                         }
                                     }
                                     Err(err) => {
-                                        warn!("No path found for block group {bg_id}: {err}");
+                                        messages.push_warn(format!(
+                                            "No path found for block group {bg_id}: {err}"
+                                        ));
                                     }
                                 }
                             } else {
-                                warn!("No block group selected");
+                                messages.push_warn("No block group selected");
                             }
                         }
                         _ => {
                             viewer.handle_input(key);
                         }
                     },
-                    FocusZone::Panel => {
-                        if key.code == KeyCode::Esc {
+                    FocusZone::Panel => match key.code {
+                        KeyCode::Esc => {
                             show_panel = false;
                             focus_zone = FocusZone::Canvas;
                             tui_layout_change = true;
                         }
-                    }
+                        KeyCode::Char('c') => {
+                            if panel_mode == PanelMode::Messages {
+                                messages.clear();
+                            }
+                        }
+                        _ => {}
+                    },
                     FocusZone::Sidebar => {
                         explorer.handle_input(&mut explorer_state, key);
                         // Check if focus change was requested by the explorer
                         if let Some(requested_zone) = explorer_state.focus_change_requested {
                             focus_zone = requested_zone;
                             explorer_state.focus_change_requested = None;
+                        }
+                        if let Some(toggled_id) =
+                            explorer_state.annotation_file_toggle_requested.take()
+                        {
+                            if explorer_state.is_annotation_file_active(&toggled_id) {
+                                if let Some(entry) = explorer.annotation_file_entry(&toggled_id) {
+                                    if let Some(bg) = current_block_group.as_ref() {
+                                        match load_annotation_file_track(
+                                            conn,
+                                            workspace,
+                                            collection_name,
+                                            bg.sample_name.as_deref(),
+                                            &block_graph,
+                                            entry,
+                                        ) {
+                                            Ok(track) => {
+                                                annotation_file_tracks.insert(toggled_id, track);
+                                            }
+                                            Err(err) => {
+                                                messages.push_warn(format!("{err}"));
+                                                explorer_state
+                                                    .deactivate_annotation_file(&toggled_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                annotation_file_tracks.remove(&toggled_id);
+                            }
                         }
                     }
                 }

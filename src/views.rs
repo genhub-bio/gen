@@ -1,6 +1,7 @@
 pub mod block_group;
 pub mod block_group_viewer;
 pub mod block_layout;
+pub mod annotation_files;
 pub mod collection;
 pub mod diff;
 pub mod edge_layout;

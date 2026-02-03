@@ -65,7 +65,7 @@ where
                 let overlap_start = max(start, overlap.start) as usize;
                 let overlap_end = min(end, overlap.end) as usize;
 
-                let updated_record_builder =
+                let mut updated_record_builder =
                     gff::feature::RecordBuf::builder()
                         .set_reference_sequence_name(format!("{nid}", nid = node.node_id))
                         .set_source(record.source().to_string())
@@ -78,6 +78,9 @@ where
                         ))
                         .set_strand(record.strand())
                         .set_attributes(record.attributes().clone());
+                if let Some(phase) = record.phase() {
+                    updated_record_builder = updated_record_builder.set_phase(phase);
+                }
                 gff_writer.write_record(&updated_record_builder.build())?;
             }
         }

@@ -50,6 +50,33 @@ pub struct AnnotationSpan {
     pub segments: Vec<AnnotationSegment>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AnnotationTrack {
+    pub name: String,
+    pub annotations: Vec<AnnotationSpan>,
+    annotation_segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>>,
+}
+
+impl AnnotationTrack {
+    pub fn new(name: impl Into<String>, annotations: Vec<AnnotationSpan>) -> Self {
+        let name = name.into();
+        let mut segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>> = HashMap::new();
+        for (idx, annotation) in annotations.iter().enumerate() {
+            for segment in &annotation.segments {
+                segments_by_node
+                    .entry(segment.node_id)
+                    .or_default()
+                    .push((idx, segment.clone()));
+            }
+        }
+        AnnotationTrack {
+            name,
+            annotations,
+            annotation_segments_by_node: segments_by_node,
+        }
+    }
+}
+
 type AnnotationSegmentsByIndex = HashMap<usize, Vec<(f64, f64)>>;
 type AnnotationSegmentsResult = (Vec<usize>, AnnotationSegmentsByIndex);
 
@@ -285,8 +312,7 @@ pub struct Viewer<'a> {
     pub has_focus: bool,
     highlights: Vec<(Color, DiGraphMap<GraphNode, ()>)>,
     node_highlights: Vec<(Color, HashSet<GraphNode>)>,
-    annotations: Vec<AnnotationSpan>,
-    annotation_segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>>,
+    annotation_tracks: Vec<AnnotationTrack>,
 }
 
 impl<'a> Viewer<'a> {
@@ -363,8 +389,7 @@ impl<'a> Viewer<'a> {
             has_focus: false,
             highlights: Vec::new(),
             node_highlights: Vec::new(),
-            annotations: Vec::new(),
-            annotation_segments_by_node: HashMap::new(),
+            annotation_tracks: Vec::new(),
         }
     }
 
@@ -413,18 +438,8 @@ impl<'a> Viewer<'a> {
         self.node_highlights = highlights;
     }
 
-    pub fn set_annotations(&mut self, annotations: Vec<AnnotationSpan>) {
-        let mut segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>> = HashMap::new();
-        for (idx, annotation) in annotations.iter().enumerate() {
-            for segment in &annotation.segments {
-                segments_by_node
-                    .entry(segment.node_id)
-                    .or_default()
-                    .push((idx, segment.clone()));
-            }
-        }
-        self.annotations = annotations;
-        self.annotation_segments_by_node = segments_by_node;
+    pub fn set_annotation_tracks(&mut self, tracks: Vec<AnnotationTrack>) {
+        self.annotation_tracks = tracks;
     }
 
     /// Check if we currently have highlights of a specific color.
@@ -721,8 +736,8 @@ impl<'a> Viewer<'a> {
         ctx.print(visible_start as f64, y, Span::styled(label, style));
     }
 
-    fn collect_annotation_segments(&self) -> AnnotationSegmentsResult {
-        if self.annotations.is_empty() {
+    fn collect_annotation_segments(&self, track: &AnnotationTrack) -> AnnotationSegmentsResult {
+        if track.annotations.is_empty() {
             return (Vec::new(), HashMap::new());
         }
 
@@ -739,7 +754,7 @@ impl<'a> Viewer<'a> {
                 continue;
             }
 
-            let Some(segments) = self.annotation_segments_by_node.get(&block.node_id) else {
+            let Some(segments) = track.annotation_segments_by_node.get(&block.node_id) else {
                 continue;
             };
 
@@ -781,17 +796,29 @@ impl<'a> Viewer<'a> {
         (visible_indices, segments_by_annotation)
     }
 
-    pub fn annotation_panel_height(&self, max_height: u16) -> u16 {
-        if self.annotations.is_empty() || max_height < 3 {
+    pub fn annotation_panel_height(&self, track: &AnnotationTrack, max_height: u16) -> u16 {
+        if max_height < 2 {
             return 0;
         }
-        let desired = self.annotations.len().saturating_add(1) as u16;
+        if track.annotations.is_empty() {
+            return if track.name.is_empty() {
+                0
+            } else {
+                2.min(max_height)
+            };
+        }
+        let desired = track.annotations.len().saturating_add(1) as u16;
         let cap = max_height.saturating_div(3).max(3);
         desired.min(cap).min(max_height)
     }
 
-    pub fn draw_annotations_panel(&self, frame: &mut ratatui::Frame, area: Rect) {
-        if area.height < 2 || self.annotations.is_empty() {
+    pub fn draw_annotations_panel(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        track: &AnnotationTrack,
+    ) {
+        if area.height < 2 {
             return;
         }
 
@@ -802,13 +829,14 @@ impl<'a> Viewer<'a> {
             .buffer_mut()
             .set_string(area.x, divider_y, divider, divider_style);
 
-        let title = "Annotations";
-        frame.buffer_mut().set_string(
-            area.x + 1,
-            divider_y,
-            title,
-            Style::default().fg(get_theme_color("text_muted").unwrap()),
-        );
+        if !track.name.is_empty() {
+            frame.buffer_mut().set_string(
+                area.x + 1,
+                divider_y,
+                &track.name,
+                Style::default().fg(get_theme_color("text_muted").unwrap()),
+            );
+        }
 
         let inner = Rect {
             x: area.x,
@@ -831,7 +859,7 @@ impl<'a> Viewer<'a> {
         let annotation_label_style = Style::default().fg(annotation_color);
         let annotation_bar_style = Style::default().bg(annotation_color);
 
-        let (visible_indices, segments_by_annotation) = self.collect_annotation_segments();
+        let (visible_indices, segments_by_annotation) = self.collect_annotation_segments(track);
         if visible_indices.is_empty() {
             return;
         }
@@ -850,7 +878,7 @@ impl<'a> Viewer<'a> {
                     };
                     segments.sort_by(|a, b| a.0.total_cmp(&b.0));
                     let y = (inner.height as i64 - 1 - row as i64) as f64;
-                    let annotation_name = &self.annotations[*idx].name;
+                    let annotation_name = &track.annotations[*idx].name;
                     if let Some((first_x1, _)) = segments.first() {
                         let label_offset = annotation_name.chars().count() as f64 + 1.0;
                         let label_x = first_x1 - label_offset;
@@ -963,6 +991,7 @@ impl<'a> Viewer<'a> {
             let x_diff = viewport.x as i32 - self.state.viewport.x as i32;
             let y_diff = viewport.y as i32 - self.state.viewport.y as i32;
             let height_diff = viewport.height as i32 - self.state.viewport.height as i32;
+            let viewport_shrank = height_diff < 0;
 
             // Adjust offsets based on viewport changes
             self.state.offset_x -= x_diff;
@@ -974,6 +1003,23 @@ impl<'a> Viewer<'a> {
                 viewport, self.state.viewport
             );
             self.state.viewport = viewport;
+
+            if viewport_shrank {
+                let target = if let Some(selected) = self.state.selected_block {
+                    Some(selected)
+                } else if let Some(origin) = self.origin_block {
+                    Some(origin)
+                } else {
+                    self.select_center_block()
+                };
+
+                if let Some(target) = target {
+                    if !self.is_block_visible(target) {
+                        self.state.world = self.compute_bounding_box();
+                        let _ = self.center_on_block(target);
+                    }
+                }
+            }
         }
 
         // Set initial scroll offset if not already set, aligning the origin block:
