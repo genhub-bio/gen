@@ -540,6 +540,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::AddAnnotation {
             name,
+            group,
             sample,
             region,
         }) => {
@@ -582,7 +583,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let accession =
                 BlockGroup::add_accession(graph_conn, &path, &name, start, end, &mut cache);
 
-            let annotation_group = "generic";
+            let annotation_group = group.as_deref().unwrap_or("default");
             let annotation =
                 Annotation::create(graph_conn, &name, annotation_group, &accession.id)?;
             if let Some(sample_name) = &sample {

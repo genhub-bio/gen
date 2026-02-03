@@ -199,10 +199,10 @@ struct DatabaseChangeset {
 struct ManifestOperation {
   operation @0 :Operation;
   fileAdditions @1 :List(FileAddition);
-  annotationFileAdditions @2 :List(FileAddition);
+  annotationFileAdditions @4 :List(FileAddition);
   operationSummary :union {
-    none @3 :Void;
-    some @4 :OperationSummary;
+    none @2 :Void;
+    some @3 :OperationSummary;
   }
 }
 

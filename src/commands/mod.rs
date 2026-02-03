@@ -216,6 +216,9 @@ pub enum Commands {
         /// The annotation name
         #[arg(short, long)]
         name: String,
+        /// The annotation group name
+        #[arg(short, long)]
+        group: Option<String>,
         /// The sample name to annotate (defaults to the collection's default sample)
         #[arg(short, long)]
         sample: Option<String>,
