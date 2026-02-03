@@ -206,10 +206,10 @@ pub enum Commands {
         /// The name of the annotation file to propagate
         #[arg(short, long)]
         gff: String,
-    /// The name of the output file
-    #[arg(short, long)]
-    output_gff: String,
-},
+        /// The name of the output file
+        #[arg(short, long)]
+        output_gff: String,
+    },
     /// Add an annotation and accession for a region
     #[command(name = "add-annotation", arg_required_else_help(true))]
     AddAnnotation {

@@ -1,11 +1,11 @@
 CREATE TABLE annotations (
   id BLOB PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
-  annotation_type TEXT NOT NULL,
+  annotation_group TEXT NOT NULL,
   accession_id BLOB NOT NULL,
   FOREIGN KEY(accession_id) REFERENCES accessions(id)
 ) STRICT;
-CREATE UNIQUE INDEX annotations_uidx ON annotations(accession_id, annotation_type, name);
+CREATE UNIQUE INDEX annotations_uidx ON annotations(accession_id, annotation_group, name);
 
 CREATE TABLE annotations_sample (
   annotation_id BLOB NOT NULL,

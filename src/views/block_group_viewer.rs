@@ -1,5 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use std::cmp::{max, min};
+use std::{
+    cmp::{max, min},
+    collections::{HashMap, HashSet},
+};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node, is_terminal};
@@ -47,6 +49,9 @@ pub struct AnnotationSpan {
     pub name: String,
     pub segments: Vec<AnnotationSegment>,
 }
+
+type AnnotationSegmentsByIndex = HashMap<usize, Vec<(f64, f64)>>;
+type AnnotationSegmentsResult = (Vec<usize>, AnnotationSegmentsByIndex);
 
 /// Used for scrolling through the graph.
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -705,7 +710,7 @@ impl<'a> Viewer<'a> {
         let mut label = String::with_capacity(visible_width);
         let mut idx = (visible_start - start) as usize;
         for _ in 0..visible_width {
-            if idx % 2 == 0 {
+            if idx.is_multiple_of(2) {
                 label.push('-');
             } else {
                 label.push(' ');
@@ -716,16 +721,14 @@ impl<'a> Viewer<'a> {
         ctx.print(visible_start as f64, y, Span::styled(label, style));
     }
 
-    fn collect_annotation_segments(
-        &self,
-    ) -> (Vec<usize>, HashMap<usize, Vec<(f64, f64)>>) {
+    fn collect_annotation_segments(&self) -> AnnotationSegmentsResult {
         if self.annotations.is_empty() {
             return (Vec::new(), HashMap::new());
         }
 
         let mut visible_indices = Vec::new();
         let mut visible_index_set = HashSet::new();
-        let mut segments_by_annotation: HashMap<usize, Vec<(f64, f64)>> = HashMap::new();
+        let mut segments_by_annotation: AnnotationSegmentsByIndex = HashMap::new();
 
         for &block in self.scaled_layout.labels.keys() {
             if is_start_node(block.node_id) || is_end_node(block.node_id) {
@@ -758,10 +761,9 @@ impl<'a> Viewer<'a> {
                     visible_indices.push(*idx);
                 }
 
-                let relative_start = (overlap_start - block.sequence_start) as f64
-                    / node_len as f64;
-                let relative_end =
-                    (overlap_end - block.sequence_start) as f64 / node_len as f64;
+                let relative_start =
+                    (overlap_start - block.sequence_start) as f64 / node_len as f64;
+                let relative_end = (overlap_end - block.sequence_start) as f64 / node_len as f64;
                 let mut seg_x1 = x1 + relative_start * label_len;
                 let mut seg_x2 = x1 + relative_end * label_len;
                 if seg_x2 < seg_x1 {
@@ -852,7 +854,12 @@ impl<'a> Viewer<'a> {
                     if let Some((first_x1, _)) = segments.first() {
                         let label_offset = annotation_name.chars().count() as f64 + 1.0;
                         let label_x = first_x1 - label_offset;
-                        self.place_label(ctx, annotation_name, (label_x, y), annotation_label_style);
+                        self.place_label(
+                            ctx,
+                            annotation_name,
+                            (label_x, y),
+                            annotation_label_style,
+                        );
                     }
 
                     let mut prev_end: Option<f64> = None;
@@ -870,18 +877,17 @@ impl<'a> Viewer<'a> {
                             self.place_bar(ctx, start_cell, y, width, annotation_bar_style);
                         }
 
-                        if !zoomed_out {
-                            if let Some(prev) = prev_end {
-                                if x1 - prev > 1.0 {
-                                    self.draw_dashed_connector(
-                                        ctx,
-                                        prev + 1.0,
-                                        x1 - 1.0,
-                                        y,
-                                        annotation_label_style,
-                                    );
-                                }
-                            }
+                        if !zoomed_out
+                            && let Some(prev) = prev_end
+                            && x1 - prev > 1.0
+                        {
+                            self.draw_dashed_connector(
+                                ctx,
+                                prev + 1.0,
+                                x1 - 1.0,
+                                y,
+                                annotation_label_style,
+                            );
                         }
 
                         prev_end = Some(x2);
@@ -1106,7 +1112,6 @@ impl<'a> Viewer<'a> {
                         );
                     }
                 }
-
             });
         frame.render_widget(canvas, area);
 

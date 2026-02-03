@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
-    annotations::{Annotation, AnnotationError, AnnotationKind, AnnotationSample},
+    annotations::{Annotation, AnnotationError, AnnotationSample},
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -213,8 +213,7 @@ impl<'a> Capnp<'a> for ChangesetModels {
             .reborrow()
             .init_annotation_samples(self.annotation_samples.len() as u32);
         for (i, annotation_sample) in self.annotation_samples.iter().enumerate() {
-            let mut annotation_sample_builder =
-                annotation_samples_builder.reborrow().get(i as u32);
+            let mut annotation_sample_builder = annotation_samples_builder.reborrow().get(i as u32);
             annotation_sample.write_capnp(&mut annotation_sample_builder);
         }
     }
@@ -664,13 +663,13 @@ pub fn process_changesetiter(
                 "annotations" => {
                     let id = parse_hashid(item, pk_column);
                     let name = parse_string(item, 1);
-                    let kind = AnnotationKind::new(parse_string(item, 2));
+                    let group = parse_string(item, 2);
                     let accession_id = parse_hashid(item, 3);
 
                     created_annotations.push(Annotation {
                         id,
                         name,
-                        kind,
+                        group,
                         accession_id,
                     });
 
@@ -1171,7 +1170,7 @@ mod tests {
             annotations: vec![Annotation {
                 id: HashId::pad_str(1),
                 name: "test_annotation".to_string(),
-                kind: AnnotationKind::gff3(),
+                group: "gff3".to_string(),
                 accession_id: HashId::pad_str(1),
             }],
             annotation_samples: vec![AnnotationSample {
@@ -1325,7 +1324,7 @@ mod tests {
             annotations: vec![Annotation {
                 id: HashId::pad_str(1),
                 name: "test_annotation".to_string(),
-                kind: AnnotationKind::gff3(),
+                group: "gff3".to_string(),
                 accession_id: HashId::pad_str(1),
             }],
             annotation_samples: vec![AnnotationSample {
@@ -1361,8 +1360,7 @@ mod tests {
         let accession = BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache);
 
         let mut session = start_operation(conn);
-        let annotation =
-            Annotation::create(conn, "gene-a", AnnotationKind::gff3(), &accession.id).unwrap();
+        let annotation = Annotation::create(conn, "gene-a", "gff3", &accession.id).unwrap();
         annotation.add_samples(conn, &["sample-1"]).unwrap();
 
         let operation = end_operation(

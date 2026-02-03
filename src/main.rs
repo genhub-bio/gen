@@ -582,14 +582,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let accession =
                 BlockGroup::add_accession(graph_conn, &path, &name, start, end, &mut cache);
 
-            let annotation_type = "generic";
+            let annotation_group = "generic";
             let annotation_id = HashId(calculate_hash(&format!(
-                "{}:{name}:{annotation_type}",
+                "{}:{name}:{annotation_group}",
                 accession.id
             )));
             graph_conn.execute(
-                "INSERT OR IGNORE INTO annotations (id, name, annotation_type, accession_id) VALUES (?1, ?2, ?3, ?4);",
-                params![annotation_id, name, annotation_type, accession.id],
+                "INSERT OR IGNORE INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);",
+                params![annotation_id, name, annotation_group, accession.id],
             )?;
             if let Some(sample_name) = &sample {
                 graph_conn.execute(

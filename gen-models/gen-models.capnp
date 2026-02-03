@@ -230,7 +230,7 @@ struct Annotation {
 struct StoredAnnotation {
   id @0 :List(UInt8);
   name @1 :Text;
-  annotationType @2 :Text;
+  annotationGroup @2 :Text;
   accessionId @3 :List(UInt8);
 }
 

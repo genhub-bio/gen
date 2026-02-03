@@ -11,13 +11,8 @@ use crossterm::{
 use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{
-    accession::AccessionEdge,
-    annotations::Annotation,
-    block_group::BlockGroup,
-    db::GraphConnection,
-    node::Node,
-    path::Path,
-    traits::Query,
+    accession::AccessionEdge, annotations::Annotation, block_group::BlockGroup,
+    db::GraphConnection, node::Node, path::Path, traits::Query,
 };
 use log::warn;
 use ratatui::{
@@ -329,20 +324,19 @@ pub fn view_block_group(
             };
 
             let annotation_panel_height = viewer.annotation_panel_height(canvas_area.height);
-            let (graph_area, annotation_area) = if annotation_panel_height > 0
-                && annotation_panel_height < canvas_area.height
-            {
-                let graph_layout = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(annotation_panel_height),
-                    ])
-                    .split(canvas_area);
-                (graph_layout[0], graph_layout[1])
-            } else {
-                (canvas_area, Rect::default())
-            };
+            let (graph_area, annotation_area) =
+                if annotation_panel_height > 0 && annotation_panel_height < canvas_area.height {
+                    let graph_layout = ratatui::layout::Layout::default()
+                        .direction(ratatui::layout::Direction::Vertical)
+                        .constraints([
+                            Constraint::Min(1),
+                            Constraint::Length(annotation_panel_height),
+                        ])
+                        .split(canvas_area);
+                    (graph_layout[0], graph_layout[1])
+                } else {
+                    (canvas_area, Rect::default())
+                };
 
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;

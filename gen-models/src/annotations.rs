@@ -1,10 +1,7 @@
-use std::{collections::HashMap, fmt, rc::Rc};
+use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, config::Workspace, traits::Capnp};
-use rusqlite::{
-    Row, params,
-    types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef},
-};
+use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -17,76 +14,11 @@ use crate::{
     traits::Query,
 };
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct AnnotationKind(String);
-
-impl AnnotationKind {
-    pub fn new(value: impl AsRef<str>) -> Self {
-        AnnotationKind(value.as_ref().trim().to_ascii_lowercase())
-    }
-
-    pub fn gff3() -> Self {
-        AnnotationKind::new("gff3")
-    }
-
-    pub fn bed() -> Self {
-        AnnotationKind::new("bed")
-    }
-
-    pub fn genbank() -> Self {
-        AnnotationKind::new("genbank")
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn to_file_type(&self) -> Option<FileTypes> {
-        match self.0.as_str() {
-            "gff3" | "gff" => Some(FileTypes::Gff3),
-            "bed" => Some(FileTypes::Bed),
-            "genbank" | "gb" => Some(FileTypes::GenBank),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for AnnotationKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<&str> for AnnotationKind {
-    fn from(value: &str) -> Self {
-        AnnotationKind::new(value)
-    }
-}
-
-impl From<String> for AnnotationKind {
-    fn from(value: String) -> Self {
-        AnnotationKind::new(value)
-    }
-}
-
-impl ToSql for AnnotationKind {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Owned(Value::Text(self.0.clone())))
-    }
-}
-
-impl FromSql for AnnotationKind {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        let raw = value.as_str()?;
-        Ok(AnnotationKind::new(raw))
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Annotation {
     pub id: HashId,
     pub name: String,
-    pub kind: AnnotationKind,
+    pub group: String,
     pub accession_id: HashId,
 }
 
@@ -97,7 +29,7 @@ impl<'a> Capnp<'a> for Annotation {
     fn write_capnp(&self, builder: &mut Self::Builder) {
         builder.set_id(&self.id.0).unwrap();
         builder.set_name(&self.name);
-        builder.set_annotation_type(self.kind.as_str());
+        builder.set_annotation_group(&self.group);
         builder.set_accession_id(&self.accession_id.0).unwrap();
     }
 
@@ -110,7 +42,7 @@ impl<'a> Capnp<'a> for Annotation {
             .try_into()
             .unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
-        let kind = AnnotationKind::new(reader.get_annotation_type().unwrap().to_string().unwrap());
+        let group = reader.get_annotation_group().unwrap().to_string().unwrap();
         let accession_id = reader
             .get_accession_id()
             .unwrap()
@@ -122,7 +54,7 @@ impl<'a> Capnp<'a> for Annotation {
         Annotation {
             id,
             name,
-            kind,
+            group,
             accession_id,
         }
     }
@@ -137,7 +69,7 @@ impl Query for Annotation {
         Annotation {
             id: row.get(0).unwrap(),
             name: row.get(1).unwrap(),
-            kind: row.get(2).unwrap(),
+            group: row.get(2).unwrap(),
             accession_id: row.get(3).unwrap(),
         }
     }
@@ -179,8 +111,7 @@ impl AnnotationSample {
         conn: &GraphConnection,
         annotation_sample: &AnnotationSample,
     ) -> Result<(), AnnotationError> {
-        let query =
-            "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
+        let query = "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![
             annotation_sample.annotation_id,
@@ -194,8 +125,7 @@ impl AnnotationSample {
         annotation_id: &HashId,
         sample_name: &str,
     ) -> Result<(), AnnotationError> {
-        let query =
-            "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
+        let query = "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![annotation_id, sample_name])?;
         Ok(())
@@ -206,8 +136,7 @@ impl AnnotationSample {
         annotation_id: &HashId,
         sample_name: &str,
     ) -> Result<(), AnnotationError> {
-        let query =
-            "DELETE FROM annotations_sample WHERE annotation_id = ?1 AND sample_name = ?2;";
+        let query = "DELETE FROM annotations_sample WHERE annotation_id = ?1 AND sample_name = ?2;";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![annotation_id, sample_name])?;
         Ok(())
@@ -221,17 +150,17 @@ pub enum AnnotationError {
 }
 
 impl Annotation {
-    pub fn generate_id(name: &str, kind: &AnnotationKind, accession_id: &HashId) -> HashId {
-        HashId(calculate_hash(&format!("{accession_id}:{name}:{kind}",)))
+    pub fn generate_id(name: &str, group: &str, accession_id: &HashId) -> HashId {
+        HashId(calculate_hash(&format!("{accession_id}:{name}:{group}",)))
     }
 
     pub fn insert(conn: &GraphConnection, annotation: &Annotation) -> Result<(), AnnotationError> {
-        let query = "INSERT OR IGNORE INTO annotations (id, name, annotation_type, accession_id) VALUES (?1, ?2, ?3, ?4);";
+        let query = "INSERT OR IGNORE INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![
             annotation.id,
             annotation.name,
-            annotation.kind,
+            annotation.group,
             annotation.accession_id
         ])?;
         Ok(())
@@ -240,18 +169,18 @@ impl Annotation {
     pub fn create(
         conn: &GraphConnection,
         name: &str,
-        kind: AnnotationKind,
+        group: &str,
         accession_id: &HashId,
     ) -> Result<Annotation, AnnotationError> {
-        let id = Annotation::generate_id(name, &kind, accession_id);
-        let query = "INSERT INTO annotations (id, name, annotation_type, accession_id) VALUES (?1, ?2, ?3, ?4);";
+        let id = Annotation::generate_id(name, group, accession_id);
+        let query = "INSERT INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query)?;
-        let insert_result = stmt.execute(params![id, name, kind, accession_id]);
+        let insert_result = stmt.execute(params![id, name, group, accession_id]);
         match insert_result {
             Ok(_) => Ok(Annotation {
                 id,
                 name: name.to_string(),
-                kind,
+                group: group.to_string(),
                 accession_id: *accession_id,
             }),
             Err(rusqlite::Error::SqliteFailure(err, _details))
@@ -267,11 +196,11 @@ impl Annotation {
     pub fn create_with_samples(
         conn: &GraphConnection,
         name: &str,
-        kind: AnnotationKind,
+        group: &str,
         accession_id: &HashId,
         sample_names: &[&str],
     ) -> Result<Annotation, AnnotationError> {
-        let annotation = Annotation::create(conn, name, kind, accession_id)?;
+        let annotation = Annotation::create(conn, name, group, accession_id)?;
         annotation.add_samples(conn, sample_names)?;
         Ok(annotation)
     }
@@ -326,10 +255,12 @@ pub enum AnnotationFileError {
 }
 
 pub fn parse_annotation_file_type(value: &str) -> Result<FileTypes, AnnotationFileError> {
-    let annotation_kind = AnnotationKind::new(value);
-    annotation_kind
-        .to_file_type()
-        .ok_or_else(|| AnnotationFileError::UnsupportedFileType(value.to_string()))
+    match value.trim().to_ascii_lowercase().as_str() {
+        "gff3" | "gff" => Ok(FileTypes::Gff3),
+        "bed" => Ok(FileTypes::Bed),
+        "genbank" | "gb" => Ok(FileTypes::GenBank),
+        other => Err(AnnotationFileError::UnsupportedFileType(other.to_string())),
+    }
 }
 
 pub struct AnnotationFile;
@@ -425,8 +356,7 @@ mod tests {
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
         let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache);
 
-        let annotation =
-            Annotation::create(&conn, "gene-a", AnnotationKind::gff3(), &accession.id).unwrap();
+        let annotation = Annotation::create(&conn, "gene-a", "gff3", &accession.id).unwrap();
         annotation
             .add_samples(&conn, &["sample-1", "sample-2"])
             .unwrap();
