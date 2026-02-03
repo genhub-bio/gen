@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
-    annotations::{Annotation, AnnotationError, AnnotationGroup, AnnotationSample},
+    annotations::{Annotation, AnnotationError, AnnotationGroup, AnnotationGroupSample},
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -92,7 +92,7 @@ pub struct ChangesetModels {
     pub accession_paths: Vec<AccessionPath>,
     pub annotation_groups: Vec<AnnotationGroup>,
     pub annotations: Vec<Annotation>,
-    pub annotation_samples: Vec<AnnotationSample>,
+    pub annotation_group_samples: Vec<AnnotationGroupSample>,
 }
 
 impl<'a> Capnp<'a> for ChangesetModels {
@@ -218,13 +218,14 @@ impl<'a> Capnp<'a> for ChangesetModels {
             annotation.write_capnp(&mut annotation_builder);
         }
 
-        // Write annotation samples
-        let mut annotation_samples_builder = builder
+        // Write annotation group samples
+        let mut annotation_group_samples_builder = builder
             .reborrow()
-            .init_annotation_samples(self.annotation_samples.len() as u32);
-        for (i, annotation_sample) in self.annotation_samples.iter().enumerate() {
-            let mut annotation_sample_builder = annotation_samples_builder.reborrow().get(i as u32);
-            annotation_sample.write_capnp(&mut annotation_sample_builder);
+            .init_annotation_group_samples(self.annotation_group_samples.len() as u32);
+        for (i, annotation_group_sample) in self.annotation_group_samples.iter().enumerate() {
+            let mut annotation_group_sample_builder =
+                annotation_group_samples_builder.reborrow().get(i as u32);
+            annotation_group_sample.write_capnp(&mut annotation_group_sample_builder);
         }
     }
 
@@ -329,11 +330,13 @@ impl<'a> Capnp<'a> for ChangesetModels {
             annotations.push(Annotation::read_capnp(annotation_reader));
         }
 
-        // Read annotation samples
-        let annotation_samples_reader = reader.get_annotation_samples().unwrap();
-        let mut annotation_samples = Vec::new();
-        for annotation_sample_reader in annotation_samples_reader.iter() {
-            annotation_samples.push(AnnotationSample::read_capnp(annotation_sample_reader));
+        // Read annotation group samples
+        let annotation_group_samples_reader = reader.get_annotation_group_samples().unwrap();
+        let mut annotation_group_samples = Vec::new();
+        for annotation_group_sample_reader in annotation_group_samples_reader.iter() {
+            annotation_group_samples.push(AnnotationGroupSample::read_capnp(
+                annotation_group_sample_reader,
+            ));
         }
 
         ChangesetModels {
@@ -351,7 +354,7 @@ impl<'a> Capnp<'a> for ChangesetModels {
             accession_paths,
             annotation_groups,
             annotations,
-            annotation_samples,
+            annotation_group_samples,
         }
     }
 }
@@ -434,7 +437,7 @@ pub fn process_changesetiter(
     let mut created_accession_paths = vec![];
     let mut created_annotation_groups = vec![];
     let mut created_annotations = vec![];
-    let mut created_annotation_samples = vec![];
+    let mut created_annotation_group_samples = vec![];
 
     // Initialize collections for dependency tracking
     let mut previous_collections = HashSet::new();
@@ -701,12 +704,12 @@ pub fn process_changesetiter(
 
                     created_annotation_groups.push(AnnotationGroup { name });
                 }
-                "annotations_sample" => {
-                    let annotation_id = parse_hashid(item, 0);
+                "annotation_group_samples" => {
+                    let annotation_group = parse_string(item, 0);
                     let sample_name = parse_string(item, 1);
 
-                    created_annotation_samples.push(AnnotationSample {
-                        annotation_id,
+                    created_annotation_group_samples.push(AnnotationGroupSample {
+                        annotation_group,
                         sample_name: sample_name.clone(),
                     });
 
@@ -756,7 +759,7 @@ pub fn process_changesetiter(
         accession_paths: created_accession_paths,
         annotation_groups: created_annotation_groups,
         annotations: created_annotations,
-        annotation_samples: created_annotation_samples,
+        annotation_group_samples: created_annotation_group_samples,
     };
 
     let dependency_models = DependencyModels {
@@ -921,8 +924,8 @@ pub fn apply_changeset(
         })?;
     }
 
-    for annotation_sample in &changeset.annotation_samples {
-        AnnotationSample::insert(conn, annotation_sample).map_err(|err| match err {
+    for annotation_group_sample in &changeset.annotation_group_samples {
+        AnnotationGroupSample::insert(conn, annotation_group_sample).map_err(|err| match err {
             AnnotationError::DatabaseError(inner) => inner,
         })?;
     }
@@ -933,11 +936,11 @@ pub fn revert_changeset(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
 ) -> Result<(), ChangesetError> {
-    for annotation_sample in &changeset.annotation_samples {
-        AnnotationSample::delete(
+    for annotation_group_sample in &changeset.annotation_group_samples {
+        AnnotationGroupSample::delete(
             conn,
-            &annotation_sample.annotation_id,
-            &annotation_sample.sample_name,
+            &annotation_group_sample.annotation_group,
+            &annotation_group_sample.sample_name,
         )
         .map_err(|err| match err {
             AnnotationError::DatabaseError(inner) => inner,
@@ -1213,8 +1216,8 @@ mod tests {
                 group: "gff3".to_string(),
                 accession_id: HashId::pad_str(1),
             }],
-            annotation_samples: vec![AnnotationSample {
-                annotation_id: HashId::pad_str(1),
+            annotation_group_samples: vec![AnnotationGroupSample {
+                annotation_group: "gff3".to_string(),
                 sample_name: "test_sample".to_string(),
             }],
         };
@@ -1257,7 +1260,7 @@ mod tests {
                 accession_paths: vec![],
                 annotation_groups: vec![],
                 annotations: vec![],
-                annotation_samples: vec![],
+                annotation_group_samples: vec![],
             },
         };
 
@@ -1371,8 +1374,8 @@ mod tests {
                 group: "gff3".to_string(),
                 accession_id: HashId::pad_str(1),
             }],
-            annotation_samples: vec![AnnotationSample {
-                annotation_id: HashId::pad_str(1),
+            annotation_group_samples: vec![AnnotationGroupSample {
+                annotation_group: "gff3".to_string(),
                 sample_name: "test_sample".to_string(),
             }],
         };
@@ -1428,9 +1431,9 @@ mod tests {
         );
         assert_eq!(changeset.changes.annotations, vec![annotation.clone()]);
         assert_eq!(
-            changeset.changes.annotation_samples,
-            vec![AnnotationSample {
-                annotation_id: annotation.id,
+            changeset.changes.annotation_group_samples,
+            vec![AnnotationGroupSample {
+                annotation_group: annotation.group.clone(),
                 sample_name: "sample-1".to_string(),
             }]
         );

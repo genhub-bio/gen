@@ -512,7 +512,7 @@ mod tests {
             accession_paths: vec![],
             annotation_groups: vec![],
             annotations: vec![],
-            annotation_samples: vec![],
+            annotation_group_samples: vec![],
         };
         let mut dependencies = base_dependencies(&start_node, &end_node);
         dependencies.sequences.push(seq.clone());

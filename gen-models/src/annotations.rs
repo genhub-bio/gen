@@ -9,7 +9,7 @@ use crate::{
     db::{GraphConnection, OperationsConnection},
     errors::FileAdditionError,
     file_types::FileTypes,
-    gen_models_capnp::{annotation_group, annotation_sample, stored_annotation},
+    gen_models_capnp::{annotation_group, annotation_group_sample, stored_annotation},
     operations::FileAddition,
     traits::Query,
 };
@@ -136,45 +136,40 @@ impl Query for Annotation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct AnnotationSample {
-    pub annotation_id: HashId,
+pub struct AnnotationGroupSample {
+    pub annotation_group: String,
     pub sample_name: String,
 }
 
-impl<'a> Capnp<'a> for AnnotationSample {
-    type Builder = annotation_sample::Builder<'a>;
-    type Reader = annotation_sample::Reader<'a>;
+impl<'a> Capnp<'a> for AnnotationGroupSample {
+    type Builder = annotation_group_sample::Builder<'a>;
+    type Reader = annotation_group_sample::Reader<'a>;
 
     fn write_capnp(&self, builder: &mut Self::Builder) {
-        builder.set_annotation_id(&self.annotation_id.0).unwrap();
+        builder.set_annotation_group(&self.annotation_group);
         builder.set_sample_name(&self.sample_name);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
-        let annotation_id = reader
-            .get_annotation_id()
-            .unwrap()
-            .as_slice()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let annotation_group = reader.get_annotation_group().unwrap().to_string().unwrap();
         let sample_name = reader.get_sample_name().unwrap().to_string().unwrap();
-        AnnotationSample {
-            annotation_id,
+        AnnotationGroupSample {
+            annotation_group,
             sample_name,
         }
     }
 }
 
-impl AnnotationSample {
+impl AnnotationGroupSample {
     pub fn insert(
         conn: &GraphConnection,
-        annotation_sample: &AnnotationSample,
+        annotation_sample: &AnnotationGroupSample,
     ) -> Result<(), AnnotationError> {
-        let query = "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
+        AnnotationGroup::get_or_create(conn, &annotation_sample.annotation_group);
+        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![
-            annotation_sample.annotation_id,
+            annotation_sample.annotation_group,
             annotation_sample.sample_name
         ])?;
         Ok(())
@@ -182,23 +177,24 @@ impl AnnotationSample {
 
     pub fn create(
         conn: &GraphConnection,
-        annotation_id: &HashId,
+        annotation_group: &str,
         sample_name: &str,
     ) -> Result<(), AnnotationError> {
-        let query = "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
+        AnnotationGroup::get_or_create(conn, annotation_group);
+        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![annotation_id, sample_name])?;
+        stmt.execute(params![annotation_group, sample_name])?;
         Ok(())
     }
 
     pub fn delete(
         conn: &GraphConnection,
-        annotation_id: &HashId,
+        annotation_group: &str,
         sample_name: &str,
     ) -> Result<(), AnnotationError> {
-        let query = "DELETE FROM annotations_sample WHERE annotation_id = ?1 AND sample_name = ?2;";
+        let query = "DELETE FROM annotation_group_samples WHERE annotation_group = ?1 AND sample_name = ?2;";
         let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![annotation_id, sample_name])?;
+        stmt.execute(params![annotation_group, sample_name])?;
         Ok(())
     }
 }
@@ -275,21 +271,22 @@ impl Annotation {
         if sample_names.is_empty() {
             return Ok(());
         }
-        let query = "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);";
+        AnnotationGroup::get_or_create(conn, &self.group);
+        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
         for sample_name in sample_names {
-            stmt.execute(params![self.id, sample_name])?;
+            stmt.execute(params![self.group, sample_name])?;
         }
         Ok(())
     }
 
     pub fn get_samples(
         conn: &GraphConnection,
-        annotation_id: &HashId,
+        annotation_group: &str,
     ) -> Result<Vec<String>, AnnotationError> {
-        let query = "SELECT sample_name FROM annotations_sample WHERE annotation_id = ?1;";
+        let query = "SELECT sample_name FROM annotation_group_samples WHERE annotation_group = ?1;";
         let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(params![annotation_id], |row| row.get(0))?;
+        let rows = stmt.query_map(params![annotation_group], |row| row.get(0))?;
         let mut samples = Vec::new();
         for row in rows {
             samples.push(row?);
@@ -301,7 +298,7 @@ impl Annotation {
         conn: &GraphConnection,
         sample_name: &str,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let query = "select a.* from annotations a left join annotations_sample s on (a.id = s.annotation_id) where s.sample_name = ?1";
+        let query = "select a.* from annotations a left join annotation_group_samples s on (a.annotation_group = s.annotation_group) where s.sample_name = ?1";
         Ok(Annotation::query(conn, query, params![sample_name]))
     }
 
@@ -432,7 +429,7 @@ mod tests {
             .add_samples(&conn, &["sample-1", "sample-2"])
             .unwrap();
 
-        let mut samples = Annotation::get_samples(&conn, &annotation.id).unwrap();
+        let mut samples = Annotation::get_samples(&conn, &annotation.group).unwrap();
         samples.sort();
         assert_eq!(
             samples,

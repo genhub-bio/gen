@@ -38,7 +38,7 @@ use r#gen::{
 use gen_core::{HashId, calculate_hash, config::Workspace};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
-    annotations::{Annotation, AnnotationFile, AnnotationSample, parse_annotation_file_type},
+    annotations::{Annotation, AnnotationFile, AnnotationGroupSample, parse_annotation_file_type},
     block_group::{BlockGroup, PathCache},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, OperationsConnection},
@@ -587,7 +587,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let annotation =
                 Annotation::create(graph_conn, &name, annotation_group, &accession.id)?;
             if let Some(sample_name) = &sample {
-                AnnotationSample::create(graph_conn, &annotation.id, sample_name)?;
+                AnnotationGroupSample::create(graph_conn, &annotation.group, sample_name)?;
             }
 
             let operation = end_operation(
