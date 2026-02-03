@@ -38,7 +38,7 @@ use r#gen::{
 use gen_core::{HashId, calculate_hash, config::Workspace};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
-    annotations::{AnnotationFile, parse_annotation_file_type},
+    annotations::{Annotation, AnnotationFile, AnnotationSample, parse_annotation_file_type},
     block_group::{BlockGroup, PathCache},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, OperationsConnection},
@@ -583,19 +583,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 BlockGroup::add_accession(graph_conn, &path, &name, start, end, &mut cache);
 
             let annotation_group = "generic";
-            let annotation_id = HashId(calculate_hash(&format!(
-                "{}:{name}:{annotation_group}",
-                accession.id
-            )));
-            graph_conn.execute(
-                "INSERT OR IGNORE INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);",
-                params![annotation_id, name, annotation_group, accession.id],
-            )?;
+            let annotation =
+                Annotation::create(graph_conn, &name, annotation_group, &accession.id)?;
             if let Some(sample_name) = &sample {
-                graph_conn.execute(
-                    "INSERT OR IGNORE INTO annotations_sample (annotation_id, sample_name) VALUES (?1, ?2);",
-                    params![annotation_id, sample_name],
-                )?;
+                AnnotationSample::create(graph_conn, &annotation.id, sample_name)?;
             }
 
             let operation = end_operation(

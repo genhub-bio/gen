@@ -239,6 +239,10 @@ struct AnnotationSample {
   sampleName @1 :Text;
 }
 
+struct AnnotationGroup {
+  name @0 :Text;
+}
+
 struct ChangesetModels {
   collections @0 :List(Collection);
   samples @1 :List(Sample);
@@ -252,8 +256,9 @@ struct ChangesetModels {
   accessions @9 :List(Accession);
   accessionEdges @10 :List(AccessionEdge);
   accessionPaths @11 :List(AccessionPath);
-  annotations @12 :List(StoredAnnotation);
-  annotationSamples @13 :List(AnnotationSample);
+  annotationGroups @12 :List(AnnotationGroup);
+  annotations @13 :List(StoredAnnotation);
+  annotationSamples @14 :List(AnnotationSample);
 }
 
 struct DependencyModels {

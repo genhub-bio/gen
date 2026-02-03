@@ -165,6 +165,7 @@ pub fn attach_session(session: &mut session::Session) {
         "accessions",
         "accession_edges",
         "accession_paths",
+        "annotation_groups",
         "annotations",
         "annotations_sample",
     ] {

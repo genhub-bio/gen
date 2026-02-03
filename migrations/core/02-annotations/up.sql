@@ -1,9 +1,14 @@
+CREATE TABLE annotation_groups (
+  name TEXT PRIMARY KEY NOT NULL
+) STRICT;
+
 CREATE TABLE annotations (
   id BLOB PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
   annotation_group TEXT NOT NULL,
   accession_id BLOB NOT NULL,
-  FOREIGN KEY(accession_id) REFERENCES accessions(id)
+  FOREIGN KEY(accession_id) REFERENCES accessions(id),
+  FOREIGN KEY(annotation_group) REFERENCES annotation_groups(name)
 ) STRICT;
 CREATE UNIQUE INDEX annotations_uidx ON annotations(accession_id, annotation_group, name);
 

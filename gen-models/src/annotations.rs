@@ -9,10 +9,70 @@ use crate::{
     db::{GraphConnection, OperationsConnection},
     errors::FileAdditionError,
     file_types::FileTypes,
-    gen_models_capnp::{annotation_sample, stored_annotation},
+    gen_models_capnp::{annotation_group, annotation_sample, stored_annotation},
     operations::FileAddition,
     traits::Query,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AnnotationGroup {
+    pub name: String,
+}
+
+impl Query for AnnotationGroup {
+    type Model = AnnotationGroup;
+
+    const PRIMARY_KEY: &'static str = "name";
+    const TABLE_NAME: &'static str = "annotation_groups";
+
+    fn process_row(row: &Row) -> Self::Model {
+        AnnotationGroup {
+            name: row.get(0).unwrap(),
+        }
+    }
+}
+
+impl AnnotationGroup {
+    pub fn create(conn: &GraphConnection, name: &str) -> rusqlite::Result<AnnotationGroup> {
+        let mut stmt = conn
+            .prepare("INSERT INTO annotation_groups (name) VALUES (?1) returning (name);")
+            .unwrap();
+        stmt.query_row((name,), |row| Ok(AnnotationGroup { name: row.get(0)? }))
+    }
+
+    pub fn get_or_create(conn: &GraphConnection, name: &str) -> AnnotationGroup {
+        match AnnotationGroup::create(conn, name) {
+            Ok(group) => group,
+            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
+                if err.code == rusqlite::ErrorCode::ConstraintViolation {
+                    AnnotationGroup {
+                        name: name.to_string(),
+                    }
+                } else {
+                    panic!("something bad happened querying the database")
+                }
+            }
+            Err(_) => {
+                panic!("something bad happened.")
+            }
+        }
+    }
+}
+
+impl<'a> Capnp<'a> for AnnotationGroup {
+    type Builder = annotation_group::Builder<'a>;
+    type Reader = annotation_group::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        builder.set_name(&self.name);
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        AnnotationGroup {
+            name: reader.get_name().unwrap().to_string().unwrap(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Annotation {
@@ -155,6 +215,7 @@ impl Annotation {
     }
 
     pub fn insert(conn: &GraphConnection, annotation: &Annotation) -> Result<(), AnnotationError> {
+        AnnotationGroup::get_or_create(conn, &annotation.group);
         let query = "INSERT OR IGNORE INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![
@@ -172,6 +233,7 @@ impl Annotation {
         group: &str,
         accession_id: &HashId,
     ) -> Result<Annotation, AnnotationError> {
+        AnnotationGroup::get_or_create(conn, group);
         let id = Annotation::generate_id(name, group, accession_id);
         let query = "INSERT INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query)?;
@@ -241,6 +303,14 @@ impl Annotation {
     ) -> Result<Vec<Annotation>, AnnotationError> {
         let query = "select a.* from annotations a left join annotations_sample s on (a.id = s.annotation_id) where s.sample_name = ?1";
         Ok(Annotation::query(conn, query, params![sample_name]))
+    }
+
+    pub fn query_by_group(
+        conn: &GraphConnection,
+        group: &str,
+    ) -> Result<Vec<Annotation>, AnnotationError> {
+        let query = "select * from annotations where annotation_group = ?1";
+        Ok(Annotation::query(conn, query, params![group]))
     }
 }
 
@@ -356,7 +426,8 @@ mod tests {
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
         let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache);
 
-        let annotation = Annotation::create(&conn, "gene-a", "gff3", &accession.id).unwrap();
+        let annotation =
+            Annotation::create(&conn, "gene-a", "project-tracks", &accession.id).unwrap();
         annotation
             .add_samples(&conn, &["sample-1", "sample-2"])
             .unwrap();
@@ -371,6 +442,9 @@ mod tests {
         let by_sample = Annotation::query_by_sample(&conn, "sample-1").unwrap();
         assert_eq!(by_sample.len(), 1);
         assert_eq!(by_sample[0], annotation);
+
+        let by_group = Annotation::query_by_group(&conn, "project-tracks").unwrap();
+        assert_eq!(by_group, vec![annotation]);
     }
 
     #[test]

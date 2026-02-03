@@ -379,6 +379,7 @@ mod tests {
             accessions: vec![],
             accession_edges: vec![],
             accession_paths: vec![],
+            annotation_groups: vec![],
             annotations: vec![],
             annotation_samples: vec![],
         };
