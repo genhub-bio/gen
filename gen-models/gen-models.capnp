@@ -200,9 +200,18 @@ struct ManifestOperation {
   operation @0 :Operation;
   fileAdditions @1 :List(FileAddition);
   annotationFileAdditions @4 :List(FileAddition);
+  annotationFileDetails @5 :List(ManifestAnnotationFileAddition);
   operationSummary :union {
     none @2 :Void;
     some @3 :OperationSummary;
+  }
+}
+
+struct ManifestAnnotationFileAddition {
+  fileAddition @0 :FileAddition;
+  name :union {
+    none @1 :Void;
+    some @2 :Text;
   }
 }
 

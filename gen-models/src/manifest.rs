@@ -2,18 +2,54 @@ use gen_core::{HashId, traits::Capnp};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    annotations::AnnotationFile,
+    annotations::{AnnotationFile, AnnotationFileLink},
     db::OperationsConnection,
-    gen_models_capnp::{manifest, manifest_diff, manifest_operation},
+    gen_models_capnp::{
+        manifest, manifest_annotation_file_addition, manifest_diff, manifest_operation,
+    },
     operations::{FileAddition, Operation, OperationSummary},
     traits::Query,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ManifestAnnotationFileAddition {
+    pub file_addition: FileAddition,
+    pub name: Option<String>,
+}
+
+impl<'a> Capnp<'a> for ManifestAnnotationFileAddition {
+    type Builder = manifest_annotation_file_addition::Builder<'a>;
+    type Reader = manifest_annotation_file_addition::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        let mut file_addition_builder = builder.reborrow().init_file_addition();
+        self.file_addition.write_capnp(&mut file_addition_builder);
+        match &self.name {
+            Some(name) => builder.reborrow().get_name().set_some(name),
+            None => builder.reborrow().get_name().set_none(()),
+        }
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        let file_addition = FileAddition::read_capnp(reader.get_file_addition().unwrap());
+        let name = match reader.get_name().which().unwrap() {
+            manifest_annotation_file_addition::name::None(()) => None,
+            manifest_annotation_file_addition::name::Some(name_reader) => {
+                Some(name_reader.unwrap().to_string().unwrap())
+            }
+        };
+        ManifestAnnotationFileAddition {
+            file_addition,
+            name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestOperation {
     pub operation: Operation,
     pub file_additions: Vec<FileAddition>,
-    pub annotation_file_additions: Vec<FileAddition>,
+    pub annotation_file_additions: Vec<ManifestAnnotationFileAddition>,
     pub operation_summary: Option<OperationSummary>,
 }
 
@@ -39,7 +75,17 @@ impl<'a> Capnp<'a> for ManifestOperation {
         for (i, file_addition) in self.annotation_file_additions.iter().enumerate() {
             let mut file_addition_builder =
                 annotation_file_additions_builder.reborrow().get(i as u32);
-            file_addition.write_capnp(&mut file_addition_builder);
+            file_addition
+                .file_addition
+                .write_capnp(&mut file_addition_builder);
+        }
+
+        let mut annotation_file_details_builder = builder
+            .reborrow()
+            .init_annotation_file_details(self.annotation_file_additions.len() as u32);
+        for (i, file_addition) in self.annotation_file_additions.iter().enumerate() {
+            let mut detail_builder = annotation_file_details_builder.reborrow().get(i as u32);
+            file_addition.write_capnp(&mut detail_builder);
         }
 
         match &self.operation_summary {
@@ -61,11 +107,22 @@ impl<'a> Capnp<'a> for ManifestOperation {
             file_additions.push(FileAddition::read_capnp(file_addition_reader));
         }
 
-        let annotation_file_additions_reader = reader.get_annotation_file_additions().unwrap();
-        let mut annotation_file_additions = Vec::new();
-        for file_addition_reader in annotation_file_additions_reader.iter() {
-            annotation_file_additions.push(FileAddition::read_capnp(file_addition_reader));
-        }
+        let annotation_file_additions = if reader.has_annotation_file_details() {
+            let annotation_file_details_reader = reader.get_annotation_file_details().unwrap();
+            annotation_file_details_reader
+                .iter()
+                .map(ManifestAnnotationFileAddition::read_capnp)
+                .collect()
+        } else {
+            let annotation_file_additions_reader = reader.get_annotation_file_additions().unwrap();
+            annotation_file_additions_reader
+                .iter()
+                .map(|file_addition_reader| ManifestAnnotationFileAddition {
+                    file_addition: FileAddition::read_capnp(file_addition_reader),
+                    name: None,
+                })
+                .collect()
+        };
 
         let operation_summary = match reader.get_operation_summary().which().unwrap() {
             manifest_operation::operation_summary::None(()) => None,
@@ -216,7 +273,13 @@ impl<'a> ManifestGenerator<'a> {
                 if let Some(op) = operations_map.get(hash) {
                     let file_additions = FileAddition::get_files_for_operation(self.conn, &op.hash);
                     let annotation_file_additions =
-                        AnnotationFile::get_files_for_operation(self.conn, &op.hash);
+                        AnnotationFile::get_links_for_operation(self.conn, &op.hash)
+                            .into_iter()
+                            .map(|entry: AnnotationFileLink| ManifestAnnotationFileAddition {
+                                file_addition: entry.file_addition,
+                                name: entry.name,
+                            })
+                            .collect();
                     let operation_summary = OperationSummary::query(
                         self.conn,
                         "select * from operation_summaries where operation_hash = ?1",
@@ -348,11 +411,14 @@ mod tests {
                 file_type: FileTypes::Fasta,
                 checksum: HashId([2u8; 32]),
             }],
-            annotation_file_additions: vec![FileAddition {
-                id: HashId([3u8; 32]),
-                file_path: "/path/to/annotation.gff3".to_string(),
-                file_type: FileTypes::Gff3,
-                checksum: HashId([4u8; 32]),
+            annotation_file_additions: vec![ManifestAnnotationFileAddition {
+                file_addition: FileAddition {
+                    id: HashId([3u8; 32]),
+                    file_path: "/path/to/annotation.gff3".to_string(),
+                    file_type: FileTypes::Gff3,
+                    checksum: HashId([4u8; 32]),
+                },
+                name: Some("track-a".to_string()),
             }],
             operation_summary: Some(OperationSummary {
                 id: 1,
@@ -529,7 +595,7 @@ mod tests {
             "fixtures/manifest_annotation.gff3",
             FileTypes::Gff3,
             None,
-            None,
+            Some("manifest-track"),
         )
         .unwrap();
 
@@ -541,7 +607,10 @@ mod tests {
         assert_eq!(manifest.operations.len(), 1);
         assert_eq!(
             manifest.operations[0].annotation_file_additions,
-            vec![file_addition]
+            vec![ManifestAnnotationFileAddition {
+                file_addition,
+                name: Some("manifest-track".to_string()),
+            }]
         );
     }
 

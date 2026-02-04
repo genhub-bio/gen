@@ -1,7 +1,7 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, config::Workspace, traits::Capnp};
-use rusqlite::{Row, params, types::Value};
+use rusqlite::{OptionalExtension as _, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -311,6 +311,12 @@ impl Annotation {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+pub struct AnnotationFileLink {
+    pub file_addition: FileAddition,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum AnnotationFileError {
     #[error("Database error: {0}")]
@@ -364,14 +370,44 @@ impl AnnotationFile {
         conn: &OperationsConnection,
         operation_hash: &HashId,
     ) -> Vec<FileAddition> {
-        let query = "select fa.* from file_additions fa left join annotation_files af on (fa.id = af.file_addition_id) where af.operation_hash = ?1";
+        AnnotationFile::get_links_for_operation(conn, operation_hash)
+            .into_iter()
+            .map(|entry| entry.file_addition)
+            .collect()
+    }
+
+    pub fn get_links_for_operation(
+        conn: &OperationsConnection,
+        operation_hash: &HashId,
+    ) -> Vec<AnnotationFileLink> {
+        let query = "select fa.*, af.name from file_additions fa left join annotation_files af on (fa.id = af.file_addition_id) where af.operation_hash = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
             .query_map(params![operation_hash], |row| {
-                Ok(FileAddition::process_row(row))
+                Ok(AnnotationFileLink {
+                    file_addition: FileAddition::process_row(row),
+                    name: row.get(4).unwrap(),
+                })
             })
             .unwrap();
         rows.map(|row| row.unwrap()).collect()
+    }
+
+    pub fn get_name_for_operation_file(
+        conn: &OperationsConnection,
+        operation_hash: &HashId,
+        file_addition_id: &HashId,
+    ) -> Result<Option<String>, AnnotationFileError> {
+        let query =
+            "select name from annotation_files where operation_hash = ?1 and file_addition_id = ?2";
+        let mut stmt = conn.prepare(query)?;
+        let name = stmt
+            .query_row(params![operation_hash, file_addition_id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten();
+        Ok(name)
     }
 
     pub fn query_by_operations(
@@ -470,6 +506,10 @@ mod tests {
         )
         .unwrap();
 
+        let display_name =
+            AnnotationFile::get_name_for_operation_file(op_conn, &op_hash, &file_addition.id)
+                .unwrap();
+        assert_eq!(display_name.as_deref(), Some("fixtures-annotation"));
         let files = AnnotationFile::get_files_for_operation(op_conn, &op_hash);
         assert_eq!(files, vec![file_addition]);
     }
