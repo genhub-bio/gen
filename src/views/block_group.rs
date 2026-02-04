@@ -183,32 +183,21 @@ fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment
     segments
 }
 
-fn load_annotations_for_block_group(
+fn load_annotations_for_group(
     conn: &GraphConnection,
-    block_group_id: &HashId,
+    group: &str,
+    node_filter: &HashSet<HashId>,
     messages: &mut MessageBuffer,
 ) -> Vec<AnnotationSpan> {
-    let path = <Path as Query>::get(
-        conn,
-        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
-        params![block_group_id],
-    );
-
-    let path = match path {
-        Ok(path) => path,
+    let annotations = match Annotation::query_by_group(conn, group) {
+        Ok(annotations) => annotations,
         Err(err) => {
             messages.push_warn(format!(
-                "No path found for block group {block_group_id}: {err}"
+                "Failed to load annotations for group {group}: {err}"
             ));
             return Vec::new();
         }
     };
-
-    let annotations = Annotation::query(
-        conn,
-        "SELECT a.* FROM annotations a JOIN accessions acc ON acc.id = a.accession_id WHERE acc.path_id = ?1",
-        params![path.id],
-    );
 
     annotations
         .into_iter()
@@ -218,7 +207,10 @@ fn load_annotations_for_block_group(
                 "SELECT ae.* FROM accession_edges ae JOIN accession_paths ap ON ap.edge_id = ae.id WHERE ap.accession_id = ?1 ORDER BY ap.index_in_path ASC",
                 params![annotation.accession_id],
             );
-            let segments = accession_edges_to_segments(&edges);
+            let segments = accession_edges_to_segments(&edges)
+                .into_iter()
+                .filter(|segment| node_filter.contains(&segment.node_id))
+                .collect::<Vec<_>>();
             if segments.is_empty() {
                 None
             } else {
@@ -475,7 +467,8 @@ pub fn view_block_group(
     };
 
     // Create explorer and its state that persists across frames
-    let mut explorer = CollectionExplorer::new(conn, op_conn, collection_name);
+    let mut explorer =
+        CollectionExplorer::new(conn, op_conn, sample_name.as_deref(), collection_name);
     let mut explorer_state = CollectionExplorerState::new();
     if let Some(ref s) = sample_name {
         explorer_state.toggle_sample(s);
@@ -538,13 +531,8 @@ pub fn view_block_group(
 
     let mut messages = MessageBuffer::new(MESSAGE_BUFFER_LIMIT);
     let mut annotation_file_tracks: HashMap<HashId, AnnotationTrack> = HashMap::new();
+    let mut annotation_group_tracks: HashMap<String, AnnotationTrack> = HashMap::new();
     let mut current_block_group = block_group_id.map(|bg_id| BlockGroup::get_by_id(conn, &bg_id));
-    let mut base_track = current_block_group.as_ref().map(|bg| {
-        AnnotationTrack::new(
-            String::new(),
-            load_annotations_for_block_group(conn, &bg.id, &mut messages),
-        )
-    });
 
     // Setup terminal
     enable_raw_mode()?;
@@ -569,10 +557,16 @@ pub fn view_block_group(
         // Refresh explorer data and force reload on change
         // I do this every REFRESH_INTERVAL seconds.
         if last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
-            if explorer.refresh(conn, op_conn, collection_name) {
+            let selected_sample = current_block_group
+                .as_ref()
+                .and_then(|bg| bg.sample_name.as_deref());
+            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
                 annotation_file_tracks.retain(|id, _| explorer_state.is_annotation_file_active(id));
+                annotation_group_tracks
+                    .retain(|name, _| explorer_state.is_annotation_group_active(name));
             }
             last_refresh = Instant::now();
         }
@@ -629,8 +623,8 @@ pub fn view_block_group(
             };
 
             let mut annotation_tracks: Vec<&AnnotationTrack> = Vec::new();
-            if let Some(track) = base_track.as_ref() {
-                if !track.annotations.is_empty() {
+            for entry in explorer.data.annotation_groups.iter() {
+                if let Some(track) = annotation_group_tracks.get(&entry.name) {
                     annotation_tracks.push(track);
                 }
             }
@@ -887,14 +881,36 @@ pub fn view_block_group(
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
             current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
-            base_track = current_block_group.as_ref().map(|bg| {
-                AnnotationTrack::new(
-                    String::new(),
-                    load_annotations_for_block_group(conn, &bg.id, &mut messages),
-                )
-            });
+            let selected_sample = current_block_group
+                .as_ref()
+                .and_then(|bg| bg.sample_name.as_deref());
+            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
+                explorer.force_reload(&mut explorer_state);
+                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
+            }
             annotation_file_tracks.clear();
+            annotation_group_tracks.clear();
             if let Some(bg) = current_block_group.as_ref() {
+                let node_filter: HashSet<HashId> =
+                    block_graph.nodes().map(|node| node.node_id).collect();
+                for entry in explorer.data.annotation_groups.iter() {
+                    if explorer_state.is_annotation_group_active(&entry.name) {
+                        let spans = load_annotations_for_group(
+                            conn,
+                            &entry.name,
+                            &node_filter,
+                            &mut messages,
+                        );
+                        if spans.is_empty() {
+                            continue;
+                        }
+                        annotation_group_tracks.insert(
+                            entry.name.clone(),
+                            AnnotationTrack::new(entry.name.clone(), spans),
+                        );
+                    }
+                }
                 for entry in explorer.data.annotation_files.iter() {
                     let id = entry.file_addition.id;
                     if explorer_state.is_annotation_file_active(&id) {
@@ -1077,6 +1093,33 @@ pub fn view_block_group(
                                 }
                             } else {
                                 annotation_file_tracks.remove(&toggled_id);
+                            }
+                        }
+                        if let Some(toggled_group) =
+                            explorer_state.annotation_group_toggle_requested.take()
+                        {
+                            if explorer_state.is_annotation_group_active(&toggled_group) {
+                                if current_block_group.is_some() {
+                                    let node_filter: HashSet<HashId> =
+                                        block_graph.nodes().map(|node| node.node_id).collect();
+                                    let spans = load_annotations_for_group(
+                                        conn,
+                                        &toggled_group,
+                                        &node_filter,
+                                        &mut messages,
+                                    );
+                                    if spans.is_empty() {
+                                        explorer_state
+                                            .deactivate_annotation_group(&toggled_group);
+                                    } else {
+                                        annotation_group_tracks.insert(
+                                            toggled_group.clone(),
+                                            AnnotationTrack::new(toggled_group, spans),
+                                        );
+                                    }
+                                }
+                            } else {
+                                annotation_group_tracks.remove(&toggled_group);
                             }
                         }
                     }
