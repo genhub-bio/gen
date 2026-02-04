@@ -38,6 +38,7 @@ use rusqlite::params;
 use crate::{
     config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
+    translate::{bed::translate_bed, gff::translate_gff},
     views::{
         annotation_files::AnnotationFileEntry,
         block_group_viewer::{
@@ -46,8 +47,6 @@ use crate::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
     },
 };
-
-use crate::translate::{bed::translate_bed, gff::translate_gff};
 
 // Frequency by which we check for external updates to the db
 const REFRESH_INTERVAL: u64 = 3; // seconds
@@ -891,22 +890,22 @@ pub fn view_block_group(
             frame.render_widget(status_bar, status_bar_area);
 
             // Message bar (latest warning)
-            if let Some(area) = message_bar_area {
-                if let Some(latest) = messages.latest() {
-                    let extra = messages.len().saturating_sub(1);
-                    let suffix = if extra > 0 {
-                        format!(" (+{extra})")
-                    } else {
-                        String::new()
-                    };
-                    let message_line = format!("WARN: {latest}{suffix}");
-                    let message_bar = Paragraph::new(message_line).style(
-                        Style::default()
-                            .fg(get_theme_color("error").unwrap())
-                            .bg(get_theme_color("statusbar").unwrap()),
-                    );
-                    frame.render_widget(message_bar, area);
-                }
+            if let Some(area) = message_bar_area
+                && let Some(latest) = messages.latest()
+            {
+                let extra = messages.len().saturating_sub(1);
+                let suffix = if extra > 0 {
+                    format!(" (+{extra})")
+                } else {
+                    String::new()
+                };
+                let message_line = format!("WARN: {latest}{suffix}");
+                let message_bar = Paragraph::new(message_line).style(
+                    Style::default()
+                        .fg(get_theme_color("error").unwrap())
+                        .bg(get_theme_color("statusbar").unwrap()),
+                );
+                frame.render_widget(message_bar, area);
             }
 
             // Canvas area
@@ -1220,7 +1219,7 @@ pub fn view_block_group(
                                             .show_path(&path, get_theme_color("error").unwrap())
                                         {
                                             // todo: pop up a message in the panel
-                                            messages.push_warn(format!("{err}"));
+                                            messages.push_warn(err.to_string());
                                         }
                                     }
                                     Err(err) => {
@@ -1261,43 +1260,40 @@ pub fn view_block_group(
                             explorer_state.annotation_file_toggle_requested.take()
                         {
                             if explorer_state.is_annotation_file_active(&toggled_id) {
-                                if let Some(entry) = explorer.annotation_file_entry(&toggled_id) {
-                                    if let Some(bg) = current_block_group.as_ref() {
-                                        let query_window = current_view_coordinate_window(&viewer)
-                                            .map(expand_query_window);
-                                        let node_filter: HashSet<HashId> =
-                                            block_graph.nodes().map(|node| node.node_id).collect();
-                                        match load_annotation_file_track(
-                                            conn,
-                                            workspace,
-                                            collection_name,
-                                            bg.sample_name.as_deref(),
-                                            Some(&bg.name),
-                                            query_window,
-                                            &node_filter,
-                                            entry,
-                                        ) {
-                                            Ok(load) => {
-                                                annotation_file_tracks
-                                                    .insert(toggled_id, load.track);
-                                                annotation_file_index_available
-                                                    .insert(toggled_id, load.index_available);
-                                                if let Some(window) = load.loaded_window {
-                                                    annotation_file_loaded_windows
-                                                        .insert(toggled_id, window);
-                                                } else {
-                                                    annotation_file_loaded_windows
-                                                        .remove(&toggled_id);
-                                                }
-                                            }
-                                            Err(err) => {
-                                                messages.push_warn(format!("{err}"));
-                                                explorer_state
-                                                    .deactivate_annotation_file(&toggled_id);
-                                                annotation_file_tracks.remove(&toggled_id);
-                                                annotation_file_index_available.remove(&toggled_id);
+                                if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
+                                    && let Some(bg) = current_block_group.as_ref()
+                                {
+                                    let query_window = current_view_coordinate_window(&viewer)
+                                        .map(expand_query_window);
+                                    let node_filter: HashSet<HashId> =
+                                        block_graph.nodes().map(|node| node.node_id).collect();
+                                    match load_annotation_file_track(
+                                        conn,
+                                        workspace,
+                                        collection_name,
+                                        bg.sample_name.as_deref(),
+                                        Some(&bg.name),
+                                        query_window,
+                                        &node_filter,
+                                        entry,
+                                    ) {
+                                        Ok(load) => {
+                                            annotation_file_tracks.insert(toggled_id, load.track);
+                                            annotation_file_index_available
+                                                .insert(toggled_id, load.index_available);
+                                            if let Some(window) = load.loaded_window {
+                                                annotation_file_loaded_windows
+                                                    .insert(toggled_id, window);
+                                            } else {
                                                 annotation_file_loaded_windows.remove(&toggled_id);
                                             }
+                                        }
+                                        Err(err) => {
+                                            messages.push_warn(format!("{err}"));
+                                            explorer_state.deactivate_annotation_file(&toggled_id);
+                                            annotation_file_tracks.remove(&toggled_id);
+                                            annotation_file_index_available.remove(&toggled_id);
+                                            annotation_file_loaded_windows.remove(&toggled_id);
                                         }
                                     }
                                 }

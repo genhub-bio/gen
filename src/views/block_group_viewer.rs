@@ -1013,11 +1013,11 @@ impl<'a> Viewer<'a> {
                     self.select_center_block()
                 };
 
-                if let Some(target) = target {
-                    if !self.is_block_visible(target) {
-                        self.state.world = self.compute_bounding_box();
-                        let _ = self.center_on_block(target);
-                    }
+                if let Some(target) = target
+                    && !self.is_block_visible(target)
+                {
+                    self.state.world = self.compute_bounding_box();
+                    let _ = self.center_on_block(target);
                 }
             }
         }
