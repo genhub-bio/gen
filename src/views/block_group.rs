@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fs::File,
     io::{BufRead, BufReader, Cursor},
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -26,7 +26,7 @@ use gen_models::{
     traits::Query,
 };
 use log::warn;
-use noodles::{bed, gff};
+use noodles::{bed, core::Region, gff, tabix};
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
@@ -383,58 +383,171 @@ fn parse_translated_bed<R: BufRead>(
     build_annotation_spans(track_label, segments_by_name)
 }
 
+#[derive(Clone, Debug)]
+struct AnnotationFileTrackLoadResult {
+    track: AnnotationTrack,
+    index_available: bool,
+    loaded_window: Option<(i64, i64)>,
+}
+
+fn current_view_coordinate_window(viewer: &Viewer<'_>) -> Option<(i64, i64)> {
+    let mut start = i64::MAX;
+    let mut end = i64::MIN;
+
+    for &block in viewer.scaled_layout.labels.keys() {
+        if is_start_node(block.node_id) || is_end_node(block.node_id) {
+            continue;
+        }
+        if !viewer.is_block_visible(block) {
+            continue;
+        }
+        start = start.min(block.sequence_start);
+        end = end.max(block.sequence_end);
+    }
+
+    (start <= end).then_some((start, end))
+}
+
+fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
+    let span = (window.1 - window.0).max(1);
+    (window.0.saturating_sub(span), window.1.saturating_add(span))
+}
+
+fn tabix_index_path(file_path: &FsPath) -> PathBuf {
+    PathBuf::from(format!("{}.tbi", file_path.to_string_lossy()))
+}
+
+fn load_tabix_region_bytes(
+    file_path: &FsPath,
+    reference_name: &str,
+    window: (i64, i64),
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let start = (window.0 + 1).max(1);
+    let end = window.1.max(start);
+    let region = format!("{reference_name}:{start}-{end}").parse::<Region>()?;
+
+    let mut reader = tabix::io::indexed_reader::Builder::default().build_from_path(file_path)?;
+    let query = reader.query(&region)?;
+
+    let mut bytes = Vec::new();
+    for result in query {
+        let record = result?;
+        bytes.extend_from_slice(record.as_ref().as_bytes());
+        bytes.push(b'\n');
+    }
+
+    Ok(bytes)
+}
+
 fn load_annotation_file_track(
     conn: &GraphConnection,
     workspace: &Workspace,
     collection_name: &str,
     sample_name: Option<&str>,
-    block_graph: &GenGraph,
+    block_group_name: Option<&str>,
+    query_window: Option<(i64, i64)>,
+    node_filter: &HashSet<HashId>,
     entry: &AnnotationFileEntry,
-) -> Result<AnnotationTrack, Box<dyn Error>> {
+) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
     let file_path = resolve_annotation_file_path(workspace, &entry.file_addition)
         .ok_or("Annotation file not found in repo or assets")?;
-    let file = File::open(&file_path)?;
+    let index_path = tabix_index_path(&file_path);
+    let index_available = index_path.exists();
+    let mut indexed_source_bytes = None;
+    let mut loaded_window = None;
+
+    if index_available {
+        if let (Some(reference_name), Some(window)) = (block_group_name, query_window) {
+            indexed_source_bytes =
+                Some(load_tabix_region_bytes(&file_path, reference_name, window)?);
+            loaded_window = Some(window);
+        } else {
+            return Ok(AnnotationFileTrackLoadResult {
+                track: AnnotationTrack::new(entry.display_name.clone(), Vec::new()),
+                index_available,
+                loaded_window: None,
+            });
+        }
+    }
+
     let mut buffer = Vec::new();
     match entry.file_addition.file_type {
-        FileTypes::Gff3 => translate_gff(
-            conn,
-            collection_name,
-            sample_name,
-            BufReader::new(file),
-            &mut buffer,
-        )?,
-        FileTypes::Bed => translate_bed(
-            conn,
-            collection_name,
-            sample_name,
-            BufReader::new(file),
-            &mut buffer,
-        )?,
+        FileTypes::Gff3 => {
+            if let Some(bytes) = indexed_source_bytes.as_deref() {
+                translate_gff(
+                    conn,
+                    collection_name,
+                    sample_name,
+                    BufReader::new(Cursor::new(bytes)),
+                    &mut buffer,
+                )?;
+            } else {
+                translate_gff(
+                    conn,
+                    collection_name,
+                    sample_name,
+                    BufReader::new(File::open(&file_path)?),
+                    &mut buffer,
+                )?;
+            }
+        }
+        FileTypes::Bed => {
+            if let Some(bytes) = indexed_source_bytes.as_deref() {
+                translate_bed(
+                    conn,
+                    collection_name,
+                    sample_name,
+                    Cursor::new(bytes),
+                    &mut buffer,
+                )?;
+            } else {
+                translate_bed(
+                    conn,
+                    collection_name,
+                    sample_name,
+                    File::open(&file_path)?,
+                    &mut buffer,
+                )?;
+            }
+        }
         other => {
             return Err(format!("Unsupported annotation file type: {other:?}").into());
         }
     }
-    let node_filter: HashSet<HashId> = block_graph.nodes().map(|node| node.node_id).collect();
     let spans = match entry.file_addition.file_type {
         FileTypes::Gff3 => {
             if buffer.is_empty() {
-                let reader = BufReader::new(File::open(&file_path)?);
-                parse_translated_gff(reader, &node_filter, &entry.display_name)
+                let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
+                {
+                    Box::new(BufReader::new(Cursor::new(bytes)))
+                } else {
+                    Box::new(BufReader::new(File::open(&file_path)?))
+                };
+                parse_translated_gff(reader, node_filter, &entry.display_name)
             } else {
-                parse_translated_gff(Cursor::new(buffer), &node_filter, &entry.display_name)
+                parse_translated_gff(Cursor::new(buffer), node_filter, &entry.display_name)
             }
         }
         FileTypes::Bed => {
             if buffer.is_empty() {
-                let reader = BufReader::new(File::open(&file_path)?);
-                parse_translated_bed(reader, &node_filter, &entry.display_name)
+                let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
+                {
+                    Box::new(BufReader::new(Cursor::new(bytes)))
+                } else {
+                    Box::new(BufReader::new(File::open(&file_path)?))
+                };
+                parse_translated_bed(reader, node_filter, &entry.display_name)
             } else {
-                parse_translated_bed(Cursor::new(buffer), &node_filter, &entry.display_name)
+                parse_translated_bed(Cursor::new(buffer), node_filter, &entry.display_name)
             }
         }
         _ => Vec::new(),
     };
-    Ok(AnnotationTrack::new(entry.display_name.clone(), spans))
+    Ok(AnnotationFileTrackLoadResult {
+        track: AnnotationTrack::new(entry.display_name.clone(), spans),
+        index_available,
+        loaded_window,
+    })
 }
 
 pub fn view_block_group(
@@ -531,6 +644,8 @@ pub fn view_block_group(
 
     let mut messages = MessageBuffer::new(MESSAGE_BUFFER_LIMIT);
     let mut annotation_file_tracks: HashMap<HashId, AnnotationTrack> = HashMap::new();
+    let mut annotation_file_index_available: HashMap<HashId, bool> = HashMap::new();
+    let mut annotation_file_loaded_windows: HashMap<HashId, (i64, i64)> = HashMap::new();
     let mut annotation_group_tracks: HashMap<String, AnnotationTrack> = HashMap::new();
     let mut current_block_group = block_group_id.map(|bg_id| BlockGroup::get_by_id(conn, &bg_id));
 
@@ -565,6 +680,10 @@ pub fn view_block_group(
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
                 annotation_file_tracks.retain(|id, _| explorer_state.is_annotation_file_active(id));
+                annotation_file_index_available
+                    .retain(|id, _| explorer_state.is_annotation_file_active(id));
+                annotation_file_loaded_windows
+                    .retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_group_tracks
                     .retain(|name, _| explorer_state.is_annotation_group_active(name));
             }
@@ -575,6 +694,67 @@ pub fn view_block_group(
         if explorer_state.selected_block_group_id != last_selected_block_group_id {
             is_loading = true;
             last_selected_block_group_id = explorer_state.selected_block_group_id;
+        }
+
+        if !is_loading
+            && let Some(bg) = current_block_group.as_ref()
+            && let Some(visible_window) = current_view_coordinate_window(&viewer)
+        {
+            let query_window = expand_query_window(visible_window);
+            let node_filter: HashSet<HashId> =
+                block_graph.nodes().map(|node| node.node_id).collect();
+            for entry in &explorer.data.annotation_files {
+                let id = entry.file_addition.id;
+                if !explorer_state.is_annotation_file_active(&id) {
+                    continue;
+                }
+                if !annotation_file_index_available
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                let needs_reload = match annotation_file_loaded_windows.get(&id) {
+                    Some((loaded_start, loaded_end)) => {
+                        visible_window.0 < *loaded_start || visible_window.1 > *loaded_end
+                    }
+                    None => true,
+                };
+
+                if !needs_reload {
+                    continue;
+                }
+
+                match load_annotation_file_track(
+                    conn,
+                    workspace,
+                    collection_name,
+                    bg.sample_name.as_deref(),
+                    Some(&bg.name),
+                    Some(query_window),
+                    &node_filter,
+                    entry,
+                ) {
+                    Ok(load) => {
+                        annotation_file_tracks.insert(id, load.track);
+                        if let Some(window) = load.loaded_window {
+                            annotation_file_loaded_windows.insert(id, window);
+                        } else {
+                            annotation_file_loaded_windows.remove(&id);
+                        }
+                        annotation_file_index_available.insert(id, load.index_available);
+                    }
+                    Err(err) => {
+                        messages.push_warn(format!("{err}"));
+                        explorer_state.deactivate_annotation_file(&id);
+                        annotation_file_tracks.remove(&id);
+                        annotation_file_index_available.remove(&id);
+                        annotation_file_loaded_windows.remove(&id);
+                    }
+                }
+            }
         }
 
         // Draw the UI
@@ -890,10 +1070,13 @@ pub fn view_block_group(
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
             }
             annotation_file_tracks.clear();
+            annotation_file_index_available.clear();
+            annotation_file_loaded_windows.clear();
             annotation_group_tracks.clear();
             if let Some(bg) = current_block_group.as_ref() {
                 let node_filter: HashSet<HashId> =
                     block_graph.nodes().map(|node| node.node_id).collect();
+                let query_window = current_view_coordinate_window(&viewer).map(expand_query_window);
                 for entry in explorer.data.annotation_groups.iter() {
                     if explorer_state.is_annotation_group_active(&entry.name) {
                         let spans = load_annotations_for_group(
@@ -919,15 +1102,23 @@ pub fn view_block_group(
                             workspace,
                             collection_name,
                             bg.sample_name.as_deref(),
-                            &block_graph,
+                            Some(&bg.name),
+                            query_window,
+                            &node_filter,
                             entry,
                         ) {
-                            Ok(track) => {
-                                annotation_file_tracks.insert(id, track);
+                            Ok(load) => {
+                                annotation_file_tracks.insert(id, load.track);
+                                annotation_file_index_available.insert(id, load.index_available);
+                                if let Some(window) = load.loaded_window {
+                                    annotation_file_loaded_windows.insert(id, window);
+                                }
                             }
                             Err(err) => {
                                 messages.push_warn(format!("{err}"));
                                 explorer_state.deactivate_annotation_file(&id);
+                                annotation_file_index_available.remove(&id);
+                                annotation_file_loaded_windows.remove(&id);
                             }
                         }
                     }
@@ -1072,27 +1263,48 @@ pub fn view_block_group(
                             if explorer_state.is_annotation_file_active(&toggled_id) {
                                 if let Some(entry) = explorer.annotation_file_entry(&toggled_id) {
                                     if let Some(bg) = current_block_group.as_ref() {
+                                        let query_window = current_view_coordinate_window(&viewer)
+                                            .map(expand_query_window);
+                                        let node_filter: HashSet<HashId> =
+                                            block_graph.nodes().map(|node| node.node_id).collect();
                                         match load_annotation_file_track(
                                             conn,
                                             workspace,
                                             collection_name,
                                             bg.sample_name.as_deref(),
-                                            &block_graph,
+                                            Some(&bg.name),
+                                            query_window,
+                                            &node_filter,
                                             entry,
                                         ) {
-                                            Ok(track) => {
-                                                annotation_file_tracks.insert(toggled_id, track);
+                                            Ok(load) => {
+                                                annotation_file_tracks
+                                                    .insert(toggled_id, load.track);
+                                                annotation_file_index_available
+                                                    .insert(toggled_id, load.index_available);
+                                                if let Some(window) = load.loaded_window {
+                                                    annotation_file_loaded_windows
+                                                        .insert(toggled_id, window);
+                                                } else {
+                                                    annotation_file_loaded_windows
+                                                        .remove(&toggled_id);
+                                                }
                                             }
                                             Err(err) => {
                                                 messages.push_warn(format!("{err}"));
                                                 explorer_state
                                                     .deactivate_annotation_file(&toggled_id);
+                                                annotation_file_tracks.remove(&toggled_id);
+                                                annotation_file_index_available.remove(&toggled_id);
+                                                annotation_file_loaded_windows.remove(&toggled_id);
                                             }
                                         }
                                     }
                                 }
                             } else {
                                 annotation_file_tracks.remove(&toggled_id);
+                                annotation_file_index_available.remove(&toggled_id);
+                                annotation_file_loaded_windows.remove(&toggled_id);
                             }
                         }
                         if let Some(toggled_group) =
@@ -1109,8 +1321,7 @@ pub fn view_block_group(
                                         &mut messages,
                                     );
                                     if spans.is_empty() {
-                                        explorer_state
-                                            .deactivate_annotation_group(&toggled_group);
+                                        explorer_state.deactivate_annotation_group(&toggled_group);
                                     } else {
                                         annotation_group_tracks.insert(
                                             toggled_group.clone(),

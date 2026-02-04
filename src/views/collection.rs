@@ -339,7 +339,8 @@ impl CollectionExplorerState {
 
     pub fn retain_annotation_groups(&mut self, entries: &[AnnotationGroupEntry]) {
         let valid: HashSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-        self.active_annotation_groups.retain(|name| valid.contains(name));
+        self.active_annotation_groups
+            .retain(|name| valid.contains(name));
     }
 }
 
@@ -698,10 +699,8 @@ impl StatefulWidget for &CollectionExplorer {
                 }
                 ExplorerItem::AnnotationGroup { name, active } => {
                     let marker = if *active { "[x]" } else { "[ ]" };
-                    Paragraph::new(Line::from(vec![Span::raw(format!(
-                        "   {marker} {name}"
-                    ))]))
-                    .wrap(Wrap { trim: false })
+                    Paragraph::new(Line::from(vec![Span::raw(format!("   {marker} {name}"))]))
+                        .wrap(Wrap { trim: false })
                 }
             };
 

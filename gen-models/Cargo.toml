@@ -29,7 +29,7 @@ chrono = "0.4.40"
 fallible-streaming-iterator = "0.1.9"
 intervaltree = "0.2.7"
 itertools = "0.14.0"
-noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "vcf"] }
+noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "tabix", "vcf"] }
 petgraph = "0.6.5"
 rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }
 rusqlite_migration = { version = "1.3.1" , features = ["from-directory"]}
