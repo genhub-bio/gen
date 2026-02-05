@@ -10,6 +10,7 @@ pub mod errors;
 pub mod generated;
 pub mod path;
 pub mod range;
+pub mod region;
 pub mod strand;
 pub mod traits;
 
