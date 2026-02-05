@@ -230,13 +230,13 @@ struct ManifestDiff {
   missingInManifest1 @1 :List(ManifestOperation);
 }
 
-struct Annotation {
+struct AnnotationInterval {
   name @0 :Text;
   start @1 :Int64;
   end @2 :Int64;
 }
 
-struct StoredAnnotation {
+struct Annotation {
   id @0 :List(UInt8);
   name @1 :Text;
   annotationGroup @2 :Text;
@@ -266,7 +266,7 @@ struct ChangesetModels {
   accessionEdges @10 :List(AccessionEdge);
   accessionPaths @11 :List(AccessionPath);
   annotationGroups @12 :List(AnnotationGroup);
-  annotations @13 :List(StoredAnnotation);
+  annotations @13 :List(Annotation);
   annotationGroupSamples @14 :List(AnnotationGroupSample);
 }
 

@@ -14,7 +14,7 @@ use std::{
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
-    annotations::gff::propagate_gff,
+    annotations::{add_annotation, add_annotation_file, gff::propagate_gff},
     commands::{
         Cli, Commands,
         cli_context::CliContext,
@@ -38,13 +38,9 @@ use r#gen::{
 use gen_core::{HashId, calculate_hash, config::Workspace};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
-    annotations::{Annotation, AnnotationFile, AnnotationGroupSample, parse_annotation_file_type},
-    block_group::{BlockGroup, PathCache},
-    changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
+    block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
-    file_types::FileTypes,
-    files::GenDatabase,
     metadata,
     operations::{
         Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
@@ -547,65 +543,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             region,
         }) => {
             let collection_name = get_default_collection(operation_conn)?;
-            let parsed_region = region.parse::<Region>()?;
-            let interval = parsed_region.interval();
-            let start = interval.start().ok_or("Region missing start")?.get() as i64;
-            let end = interval.end().ok_or("Region missing end")?.get() as i64;
-
-            let block_groups =
-                Sample::get_block_groups(graph_conn, &collection_name, sample.as_deref());
-            let block_group = block_groups
-                .iter()
-                .find(|bg| bg.name == parsed_region.name())
-                .ok_or_else(|| {
-                    let sample_label = match &sample {
-                        Some(name) => format!("sample {name}"),
-                        None => "default sample".to_string(),
-                    };
-                    format!(
-                        "Graph {} not found for {sample_label}",
-                        parsed_region.name()
-                    )
-                })?;
-            let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
-            let path_length = path.length(graph_conn);
-            if start < 0 || end < 0 || start > end || end > path_length {
-                return Err(format!(
-                    "Region {region} is outside the path bounds (0-{path_length})"
-                )
-                .into());
-            }
-
-            let mut session = start_operation(graph_conn);
-            graph_conn.execute("BEGIN TRANSACTION", [])?;
-            operation_conn.execute("BEGIN TRANSACTION", [])?;
-
-            let mut cache = PathCache::new(graph_conn);
-            let _ = PathCache::lookup(&mut cache, &block_group.id, path.name.clone());
-            let accession =
-                BlockGroup::add_accession(graph_conn, &path, &name, start, end, &mut cache);
-
-            let annotation_group = group.as_deref().unwrap_or("default");
-            let annotation =
-                Annotation::create(graph_conn, &name, annotation_group, &accession.id)?;
-            if let Some(sample_name) = &sample {
-                AnnotationGroupSample::create(graph_conn, &annotation.group, sample_name)?;
-            }
-
-            let operation = end_operation(
+            let operation = add_annotation(
                 &db_context,
-                &mut session,
-                &OperationInfo {
-                    files: vec![],
-                    description: format!("add annotation {name}"),
-                },
-                &format!("add annotation {name}"),
-                None,
+                &collection_name,
+                &name,
+                group.as_deref(),
+                sample.as_deref(),
+                &region,
             )?;
-
-            graph_conn.execute("END TRANSACTION", [])?;
-            operation_conn.execute("END TRANSACTION", [])?;
-
             println!("Annotation {name} added in operation {}", operation.hash);
             Ok(())
         }
@@ -615,51 +560,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             name,
             message,
         }) => {
-            let file_type = parse_annotation_file_type(&format)?;
-            let operation_hash = HashId::uuid7();
-            let operation = Operation::create(operation_conn, "annotation-file", &operation_hash)?;
-            let file_addition = AnnotationFile::add_to_operation(
-                &workspace,
-                operation_conn,
-                &operation.hash,
+            let operation = add_annotation_file(
+                &db_context,
                 &path,
-                file_type,
-                None,
+                format.as_deref(),
                 name.as_deref(),
+                message.as_deref(),
             )?;
-            Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
-            let summary = message.unwrap_or_else(|| format!("Add annotation file {path}"));
-            OperationSummary::create(operation_conn, &operation.hash, &summary);
-
-            let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid)?;
-            write_changeset(
-                &workspace,
-                &operation,
-                DatabaseChangeset {
-                    db_path: gen_db.path,
-                    changes: ChangesetModels::default(),
-                },
-                &DependencyModels::default(),
-            );
-
-            if file_type != FileTypes::Changeset && file_type != FileTypes::None {
-                let gen_dir = workspace
-                    .find_gen_dir()
-                    .ok_or("No .gen directory found. Please run 'gen init' first.")?;
-                let assets_dir = gen_dir.join("assets");
-                fs::create_dir_all(&assets_dir)?;
-                let asset_path = assets_dir.join(file_addition.hashed_filename());
-                if !asset_path.exists() {
-                    let source_path = if Path::new(&path).is_absolute() {
-                        PathBuf::from(&path)
-                    } else {
-                        workspace.repo_root()?.join(&path)
-                    };
-                    fs::copy(source_path, asset_path)?;
-                }
-            }
-
-            println!("Annotation file added in operation {operation_hash}");
+            println!("Annotation file added in operation {}", operation.hash);
             Ok(())
         }
         Some(Commands::ListSamples {}) => {

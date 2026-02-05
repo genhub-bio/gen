@@ -330,11 +330,7 @@ fn parse_translated_bed<R: BufRead>(
     let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
     let mut bed_reader = bed::io::reader::Builder::<3>.build_from_reader(reader);
     let mut record = bed::Record::<3>::default();
-    loop {
-        let read = match bed_reader.read_record(&mut record) {
-            Ok(count) => count,
-            Err(_) => break,
-        };
+    while let Ok(read) = bed_reader.read_record(&mut record) {
         if read == 0 {
             break;
         }
@@ -438,17 +434,21 @@ fn load_tabix_region_bytes(
     Ok(bytes)
 }
 
-fn load_annotation_file_track(
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    collection_name: &str,
-    sample_name: Option<&str>,
-    block_group_name: Option<&str>,
+struct AnnotationFileTrackRequest<'a> {
+    conn: &'a GraphConnection,
+    workspace: &'a Workspace,
+    collection_name: &'a str,
+    sample_name: Option<&'a str>,
+    block_group_name: Option<&'a str>,
     query_window: Option<(i64, i64)>,
-    node_filter: &HashSet<HashId>,
-    entry: &AnnotationFileEntry,
+    node_filter: &'a HashSet<HashId>,
+    entry: &'a AnnotationFileEntry,
+}
+
+fn load_annotation_file_track(
+    request: &AnnotationFileTrackRequest<'_>,
 ) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
-    let file_path = resolve_annotation_file_path(workspace, &entry.file_addition)
+    let file_path = resolve_annotation_file_path(request.workspace, &request.entry.file_addition)
         .ok_or("Annotation file not found in repo or assets")?;
     let index_path = tabix_index_path(&file_path);
     let index_available = index_path.exists();
@@ -456,13 +456,15 @@ fn load_annotation_file_track(
     let mut loaded_window = None;
 
     if index_available {
-        if let (Some(reference_name), Some(window)) = (block_group_name, query_window) {
+        if let (Some(reference_name), Some(window)) =
+            (request.block_group_name, request.query_window)
+        {
             indexed_source_bytes =
                 Some(load_tabix_region_bytes(&file_path, reference_name, window)?);
             loaded_window = Some(window);
         } else {
             return Ok(AnnotationFileTrackLoadResult {
-                track: AnnotationTrack::new(entry.display_name.clone(), Vec::new()),
+                track: AnnotationTrack::new(request.entry.display_name.clone(), Vec::new()),
                 index_available,
                 loaded_window: None,
             });
@@ -470,21 +472,21 @@ fn load_annotation_file_track(
     }
 
     let mut buffer = Vec::new();
-    match entry.file_addition.file_type {
+    match request.entry.file_addition.file_type {
         FileTypes::Gff3 => {
             if let Some(bytes) = indexed_source_bytes.as_deref() {
                 translate_gff(
-                    conn,
-                    collection_name,
-                    sample_name,
+                    request.conn,
+                    request.collection_name,
+                    request.sample_name,
                     BufReader::new(Cursor::new(bytes)),
                     &mut buffer,
                 )?;
             } else {
                 translate_gff(
-                    conn,
-                    collection_name,
-                    sample_name,
+                    request.conn,
+                    request.collection_name,
+                    request.sample_name,
                     BufReader::new(File::open(&file_path)?),
                     &mut buffer,
                 )?;
@@ -493,17 +495,17 @@ fn load_annotation_file_track(
         FileTypes::Bed => {
             if let Some(bytes) = indexed_source_bytes.as_deref() {
                 translate_bed(
-                    conn,
-                    collection_name,
-                    sample_name,
+                    request.conn,
+                    request.collection_name,
+                    request.sample_name,
                     Cursor::new(bytes),
                     &mut buffer,
                 )?;
             } else {
                 translate_bed(
-                    conn,
-                    collection_name,
-                    sample_name,
+                    request.conn,
+                    request.collection_name,
+                    request.sample_name,
                     File::open(&file_path)?,
                     &mut buffer,
                 )?;
@@ -513,7 +515,7 @@ fn load_annotation_file_track(
             return Err(format!("Unsupported annotation file type: {other:?}").into());
         }
     }
-    let spans = match entry.file_addition.file_type {
+    let spans = match request.entry.file_addition.file_type {
         FileTypes::Gff3 => {
             if buffer.is_empty() {
                 let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
@@ -522,9 +524,13 @@ fn load_annotation_file_track(
                 } else {
                     Box::new(BufReader::new(File::open(&file_path)?))
                 };
-                parse_translated_gff(reader, node_filter, &entry.display_name)
+                parse_translated_gff(reader, request.node_filter, &request.entry.display_name)
             } else {
-                parse_translated_gff(Cursor::new(buffer), node_filter, &entry.display_name)
+                parse_translated_gff(
+                    Cursor::new(buffer),
+                    request.node_filter,
+                    &request.entry.display_name,
+                )
             }
         }
         FileTypes::Bed => {
@@ -535,15 +541,19 @@ fn load_annotation_file_track(
                 } else {
                     Box::new(BufReader::new(File::open(&file_path)?))
                 };
-                parse_translated_bed(reader, node_filter, &entry.display_name)
+                parse_translated_bed(reader, request.node_filter, &request.entry.display_name)
             } else {
-                parse_translated_bed(Cursor::new(buffer), node_filter, &entry.display_name)
+                parse_translated_bed(
+                    Cursor::new(buffer),
+                    request.node_filter,
+                    &request.entry.display_name,
+                )
             }
         }
         _ => Vec::new(),
     };
     Ok(AnnotationFileTrackLoadResult {
-        track: AnnotationTrack::new(entry.display_name.clone(), spans),
+        track: AnnotationTrack::new(request.entry.display_name.clone(), spans),
         index_available,
         loaded_window,
     })
@@ -726,16 +736,17 @@ pub fn view_block_group(
                     continue;
                 }
 
-                match load_annotation_file_track(
+                let request = AnnotationFileTrackRequest {
                     conn,
                     workspace,
                     collection_name,
-                    bg.sample_name.as_deref(),
-                    Some(&bg.name),
-                    Some(query_window),
-                    &node_filter,
+                    sample_name: bg.sample_name.as_deref(),
+                    block_group_name: Some(&bg.name),
+                    query_window: Some(query_window),
+                    node_filter: &node_filter,
                     entry,
-                ) {
+                };
+                match load_annotation_file_track(&request) {
                     Ok(load) => {
                         annotation_file_tracks.insert(id, load.track);
                         if let Some(window) = load.loaded_window {
@@ -1096,16 +1107,17 @@ pub fn view_block_group(
                 for entry in explorer.data.annotation_files.iter() {
                     let id = entry.file_addition.id;
                     if explorer_state.is_annotation_file_active(&id) {
-                        match load_annotation_file_track(
+                        let request = AnnotationFileTrackRequest {
                             conn,
                             workspace,
                             collection_name,
-                            bg.sample_name.as_deref(),
-                            Some(&bg.name),
+                            sample_name: bg.sample_name.as_deref(),
+                            block_group_name: Some(&bg.name),
                             query_window,
-                            &node_filter,
+                            node_filter: &node_filter,
                             entry,
-                        ) {
+                        };
+                        match load_annotation_file_track(&request) {
                             Ok(load) => {
                                 annotation_file_tracks.insert(id, load.track);
                                 annotation_file_index_available.insert(id, load.index_available);
@@ -1267,16 +1279,17 @@ pub fn view_block_group(
                                         .map(expand_query_window);
                                     let node_filter: HashSet<HashId> =
                                         block_graph.nodes().map(|node| node.node_id).collect();
-                                    match load_annotation_file_track(
+                                    let request = AnnotationFileTrackRequest {
                                         conn,
                                         workspace,
                                         collection_name,
-                                        bg.sample_name.as_deref(),
-                                        Some(&bg.name),
+                                        sample_name: bg.sample_name.as_deref(),
+                                        block_group_name: Some(&bg.name),
                                         query_window,
-                                        &node_filter,
+                                        node_filter: &node_filter,
                                         entry,
-                                    ) {
+                                    };
+                                    match load_annotation_file_track(&request) {
                                         Ok(load) => {
                                             annotation_file_tracks.insert(toggled_id, load.track);
                                             annotation_file_index_available

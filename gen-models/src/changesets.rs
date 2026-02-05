@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
-    annotations::{Annotation, AnnotationError, AnnotationGroup, AnnotationGroupSample},
+    annotations::{
+        Annotation, AnnotationError, AnnotationGroup, AnnotationGroupError, AnnotationGroupSample,
+    },
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -915,18 +917,37 @@ pub fn apply_changeset(
     }
 
     for annotation_group in &changeset.annotation_groups {
-        AnnotationGroup::get_or_create(conn, &annotation_group.name);
+        AnnotationGroup::get_or_create(conn, &annotation_group.name).map_err(|err| match err {
+            AnnotationGroupError::DatabaseError(inner) => inner,
+        })?;
     }
 
     for annotation in &changeset.annotations {
-        Annotation::insert(conn, annotation).map_err(|err| match err {
+        Annotation::create(
+            conn,
+            &annotation.name,
+            &annotation.group,
+            &annotation.accession_id,
+        )
+        .map_err(|err| match err {
             AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
+                inner
+            }
         })?;
     }
 
     for annotation_group_sample in &changeset.annotation_group_samples {
-        AnnotationGroupSample::insert(conn, annotation_group_sample).map_err(|err| match err {
+        AnnotationGroupSample::create(
+            conn,
+            &annotation_group_sample.annotation_group,
+            &annotation_group_sample.sample_name,
+        )
+        .map_err(|err| match err {
             AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
+                inner
+            }
         })?;
     }
     Ok(())
@@ -944,6 +965,9 @@ pub fn revert_changeset(
         )
         .map_err(|err| match err {
             AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
+                inner
+            }
         })?;
     }
     Annotation::delete_by_ids(
@@ -1407,7 +1431,7 @@ mod tests {
         let accession = BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache);
 
         let mut session = start_operation(conn);
-        let annotation = Annotation::create(conn, "gene-a", "gff3", &accession.id).unwrap();
+        let annotation = Annotation::get_or_create(conn, "gene-a", "gff3", &accession.id).unwrap();
         annotation.add_samples(conn, &["sample-1"]).unwrap();
 
         let operation = end_operation(

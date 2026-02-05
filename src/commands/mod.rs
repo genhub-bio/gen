@@ -232,9 +232,9 @@ pub enum Commands {
         /// The annotation file path
         #[clap(index = 1)]
         path: String,
-        /// The annotation file format (gff3, bed, genbank)
+        /// The annotation file format (gff3, bed, genbank). If omitted, infer from the file extension.
         #[arg(short, long)]
-        format: String,
+        format: Option<String>,
         /// Optional annotation file name
         #[arg(short, long)]
         name: Option<String>,

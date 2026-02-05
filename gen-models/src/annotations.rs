@@ -1,7 +1,7 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, config::Workspace, traits::Capnp};
-use rusqlite::{OptionalExtension as _, Row, params, types::Value};
+use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -9,7 +9,7 @@ use crate::{
     db::{GraphConnection, OperationsConnection},
     errors::FileAdditionError,
     file_types::FileTypes,
-    gen_models_capnp::{annotation_group, annotation_group_sample, stored_annotation},
+    gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     operations::FileAddition,
     traits::Query,
 };
@@ -40,21 +40,19 @@ impl AnnotationGroup {
         stmt.query_row((name,), |row| Ok(AnnotationGroup { name: row.get(0)? }))
     }
 
-    pub fn get_or_create(conn: &GraphConnection, name: &str) -> AnnotationGroup {
+    pub fn get_or_create(
+        conn: &GraphConnection,
+        name: &str,
+    ) -> Result<AnnotationGroup, AnnotationGroupError> {
         match AnnotationGroup::create(conn, name) {
-            Ok(group) => group,
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    AnnotationGroup {
-                        name: name.to_string(),
-                    }
-                } else {
-                    panic!("something bad happened querying the database")
-                }
+            Ok(group) => Ok(group),
+            Err(rusqlite::Error::SqliteFailure(err, _details))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                AnnotationGroup::get_by_id(conn, &name.to_string())
+                    .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
             }
-            Err(_) => {
-                panic!("something bad happened.")
-            }
+            Err(err) => Err(err.into()),
         }
     }
 }
@@ -83,8 +81,8 @@ pub struct Annotation {
 }
 
 impl<'a> Capnp<'a> for Annotation {
-    type Builder = stored_annotation::Builder<'a>;
-    type Reader = stored_annotation::Reader<'a>;
+    type Builder = annotation::Builder<'a>;
+    type Reader = annotation::Reader<'a>;
 
     fn write_capnp(&self, builder: &mut Self::Builder) {
         builder.set_id(&self.id.0).unwrap();
@@ -161,26 +159,12 @@ impl<'a> Capnp<'a> for AnnotationGroupSample {
 }
 
 impl AnnotationGroupSample {
-    pub fn insert(
-        conn: &GraphConnection,
-        annotation_sample: &AnnotationGroupSample,
-    ) -> Result<(), AnnotationError> {
-        AnnotationGroup::get_or_create(conn, &annotation_sample.annotation_group);
-        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
-        let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![
-            annotation_sample.annotation_group,
-            annotation_sample.sample_name
-        ])?;
-        Ok(())
-    }
-
     pub fn create(
         conn: &GraphConnection,
         annotation_group: &str,
         sample_name: &str,
     ) -> Result<(), AnnotationError> {
-        AnnotationGroup::get_or_create(conn, annotation_group);
+        AnnotationGroup::get_or_create(conn, annotation_group)?;
         let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![annotation_group, sample_name])?;
@@ -200,27 +184,22 @@ impl AnnotationGroupSample {
 }
 
 #[derive(Debug, Error)]
-pub enum AnnotationError {
+pub enum AnnotationGroupError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
 }
 
+#[derive(Debug, Error)]
+pub enum AnnotationError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+    #[error("Annotation group error: {0}")]
+    AnnotationGroupError(#[from] AnnotationGroupError),
+}
+
 impl Annotation {
     pub fn generate_id(name: &str, group: &str, accession_id: &HashId) -> HashId {
-        HashId(calculate_hash(&format!("{accession_id}:{name}:{group}",)))
-    }
-
-    pub fn insert(conn: &GraphConnection, annotation: &Annotation) -> Result<(), AnnotationError> {
-        AnnotationGroup::get_or_create(conn, &annotation.group);
-        let query = "INSERT OR IGNORE INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);";
-        let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![
-            annotation.id,
-            annotation.name,
-            annotation.group,
-            annotation.accession_id
-        ])?;
-        Ok(())
+        HashId(calculate_hash(&format!("{name}:{group}:{accession_id}",)))
     }
 
     pub fn create(
@@ -229,25 +208,35 @@ impl Annotation {
         group: &str,
         accession_id: &HashId,
     ) -> Result<Annotation, AnnotationError> {
-        AnnotationGroup::get_or_create(conn, group);
         let id = Annotation::generate_id(name, group, accession_id);
         let query = "INSERT INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query)?;
-        let insert_result = stmt.execute(params![id, name, group, accession_id]);
-        match insert_result {
-            Ok(_) => Ok(Annotation {
-                id,
-                name: name.to_string(),
-                group: group.to_string(),
-                accession_id: *accession_id,
-            }),
-            Err(rusqlite::Error::SqliteFailure(err, _details))
+        stmt.execute(params![id, name, group, accession_id])?;
+        Ok(Annotation {
+            id,
+            name: name.to_string(),
+            group: group.to_string(),
+            accession_id: *accession_id,
+        })
+    }
+
+    pub fn get_or_create(
+        conn: &GraphConnection,
+        name: &str,
+        group: &str,
+        accession_id: &HashId,
+    ) -> Result<Annotation, AnnotationError> {
+        AnnotationGroup::get_or_create(conn, group)?;
+        match Annotation::create(conn, name, group, accession_id) {
+            Ok(annotation) => Ok(annotation),
+            Err(AnnotationError::DatabaseError(rusqlite::Error::SqliteFailure(err, _details)))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
+                let id = Annotation::generate_id(name, group, accession_id);
                 Annotation::get_by_id(conn, &id)
                     .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
             }
-            Err(err) => Err(err.into()),
+            Err(err) => Err(err),
         }
     }
 
@@ -258,7 +247,7 @@ impl Annotation {
         accession_id: &HashId,
         sample_names: &[&str],
     ) -> Result<Annotation, AnnotationError> {
-        let annotation = Annotation::create(conn, name, group, accession_id)?;
+        let annotation = Annotation::get_or_create(conn, name, group, accession_id)?;
         annotation.add_samples(conn, sample_names)?;
         Ok(annotation)
     }
@@ -271,7 +260,7 @@ impl Annotation {
         if sample_names.is_empty() {
             return Ok(());
         }
-        AnnotationGroup::get_or_create(conn, &self.group);
+        AnnotationGroup::get_or_create(conn, &self.group)?;
         let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
         for sample_name in sample_names {
@@ -336,7 +325,28 @@ pub fn parse_annotation_file_type(value: &str) -> Result<FileTypes, AnnotationFi
     }
 }
 
-pub struct AnnotationFile;
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AnnotationFile {
+    pub id: i64,
+    pub operation_hash: HashId,
+    pub file_addition_id: HashId,
+    pub name: Option<String>,
+}
+
+impl Query for AnnotationFile {
+    type Model = AnnotationFile;
+
+    const TABLE_NAME: &'static str = "annotation_files";
+
+    fn process_row(row: &Row) -> Self::Model {
+        AnnotationFile {
+            id: row.get(0).unwrap(),
+            operation_hash: row.get(1).unwrap(),
+            file_addition_id: row.get(2).unwrap(),
+            name: row.get(3).unwrap(),
+        }
+    }
+}
 
 impl AnnotationFile {
     pub fn link_to_operation(
@@ -393,23 +403,6 @@ impl AnnotationFile {
         rows.map(|row| row.unwrap()).collect()
     }
 
-    pub fn get_name_for_operation_file(
-        conn: &OperationsConnection,
-        operation_hash: &HashId,
-        file_addition_id: &HashId,
-    ) -> Result<Option<String>, AnnotationFileError> {
-        let query =
-            "select name from annotation_files where operation_hash = ?1 and file_addition_id = ?2";
-        let mut stmt = conn.prepare(query)?;
-        let name = stmt
-            .query_row(params![operation_hash, file_addition_id], |row| {
-                row.get::<_, Option<String>>(0)
-            })
-            .optional()?
-            .flatten();
-        Ok(name)
-    }
-
     pub fn query_by_operations(
         conn: &OperationsConnection,
         operations: &[HashId],
@@ -445,12 +438,12 @@ mod tests {
     use crate::{
         block_group::{BlockGroup, PathCache},
         sample::Sample,
-        test_helpers::{setup_block_group, setup_gen},
+        test_helpers::{get_connection, setup_block_group, setup_gen},
     };
 
     #[test]
     fn create_annotation_with_samples() {
-        let conn = crate::test_helpers::get_connection(None).unwrap();
+        let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
 
         let _ = Sample::create(&conn, "sample-1").unwrap();
@@ -461,7 +454,7 @@ mod tests {
         let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache);
 
         let annotation =
-            Annotation::create(&conn, "gene-a", "project-tracks", &accession.id).unwrap();
+            Annotation::get_or_create(&conn, "gene-a", "project-tracks", &accession.id).unwrap();
         annotation
             .add_samples(&conn, &["sample-1", "sample-2"])
             .unwrap();
@@ -506,10 +499,6 @@ mod tests {
         )
         .unwrap();
 
-        let display_name =
-            AnnotationFile::get_name_for_operation_file(op_conn, &op_hash, &file_addition.id)
-                .unwrap();
-        assert_eq!(display_name.as_deref(), Some("fixtures-annotation"));
         let files = AnnotationFile::get_files_for_operation(op_conn, &op_hash);
         assert_eq!(files, vec![file_addition]);
     }
