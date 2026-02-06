@@ -22,7 +22,7 @@ use gen_models::{
 };
 use noodles::core::Region;
 
-fn detect_annotation_file_type(path: &str) -> Option<FileTypes> {
+fn annotation_file_extension(path: &str) -> Option<String> {
     let path = Path::new(path);
     let mut ext = path
         .extension()
@@ -35,12 +35,7 @@ fn detect_annotation_file_type(path: &str) -> Option<FileTypes> {
             .and_then(|stem| Path::new(stem).extension().and_then(|ext| ext.to_str()))
             .map(|ext| ext.to_ascii_lowercase());
     }
-    match ext.as_deref() {
-        Some("gff3") | Some("gff") => Some(FileTypes::Gff3),
-        Some("bed") => Some(FileTypes::Bed),
-        Some("genbank") | Some("gb") | Some("gbk") => Some(FileTypes::GenBank),
-        _ => None,
-    }
+    ext
 }
 
 pub fn add_annotation(
@@ -129,11 +124,14 @@ pub fn add_annotation_file(
 
     let file_type = match format {
         Some(format) => parse_annotation_file_type(format)?,
-        None => detect_annotation_file_type(path).ok_or_else(|| {
-            anyhow!(
-                "Unable to detect annotation file format from the file extension. Use --format to specify it explicitly."
-            )
-        })?,
+        None => {
+            let ext = annotation_file_extension(path).ok_or_else(|| {
+                anyhow!(
+                    "Unable to detect annotation file format from the file extension. Use --format to specify it explicitly."
+                )
+            })?;
+            parse_annotation_file_type(&ext)?
+        }
     };
     let file_addition =
         FileAddition::get_or_create(workspace, operation_conn, path, file_type, None)?;

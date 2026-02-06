@@ -20,7 +20,7 @@ use crate::{
     translate::{bed::translate_bed, gff::translate_gff},
     views::{
         annotation_files::AnnotationFileEntry,
-        block_group_viewer::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
+        annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
     },
 };
 

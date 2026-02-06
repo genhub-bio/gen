@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     error::Error,
     time::{Duration, Instant},
 };
@@ -18,7 +18,6 @@ use gen_models::{
     path::Path,
     traits::Query,
 };
-use log::warn;
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
@@ -31,60 +30,19 @@ use crate::{
     config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
+        annotation_track::AnnotationTrack,
         annotations::{
             AnnotationFileTrackRequest, load_annotation_file_track, load_annotations_for_group,
         },
-        block_group_viewer::{AnnotationTrack, PlotParameters, Viewer},
+        block_group_viewer::{PlotParameters, Viewer},
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
+        messages::MessageBuffer,
     },
 };
 
 // Frequency by which we check for external updates to the db
 const REFRESH_INTERVAL: u64 = 3; // seconds
 const MESSAGE_BUFFER_LIMIT: usize = 10;
-
-struct MessageBuffer {
-    entries: VecDeque<String>,
-    capacity: usize,
-}
-
-impl MessageBuffer {
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: VecDeque::new(),
-            capacity,
-        }
-    }
-
-    fn push_warn(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        warn!("{message}");
-        if self.entries.len() >= self.capacity {
-            self.entries.pop_front();
-        }
-        self.entries.push_back(message);
-    }
-
-    fn latest(&self) -> Option<&String> {
-        self.entries.back()
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &String> {
-        self.entries.iter()
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PanelMode {
