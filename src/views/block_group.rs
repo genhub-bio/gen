@@ -1,9 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
-    fs::File,
-    io::{BufRead, BufReader, Cursor},
-    path::{Path as FsPath, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -15,18 +12,13 @@ use crossterm::{
 use gen_core::{HashId, PATH_START_NODE_ID, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{
-    accession::AccessionEdge,
-    annotations::Annotation,
     block_group::BlockGroup,
     db::{GraphConnection, OperationsConnection},
-    file_types::FileTypes,
     node::Node,
-    operations::FileAddition,
     path::Path,
     traits::Query,
 };
 use log::warn;
-use noodles::{bed, core::Region, gff, tabix};
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
@@ -38,12 +30,11 @@ use rusqlite::params;
 use crate::{
     config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
-    translate::{bed::translate_bed, gff::translate_gff},
     views::{
-        annotation_files::AnnotationFileEntry,
-        block_group_viewer::{
-            AnnotationSegment, AnnotationSpan, AnnotationTrack, PlotParameters, Viewer,
+        annotations::{
+            AnnotationFileTrackRequest, load_annotation_file_track, load_annotations_for_group,
         },
+        block_group_viewer::{AnnotationTrack, PlotParameters, Viewer},
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
     },
 };
@@ -134,257 +125,6 @@ fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<
     Line::from(spans)
 }
 
-fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
-    let mut segments = Vec::new();
-    let mut current_node: Option<HashId> = None;
-    let mut current_start: Option<i64> = None;
-
-    for edge in edges {
-        if is_start_node(edge.source_node_id) {
-            current_node = Some(edge.target_node_id);
-            current_start = Some(edge.target_coordinate);
-            continue;
-        }
-
-        if is_end_node(edge.target_node_id) {
-            if let (Some(node_id), Some(start)) = (current_node, current_start) {
-                let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                    (start, edge.source_coordinate)
-                } else {
-                    (edge.source_coordinate, start)
-                };
-                segments.push(AnnotationSegment {
-                    node_id,
-                    start: segment_start,
-                    end: segment_end,
-                });
-            }
-            break;
-        }
-
-        if let (Some(node_id), Some(start)) = (current_node, current_start) {
-            let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                (start, edge.source_coordinate)
-            } else {
-                (edge.source_coordinate, start)
-            };
-            segments.push(AnnotationSegment {
-                node_id,
-                start: segment_start,
-                end: segment_end,
-            });
-        }
-
-        current_node = Some(edge.target_node_id);
-        current_start = Some(edge.target_coordinate);
-    }
-
-    segments
-}
-
-fn load_annotations_for_group(
-    conn: &GraphConnection,
-    group: &str,
-    node_filter: &HashSet<HashId>,
-    messages: &mut MessageBuffer,
-) -> Vec<AnnotationSpan> {
-    let annotations = match Annotation::query_by_group(conn, group) {
-        Ok(annotations) => annotations,
-        Err(err) => {
-            messages.push_warn(format!(
-                "Failed to load annotations for group {group}: {err}"
-            ));
-            return Vec::new();
-        }
-    };
-
-    annotations
-        .into_iter()
-        .filter_map(|annotation| {
-            let edges = AccessionEdge::query(
-                conn,
-                "SELECT ae.* FROM accession_edges ae JOIN accession_paths ap ON ap.edge_id = ae.id WHERE ap.accession_id = ?1 ORDER BY ap.index_in_path ASC",
-                params![annotation.accession_id],
-            );
-            let segments = accession_edges_to_segments(&edges)
-                .into_iter()
-                .filter(|segment| node_filter.contains(&segment.node_id))
-                .collect::<Vec<_>>();
-            if segments.is_empty() {
-                None
-            } else {
-                Some(AnnotationSpan {
-                    id: annotation.id,
-                    name: annotation.name,
-                    segments,
-                })
-            }
-        })
-        .collect()
-}
-
-fn resolve_annotation_file_path(
-    workspace: &Workspace,
-    file_addition: &FileAddition,
-) -> Option<PathBuf> {
-    if let Ok(repo_root) = workspace.repo_root() {
-        let repo_path = repo_root.join(&file_addition.file_path);
-        if repo_path.exists() {
-            return Some(repo_path);
-        }
-    }
-    let gen_dir = workspace.find_gen_dir()?;
-    let asset_path = gen_dir
-        .join("assets")
-        .join(file_addition.clone().hashed_filename());
-    if asset_path.exists() {
-        return Some(asset_path);
-    }
-    None
-}
-
-fn gff_attribute_value_to_string(
-    value: &gff::feature::record_buf::attributes::field::Value,
-) -> String {
-    if let Some(value) = value.as_string() {
-        String::from_utf8_lossy(value.as_ref()).to_string()
-    } else {
-        value
-            .iter()
-            .next()
-            .map(|item| String::from_utf8_lossy(item.as_ref()).to_string())
-            .unwrap_or_default()
-    }
-}
-
-fn build_annotation_spans(
-    track_label: &str,
-    segments_by_name: HashMap<String, Vec<AnnotationSegment>>,
-) -> Vec<AnnotationSpan> {
-    segments_by_name
-        .into_iter()
-        .map(|(name, segments)| AnnotationSpan {
-            id: HashId::convert_str(&format!("{track_label}:{name}")),
-            name,
-            segments,
-        })
-        .collect()
-}
-
-fn parse_translated_gff<R: BufRead>(
-    reader: R,
-    node_filter: &HashSet<HashId>,
-    track_label: &str,
-) -> Vec<AnnotationSpan> {
-    let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
-    let mut reader = gff::io::Reader::new(reader);
-    for result in reader.record_bufs() {
-        let record = match result {
-            Ok(record) => record,
-            Err(_) => continue,
-        };
-        let ref_name = record.reference_sequence_name().to_string();
-        let node_id = match HashId::try_from(ref_name) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        if !node_filter.contains(&node_id) {
-            continue;
-        }
-        let start = record.start().get() as i64;
-        let end = record.end().get() as i64;
-        if end <= 0 {
-            continue;
-        }
-        let start = start.saturating_sub(1);
-        let (seg_start, seg_end) = if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        };
-        let attrs = record.attributes();
-        let name = attrs
-            .get(b"Name")
-            .map(gff_attribute_value_to_string)
-            .or_else(|| attrs.get(b"ID").map(gff_attribute_value_to_string))
-            .or_else(|| attrs.get(b"gene").map(gff_attribute_value_to_string))
-            .or_else(|| attrs.get(b"db_xref").map(gff_attribute_value_to_string))
-            .unwrap_or_else(|| record.ty().to_string());
-        segments_by_name
-            .entry(name)
-            .or_default()
-            .push(AnnotationSegment {
-                node_id,
-                start: seg_start,
-                end: seg_end,
-            });
-    }
-    build_annotation_spans(track_label, segments_by_name)
-}
-
-fn parse_translated_bed<R: BufRead>(
-    reader: R,
-    node_filter: &HashSet<HashId>,
-    track_label: &str,
-) -> Vec<AnnotationSpan> {
-    let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
-    let mut bed_reader = bed::io::reader::Builder::<3>.build_from_reader(reader);
-    let mut record = bed::Record::<3>::default();
-    while let Ok(read) = bed_reader.read_record(&mut record) {
-        if read == 0 {
-            break;
-        }
-        let ref_name = String::from_utf8_lossy(record.reference_sequence_name().as_ref());
-        let node_id = match HashId::try_from(ref_name.to_string()) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        if !node_filter.contains(&node_id) {
-            continue;
-        }
-        let start = match record.feature_start() {
-            Ok(pos) => pos.get() as i64,
-            Err(_) => continue,
-        };
-        let end = match record.feature_end() {
-            Some(Ok(pos)) => pos.get() as i64,
-            _ => continue,
-        };
-        if end <= 0 {
-            continue;
-        }
-        let start = start.saturating_sub(1);
-        let (seg_start, seg_end) = if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        };
-        let name = record
-            .other_fields()
-            .get(0)
-            .and_then(|value| std::str::from_utf8(value).ok())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("feature")
-            .to_string();
-        segments_by_name
-            .entry(name)
-            .or_default()
-            .push(AnnotationSegment {
-                node_id,
-                start: seg_start,
-                end: seg_end,
-            });
-    }
-    build_annotation_spans(track_label, segments_by_name)
-}
-
-#[derive(Clone, Debug)]
-struct AnnotationFileTrackLoadResult {
-    track: AnnotationTrack,
-    index_available: bool,
-    loaded_window: Option<(i64, i64)>,
-}
-
 fn current_view_coordinate_window(viewer: &Viewer<'_>) -> Option<(i64, i64)> {
     let mut start = i64::MAX;
     let mut end = i64::MIN;
@@ -406,157 +146,6 @@ fn current_view_coordinate_window(viewer: &Viewer<'_>) -> Option<(i64, i64)> {
 fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     let span = (window.1 - window.0).max(1);
     (window.0.saturating_sub(span), window.1.saturating_add(span))
-}
-
-fn tabix_index_path(file_path: &FsPath) -> PathBuf {
-    PathBuf::from(format!("{}.tbi", file_path.to_string_lossy()))
-}
-
-fn load_tabix_region_bytes(
-    file_path: &FsPath,
-    reference_name: &str,
-    window: (i64, i64),
-) -> Result<Vec<u8>, Box<dyn Error>> {
-    let start = (window.0 + 1).max(1);
-    let end = window.1.max(start);
-    let region = format!("{reference_name}:{start}-{end}").parse::<Region>()?;
-
-    let mut reader = tabix::io::indexed_reader::Builder::default().build_from_path(file_path)?;
-    let query = reader.query(&region)?;
-
-    let mut bytes = Vec::new();
-    for result in query {
-        let record = result?;
-        bytes.extend_from_slice(record.as_ref().as_bytes());
-        bytes.push(b'\n');
-    }
-
-    Ok(bytes)
-}
-
-struct AnnotationFileTrackRequest<'a> {
-    conn: &'a GraphConnection,
-    workspace: &'a Workspace,
-    collection_name: &'a str,
-    sample_name: Option<&'a str>,
-    block_group_name: Option<&'a str>,
-    query_window: Option<(i64, i64)>,
-    node_filter: &'a HashSet<HashId>,
-    entry: &'a AnnotationFileEntry,
-}
-
-fn load_annotation_file_track(
-    request: &AnnotationFileTrackRequest<'_>,
-) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
-    let file_path = resolve_annotation_file_path(request.workspace, &request.entry.file_addition)
-        .ok_or("Annotation file not found in repo or assets")?;
-    let index_path = tabix_index_path(&file_path);
-    let index_available = index_path.exists();
-    let mut indexed_source_bytes = None;
-    let mut loaded_window = None;
-
-    if index_available {
-        if let (Some(reference_name), Some(window)) =
-            (request.block_group_name, request.query_window)
-        {
-            indexed_source_bytes =
-                Some(load_tabix_region_bytes(&file_path, reference_name, window)?);
-            loaded_window = Some(window);
-        } else {
-            return Ok(AnnotationFileTrackLoadResult {
-                track: AnnotationTrack::new(request.entry.display_name.clone(), Vec::new()),
-                index_available,
-                loaded_window: None,
-            });
-        }
-    }
-
-    let mut buffer = Vec::new();
-    match request.entry.file_addition.file_type {
-        FileTypes::Gff3 => {
-            if let Some(bytes) = indexed_source_bytes.as_deref() {
-                translate_gff(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    BufReader::new(Cursor::new(bytes)),
-                    &mut buffer,
-                )?;
-            } else {
-                translate_gff(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    BufReader::new(File::open(&file_path)?),
-                    &mut buffer,
-                )?;
-            }
-        }
-        FileTypes::Bed => {
-            if let Some(bytes) = indexed_source_bytes.as_deref() {
-                translate_bed(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    Cursor::new(bytes),
-                    &mut buffer,
-                )?;
-            } else {
-                translate_bed(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    File::open(&file_path)?,
-                    &mut buffer,
-                )?;
-            }
-        }
-        other => {
-            return Err(format!("Unsupported annotation file type: {other:?}").into());
-        }
-    }
-    let spans = match request.entry.file_addition.file_type {
-        FileTypes::Gff3 => {
-            if buffer.is_empty() {
-                let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
-                {
-                    Box::new(BufReader::new(Cursor::new(bytes)))
-                } else {
-                    Box::new(BufReader::new(File::open(&file_path)?))
-                };
-                parse_translated_gff(reader, request.node_filter, &request.entry.display_name)
-            } else {
-                parse_translated_gff(
-                    Cursor::new(buffer),
-                    request.node_filter,
-                    &request.entry.display_name,
-                )
-            }
-        }
-        FileTypes::Bed => {
-            if buffer.is_empty() {
-                let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
-                {
-                    Box::new(BufReader::new(Cursor::new(bytes)))
-                } else {
-                    Box::new(BufReader::new(File::open(&file_path)?))
-                };
-                parse_translated_bed(reader, request.node_filter, &request.entry.display_name)
-            } else {
-                parse_translated_bed(
-                    Cursor::new(buffer),
-                    request.node_filter,
-                    &request.entry.display_name,
-                )
-            }
-        }
-        _ => Vec::new(),
-    };
-    Ok(AnnotationFileTrackLoadResult {
-        track: AnnotationTrack::new(request.entry.display_name.clone(), spans),
-        index_available,
-        loaded_window,
-    })
 }
 
 pub fn view_block_group(
@@ -1089,12 +678,17 @@ pub fn view_block_group(
                 let query_window = current_view_coordinate_window(&viewer).map(expand_query_window);
                 for entry in explorer.data.annotation_groups.iter() {
                     if explorer_state.is_annotation_group_active(&entry.name) {
-                        let spans = load_annotations_for_group(
-                            conn,
-                            &entry.name,
-                            &node_filter,
-                            &mut messages,
-                        );
+                        let spans =
+                            match load_annotations_for_group(conn, &entry.name, &node_filter) {
+                                Ok(spans) => spans,
+                                Err(err) => {
+                                    messages.push_warn(format!(
+                                        "Failed to load annotations for group {}: {err}",
+                                        entry.name
+                                    ));
+                                    Vec::new()
+                                }
+                            };
                         if spans.is_empty() {
                             continue;
                         }
@@ -1323,12 +917,20 @@ pub fn view_block_group(
                                 if current_block_group.is_some() {
                                     let node_filter: HashSet<HashId> =
                                         block_graph.nodes().map(|node| node.node_id).collect();
-                                    let spans = load_annotations_for_group(
+                                    let spans = match load_annotations_for_group(
                                         conn,
                                         &toggled_group,
                                         &node_filter,
-                                        &mut messages,
-                                    );
+                                    ) {
+                                        Ok(spans) => spans,
+                                        Err(err) => {
+                                            messages.push_warn(format!(
+                                                "Failed to load annotations for group {}: {err}",
+                                                toggled_group
+                                            ));
+                                            Vec::new()
+                                        }
+                                    };
                                     if spans.is_empty() {
                                         explorer_state.deactivate_annotation_group(&toggled_group);
                                     } else {

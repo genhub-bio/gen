@@ -242,9 +242,9 @@ mod tests {
                 .unwrap();
         assert_eq!(operation.change_type, "annotation-file");
 
-        let links = AnnotationFile::get_links_for_operation(operation_conn, &operation.hash);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].name.as_deref(), Some("track-1"));
+        let files = AnnotationFile::get_files_for_operation(operation_conn, &operation.hash);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name.as_deref(), Some("track-1"));
 
         let err = add_annotation_file(&context, &annotation_path_str, None, Some("track-1"), None)
             .unwrap_err();

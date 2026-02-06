@@ -1,5 +1,4 @@
-use gen_models::db::GraphConnection;
-use rusqlite::params;
+use gen_models::{annotations::AnnotationGroup, db::GraphConnection};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationGroupEntry {
@@ -13,15 +12,8 @@ pub fn load_annotation_group_entries(
     let Some(sample_name) = sample_name else {
         return Vec::new();
     };
-    let mut stmt = conn
-        .prepare(
-            "SELECT annotation_group FROM annotation_group_samples WHERE sample_name = ?1 ORDER BY annotation_group;",
-        )
-        .unwrap();
-    let rows = stmt
-        .query_map(params![sample_name], |row| row.get::<_, String>(0))
-        .unwrap();
-    rows.filter_map(Result::ok)
-        .map(|name| AnnotationGroupEntry { name })
+    AnnotationGroup::query_by_sample(conn, sample_name)
+        .into_iter()
+        .map(|group| AnnotationGroupEntry { name: group.name })
         .collect()
 }

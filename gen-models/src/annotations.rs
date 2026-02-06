@@ -55,6 +55,17 @@ impl AnnotationGroup {
             Err(err) => Err(err.into()),
         }
     }
+
+    pub fn query_by_sample(conn: &GraphConnection, sample_name: &str) -> Vec<AnnotationGroup> {
+        let query = "\
+            select ag.* \
+            from annotation_groups ag \
+            join annotation_group_samples s \
+                on ag.name = s.annotation_group \
+            where s.sample_name = ?1 \
+            order by ag.name;";
+        AnnotationGroup::query(conn, query, params![sample_name])
+    }
 }
 
 impl<'a> Capnp<'a> for AnnotationGroup {
@@ -233,8 +244,12 @@ impl Annotation {
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
                 let id = Annotation::generate_id(name, group, accession_id);
-                Annotation::get_by_id(conn, &id)
-                    .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
+                Ok(Annotation {
+                    id,
+                    name: name.to_string(),
+                    group: group.to_string(),
+                    accession_id: *accession_id,
+                })
             }
             Err(err) => Err(err),
         }
@@ -301,7 +316,7 @@ impl Annotation {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct AnnotationFileLink {
+pub struct AnnotationFileInfo {
     pub file_addition: FileAddition,
     pub name: Option<String>,
 }
@@ -379,28 +394,46 @@ impl AnnotationFile {
     pub fn get_files_for_operation(
         conn: &OperationsConnection,
         operation_hash: &HashId,
-    ) -> Vec<FileAddition> {
-        AnnotationFile::get_links_for_operation(conn, operation_hash)
-            .into_iter()
-            .map(|entry| entry.file_addition)
-            .collect()
-    }
-
-    pub fn get_links_for_operation(
-        conn: &OperationsConnection,
-        operation_hash: &HashId,
-    ) -> Vec<AnnotationFileLink> {
+    ) -> Vec<AnnotationFileInfo> {
         let query = "select fa.*, af.name from file_additions fa left join annotation_files af on (fa.id = af.file_addition_id) where af.operation_hash = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
             .query_map(params![operation_hash], |row| {
-                Ok(AnnotationFileLink {
+                Ok(AnnotationFileInfo {
                     file_addition: FileAddition::process_row(row),
                     name: row.get(4).unwrap(),
                 })
             })
             .unwrap();
         rows.map(|row| row.unwrap()).collect()
+    }
+
+    pub fn get_all_files(conn: &OperationsConnection) -> Vec<AnnotationFileInfo> {
+        let query = "select fa.*, af.name from file_additions fa join annotation_files af on (fa.id = af.file_addition_id)";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AnnotationFileInfo {
+                    file_addition: FileAddition::process_row(row),
+                    name: row.get(4).unwrap(),
+                })
+            })
+            .unwrap();
+        let mut entries: Vec<AnnotationFileInfo> = rows.map(|row| row.unwrap()).collect();
+        entries.sort_by(|a, b| {
+            let a_name = std::path::Path::new(&a.file_addition.file_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| a.file_addition.file_path.clone());
+            let b_name = std::path::Path::new(&b.file_addition.file_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| b.file_addition.file_path.clone());
+            a_name
+                .cmp(&b_name)
+                .then_with(|| a.file_addition.file_path.cmp(&b.file_addition.file_path))
+        });
+        entries
     }
 
     pub fn query_by_operations(
@@ -500,6 +533,24 @@ mod tests {
         .unwrap();
 
         let files = AnnotationFile::get_files_for_operation(op_conn, &op_hash);
-        assert_eq!(files, vec![file_addition]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_addition, file_addition);
+    }
+
+    #[test]
+    fn parse_annotation_file_type_values() {
+        assert_eq!(parse_annotation_file_type("gff3").unwrap(), FileTypes::Gff3);
+        assert_eq!(parse_annotation_file_type("GFF").unwrap(), FileTypes::Gff3);
+        assert_eq!(parse_annotation_file_type("bed").unwrap(), FileTypes::Bed);
+        assert_eq!(
+            parse_annotation_file_type("GenBank").unwrap(),
+            FileTypes::GenBank
+        );
+        assert_eq!(
+            parse_annotation_file_type("gb").unwrap(),
+            FileTypes::GenBank
+        );
+        let err = parse_annotation_file_type("bam").unwrap_err();
+        assert!(matches!(err, AnnotationFileError::UnsupportedFileType(_)));
     }
 }

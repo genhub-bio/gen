@@ -828,7 +828,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                                     "assets",
                                     FilePath::new(".gen")
                                         .join("assets")
-                                        .join(annotation_file.hashed_filename()),
+                                        .join(annotation_file.file_addition.hashed_filename()),
                                 )
                                 .unwrap();
                         }

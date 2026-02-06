@@ -2,7 +2,7 @@ use gen_core::{HashId, traits::Capnp};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    annotations::{AnnotationFile, AnnotationFileLink},
+    annotations::{AnnotationFile, AnnotationFileInfo},
     db::OperationsConnection,
     gen_models_capnp::{
         manifest, manifest_annotation_file_addition, manifest_diff, manifest_operation,
@@ -273,9 +273,9 @@ impl<'a> ManifestGenerator<'a> {
                 if let Some(op) = operations_map.get(hash) {
                     let file_additions = FileAddition::get_files_for_operation(self.conn, &op.hash);
                     let annotation_file_additions =
-                        AnnotationFile::get_links_for_operation(self.conn, &op.hash)
+                        AnnotationFile::get_files_for_operation(self.conn, &op.hash)
                             .into_iter()
-                            .map(|entry: AnnotationFileLink| ManifestAnnotationFileAddition {
+                            .map(|entry: AnnotationFileInfo| ManifestAnnotationFileAddition {
                                 file_addition: entry.file_addition,
                                 name: entry.name,
                             })
