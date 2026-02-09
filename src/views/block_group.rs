@@ -106,6 +106,20 @@ fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     (window.0.saturating_sub(span), window.1.saturating_add(span))
 }
 
+fn visible_ranges_by_node(block_graph: &GenGraph) -> HashMap<HashId, Vec<(i64, i64)>> {
+    let mut ranges_by_node: HashMap<HashId, Vec<(i64, i64)>> = HashMap::new();
+    for node in block_graph.nodes() {
+        if node.sequence_end <= node.sequence_start {
+            continue;
+        }
+        ranges_by_node
+            .entry(node.node_id)
+            .or_default()
+            .push((node.sequence_start, node.sequence_end));
+    }
+    ranges_by_node
+}
+
 pub fn view_block_group(
     conn: &GraphConnection,
     op_conn: &OperationsConnection,
@@ -633,20 +647,24 @@ pub fn view_block_group(
             if let Some(bg) = current_block_group.as_ref() {
                 let node_filter: HashSet<HashId> =
                     block_graph.nodes().map(|node| node.node_id).collect();
+                let visible_node_ranges = visible_ranges_by_node(&block_graph);
                 let query_window = current_view_coordinate_window(&viewer).map(expand_query_window);
                 for entry in explorer.data.annotation_groups.iter() {
                     if explorer_state.is_annotation_group_active(&entry.name) {
-                        let spans =
-                            match load_annotations_for_group(conn, &entry.name, &node_filter) {
-                                Ok(spans) => spans,
-                                Err(err) => {
-                                    messages.push_warn(format!(
-                                        "Failed to load annotations for group {}: {err}",
-                                        entry.name
-                                    ));
-                                    Vec::new()
-                                }
-                            };
+                        let spans = match load_annotations_for_group(
+                            conn,
+                            &entry.name,
+                            &visible_node_ranges,
+                        ) {
+                            Ok(spans) => spans,
+                            Err(err) => {
+                                messages.push_warn(format!(
+                                    "Failed to load annotations for group {}: {err}",
+                                    entry.name
+                                ));
+                                Vec::new()
+                            }
+                        };
                         if spans.is_empty() {
                             continue;
                         }
@@ -873,12 +891,11 @@ pub fn view_block_group(
                         {
                             if explorer_state.is_annotation_group_active(&toggled_group) {
                                 if current_block_group.is_some() {
-                                    let node_filter: HashSet<HashId> =
-                                        block_graph.nodes().map(|node| node.node_id).collect();
+                                    let visible_node_ranges = visible_ranges_by_node(&block_graph);
                                     let spans = match load_annotations_for_group(
                                         conn,
                                         &toggled_group,
-                                        &node_filter,
+                                        &visible_node_ranges,
                                     ) {
                                         Ok(spans) => spans,
                                         Err(err) => {

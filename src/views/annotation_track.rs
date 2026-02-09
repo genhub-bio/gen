@@ -62,16 +62,28 @@ impl<'a> Viewer<'a> {
             return (Vec::new(), HashMap::new());
         }
 
+        const HORIZONTAL_LOOKAHEAD: f64 = 8.0;
         let mut visible_indices = Vec::new();
         let mut visible_index_set = HashSet::new();
         let mut segments_by_annotation: AnnotationSegmentsByIndex = HashMap::new();
+        let window_start = self.state.offset_x as f64;
+        let window_end = window_start + self.state.viewport.width as f64 - 0.5;
+        let left_bound = window_start - HORIZONTAL_LOOKAHEAD;
+        let right_bound = window_end + HORIZONTAL_LOOKAHEAD;
+        let y_min = self.state.offset_y;
+        let y_max = self.state.offset_y + self.state.viewport.height as i32;
 
         for &block in self.scaled_layout.labels.keys() {
             if is_start_node(block.node_id) || is_end_node(block.node_id) {
                 continue;
             }
 
-            if !self.is_block_visible(block) {
+            let Some(&((x1, y), (x2, _))) = self.scaled_layout.labels.get(&block) else {
+                continue;
+            };
+            let y_visible = (y as i32) >= y_min && (y as i32) < y_max;
+            let near_horizontally = x2 >= left_bound && x1 <= right_bound;
+            if !y_visible || !near_horizontally {
                 continue;
             }
 
@@ -79,7 +91,6 @@ impl<'a> Viewer<'a> {
                 continue;
             };
 
-            let ((x1, _y), (x2, _)) = self.scaled_layout.labels[&block];
             let node_len = block.sequence_end - block.sequence_start;
             if node_len <= 0 {
                 continue;
@@ -93,10 +104,6 @@ impl<'a> Viewer<'a> {
                     continue;
                 }
 
-                if visible_index_set.insert(*idx) {
-                    visible_indices.push(*idx);
-                }
-
                 let relative_start =
                     (overlap_start - block.sequence_start) as f64 / node_len as f64;
                 let relative_end = (overlap_end - block.sequence_start) as f64 / node_len as f64;
@@ -104,6 +111,10 @@ impl<'a> Viewer<'a> {
                 let mut seg_x2 = x1 + relative_end * label_len;
                 if seg_x2 < seg_x1 {
                     std::mem::swap(&mut seg_x1, &mut seg_x2);
+                }
+                let is_on_screen = seg_x2 >= window_start && seg_x1 <= window_end;
+                if is_on_screen && visible_index_set.insert(*idx) {
+                    visible_indices.push(*idx);
                 }
 
                 segments_by_annotation

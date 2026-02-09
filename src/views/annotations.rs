@@ -75,7 +75,7 @@ fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment
 pub fn load_annotations_for_group(
     conn: &GraphConnection,
     group: &str,
-    node_filter: &HashSet<HashId>,
+    visible_ranges_by_node: &HashMap<HashId, Vec<(i64, i64)>>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
     let annotations = Annotation::query_by_group(conn, group)?;
 
@@ -85,7 +85,15 @@ pub fn load_annotations_for_group(
             let edges = Accession::get_edges_by_id(conn, &annotation.accession_id);
             let segments = accession_edges_to_segments(&edges)
                 .into_iter()
-                .filter(|segment| node_filter.contains(&segment.node_id))
+                .filter(|segment| {
+                    visible_ranges_by_node
+                        .get(&segment.node_id)
+                        .is_some_and(|ranges| {
+                            ranges
+                                .iter()
+                                .any(|(start, end)| segment.start < *end && *start < segment.end)
+                        })
+                })
                 .collect::<Vec<_>>();
             if segments.is_empty() {
                 None
