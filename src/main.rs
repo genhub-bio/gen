@@ -557,6 +557,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::AddAnnotationFile {
             path,
             format,
+            index,
             name,
             message,
         }) => {
@@ -564,6 +565,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &db_context,
                 &path,
                 format.as_deref(),
+                index.as_deref(),
                 name.as_deref(),
                 message.as_deref(),
             )?;

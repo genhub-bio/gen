@@ -235,6 +235,9 @@ pub enum Commands {
         /// The annotation file format (gff3, bed, genbank). If omitted, infer from the file extension.
         #[arg(short, long)]
         format: Option<String>,
+        /// Optional tabix index file path for the annotation file
+        #[arg(long)]
+        index: Option<String>,
         /// Optional annotation file name
         #[arg(short, long)]
         name: Option<String>,

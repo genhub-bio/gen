@@ -18,6 +18,7 @@ enum FileType {
   none @7;
   gff3 @8;
   bed @9;
+  tabix @10;
 }
 
 # Core sequence and node models
@@ -212,6 +213,10 @@ struct ManifestAnnotationFileAddition {
   name :union {
     none @1 :Void;
     some @2 :Text;
+  }
+  indexFileAddition :union {
+    none @3 :Void;
+    some @4 :FileAddition;
   }
 }
 

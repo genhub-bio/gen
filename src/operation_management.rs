@@ -579,6 +579,22 @@ fn apply_operations_to_remote(
                     )
                 })?;
             }
+            if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
+                let src_path = local_base.join(&index_file_addition.file_path);
+                let dst_path = remote_base.join(&index_file_addition.file_path);
+                if src_path.exists() {
+                    if let Some(parent) = dst_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::copy(&src_path, &dst_path).map_err(|_| {
+                        RemoteOperationError::FileTransferError(
+                            index_file_addition.file_path.clone(),
+                            src_path.to_string_lossy().to_string(),
+                            dst_path.to_string_lossy().to_string(),
+                        )
+                    })?;
+                }
+            }
         }
 
         let changeset = operation.get_changeset(workspace);
@@ -632,10 +648,26 @@ fn apply_operations_to_remote(
                         annotation_file.file_addition.file_type,
                         Some(annotation_file.file_addition.checksum),
                     )?;
+                    let remote_index_file_addition = annotation_file
+                        .index_file_addition
+                        .as_ref()
+                        .map(|index_file_addition| {
+                            FileAddition::get_or_create(
+                                remote_workspace,
+                                remote_op_conn,
+                                &index_file_addition.file_path,
+                                index_file_addition.file_type,
+                                Some(index_file_addition.checksum),
+                            )
+                        })
+                        .transpose()?;
                     AnnotationFile::link_to_operation(
                         remote_op_conn,
                         &operation.hash,
                         &remote_file_addition.id,
+                        remote_index_file_addition
+                            .as_ref()
+                            .map(|index_file| &index_file.id),
                         annotation_file.name.as_deref(),
                     )?;
                 }
@@ -831,6 +863,18 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                                         .join(annotation_file.file_addition.hashed_filename()),
                                 )
                                 .unwrap();
+                            if let Some(index_file_addition) =
+                                annotation_file.index_file_addition.as_ref()
+                            {
+                                form = form
+                                    .file(
+                                        "assets",
+                                        FilePath::new(".gen")
+                                            .join("assets")
+                                            .join(index_file_addition.clone().hashed_filename()),
+                                    )
+                                    .unwrap();
+                            }
                         }
 
                         form = form.text("branch", current_branch.name.clone());
@@ -1059,10 +1103,26 @@ fn ingest_manifest_operation(
                     annotation_file.file_addition.file_type,
                     Some(annotation_file.file_addition.checksum),
                 )?;
+                let local_index_file_addition = annotation_file
+                    .index_file_addition
+                    .as_ref()
+                    .map(|index_file_addition| {
+                        FileAddition::get_or_create(
+                            workspace,
+                            operation_conn,
+                            &index_file_addition.file_path,
+                            index_file_addition.file_type,
+                            Some(index_file_addition.checksum),
+                        )
+                    })
+                    .transpose()?;
                 AnnotationFile::link_to_operation(
                     operation_conn,
                     &operation.hash,
                     &local_file_addition.id,
+                    local_index_file_addition
+                        .as_ref()
+                        .map(|index_file| &index_file.id),
                     annotation_file.name.as_deref(),
                 )?;
             }
@@ -1163,6 +1223,22 @@ fn copy_operation_from_remote_fs(
                     dst_path.to_string_lossy().to_string(),
                 )
             })?;
+        }
+        if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
+            let src_path = remote_path.join(&index_file_addition.file_path);
+            let dst_path = repo_root.join(&index_file_addition.file_path);
+            if src_path.exists() {
+                if let Some(parent) = dst_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&src_path, &dst_path).map_err(|_| {
+                    RemoteOperationError::FileTransferError(
+                        index_file_addition.file_path.clone(),
+                        src_path.to_string_lossy().to_string(),
+                        dst_path.to_string_lossy().to_string(),
+                    )
+                })?;
+            }
         }
     }
 

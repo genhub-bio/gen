@@ -283,8 +283,25 @@ fn tabix_index_path(file_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tbi", file_path.display()))
 }
 
+fn resolve_annotation_index_file_path(
+    workspace: &Workspace,
+    entry: &AnnotationFileEntry,
+    file_path: &Path,
+) -> Option<PathBuf> {
+    if let Some(index_file_addition) = entry.index_file_addition.as_ref() {
+        return resolve_annotation_file_path(workspace, index_file_addition);
+    }
+    let index_path = tabix_index_path(file_path);
+    if index_path.exists() {
+        Some(index_path)
+    } else {
+        None
+    }
+}
+
 fn load_tabix_region_bytes(
     file_path: &Path,
+    index_path: Option<&Path>,
     reference_name: &str,
     window: (i64, i64),
 ) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -292,7 +309,11 @@ fn load_tabix_region_bytes(
     let end = window.1.max(start);
     let region = format!("{reference_name}:{start}-{end}").parse::<Region>()?;
 
-    let mut reader = tabix::io::indexed_reader::Builder::default().build_from_path(file_path)?;
+    let mut builder = tabix::io::indexed_reader::Builder::default();
+    if let Some(index_path) = index_path {
+        builder = builder.set_index(tabix::fs::read(index_path)?);
+    }
+    let mut reader = builder.build_from_path(file_path)?;
     let query = reader.query(&region)?;
 
     let mut bytes = Vec::new();
@@ -327,8 +348,9 @@ pub fn load_annotation_file_track(
 ) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
     let file_path = resolve_annotation_file_path(request.workspace, &request.entry.file_addition)
         .ok_or("Annotation file not found in repo or assets")?;
-    let index_path = tabix_index_path(&file_path);
-    let index_available = index_path.exists();
+    let index_path =
+        resolve_annotation_index_file_path(request.workspace, request.entry, &file_path);
+    let index_available = index_path.is_some();
     let mut indexed_source_bytes = None;
     let mut loaded_window = None;
 
@@ -336,8 +358,12 @@ pub fn load_annotation_file_track(
         if let (Some(reference_name), Some(window)) =
             (request.block_group_name, request.query_window)
         {
-            indexed_source_bytes =
-                Some(load_tabix_region_bytes(&file_path, reference_name, window)?);
+            indexed_source_bytes = Some(load_tabix_region_bytes(
+                &file_path,
+                index_path.as_deref(),
+                reference_name,
+                window,
+            )?);
             loaded_window = Some(window);
         } else {
             return Ok(AnnotationFileTrackLoadResult {

@@ -38,6 +38,46 @@ fn annotation_file_extension(path: &str) -> Option<String> {
     ext
 }
 
+fn annotation_index_file_path(
+    workspace: &gen_core::config::Workspace,
+    path: &str,
+    explicit_index_path: Option<&str>,
+) -> Option<String> {
+    if let Some(index_path) = explicit_index_path {
+        return Some(index_path.to_string());
+    }
+
+    let mut candidates = vec![format!("{path}.tbi")];
+    let path_buf = PathBuf::from(path);
+    if let Some(extension) = path_buf.extension().and_then(|ext| ext.to_str()) {
+        let mut extension_candidate = path_buf.clone();
+        extension_candidate.set_extension(format!("{extension}.tbi"));
+        let extension_candidate = extension_candidate.to_string_lossy().to_string();
+        if !candidates
+            .iter()
+            .any(|candidate| candidate == &extension_candidate)
+        {
+            candidates.push(extension_candidate);
+        }
+    }
+
+    for candidate in candidates {
+        let exists = if Path::new(&candidate).is_absolute() {
+            Path::new(&candidate).exists()
+        } else {
+            workspace
+                .repo_root()
+                .ok()
+                .is_some_and(|repo_root| repo_root.join(&candidate).exists())
+        };
+        if exists {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 pub fn add_annotation(
     context: &DbContext,
     collection: &str,
@@ -114,6 +154,7 @@ pub fn add_annotation_file(
     context: &DbContext,
     path: &str,
     format: Option<&str>,
+    index: Option<&str>,
     name: Option<&str>,
     message: Option<&str>,
 ) -> Result<Operation, Box<dyn std::error::Error>> {
@@ -135,9 +176,24 @@ pub fn add_annotation_file(
     };
     let file_addition =
         FileAddition::get_or_create(workspace, operation_conn, path, file_type, None)?;
+    let index_file_addition = annotation_index_file_path(workspace, path, index)
+        .map(|index_path| {
+            FileAddition::get_or_create(
+                workspace,
+                operation_conn,
+                &index_path,
+                FileTypes::Tabix,
+                None,
+            )
+        })
+        .transpose()?;
     let name_value = name.unwrap_or_default();
+    let index_file_addition_id = index_file_addition
+        .as_ref()
+        .map(|index_file| index_file.id.to_string())
+        .unwrap_or_default();
     let operation_hash = HashId(calculate_hash(&format!(
-        "{file_addition_id}:{name_value}",
+        "{file_addition_id}:{name_value}:{index_file_addition_id}",
         file_addition_id = file_addition.id
     )));
     let operation = match Operation::create(operation_conn, "annotation-file", &operation_hash) {
@@ -149,7 +205,15 @@ pub fn add_annotation_file(
         }
         Err(err) => return Err(err.into()),
     };
-    AnnotationFile::link_to_operation(operation_conn, &operation.hash, &file_addition.id, name)?;
+    AnnotationFile::link_to_operation(
+        operation_conn,
+        &operation.hash,
+        &file_addition.id,
+        index_file_addition
+            .as_ref()
+            .map(|index_file| &index_file.id),
+        name,
+    )?;
     Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
     let summary = message
         .map(str::to_string)
@@ -181,6 +245,17 @@ pub fn add_annotation_file(
                 workspace.repo_root()?.join(path)
             };
             fs::copy(source_path, asset_path)?;
+        }
+        if let Some(index_file_addition) = index_file_addition {
+            let index_asset_path = assets_dir.join(index_file_addition.clone().hashed_filename());
+            if !index_asset_path.exists() {
+                let index_source_path = if Path::new(&index_file_addition.file_path).is_absolute() {
+                    PathBuf::from(&index_file_addition.file_path)
+                } else {
+                    workspace.repo_root()?.join(&index_file_addition.file_path)
+                };
+                fs::copy(index_source_path, index_asset_path)?;
+            }
         }
     }
 
@@ -235,17 +310,30 @@ mod tests {
         fs::write(&annotation_path, "##gff-version 3\n").unwrap();
         let annotation_path_str = annotation_path.to_string_lossy().to_string();
 
-        let operation =
-            add_annotation_file(&context, &annotation_path_str, None, Some("track-1"), None)
-                .unwrap();
+        let operation = add_annotation_file(
+            &context,
+            &annotation_path_str,
+            None,
+            None,
+            Some("track-1"),
+            None,
+        )
+        .unwrap();
         assert_eq!(operation.change_type, "annotation-file");
 
         let files = AnnotationFile::get_files_for_operation(operation_conn, &operation.hash);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name.as_deref(), Some("track-1"));
 
-        let err = add_annotation_file(&context, &annotation_path_str, None, Some("track-1"), None)
-            .unwrap_err();
+        let err = add_annotation_file(
+            &context,
+            &annotation_path_str,
+            None,
+            None,
+            Some("track-1"),
+            None,
+        )
+        .unwrap_err();
         let op_err = err
             .downcast_ref::<OperationError>()
             .expect("expected OperationError");

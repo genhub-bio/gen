@@ -14,6 +14,7 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestAnnotationFileAddition {
     pub file_addition: FileAddition,
+    pub index_file_addition: Option<FileAddition>,
     pub name: Option<String>,
 }
 
@@ -28,6 +29,14 @@ impl<'a> Capnp<'a> for ManifestAnnotationFileAddition {
             Some(name) => builder.reborrow().get_name().set_some(name),
             None => builder.reborrow().get_name().set_none(()),
         }
+        match &self.index_file_addition {
+            Some(index_file_addition) => {
+                let mut index_file_builder =
+                    builder.reborrow().get_index_file_addition().init_some();
+                index_file_addition.write_capnp(&mut index_file_builder);
+            }
+            None => builder.reborrow().get_index_file_addition().set_none(()),
+        }
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -38,8 +47,15 @@ impl<'a> Capnp<'a> for ManifestAnnotationFileAddition {
                 Some(name_reader.unwrap().to_string().unwrap())
             }
         };
+        let index_file_addition = match reader.get_index_file_addition().which().unwrap() {
+            manifest_annotation_file_addition::index_file_addition::None(()) => None,
+            manifest_annotation_file_addition::index_file_addition::Some(file_reader) => {
+                Some(FileAddition::read_capnp(file_reader.unwrap()))
+            }
+        };
         ManifestAnnotationFileAddition {
             file_addition,
+            index_file_addition,
             name,
         }
     }
@@ -119,6 +135,7 @@ impl<'a> Capnp<'a> for ManifestOperation {
                 .iter()
                 .map(|file_addition_reader| ManifestAnnotationFileAddition {
                     file_addition: FileAddition::read_capnp(file_addition_reader),
+                    index_file_addition: None,
                     name: None,
                 })
                 .collect()
@@ -277,6 +294,7 @@ impl<'a> ManifestGenerator<'a> {
                             .into_iter()
                             .map(|entry: AnnotationFileInfo| ManifestAnnotationFileAddition {
                                 file_addition: entry.file_addition,
+                                index_file_addition: entry.index_file_addition,
                                 name: entry.name,
                             })
                             .collect();
@@ -376,7 +394,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        annotations::AnnotationFile,
+        annotations::{AnnotationFile, AnnotationFileAdditionInput},
         file_types::FileTypes,
         operations::OperationInfo,
         session_operations::{end_operation, start_operation},
@@ -418,6 +436,7 @@ mod tests {
                     file_type: FileTypes::Gff3,
                     checksum: HashId([4u8; 32]),
                 },
+                index_file_addition: None,
                 name: Some("track-a".to_string()),
             }],
             operation_summary: Some(OperationSummary {
@@ -592,10 +611,13 @@ mod tests {
             context.workspace(),
             op_conn,
             &operation.hash,
-            "fixtures/manifest_annotation.gff3",
-            FileTypes::Gff3,
-            None,
-            Some("manifest-track"),
+            &AnnotationFileAdditionInput {
+                file_path: "fixtures/manifest_annotation.gff3".to_string(),
+                file_type: FileTypes::Gff3,
+                checksum_override: None,
+                name: Some("manifest-track".to_string()),
+                index_file_path: None,
+            },
         )
         .unwrap();
 
@@ -609,6 +631,7 @@ mod tests {
             manifest.operations[0].annotation_file_additions,
             vec![ManifestAnnotationFileAddition {
                 file_addition,
+                index_file_addition: None,
                 name: Some("manifest-track".to_string()),
             }]
         );

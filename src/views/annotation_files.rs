@@ -5,6 +5,7 @@ use gen_models::{annotations::AnnotationFile, db::OperationsConnection, operatio
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationFileEntry {
     pub file_addition: FileAddition,
+    pub index_file_addition: Option<FileAddition>,
     pub name: Option<String>,
     pub display_name: String,
 }
@@ -20,6 +21,7 @@ pub fn load_annotation_file_entries(conn: &OperationsConnection) -> Vec<Annotati
         });
         entries.push(AnnotationFileEntry {
             file_addition: info.file_addition,
+            index_file_addition: info.index_file_addition,
             name: info.name,
             display_name,
         });

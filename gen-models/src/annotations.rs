@@ -318,7 +318,17 @@ impl Annotation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct AnnotationFileInfo {
     pub file_addition: FileAddition,
+    pub index_file_addition: Option<FileAddition>,
     pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AnnotationFileAdditionInput {
+    pub file_path: String,
+    pub file_type: FileTypes,
+    pub checksum_override: Option<HashId>,
+    pub name: Option<String>,
+    pub index_file_path: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -327,6 +337,8 @@ pub enum AnnotationFileError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("File addition error: {0}")]
     FileAdditionError(#[from] FileAdditionError),
+    #[error("Index file must be Tabix, got: {0:?}")]
+    InvalidIndexFileType(FileTypes),
     #[error("Unsupported annotation file type: {0}")]
     UnsupportedFileType(String),
 }
@@ -345,6 +357,7 @@ pub struct AnnotationFile {
     pub id: i64,
     pub operation_hash: HashId,
     pub file_addition_id: HashId,
+    pub index_file_addition_id: Option<HashId>,
     pub name: Option<String>,
 }
 
@@ -358,21 +371,47 @@ impl Query for AnnotationFile {
             id: row.get(0).unwrap(),
             operation_hash: row.get(1).unwrap(),
             file_addition_id: row.get(2).unwrap(),
-            name: row.get(3).unwrap(),
+            index_file_addition_id: row.get(3).unwrap(),
+            name: row.get(4).unwrap(),
         }
     }
 }
 
 impl AnnotationFile {
+    pub fn load_index(
+        conn: &OperationsConnection,
+        file_addition_id: Option<&HashId>,
+    ) -> Result<Option<FileAddition>, AnnotationFileError> {
+        let Some(file_addition_id) = file_addition_id else {
+            return Ok(None);
+        };
+        let index_file_addition = FileAddition::get_by_id(conn, file_addition_id).ok_or(
+            AnnotationFileError::DatabaseError(rusqlite::Error::QueryReturnedNoRows),
+        )?;
+        if index_file_addition.file_type != FileTypes::Tabix {
+            return Err(AnnotationFileError::InvalidIndexFileType(
+                index_file_addition.file_type,
+            ));
+        }
+        Ok(Some(index_file_addition))
+    }
+
     pub fn link_to_operation(
         conn: &OperationsConnection,
         operation_hash: &HashId,
         file_addition_id: &HashId,
+        index_file_addition_id: Option<&HashId>,
         name: Option<&str>,
     ) -> Result<(), AnnotationFileError> {
-        let query = "INSERT INTO annotation_files (operation_hash, file_addition_id, name) VALUES (?1, ?2, ?3);";
+        AnnotationFile::load_index(conn, index_file_addition_id)?;
+        let query = "INSERT INTO annotation_files (operation_hash, file_addition_id, index_file_addition_id, name) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![operation_hash, file_addition_id, name])?;
+        stmt.execute(params![
+            operation_hash,
+            file_addition_id,
+            index_file_addition_id,
+            name
+        ])?;
         Ok(())
     }
 
@@ -380,14 +419,27 @@ impl AnnotationFile {
         workspace: &Workspace,
         conn: &OperationsConnection,
         operation_hash: &HashId,
-        file_path: &str,
-        file_type: FileTypes,
-        checksum_override: Option<HashId>,
-        name: Option<&str>,
+        input: &AnnotationFileAdditionInput,
     ) -> Result<FileAddition, AnnotationFileError> {
-        let file_addition =
-            FileAddition::get_or_create(workspace, conn, file_path, file_type, checksum_override)?;
-        AnnotationFile::link_to_operation(conn, operation_hash, &file_addition.id, name)?;
+        let file_addition = FileAddition::get_or_create(
+            workspace,
+            conn,
+            &input.file_path,
+            input.file_type,
+            input.checksum_override,
+        )?;
+        let index_file_addition = input
+            .index_file_path
+            .as_deref()
+            .map(|path| FileAddition::get_or_create(workspace, conn, path, FileTypes::Tabix, None))
+            .transpose()?;
+        AnnotationFile::link_to_operation(
+            conn,
+            operation_hash,
+            &file_addition.id,
+            index_file_addition.as_ref().map(|index| &index.id),
+            input.name.as_deref(),
+        )?;
         Ok(file_addition)
     }
 
@@ -395,31 +447,58 @@ impl AnnotationFile {
         conn: &OperationsConnection,
         operation_hash: &HashId,
     ) -> Vec<AnnotationFileInfo> {
-        let query = "select fa.*, af.name from file_additions fa left join annotation_files af on (fa.id = af.file_addition_id) where af.operation_hash = ?1";
+        let query = "select fa.*, af.index_file_addition_id, af.name from file_additions fa join annotation_files af on (fa.id = af.file_addition_id) where af.operation_hash = ?1";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
             .query_map(params![operation_hash], |row| {
-                Ok(AnnotationFileInfo {
-                    file_addition: FileAddition::process_row(row),
-                    name: row.get(4).unwrap(),
-                })
+                Ok((
+                    FileAddition::process_row(row),
+                    row.get::<_, Option<HashId>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
             })
             .unwrap();
-        rows.map(|row| row.unwrap()).collect()
+        rows.map(|row| {
+            let (file_addition, index_file_addition_id, name) = row.unwrap();
+            AnnotationFileInfo {
+                file_addition,
+                index_file_addition: AnnotationFile::load_index(
+                    conn,
+                    index_file_addition_id.as_ref(),
+                )
+                .unwrap(),
+                name,
+            }
+        })
+        .collect()
     }
 
     pub fn get_all_files(conn: &OperationsConnection) -> Vec<AnnotationFileInfo> {
-        let query = "select fa.*, af.name from file_additions fa join annotation_files af on (fa.id = af.file_addition_id)";
+        let query = "select fa.*, af.index_file_addition_id, af.name from file_additions fa join annotation_files af on (fa.id = af.file_addition_id)";
         let mut stmt = conn.prepare(query).unwrap();
         let rows = stmt
             .query_map([], |row| {
-                Ok(AnnotationFileInfo {
-                    file_addition: FileAddition::process_row(row),
-                    name: row.get(4).unwrap(),
-                })
+                Ok((
+                    FileAddition::process_row(row),
+                    row.get::<_, Option<HashId>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
             })
             .unwrap();
-        let mut entries: Vec<AnnotationFileInfo> = rows.map(|row| row.unwrap()).collect();
+        let mut entries: Vec<AnnotationFileInfo> = rows
+            .map(|row| {
+                let (file_addition, index_file_addition_id, name) = row.unwrap();
+                AnnotationFileInfo {
+                    file_addition,
+                    index_file_addition: AnnotationFile::load_index(
+                        conn,
+                        index_file_addition_id.as_ref(),
+                    )
+                    .unwrap(),
+                    name,
+                }
+            })
+            .collect();
         entries.sort_by(|a, b| {
             let a_name = std::path::Path::new(&a.file_addition.file_path)
                 .file_name()
@@ -525,16 +604,20 @@ mod tests {
             workspace,
             op_conn,
             &op_hash,
-            annotation_path.to_string_lossy().as_ref(),
-            FileTypes::Gff3,
-            None,
-            Some("fixtures-annotation"),
+            &AnnotationFileAdditionInput {
+                file_path: annotation_path.to_string_lossy().to_string(),
+                file_type: FileTypes::Gff3,
+                checksum_override: None,
+                name: Some("fixtures-annotation".to_string()),
+                index_file_path: None,
+            },
         )
         .unwrap();
 
         let files = AnnotationFile::get_files_for_operation(op_conn, &op_hash);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_addition, file_addition);
+        assert!(files[0].index_file_addition.is_none());
     }
 
     #[test]
