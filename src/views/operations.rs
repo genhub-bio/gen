@@ -16,7 +16,6 @@ use gen_models::{
     operations::{Operation, OperationSummary},
     traits::Query,
 };
-use gen_tui::{graph_controller::GraphController, layout::VisualDetail, theme::Theme};
 use itertools::Itertools;
 use ratatui::{
     Terminal,
@@ -32,7 +31,7 @@ use tui_textarea::TextArea;
 use crate::{
     config::get_theme_color,
     views::{
-        gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
+        gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
         patch::get_change_graph_from_hash,
     },
 };
@@ -129,18 +128,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
         sequence_end: 1,
     });
 
-    let node_sizer = GenGraphNodeSizer;
-    let mut graph_controller = GraphController::new(&empty_graph, node_sizer).with_theme(Theme {
-        canvas: get_theme_color("canvas").unwrap(),
-        node_fg: get_theme_color("text").unwrap(),
-        node_bg: get_theme_color("node").unwrap(),
-        edge_fg: get_theme_color("edge").unwrap(),
-        edge_bg: get_theme_color("canvas").unwrap(),
-        cursor_fg: get_theme_color("cursor_fg").unwrap(),
-        cursor_bg: get_theme_color("cursor_bg").unwrap(),
-    });
-    graph_controller.set_detail_level(VisualDetail::Truncated);
-    graph_controller.show_cursor();
+    let mut graph_controller = create_gen_graph_controller(&empty_graph);
 
     let mut view_message_panel = false;
     let mut view_graph = false;
@@ -268,124 +256,83 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     }),
             );
 
-            if view_message_panel {
+            // Determine the canvas area for the graph and render all panels
+            let canvas_area = if view_message_panel {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
+                f.render_widget(table, chunks[0]);
                 if view_graph {
                     let sub_chunk = Layout::default()
                         .direction(Direction::Horizontal)
                         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                         .split(chunks[1]);
                     f.render_widget(&textarea, sub_chunk[0]);
-
-                    let canvas_area = sub_chunk[1];
-
-                    let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
-                    let graph_title = if blockgroup_graphs.is_empty() {
-                        if !panel_activated && panel_focus == "graph_view" {
-                            "[Change Graph]".to_string()
-                        } else {
-                            "Change Graph".to_string()
-                        }
-                    } else {
-                        let base_title = format!(
-                            "Change Graph {name}",
-                            name = blockgroup_graphs[selected_blockgroup_graph].1
-                        );
-                        if !panel_activated && panel_focus == "graph_view" {
-                            format!("[{}]", base_title)
-                        } else {
-                            base_title
-                        }
-                    };
-                    let graph_block = Block::default()
-                        .title(graph_title)
-                        .borders(Borders::ALL)
-                        .border_style(if panel_activated && panel_focus == "graph_view" {
-                            focused_style // Blue bold when active
-                        } else if !panel_activated && panel_focus == "graph_view" {
-                            selected_style // Cyan bold when selected but not active
-                        } else {
-                            unfocused_style // Gray when not selected
-                        });
-
-                    let inner_canvas = graph_block.inner(canvas_area);
-
-                    graph_controller.viewport_state.focus();
-                    graph_controller.viewport_state.viewport_bounds = inner_canvas;
-                    graph_controller.update_animations(frame_delta);
-
-                    f.render_widget(graph_block, canvas_area);
-
-                    let widget = create_gen_graph_widget(conn)
-                        .detail_level(graph_controller.get_detail_level())
-                        .style(canvas_style)
-                        .cursor();
-                    f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+                    Some(sub_chunk[1])
                 } else {
                     f.render_widget(&textarea, chunks[1]);
+                    None
                 }
-                f.render_widget(table, chunks[0]);
             } else if view_graph {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
                 f.render_widget(table, chunks[0]);
-
-                let canvas_area = chunks[1];
-
-                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
-                let graph_title = if blockgroup_graphs.is_empty() {
-                    if !panel_activated && panel_focus == "graph_view" {
-                        "[Change Graph]".to_string()
-                    } else {
-                        "Change Graph".to_string()
-                    }
-                } else {
-                    let base_title = format!(
-                        "Change Graph {name}",
-                        name = blockgroup_graphs[selected_blockgroup_graph].1
-                    );
-                    if !panel_activated && panel_focus == "graph_view" {
-                        format!("[{}]", base_title)
-                    } else {
-                        base_title
-                    }
-                };
-                let graph_block = Block::default()
-                    .title(graph_title)
-                    .borders(Borders::ALL)
-                    .border_style(if panel_activated && panel_focus == "graph_view" {
-                        focused_style // Blue bold when active
-                    } else if !panel_activated && panel_focus == "graph_view" {
-                        selected_style // Cyan bold when selected but not active
-                    } else {
-                        unfocused_style // Gray when not selected
-                    });
-
-                let inner_canvas = graph_block.inner(canvas_area);
-
-                graph_controller.viewport_state.focus();
-                graph_controller.viewport_state.viewport_bounds = inner_canvas;
-                graph_controller.update_animations(frame_delta);
-
-                f.render_widget(graph_block, canvas_area);
-
-                let widget = create_gen_graph_widget(conn)
-                    .detail_level(graph_controller.get_detail_level())
-                    .style(canvas_style)
-                    .cursor();
-                f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+                Some(chunks[1])
             } else {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(100)].as_ref())
                     .split(main_area);
                 f.render_widget(table, chunks[0]);
+                None
             };
+
+            // Render the graph widget if a canvas area is available
+            if let Some(canvas_area) = canvas_area {
+                let graph_title = if blockgroup_graphs.is_empty() {
+                    "Change Graph".to_string()
+                } else {
+                    format!(
+                        "Change Graph {name}",
+                        name = blockgroup_graphs[selected_blockgroup_graph].1
+                    )
+                };
+                let graph_title = if !panel_activated && panel_focus == "graph_view" {
+                    format!("[{}]", graph_title)
+                } else {
+                    graph_title
+                };
+                let graph_border_style = if panel_activated && panel_focus == "graph_view" {
+                    focused_style
+                } else if !panel_activated && panel_focus == "graph_view" {
+                    selected_style
+                } else {
+                    unfocused_style
+                };
+
+                let graph_block = Block::default()
+                    .title(graph_title)
+                    .borders(Borders::ALL)
+                    .border_style(graph_border_style);
+                let inner_canvas = graph_block.inner(canvas_area);
+
+                // Update viewport with exact inner bounds before animations
+                graph_controller.viewport_state.focus();
+                graph_controller.viewport_state.viewport_bounds = inner_canvas;
+                graph_controller.update_animations(frame_delta);
+
+                f.render_widget(graph_block, canvas_area);
+
+                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+                let widget = create_gen_graph_widget(conn)
+                    .detail_level(graph_controller.get_detail_level())
+                    .style(canvas_style)
+                    .cursor();
+                f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+            }
             let status_bar_contents = format!(
                 "{panel_messages:^width$}",
                 width = status_bar_area.width as usize
@@ -585,41 +532,13 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                         ));
                                     }
                                     selected_blockgroup_graph = 0;
-                                    if blockgroup_graphs.is_empty() {
-                                        let node_sizer = GenGraphNodeSizer;
-                                        graph_controller =
-                                            GraphController::new(&empty_graph, node_sizer)
-                                                .with_theme(Theme {
-                                                    canvas: get_theme_color("canvas").unwrap(),
-                                                    node_fg: get_theme_color("text").unwrap(),
-                                                    node_bg: get_theme_color("node").unwrap(),
-                                                    edge_fg: get_theme_color("edge").unwrap(),
-                                                    edge_bg: get_theme_color("canvas").unwrap(),
-                                                    cursor_fg: get_theme_color("cursor_fg")
-                                                        .unwrap(),
-                                                    cursor_bg: get_theme_color("cursor_bg")
-                                                        .unwrap(),
-                                                });
-                                        graph_controller.set_detail_level(VisualDetail::Truncated);
-                                        graph_controller.show_cursor();
+                                    graph_controller = if blockgroup_graphs.is_empty() {
+                                        create_gen_graph_controller(&empty_graph)
                                     } else {
-                                        let node_sizer = GenGraphNodeSizer;
-                                        graph_controller = GraphController::new(
+                                        create_gen_graph_controller(
                                             &blockgroup_graphs[selected_blockgroup_graph].2,
-                                            node_sizer,
                                         )
-                                        .with_theme(Theme {
-                                            canvas: get_theme_color("canvas").unwrap(),
-                                            node_fg: get_theme_color("text").unwrap(),
-                                            node_bg: get_theme_color("node").unwrap(),
-                                            edge_fg: get_theme_color("edge").unwrap(),
-                                            edge_bg: get_theme_color("canvas").unwrap(),
-                                            cursor_fg: get_theme_color("cursor_fg").unwrap(),
-                                            cursor_bg: get_theme_color("cursor_bg").unwrap(),
-                                        });
-                                        graph_controller.set_detail_level(VisualDetail::Truncated);
-                                        graph_controller.show_cursor();
-                                    }
+                                    };
                                     // panel_activated remains true (auto-activate new panel)
                                 }
                                 _ => {}
@@ -657,22 +576,9 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                     }
                                 }
                                 // Update the graph controller with the new graph
-                                let node_sizer = GenGraphNodeSizer;
-                                graph_controller = GraphController::new(
+                                graph_controller = create_gen_graph_controller(
                                     &blockgroup_graphs[selected_blockgroup_graph].2,
-                                    node_sizer,
-                                )
-                                .with_theme(Theme {
-                                    canvas: get_theme_color("canvas").unwrap(),
-                                    node_fg: get_theme_color("text").unwrap(),
-                                    node_bg: get_theme_color("node").unwrap(),
-                                    edge_fg: get_theme_color("edge").unwrap(),
-                                    edge_bg: get_theme_color("canvas").unwrap(),
-                                    cursor_fg: get_theme_color("cursor_fg").unwrap(),
-                                    cursor_bg: get_theme_color("cursor_bg").unwrap(),
-                                });
-                                graph_controller.set_detail_level(VisualDetail::Truncated);
-                                graph_controller.show_cursor();
+                                );
                             } else {
                                 let _ = graph_controller.handle_key_event(key);
                             }

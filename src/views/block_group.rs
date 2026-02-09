@@ -11,9 +11,7 @@ use crossterm::{
 use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use gen_tui::{
-    graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle, theme::Theme,
-};
+use gen_tui::{graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
 use ratatui::{
     layout::Constraint,
@@ -28,7 +26,10 @@ use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
-        gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_widget},
+        gen_graph_widget::{
+            GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
+            create_gen_graph_widget,
+        },
     },
 };
 
@@ -114,7 +115,7 @@ fn get_block_group_path_nodes(
 /// Toggle path highlighting for a block group
 fn toggle_path_highlight(
     conn: &GraphConnection,
-    controller: &mut gen_tui::graph_controller::GraphController<&GenGraph, GenGraphNodeSizer>,
+    controller: &mut GraphController<&GenGraph, GenGraphNodeSizer>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
 ) -> Result<bool, String> {
@@ -214,18 +215,7 @@ pub fn view_block_group(
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
-    let node_sizer = GenGraphNodeSizer;
-    let mut graph_controller = GraphController::new(&block_graph, node_sizer).with_theme(Theme {
-        canvas: get_theme_color("canvas").unwrap(),
-        node_fg: get_theme_color("text").unwrap(),
-        node_bg: get_theme_color("node").unwrap(),
-        edge_fg: get_theme_color("edge").unwrap(),
-        edge_bg: get_theme_color("canvas").unwrap(),
-        cursor_fg: get_theme_color("cursor_fg").unwrap(),
-        cursor_bg: get_theme_color("cursor_bg").unwrap(),
-    });
-    graph_controller.set_detail_level(VisualDetail::Truncated);
-    graph_controller.show_cursor();
+    let mut graph_controller = create_gen_graph_controller(&block_graph);
 
     // Create a renderer for path highlighting functionality
     let _renderer = GenGraphNodeRenderer::new(conn);
@@ -478,18 +468,7 @@ pub fn view_block_group(
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
             connect_all_boundary_edges(&mut block_graph);
             // Update the graph controller
-            let node_sizer = GenGraphNodeSizer;
-            graph_controller = GraphController::new(&block_graph, node_sizer).with_theme(Theme {
-                canvas: get_theme_color("canvas").unwrap(),
-                node_fg: get_theme_color("text").unwrap(),
-                node_bg: get_theme_color("node").unwrap(),
-                edge_fg: get_theme_color("edge").unwrap(),
-                edge_bg: get_theme_color("canvas").unwrap(),
-                cursor_fg: get_theme_color("cursor_fg").unwrap(),
-                cursor_bg: get_theme_color("cursor_bg").unwrap(),
-            });
-            graph_controller.set_detail_level(VisualDetail::Truncated);
-            graph_controller.show_cursor();
+            graph_controller = create_gen_graph_controller(&block_graph);
 
             is_loading = false;
         }

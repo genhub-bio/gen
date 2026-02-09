@@ -4,10 +4,11 @@ use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::GraphConnection, node::Node};
 use gen_tui::{
     geometry::WorldRect,
-    graph_controller::WorldBuffer,
+    graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer},
+    theme::Theme,
 };
 use ratatui::style::Style;
 
@@ -156,6 +157,35 @@ pub fn create_gen_graph_widget(
 ) -> GraphWidget<'_, &GenGraph, GenGraphNodeSizer, GenGraphNodeRenderer<'_>> {
     let renderer = GenGraphNodeRenderer::new(conn);
     GraphWidget::with_renderer(renderer)
+}
+
+/// Create a configured GraphController for a GenGraph with the standard theme and settings.
+///
+/// This is the standard way to initialize a graph controller for GenGraph visualization.
+/// It applies the application's theme colors, sets the detail level to Truncated, and
+/// enables the cursor.
+///
+/// # Arguments
+/// * `graph` - The GenGraph to visualize
+///
+/// # Returns
+/// A configured GraphController ready for use with `create_gen_graph_widget`
+pub fn create_gen_graph_controller(
+    graph: &GenGraph,
+) -> GraphController<&GenGraph, GenGraphNodeSizer> {
+    let node_sizer = GenGraphNodeSizer;
+    let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme {
+        canvas: get_theme_color("canvas").unwrap(),
+        node_fg: get_theme_color("text").unwrap(),
+        node_bg: get_theme_color("node").unwrap(),
+        edge_fg: get_theme_color("edge").unwrap(),
+        edge_bg: get_theme_color("canvas").unwrap(),
+        cursor_fg: get_theme_color("cursor_fg").unwrap(),
+        cursor_bg: get_theme_color("cursor_bg").unwrap(),
+    });
+    controller.set_detail_level(VisualDetail::Truncated);
+    controller.show_cursor();
+    controller
 }
 
 #[cfg(test)]
