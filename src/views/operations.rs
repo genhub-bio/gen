@@ -1,7 +1,7 @@
 // Note: Using patched tui-textarea from https://github.com/phsym/tui-textarea
 // This fork has ratatui 0.30.0 compatibility fixes that haven't been merged upstream yet
 
-use std::{backtrace::Backtrace, collections::HashMap, io, rc::Rc, time::Instant};
+use std::{collections::HashMap, io, rc::Rc, time::Instant};
 
 use crossterm::{
     event::{self, KeyCode, KeyModifiers},
@@ -21,7 +21,7 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    prelude::{Color, Line, Span, Style},
+    prelude::{Color, Style},
     style::Modifier,
     widgets::{Block, Borders, Paragraph, Row, Table},
 };
@@ -32,6 +32,7 @@ use crate::{
     config::get_theme_color,
     views::{
         gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
+        helpers::{install_tui_panic_hook, style_text},
         patch::get_change_graph_from_hash,
     },
 };
@@ -45,47 +46,15 @@ fn clip_text(t: &str, limit: usize) -> String {
     }
 }
 
-/// Parses a string with markdown-like asterisk syntax for highlighting.
-/// Segments surrounded by '*' are styled with `highlight_style`.
-/// Other segments are styled with `default_style`.
-fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<'_> {
-    let mut spans = Vec::new();
-    let mut is_highlighted = false;
-    for part in text.split('*') {
-        if !part.is_empty() {
-            spans.push(Span::styled(
-                part,
-                if is_highlighted {
-                    highlight_style
-                } else {
-                    default_style
-                },
-            ));
-        }
-        is_highlighted = !is_highlighted;
-    }
-    Line::from(spans)
-}
-
 struct OperationRow<'a> {
     operation: &'a Operation,
     summary: OperationSummary,
 }
 
-fn restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
-}
-
 pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<(), io::Error> {
     let conn = context.graph().conn();
     let op_conn = context.operations().conn();
-    std::panic::set_hook(Box::new(|info| {
-        restore_terminal();
-        eprintln!("Application crashed: {info}");
-        let backtrace = Backtrace::capture();
-        eprintln!("Stack trace:\n{backtrace}");
-    }));
+    install_tui_panic_hook();
 
     let operation_by_hash: HashMap<_, &Operation> = HashMap::from_iter(
         operations

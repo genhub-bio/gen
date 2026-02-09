@@ -29,6 +29,7 @@ use crate::{
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
+        helpers::{install_tui_panic_hook, style_text},
     },
 };
 
@@ -44,28 +45,6 @@ fn get_empty_graph() -> GenGraph {
         sequence_end: 0,
     });
     g
-}
-
-/// Parses a string with markdown-like asterisk syntax for highlighting.
-/// Segments surrounded by '*' are styled with `highlight_style`.
-/// Other segments are styled with `default_style`.
-fn style_text(text: &str, default_style: Style, highlight_style: Style) -> Line<'_> {
-    let mut spans = Vec::new();
-    let mut is_highlighted = false;
-    for part in text.split('*') {
-        if !part.is_empty() {
-            spans.push(Span::styled(
-                part,
-                if is_highlighted {
-                    highlight_style
-                } else {
-                    default_style
-                },
-            ));
-        }
-        is_highlighted = !is_highlighted;
-    }
-    Line::from(spans)
 }
 
 /// Get the most recent path for a block group and map it to GraphNodes in the current graph
@@ -118,7 +97,9 @@ fn toggle_path_highlight(
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
 ) -> Result<bool, String> {
-    let style = PathStyle::new(color);
+    let style = PathStyle::new(color)
+        .with_line_style(gen_tui::plotter::LineStyle::Bold)
+        .with_merge_glyphs(true);
     // Check if highlighting is already active for this style
     if controller.has_highlight(&style) {
         controller.clear_highlight(&style);
@@ -224,6 +205,8 @@ pub fn view_block_group(
     bar.finish();
 
     // Setup terminal
+    install_tui_panic_hook();
+
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;

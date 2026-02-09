@@ -244,8 +244,8 @@ pub fn show_inline_gen_graph_widget(
                                         get_theme_color("base09")
                                             .expect("Theme should use base16 system"),
                                     )
-                                    .with_line_style(LineStyle::Normal)
-                                    .with_merge_glyphs(false);
+                                    .with_line_style(LineStyle::Bold)
+                                    .with_merge_glyphs(true);
 
                                     if state.controller.has_highlight(&path_style) {
                                         state.controller.clear_highlight(&path_style);
