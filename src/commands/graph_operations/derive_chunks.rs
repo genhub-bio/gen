@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     commands::get_default_collection,
-    graph_operators::{derive_chunks, get_path},
+    graphs::operators::{derive_chunks, get_path},
 };
 
 #[derive(Debug, Error, PartialEq)]

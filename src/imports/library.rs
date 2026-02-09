@@ -13,7 +13,7 @@ use gen_models::{
 };
 use thiserror::Error;
 
-use crate::combinatorial_library::{
+use crate::graphs::combinatorial_library::{
     CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
     parse_library,
 };

@@ -10,7 +10,7 @@ use gen_models::{
 use noodles::core::Region;
 use thiserror::Error;
 
-use crate::{commands::get_default_collection, graph_operators::derive_chunks};
+use crate::{commands::get_default_collection, graphs::operators::derive_chunks};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum DeriveSubgraphOperationError {

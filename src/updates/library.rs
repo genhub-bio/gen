@@ -10,12 +10,12 @@ use gen_models::{
 };
 use thiserror::Error;
 
-use crate::{
+use crate::graphs::{
     combinatorial_library::{
         CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
         parse_library,
     },
-    graph_operators::{GraphOperationError, derive_chunks, make_stitch},
+    operators::{GraphOperationError, derive_chunks, make_stitch},
 };
 
 #[derive(Error, Debug)]

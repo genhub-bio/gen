@@ -6,20 +6,16 @@ use std::{
 };
 
 use anyhow::Result;
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_models::{
-    block_group::BlockGroup,
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    db::GraphConnection,
-    edge::{Edge, EdgeData},
-    node::Node,
-    path::Path,
-    sequence::Sequence,
-    traits::Query,
+    block_group::BlockGroup, db::GraphConnection, edge::Edge, node::Node, path::Path,
+    sequence::Sequence, traits::Query,
 };
 use itertools::Itertools;
 use noodles::fasta;
 use thiserror::Error;
+
+use crate::graphs::stitch;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SequencePart {
@@ -133,8 +129,10 @@ pub fn create_library(
         sequence_hashes_by_name.insert(part.name.clone(), seq.hash);
     }
 
-    let mut part_nodes_list = vec![];
+    let mut part_nodes_list = vec![vec![PATH_START_NODE_ID]];
     let mut sequence_lengths_by_node_id = HashMap::new();
+    sequence_lengths_by_node_id.insert(PATH_START_NODE_ID, 0);
+
     for (index, parts) in parts_list.iter().enumerate() {
         let mut part_nodes = vec![];
         for part in parts {
@@ -161,88 +159,31 @@ pub fn create_library(
         part_nodes_list.push(part_nodes);
     }
 
-    let mut new_edges = HashSet::new();
-    let start_parts = part_nodes_list.first().ok_or_else(|| {
-        CombinatorialLibraryCreationError::CreationFailed("No parts found.".to_string())
-    })?;
-    for start_part in start_parts {
-        let edge = EdgeData {
-            source_node_id: PATH_START_NODE_ID,
-            source_coordinate: 0,
-            source_strand: Strand::Forward,
-            target_node_id: *start_part,
-            target_coordinate: 0,
-            target_strand: Strand::Forward,
-        };
-        new_edges.insert(edge);
-    }
-
-    let end_parts = part_nodes_list.last().ok_or_else(|| {
-        CombinatorialLibraryCreationError::CreationFailed("No parts found.".to_string())
-    })?;
-    for end_part in end_parts {
-        let end_part_source_coordinate =
-            sequence_lengths_by_node_id.get(end_part).ok_or_else(|| {
-                CombinatorialLibraryCreationError::CreationFailed(format!(
-                    "Part {end_part} missing."
-                ))
-            })?;
-        let edge = EdgeData {
-            source_node_id: *end_part,
-            source_coordinate: *end_part_source_coordinate,
-            source_strand: Strand::Forward,
-            target_node_id: PATH_END_NODE_ID,
-            target_coordinate: 0,
-            target_strand: Strand::Forward,
-        };
-        new_edges.insert(edge);
-    }
+    part_nodes_list.push(vec![PATH_END_NODE_ID]);
+    sequence_lengths_by_node_id.insert(PATH_END_NODE_ID, 0);
 
     let mut path_changes_count = 1;
+    let mut new_edge_ids = vec![];
     for (parts1, parts2) in part_nodes_list.iter().tuple_windows() {
         path_changes_count *= parts1.len();
+        let mut source_coordinates = vec![];
         for part1 in parts1 {
-            for part2 in parts2 {
-                let part1_source_coordinate =
-                    sequence_lengths_by_node_id.get(part1).ok_or_else(|| {
-                        CombinatorialLibraryCreationError::CreationFailed(format!(
-                            "Part {part1} missing."
-                        ))
-                    })?;
-                let edge = EdgeData {
-                    source_node_id: *part1,
-                    source_coordinate: *part1_source_coordinate,
-                    source_strand: Strand::Forward,
-                    target_node_id: *part2,
-                    target_coordinate: 0,
-                    target_strand: Strand::Forward,
-                };
-                new_edges.insert(edge);
-            }
+            let part1_length = sequence_lengths_by_node_id.get(part1).ok_or_else(|| {
+                CombinatorialLibraryCreationError::CreationFailed(format!("Part {part1} missing."))
+            })?;
+            source_coordinates.push(*part1_length);
         }
+
+        new_edge_ids.extend(stitch(
+            conn,
+            parts1,
+            source_coordinates,
+            parts2,
+            block_group.id,
+        ));
     }
 
-    path_changes_count *= end_parts.len();
-
-    let new_edge_ids = Edge::bulk_create(conn, &new_edges.iter().cloned().collect::<Vec<_>>());
-
-    let new_block_group_edges = new_edge_ids
-        .iter()
-        .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: block_group.id,
-            edge_id: *edge_id,
-            chromosome_index: edge_id.extract_digits(), // TODO: This is a hack, clean it up with phase layers
-            phased: 0,
-        })
-        .collect::<Vec<_>>();
-    BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-
-    let mut path_node_ids = vec![];
-    path_node_ids.push(PATH_START_NODE_ID);
-    for parts in &part_nodes_list {
-        path_node_ids.push(parts[0]);
-    }
-    path_node_ids.push(PATH_END_NODE_ID);
+    let path_node_ids: Vec<_> = part_nodes_list.iter().map(|parts| parts[0]).collect();
 
     let new_edges = Edge::query_by_ids(conn, &new_edge_ids);
     let new_edge_ids_by_source_and_target_node = new_edges

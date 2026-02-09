@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{
     commands::get_default_collection,
-    graph_operators::{GraphOperationError, make_stitch},
+    graphs::operators::{GraphOperationError, make_stitch},
 };
 
 #[derive(Debug, Error, PartialEq)]
