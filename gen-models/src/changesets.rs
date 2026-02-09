@@ -923,7 +923,7 @@ pub fn apply_changeset(
     }
 
     for annotation in &changeset.annotations {
-        Annotation::create(
+        Annotation::get_or_create(
             conn,
             &annotation.name,
             &annotation.group,

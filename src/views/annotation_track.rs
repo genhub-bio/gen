@@ -104,6 +104,7 @@ impl<'a> Viewer<'a> {
                     continue;
                 }
 
+                // We do the swap here to ensure seg_x1 is always the left bound, and seg_x2 is always right bound
                 let relative_start =
                     (overlap_start - block.sequence_start) as f64 / node_len as f64;
                 let relative_end = (overlap_end - block.sequence_start) as f64 / node_len as f64;
