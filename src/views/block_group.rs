@@ -27,8 +27,7 @@ use crate::{
     views::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
-            create_gen_graph_widget,
+            GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
     },
 };
@@ -217,9 +216,6 @@ pub fn view_block_group(
 
     let mut graph_controller = create_gen_graph_controller(&block_graph);
 
-    // Create a renderer for path highlighting functionality
-    let _renderer = GenGraphNodeRenderer::new(conn);
-
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if origin.is_some() {
         warn!("Origin positioning not yet supported in GenGraphWidget");
@@ -381,17 +377,7 @@ pub fn view_block_group(
                 frame.render_widget(Clear, canvas_area); // Clear the canvas area first
                 frame.render_widget(loading_para, loading_area);
             } else {
-                // Set focus for the canvas area
                 graph_controller.viewport_state.focus();
-                // graph_controller.force_update
-
-                // // Ensure viewport is ready: loads partitions and rebuilds viewport graph if needed
-                // graph_controller.ensure_camera_coverage();
-                // if graph_controller.rebuild_needed {
-                //     graph_controller.rebuild_viewport_graph();
-                // }
-
-                // Render the GenGraphWidget with cursor enabled and canvas background
                 let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
                 let widget = create_gen_graph_widget(conn)
                     .detail_level(graph_controller.get_detail_level())

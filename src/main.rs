@@ -25,9 +25,8 @@ use r#gen::{
     patch, track_database, translate,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, diff::view_diff,
-        inline_gen_graph_widget::show_inline_gen_graph_widget, operations::view_operations,
-        patch::view_patches,
+        block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
+        diff::view_diff, operations::view_operations, patch::view_patches,
     },
 };
 use gen_core::config::Workspace;
