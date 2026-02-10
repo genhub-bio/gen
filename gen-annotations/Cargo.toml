@@ -1,0 +1,11 @@
+[package]
+name = "gen-annotations"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gen-core = { path = "../gen-core" }
+gen-graph = { path = "../gen-graph" }
+gen-models = { path = "../gen-models" }
+interavl = "0.3.0"
+noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }

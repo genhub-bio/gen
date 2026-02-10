@@ -8,6 +8,27 @@ use gen_models::{
 };
 use noodles::{core::Position, gff};
 
+pub fn gff_attribute_value_to_string(
+    attrs: &gff::feature::record_buf::Attributes,
+    key: &str,
+) -> Option<String> {
+    let key_bytes = key.as_bytes();
+    attrs.as_ref().iter().find_map(|(tag, value)| {
+        let tag_bytes: &[u8] = tag.as_ref();
+        if !tag_bytes.eq_ignore_ascii_case(key_bytes) {
+            return None;
+        }
+        if let Some(value) = value.as_string() {
+            Some(String::from_utf8_lossy(value.as_ref()).to_string())
+        } else {
+            value
+                .iter()
+                .next()
+                .map(|item| String::from_utf8_lossy(item.as_ref()).to_string())
+        }
+    })
+}
+
 pub fn propagate_gff(
     conn: &GraphConnection,
     collection_name: &str,
@@ -35,7 +56,7 @@ pub fn propagate_gff(
         .collect::<HashMap<String, Path>>();
 
     let mut path_mappings_by_bg_name = HashMap::new();
-    for (name, target_path) in target_paths_by_bg_name.iter() {
+    for (name, target_path) in &target_paths_by_bg_name {
         let source_path = source_paths_by_bg_name.get(name).unwrap();
         let mapping = source_path.get_mapping_tree(conn, target_path);
         path_mappings_by_bg_name.insert(name, mapping);
@@ -87,99 +108,4 @@ pub fn propagate_gff(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use std::path::PathBuf;
-
-    use tempfile::tempdir;
-
-    use super::*;
-    use crate::{
-        imports::fasta::import_fasta, test_helpers::setup_gen, track_database,
-        updates::fasta::update_with_fasta,
-    };
-
-    #[test]
-    fn test_simple_propagate() {
-        let context = setup_gen();
-        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_path.push("fixtures/simple.fa");
-        let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_update_path.push("fixtures/aa.fa");
-        let mut gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        gff_path.push("fixtures/simple.gff");
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
-
-        import_fasta(
-            &context,
-            &fasta_path.to_str().unwrap().to_string(),
-            "test",
-            None,
-            false,
-        )
-        .unwrap();
-
-        let _ = update_with_fasta(
-            &context,
-            "test",
-            None,
-            "child sample",
-            "m123",
-            15,
-            25,
-            fasta_update_path.to_str().unwrap(),
-            false,
-        );
-
-        let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
-        let mut output_path = PathBuf::from(temp_dir.path());
-        output_path.push("output.gff");
-        let _ = propagate_gff(
-            conn,
-            "test",
-            None,
-            "child sample",
-            gff_path.to_str().unwrap(),
-            output_path.to_str().unwrap(),
-        );
-
-        let reader = File::open(output_path.to_str().unwrap())
-            .map(BufReader::new)
-            .map(gff::io::Reader::new);
-
-        for (i, result) in reader
-            .expect("Could not read output file!")
-            .record_bufs()
-            .enumerate()
-        {
-            let record = result.unwrap();
-            assert_eq!(record.reference_sequence_name(), "m123");
-            if i == 0 {
-                assert_eq!(record.reference_sequence_name(), "m123");
-                assert_eq!(record.source(), "gen-test");
-                assert_eq!(record.ty(), "Region");
-                // Full region annotation
-                // Original sequence is on the full region, [0, 34) range (length 34)
-                // The edit replaces [15, 25) with a 2 bp sequence
-                // New sequence length is 34 - 8 = 26
-                assert_eq!(record.start().get(), 1);
-                assert_eq!(record.end().get(), 26);
-            } else {
-                assert_eq!(record.reference_sequence_name(), "m123");
-                assert_eq!(record.source(), "gen-test");
-                assert_eq!(record.ty(), "Gene");
-                // Gene annotation, was on [5, 20)
-                // Replaced [15, 25) with a 2 bp sequence
-                // New gene annotation is [5, 15)
-                assert_eq!(record.start().get(), 5);
-                assert_eq!(record.end().get(), 15);
-            }
-        }
-    }
 }

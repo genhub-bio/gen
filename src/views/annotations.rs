@@ -6,6 +6,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use gen_annotations::{
+    gff::gff_attribute_value_to_string,
+    translate::{bed::translate_bed, gff::translate_gff},
+};
 use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_models::{
     accession::{Accession, AccessionEdge},
@@ -16,12 +20,9 @@ use gen_models::{
 };
 use noodles::{bed, core::Region, gff, tabix};
 
-use crate::{
-    translate::{bed::translate_bed, gff::translate_gff},
-    views::{
-        annotation_files::AnnotationFileEntry,
-        annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
-    },
+use crate::views::{
+    annotation_files::AnnotationFileEntry,
+    annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
 };
 
 fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
@@ -106,27 +107,6 @@ pub fn load_annotations_for_group(
             }
         })
         .collect())
-}
-
-fn gff_attribute_value_to_string(
-    attrs: &gff::feature::record_buf::Attributes,
-    key: &str,
-) -> Option<String> {
-    let key_bytes = key.as_bytes();
-    attrs.as_ref().iter().find_map(|(tag, value)| {
-        let tag_bytes: &[u8] = tag.as_ref();
-        if !tag_bytes.eq_ignore_ascii_case(key_bytes) {
-            return None;
-        }
-        if let Some(value) = value.as_string() {
-            Some(String::from_utf8_lossy(value.as_ref()).to_string())
-        } else {
-            value
-                .iter()
-                .next()
-                .map(|item| String::from_utf8_lossy(item.as_ref()).to_string())
-        }
-    })
 }
 
 fn build_annotation_spans(
