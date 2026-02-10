@@ -10,7 +10,7 @@ use gen_diff::{
     operations::{BlockGroupDiff, OperationDiff},
 };
 use gen_models::db::GraphConnection;
-use gen_tui::{graph_controller::GraphController, plotter::PathStyle};
+use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -59,7 +59,7 @@ fn apply_diff_highlights(
     component: &DiffComponent,
 ) {
     let style = PathStyle::new(component.highlight_color)
-        .with_line_style(gen_tui::plotter::LineStyle::Bold)
+        .with_line_style(LineStyle::Bold)
         .with_merge_glyphs(true);
     for &node in &component.highlight_nodes {
         controller.set_node_highlight(node, style);

@@ -297,7 +297,6 @@ fn viewport_visual_regression_complex_dag() {
 }
 
 #[test]
-#[ignore]
 fn viewport_multi_partition_boundary_handling() {
     let _ = env_logger::try_init();
     // Create a wide graph that forces multiple partitions to test boundary handling
@@ -367,7 +366,6 @@ fn viewport_visual_regression_extended_complex_dag_layer_partitioning() {
 //            █████ │   █████   │ █████
 //                  ╰───█N5██───╯
 //                      █████
-#[ignore]
 #[test]
 fn viewport_visual_regression_extended_complex_dag_node_partitioning() {
     let _ = env_logger::try_init();
@@ -667,7 +665,6 @@ fn test_skip_layer_partition_boundary() {
 }
 
 #[test]
-#[ignore]
 fn test_skip_layer_terminal_stitch_edge_bundles() {
     let _ = env_logger::try_init();
 
@@ -729,17 +726,16 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
     println!("Total edges in viewport graph: {}", total_edges);
     println!("Edges without bundles: {}", edges_without_bundles);
 
-    // There should be exactly 1 edge without bundles (from terminal stitch nodes)
-    // Note: Previously there were 2, but the fix for layer-skipping edges now properly
-    // labels routing edges, so only the actual stitch edges remain unlabeled
+    // After filtering out edges with empty bundles in viewport_graph.rs,
+    // there should be 0 edges without bundles in the viewport graph
     assert_eq!(
-        edges_without_bundles, 1,
-        "Expected exactly 1 edge without bundles (from terminal stitch nodes), but found {}",
+        edges_without_bundles, 0,
+        "Expected 0 edges without bundles (they should be filtered out at viewport graph creation), but found {}",
         edges_without_bundles
     );
 
     println!(
-        "Test completed successfully - found exactly 1 unbundled edge from terminal stitch nodes"
+        "Test completed successfully - no unbundled edges in viewport graph (filtered at creation)"
     );
 }
 

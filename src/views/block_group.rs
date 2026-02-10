@@ -11,7 +11,7 @@ use crossterm::{
 use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use gen_tui::{graph_controller::GraphController, plotter::PathStyle};
+use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
 use ratatui::{
     layout::Constraint,
@@ -98,7 +98,7 @@ fn toggle_path_highlight(
     color: ratatui::style::Color,
 ) -> Result<bool, String> {
     let style = PathStyle::new(color)
-        .with_line_style(gen_tui::plotter::LineStyle::Bold)
+        .with_line_style(LineStyle::Bold)
         .with_merge_glyphs(true);
     // Check if highlighting is already active for this style
     if controller.has_highlight(&style) {

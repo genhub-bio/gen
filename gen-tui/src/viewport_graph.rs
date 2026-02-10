@@ -182,8 +182,10 @@ impl CroppedGraph {
 
                             // Only add edge if both endpoints are non-stitch nodes
                             // Stitch nodes are partition boundary artifacts that shouldn't appear in ViewportGraph
+                            // Also skip edges with empty bundles (terminal edges from stitch to source/sink nodes)
                             if !matches!(source_data.role, NodeRole::Stitch(_))
                                 && !matches!(target_data.role, NodeRole::Stitch(_))
+                                && !edge_data.bundle.is_empty()
                             {
                                 this.merge_edge(
                                     source_world,

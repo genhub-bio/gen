@@ -595,6 +595,26 @@ where
                 "load_partition: loading bridge partition {}",
                 partition_index,
             );
+
+            // Ensure adjacent sections are loaded before trying to build the bridge
+            let (left_section, right_section) = Self::get_adjacent_sections(partition_index);
+            if self.partitions[left_section].layouts[0].is_none() {
+                log::trace!(
+                    "load_partition: loading left section {} for bridge {}",
+                    left_section,
+                    partition_index
+                );
+                self.load_partition(left_section, original_sizer, original_graph, vertex_spacing)?;
+            }
+            if self.partitions[right_section].layouts[0].is_none() {
+                log::trace!(
+                    "load_partition: loading right section {} for bridge {}",
+                    right_section,
+                    partition_index
+                );
+                self.load_partition(right_section, original_sizer, original_graph, vertex_spacing)?;
+            }
+
             for detail_level in [
                 VisualDetail::Minimal,
                 VisualDetail::Full,

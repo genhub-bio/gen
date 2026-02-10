@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use gen_core::{is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::GraphConnection, node::Node};
 use gen_tui::{
@@ -14,6 +15,12 @@ use ratatui::style::Style;
 
 use crate::config::get_theme_color;
 
+/// Labels for special start/end nodes
+pub mod label {
+    pub const START: &str = "Start >";
+    pub const END: &str = "> End";
+}
+
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
 /// based on genomic sequence length.
 pub struct GenGraphNodeSizer;
@@ -21,6 +28,14 @@ pub struct GenGraphNodeSizer;
 impl NodeSizer<&GenGraph> for GenGraphNodeSizer {
     /// Calculate how much screen space a GenGraph node needs based on sequence length and level of detail
     fn get_node_size(&self, node: &GraphNode, detail_level: VisualDetail) -> (u64, u64) {
+        // Handle special start/end nodes with fixed label sizes (always show full label)
+        if is_start_node(node.node_id) {
+            return (label::START.len() as u64, 1u64);
+        }
+        if is_end_node(node.node_id) {
+            return (label::END.len() as u64, 1u64);
+        }
+
         let sequence_length = (node.sequence_end - node.sequence_start) as u64;
         match detail_level {
             VisualDetail::Minimal => (1u64, 1u64), // Just a glyph
@@ -95,6 +110,22 @@ impl NodeRenderer<&GenGraph> for GenGraphNodeRenderer<'_> {
 
         buffer.fill_rect(area, ' ');
         buffer.set_char_styled(area.left_center(), ' ', background_style);
+
+        // Handle special start/end nodes (always show full label)
+        if is_start_node(node_id.node_id) {
+            let edge_style = Style::default()
+                .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
+                .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
+            buffer.set_string_styled(area.left_center(), label::START, edge_style);
+            return;
+        }
+        if is_end_node(node_id.node_id) {
+            let edge_style = Style::default()
+                .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
+                .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
+            buffer.set_string_styled(area.left_center(), label::END, edge_style);
+            return;
+        }
 
         match detail_level {
             VisualDetail::Minimal => {

@@ -29,6 +29,8 @@ pub enum LineStyle {
     Normal,
     /// Heavy weight box-drawing characters
     Bold,
+    /// Dashed box-drawing characters
+    Dashed,
 }
 
 /// Style specification for highlighted paths
@@ -290,42 +292,39 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
 {
     // Draw edges first so nodes appear on top
     for (source, target, bundle) in viewport_graph.edges() {
-        // Ommit the edges that don't actually represent an original edge
-        // (edges to/from terminal source/sink nodes)
-        if !bundle.is_empty() {
-            // Check if edge is in any highlighted path
-            // Later highlights in the vector take precedence over earlier ones
-            let highlighted_style = edge_highlights
-                .iter()
-                .filter(|((s, t), _)| {
-                    (*s == source && *t == target) || (*s == target && *t == source)
-                })
-                .map(|(_, style)| *style)
-                .next_back();
+        // Check if edge is in any highlighted path
+        // Later highlights in the vector take precedence over earlier ones
+        let highlighted_style = edge_highlights
+            .iter()
+            .filter(|((s, t), _)| (*s == source && *t == target) || (*s == target && *t == source))
+            .map(|(_, style)| *style)
+            .next_back();
 
-            if let Some(style) = highlighted_style {
-                let edge_color = match style.color {
-                    Color::Reset => {
-                        // Brighten the edge color instead of tinting
-                        let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.2);
-                        brightened
-                    }
-                    _ => {
-                        // Compute tinted colors as they would be applied to nodes
-                        let (_, tinted_bg) =
-                            tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
-                        // Use the tinted bg as the edge fg color
-                        tinted_bg
-                    }
-                };
-                match style.line_style {
-                    LineStyle::Normal => draw_edge(buffer, source, target, edge_color),
-                    LineStyle::Bold => draw_bold_edge(buffer, source, target, edge_color),
+        if let Some(style) = highlighted_style {
+            let edge_color = match style.color {
+                Color::Reset => {
+                    // Brighten the edge color instead of tinting
+                    let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.2);
+                    brightened
                 }
-            } else {
-                let color = theme.edge_fg;
-                draw_edge(buffer, source, target, color);
-            }
+                _ => {
+                    // Compute tinted colors as they would be applied to nodes
+                    let (_, tinted_bg) =
+                        tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
+                    // Use the tinted bg as the edge fg color
+                    tinted_bg
+                }
+            };
+            draw_edge_with_style(buffer, source, target, edge_color, style.line_style);
+        } else if !bundle.is_empty() {
+            // Normal edge with data
+            let color = theme.edge_fg;
+            draw_edge_with_style(buffer, source, target, color, LineStyle::Normal);
+        } else {
+            // Edges that don't actually represent an original edge
+            // (edges to/from terminal source/sink nodes) - draw with dashed lines
+            let color = theme.edge_fg;
+            draw_edge_with_style(buffer, source, target, color, LineStyle::Dashed);
         }
     }
 
@@ -408,6 +407,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         let high_char = match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
                             LineStyle::Bold => high_glyph.heavy_glyph(),
+                            LineStyle::Dashed => high_glyph.dashed_glyph(),
                         };
                         MergeStrategy::Fuzzy
                             .merge(&base_glyph.glyph().to_string(), &high_char.to_string())
@@ -419,6 +419,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
                             LineStyle::Bold => high_glyph.heavy_glyph(),
+                            LineStyle::Dashed => high_glyph.dashed_glyph(),
                         }
                     }
                 } else {
@@ -476,20 +477,20 @@ fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> Junct
 }
 
 /// Draw a rectilinear edge between two world positions (horizontal or vertical only),
-/// optionally using heavy box-drawing characters.
-fn draw_edge_with_weight(
+/// using the specified line style for box-drawing characters.
+fn draw_edge_with_style(
     buffer: &mut WorldBuffer,
     source: WorldPos,
     target: WorldPos,
     color: Color,
-    heavy: bool,
+    line_style: LineStyle,
 ) {
     let style = Style::default().fg(color);
 
-    let (v_ch, h_ch) = if heavy {
-        ('┃', '━')
-    } else {
-        ('│', '─')
+    let (v_ch, h_ch) = match line_style {
+        LineStyle::Normal => ('│', '─'),
+        LineStyle::Bold => ('┃', '━'),
+        LineStyle::Dashed => ('┆', '┄'),
     };
 
     if source.x == target.x {
@@ -515,22 +516,12 @@ fn draw_edge_with_weight(
             let pos = WorldPos::new(x, source.y);
 
             // Don't overwrite a vertical line with a horizontal one.
-            // Vertical edges take priority at crossings (both normal and heavy).
-            if !matches!(buffer.get_char(pos), Some('│') | Some('┃')) {
+            // Vertical edges take priority at crossings (normal, heavy, and dashed).
+            if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┆')) {
                 buffer.set_char_styled(pos, h_ch, style);
             }
         }
     }
-}
-
-/// Draw a rectilinear edge using normal-weight box-drawing characters.
-fn draw_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, color: Color) {
-    draw_edge_with_weight(buffer, source, target, color, false);
-}
-
-/// Draw a rectilinear edge using heavy-weight box-drawing characters.
-fn draw_bold_edge(buffer: &mut WorldBuffer, source: WorldPos, target: WorldPos, color: Color) {
-    draw_edge_with_weight(buffer, source, target, color, true);
 }
 
 /// Render any graph widget to string representation using TestBackend

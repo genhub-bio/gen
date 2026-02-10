@@ -82,6 +82,26 @@ impl JunctionSymbol {
         '├', // 1110 NES_
         '┼', // 1111 NESW
     ];
+    /// Dashed box-drawing characters for routing nodes
+    /// Index: 4-bit value where bits represent [North, East, South, West]
+    const DASHED_ROUTING_GLYPHS: [char; 16] = [
+        '?', // 0000 ____
+        '╴', // 0001 ___W
+        '╷', // 0010 __S_
+        '╮', // 0011 __SW
+        '╶', // 0100 _E__
+        '┄', // 0101 _E_W (light triple dash horizontal)
+        '╭', // 0110 _ES_
+        '┬', // 0111 _ESW
+        '╵', // 1000 N___
+        '╯', // 1001 N__W
+        '┆', // 1010 N_S_ (light triple dash vertical)
+        '┤', // 1011 N_SW
+        '╰', // 1100 NE__
+        '┴', // 1101 NE_W
+        '├', // 1110 NES_
+        '┼', // 1111 NESW
+    ];
 
     /// Get the routing glyph character for this index
     pub fn glyph(&self) -> char {
@@ -94,6 +114,14 @@ impl JunctionSymbol {
     /// Get the heavy routing glyph character for this index
     pub fn heavy_glyph(&self) -> char {
         Self::HEAVY_ROUTING_GLYPHS
+            .get(self.index as usize)
+            .copied()
+            .unwrap_or('?')
+    }
+
+    /// Get the dashed routing glyph character for this index
+    pub fn dashed_glyph(&self) -> char {
+        Self::DASHED_ROUTING_GLYPHS
             .get(self.index as usize)
             .copied()
             .unwrap_or('?')
