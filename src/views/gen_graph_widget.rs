@@ -17,8 +17,8 @@ use crate::config::get_theme_color;
 
 /// Labels for special start/end nodes
 pub mod label {
-    pub const START: &str = "Start >";
-    pub const END: &str = "> End";
+    pub const START: &str = "start╟";
+    pub const END: &str = "╢end";
 }
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
@@ -30,10 +30,10 @@ impl NodeSizer<&GenGraph> for GenGraphNodeSizer {
     fn get_node_size(&self, node: &GraphNode, detail_level: VisualDetail) -> (u64, u64) {
         // Handle special start/end nodes with fixed label sizes (always show full label)
         if is_start_node(node.node_id) {
-            return (label::START.len() as u64, 1u64);
+            return (label::START.chars().count() as u64, 1u64);
         }
         if is_end_node(node.node_id) {
-            return (label::END.len() as u64, 1u64);
+            return (label::END.chars().count() as u64, 1u64);
         }
 
         let sequence_length = (node.sequence_end - node.sequence_start) as u64;

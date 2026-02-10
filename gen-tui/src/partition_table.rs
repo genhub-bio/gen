@@ -327,152 +327,134 @@ where
         // these are used to align the partitions with each other.
         // If we had to break outside of an articulation point, we don't add
         // more stitching nodes, but instead hook up more edges to the same stitch node.
+        // Note: LeftStitch nodes are only created from the second partition (partition_idx >= 2)
+        // RightStitch nodes are created up to but not including the last partition
         for (partition_idx, partition) in all_partitions.iter_mut().enumerate().step_by(2) {
-            // Add Left Stitching node
-            let left_stitch_idx = partition
-                .graph
-                .add_node(PartitionNode::Stitch(StitchSide::Left));
-            partition.left_stitch_idx = Some(left_stitch_idx);
+            // Add Left Stitching node only if this is not the first partition
+            if partition_idx >= 2 {
+                let left_stitch_idx = partition
+                    .graph
+                    .add_node(PartitionNode::Stitch(StitchSide::Left));
+                partition.left_stitch_idx = Some(left_stitch_idx);
 
-            // Collect all data nodes with their domain indices
-            let data_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
-                .graph
-                .node_indices()
-                .filter(|&node_idx| {
-                    matches!(
-                        partition.graph.node_weight(node_idx),
-                        Some(PartitionNode::Data(_))
-                    )
-                })
-                .map(|node_idx| {
-                    let PartitionNode::Data(domain_idx) =
-                        partition.graph.node_weight(node_idx).unwrap()
-                    else {
-                        unreachable!()
-                    };
-                    (node_idx, *domain_idx)
-                })
-                .collect();
-
-            for (node_idx, domain_idx) in data_nodes {
-                // Find all incoming inter-partition edges to this domain node
-                let bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = inter_partition_edges
-                    .iter()
-                    // Keep only edges that belong to the current target partition
-                    .filter(|((_, tgt_partition), _)| *tgt_partition == partition_idx)
-                    // Expand the list of edges for each matching partition
-                    .flat_map(|(_, edges)| edges.iter())
-                    // Keep only edges whose target node matches the domain index
-                    .filter(|(_, tgt, _)| *tgt == domain_idx)
-                    // Convert to (source, target) pairs
-                    .map(|(src, tgt, _)| (*src, *tgt))
+                // Collect all data nodes with their domain indices
+                let data_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
+                    .graph
+                    .node_indices()
+                    .filter(|&node_idx| {
+                        matches!(
+                            partition.graph.node_weight(node_idx),
+                            Some(PartitionNode::Data(_))
+                        )
+                    })
+                    .map(|node_idx| {
+                        let PartitionNode::Data(domain_idx) =
+                            partition.graph.node_weight(node_idx).unwrap()
+                        else {
+                            unreachable!()
+                        };
+                        (node_idx, *domain_idx)
+                    })
                     .collect();
 
-                // Check if node has any intra-partition incoming edges
-                let has_intra_partition_incoming = partition
-                    .graph
-                    .neighbors_directed(node_idx, petgraph::Direction::Incoming)
-                    .next()
-                    .is_some();
+                for (node_idx, domain_idx) in data_nodes {
+                    // Find all incoming inter-partition edges to this domain node
+                    let bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = inter_partition_edges
+                        .iter()
+                        // Keep only edges that belong to the current target partition
+                        .filter(|((_, tgt_partition), _)| *tgt_partition == partition_idx)
+                        // Expand the list of edges for each matching partition
+                        .flat_map(|(_, edges)| edges.iter())
+                        // Keep only edges whose target node matches the domain index
+                        .filter(|(_, tgt, _)| *tgt == domain_idx)
+                        // Convert to (source, target) pairs
+                        .map(|(src, tgt, _)| (*src, *tgt))
+                        .collect();
 
-                // Connect to left stitch if:
-                // 1. Node has inter-partition incoming edges, OR
-                // 2. Node has no intra-partition incoming edges (is a source node)
-                if !bundles.is_empty() {
-                    // Has inter-partition edges - add one edge per bundle
-                    for bundle in bundles {
-                        log::trace!(
-                            "connecting left_stitch {:?} -> node {:?} with bundle {:?}",
-                            left_stitch_idx,
-                            node_idx,
-                            bundle
-                        );
-                        partition
-                            .graph
-                            .add_edge(left_stitch_idx, node_idx, Some(bundle));
+                    // Connect to left stitch only if node has actual inter-partition connections
+                    // Do NOT connect terminal nodes (sources with no incoming edges)
+                    if !bundles.is_empty() {
+                        // Has inter-partition edges - add one edge per bundle
+                        for bundle in bundles {
+                            log::trace!(
+                                "connecting left_stitch {:?} -> node {:?} with bundle {:?}",
+                                left_stitch_idx,
+                                node_idx,
+                                bundle
+                            );
+                            partition
+                                .graph
+                                .add_edge(left_stitch_idx, node_idx, Some(bundle));
+                        }
                     }
-                } else if !has_intra_partition_incoming {
-                    // Source node with no inter-partition edges
-                    log::trace!(
-                        "connecting left_stitch {:?} -> node {:?} with no bundle",
-                        left_stitch_idx,
-                        node_idx,
-                    );
-                    partition.graph.add_edge(left_stitch_idx, node_idx, None);
+                    // Terminal source nodes are now allowed to dangle - no connection to left stitch
                 }
             }
 
-            // Add Right Stitching node
-            let right_stitch_idx = partition
-                .graph
-                .add_node(PartitionNode::Stitch(StitchSide::Right));
-            partition.right_stitch_idx = Some(right_stitch_idx);
+            // Add Right Stitching node only if this is not the last partition
+            let last_section_idx = if num_partitions > 0 {
+                (num_partitions - 1).div_ceil(2).saturating_sub(1)
+            } else {
+                0
+            };
+            let current_section_idx = partition_idx / 2;
+            if current_section_idx < last_section_idx {
+                let right_stitch_idx = partition
+                    .graph
+                    .add_node(PartitionNode::Stitch(StitchSide::Right));
+                partition.right_stitch_idx = Some(right_stitch_idx);
 
-            // Collect all data nodes with their domain indices
-            let data_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
-                .graph
-                .node_indices()
-                .filter(|&node_idx| {
-                    matches!(
-                        partition.graph.node_weight(node_idx),
-                        Some(PartitionNode::Data(_))
-                    )
-                })
-                .map(|node_idx| {
-                    let PartitionNode::Data(domain_idx) =
-                        partition.graph.node_weight(node_idx).unwrap()
-                    else {
-                        unreachable!()
-                    };
-                    (node_idx, *domain_idx)
-                })
-                .collect();
-
-            for (node_idx, domain_idx) in data_nodes {
-                // Find all outgoing inter-partition edges from this domain node
-                let bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = inter_partition_edges
-                    .iter()
-                    // Keep only edges from the current partition
-                    .filter(|((src_partition, _), _)| *src_partition == partition_idx)
-                    // Expand the list of edges for each matching partition
-                    .flat_map(|(_, edges)| edges.iter())
-                    // Keep only edges whose source node matches the domain index
-                    .filter(|(src, _, _)| *src == domain_idx)
-                    // Convert to (source, target) pairs
-                    .map(|(src, tgt, _)| (*src, *tgt))
+                // Collect all data nodes with their domain indices
+                let data_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
+                    .graph
+                    .node_indices()
+                    .filter(|&node_idx| {
+                        matches!(
+                            partition.graph.node_weight(node_idx),
+                            Some(PartitionNode::Data(_))
+                        )
+                    })
+                    .map(|node_idx| {
+                        let PartitionNode::Data(domain_idx) =
+                            partition.graph.node_weight(node_idx).unwrap()
+                        else {
+                            unreachable!()
+                        };
+                        (node_idx, *domain_idx)
+                    })
                     .collect();
 
-                // Check if node has any intra-partition outgoing edges
-                let has_intra_partition_outgoing = partition
-                    .graph
-                    .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
-                    .next()
-                    .is_some();
+                for (node_idx, domain_idx) in data_nodes {
+                    // Find all outgoing inter-partition edges from this domain node
+                    let bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = inter_partition_edges
+                        .iter()
+                        // Keep only edges from the current partition
+                        .filter(|((src_partition, _), _)| *src_partition == partition_idx)
+                        // Expand the list of edges for each matching partition
+                        .flat_map(|(_, edges)| edges.iter())
+                        // Keep only edges whose source node matches the domain index
+                        .filter(|(src, _, _)| *src == domain_idx)
+                        // Convert to (source, target) pairs
+                        .map(|(src, tgt, _)| (*src, *tgt))
+                        .collect();
 
-                // Connect to right stitch if:
-                // 1. Node has inter-partition outgoing edges, OR
-                // 2. Node has no intra-partition outgoing edges (is a sink node)
-                if !bundles.is_empty() {
-                    // Has inter-partition edges - add one edge per bundle
-                    for bundle in bundles {
-                        log::trace!(
-                            "connecting node {:?} -> right_stitch {:?} with bundle {:?}",
-                            node_idx,
-                            right_stitch_idx,
-                            bundle
-                        );
-                        partition
-                            .graph
-                            .add_edge(node_idx, right_stitch_idx, Some(bundle));
+                    // Connect to right stitch only if node has actual inter-partition connections
+                    // Do NOT connect terminal nodes (sinks with no outgoing edges)
+                    if !bundles.is_empty() {
+                        // Has inter-partition edges - add one edge per bundle
+                        for bundle in bundles {
+                            log::trace!(
+                                "connecting node {:?} -> right_stitch {:?} with bundle {:?}",
+                                node_idx,
+                                right_stitch_idx,
+                                bundle
+                            );
+                            partition
+                                .graph
+                                .add_edge(node_idx, right_stitch_idx, Some(bundle));
+                        }
                     }
-                } else if !has_intra_partition_outgoing {
-                    // Sink node with no inter-partition edges
-                    log::trace!(
-                        "connecting node {:?} -> right_stitch {:?} with no bundle",
-                        node_idx,
-                        right_stitch_idx,
-                    );
-                    partition.graph.add_edge(node_idx, right_stitch_idx, None);
+                    // Terminal sink nodes are now allowed to dangle - no connection to right stitch
                 }
             }
         }
@@ -612,7 +594,12 @@ where
                     right_section,
                     partition_index
                 );
-                self.load_partition(right_section, original_sizer, original_graph, vertex_spacing)?;
+                self.load_partition(
+                    right_section,
+                    original_sizer,
+                    original_graph,
+                    vertex_spacing,
+                )?;
             }
 
             for detail_level in [

@@ -523,10 +523,11 @@ where
         trace!("Cursor placed: viewport={:?}", desired_viewport_pos);
     }
 
-    /// Associate cursor with default node (node closest to origin).
-    /// Call this only if no node has been explicitly set.
+    /// Associate cursor with default node using spatial fallback.
+    /// This method works robustly without relying on stitch nodes or specific graph connectivity.
+    /// It scans the loaded viewport layout for any valid Data node and selects the best candidate.
     pub fn associate_cursor(&mut self) {
-        // Find the node closest to partition origin (0, 0) and associate cursor with it
+        // Try to find node closest to origin first (for backward compatibility)
         if let Some(node_idx) = self.find_node_closest_to_origin() {
             // Set cursor to track this node at fractional (0.0, 0.5) = left edge, vertical middle
             self.cursor.set_node(node_idx, (0.0, 0.5));
@@ -534,8 +535,18 @@ where
                 "Cursor associated: node={:?}, fractional=(0.0, 0.5)",
                 node_idx
             );
+            return;
+        }
+
+        // Spatial fallback: scan loaded viewport layout for any valid Data node
+        if let Some(node_idx) = self.find_any_viewport_node() {
+            self.cursor.set_node(node_idx, (0.0, 0.5));
+            trace!(
+                "Cursor associated via spatial fallback: node={:?}, fractional=(0.0, 0.5)",
+                node_idx
+            );
         } else {
-            trace!("Warning: No data nodes found in anchor partition for cursor association");
+            trace!("Warning: No data nodes found in any loaded partition for cursor association");
         }
     }
 
@@ -579,6 +590,33 @@ where
         candidates.sort_by_key(|(_, dist)| *dist);
 
         // Return the closest node
+        candidates.first().map(|(idx, _)| *idx)
+    }
+
+    /// Find any available data node in current viewport using spatial search.
+    /// This works for disconnected graphs and single-node partitions by selecting
+    /// the data node closest to the top-left of what's currently being rendered.
+    fn find_any_viewport_node(&self) -> Option<NodeIndex> {
+        // Collect all data nodes from the current viewport graph with their world positions
+        let mut candidates: Vec<(NodeIndex, (i64, i64))> = Vec::new();
+
+        for (&world_pos, layout_node) in &self.viewport_graph.node_data_by_pos {
+            // Filter for Data nodes only (stitch nodes are already excluded from viewport_graph)
+            if let NodeRole::Data(domain_idx) = &layout_node.role {
+                candidates.push((*domain_idx, (world_pos.x, world_pos.y)));
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Find node closest to top-left (smallest x, then smallest y)
+        // This ensures a consistent, predictable choice for single-node or simple graphs
+        candidates.sort_by(|a, b| {
+            a.1.cmp(&b.1) // Compare (x, y) tuples lexicographically
+        });
+
         candidates.first().map(|(idx, _)| *idx)
     }
 
@@ -760,7 +798,59 @@ where
 
             WorldPos::new(cursor_x, cursor_y)
         } else {
-            return Err("Cursor has no node association".to_string());
+            // Spatial fallback: try to find any available node in loaded partitions
+            if let Some(node_idx) = self.find_any_viewport_node() {
+                trace!("rebuild_viewport_graph: using spatial fallback for cursor positioning");
+
+                // Associate cursor with this node for future use
+                self.cursor.set_node(node_idx, (0.0, 0.5));
+
+                // Get the anchor partition's layout (cursor_partition should be anchor)
+                let layout = self
+                    .partition_controller
+                    .partition_table
+                    .get_layout(cursor_partition, detail_level)
+                    .ok_or("Anchor partition layout not available")?;
+
+                // Find the node in the layout
+                let layout_node = layout
+                    .graph
+                    .node_indices()
+                    .find_map(|layout_idx| {
+                        let node = layout.graph.node_weight(layout_idx)?;
+                        if let NodeRole::Data(domain_idx) = &node.role
+                            && *domain_idx == node_idx
+                        {
+                            Some(node)
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or("Fallback node not found in anchor partition layout")?;
+
+                // Get node center and size
+                let node_center = layout_node.pos;
+                let (width, height) = layout_node.size;
+
+                // Calculate world position from fractional offset
+                let half_width = (width as i64 - 1) / 2;
+                let half_height = (height as i64 - 1) / 2;
+                let wo_x = node_center.x - half_width;
+                let wo_y = node_center.y - half_height;
+
+                let span_x = width.saturating_sub(1);
+                let span_y = height.saturating_sub(1);
+
+                let (frac_x, frac_y) = self.cursor.fractional_pos();
+                let cursor_x = wo_x + (frac_x * span_x as f64).round() as i64;
+                let cursor_y = wo_y + (frac_y * span_y as f64).round() as i64;
+
+                WorldPos::new(cursor_x, cursor_y)
+            } else {
+                // No nodes available at all - use world origin as fallback
+                trace!("rebuild_viewport_graph: no nodes available, using world origin");
+                WorldPos::ZERO
+            }
         };
 
         trace!(
