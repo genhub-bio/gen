@@ -1380,6 +1380,8 @@ dependencies = [
  "gen-models",
  "interavl",
  "noodles",
+ "rusqlite",
+ "tempfile",
 ]
 
 [[package]]

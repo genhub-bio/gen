@@ -9,3 +9,7 @@ gen-graph = { path = "../gen-graph" }
 gen-models = { path = "../gen-models" }
 interavl = "0.3.0"
 noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.32.1", features = ["array", "bundled"] }
+tempfile = "3.20.0"

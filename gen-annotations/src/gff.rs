@@ -109,3 +109,202 @@ pub fn propagate_gff(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, fs::File, io::BufReader, path::PathBuf};
+
+    use gen_core::{
+        HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
+    };
+    use gen_models::{
+        block_group::{BlockGroup, PathChange},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        collection::Collection,
+        db::GraphConnection,
+        edge::Edge,
+        node::Node,
+        path::Path,
+        sample::Sample,
+        sequence::Sequence,
+        traits::Query,
+    };
+    use noodles::gff;
+    use tempfile::tempdir;
+
+    use super::propagate_gff;
+    use crate::test_helpers::get_connection;
+
+    fn create_block_group(conn: &GraphConnection) {
+        let collection = Collection::create(conn, "test");
+        let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
+        let reference_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence(sequence)
+            .save(conn);
+        let node_id = Node::create(
+            conn,
+            &reference_sequence.hash,
+            &HashId::convert_str(&format!(
+                "{collection}.m123:{hash}",
+                collection = collection.name,
+                hash = reference_sequence.hash
+            )),
+        );
+        let block_group = BlockGroup::create(conn, &collection.name, None, "m123");
+
+        let edge_into = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            node_id,
+            0,
+            Strand::Forward,
+        );
+        let edge_out_of = Edge::create(
+            conn,
+            node_id,
+            reference_sequence.length,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        );
+
+        let new_block_group_edges = vec![
+            BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: edge_into.id,
+                chromosome_index: 0,
+                phased: 0,
+            },
+            BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: edge_out_of.id,
+                chromosome_index: 0,
+                phased: 0,
+            },
+        ];
+
+        BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
+        Path::create(
+            conn,
+            "m123",
+            &block_group.id,
+            &[edge_into.id, edge_out_of.id],
+        );
+    }
+
+    fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
+        Sample::get_or_create(conn, "child sample");
+        let _ = Sample::get_or_create_child(conn, "test", "child sample", None);
+
+        let sample_bg_id = BlockGroup::get_or_create_sample_block_group(
+            conn,
+            "test",
+            "child sample",
+            "m123",
+            None,
+        )
+        .expect("should create child block group");
+        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
+        let tree = sample_path.intervaltree(conn);
+        let replacement_sequence = "AA";
+
+        let replacement = Sequence::new()
+            .sequence_type("DNA")
+            .sequence(replacement_sequence)
+            .save(conn);
+        let node_id = Node::create(
+            conn,
+            &replacement.hash,
+            &HashId::convert_str(&format!(
+                "{path_id}:15-25->{sequence_hash}",
+                path_id = sample_path.id,
+                sequence_hash = replacement.hash,
+            )),
+        );
+        let change = PathChange {
+            block_group_id: sample_bg_id,
+            path: sample_path.clone(),
+            path_accession: None,
+            start: 15,
+            end: 25,
+            block: PathBlock {
+                id: 0,
+                node_id,
+                block_sequence: replacement_sequence.to_string(),
+                sequence_start: 0,
+                sequence_end: replacement_sequence.len() as i64,
+                path_start: 15,
+                path_end: 25,
+                strand: Strand::Forward,
+            },
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: true,
+        };
+
+        BlockGroup::insert_change(conn, &change, &tree)
+            .expect("should apply AA update to child sample");
+
+        let edge_to_insert = Edge::query(
+            conn,
+            "select * from edges where target_node_id = ?1",
+            rusqlite::params![node_id],
+        )[0]
+        .clone();
+        let edge_from_insert = Edge::query(
+            conn,
+            "select * from edges where source_node_id = ?1",
+            rusqlite::params![node_id],
+        )[0]
+        .clone();
+        sample_path.new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert);
+    }
+
+    #[test]
+    fn simple_propagate() {
+        let conn = get_connection();
+        create_block_group(&conn);
+        apply_child_sample_update_from_aa_fasta(&conn);
+
+        let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        let temp_dir = tempdir().expect("should create temp directory");
+        let output_path = temp_dir.path().join("output.gff");
+
+        propagate_gff(
+            &conn,
+            "test",
+            None,
+            "child sample",
+            gff_path.to_str().expect("should convert gff path to UTF-8"),
+            output_path
+                .to_str()
+                .expect("should convert output path to UTF-8"),
+        )
+        .expect("should propagate gff to child sample");
+
+        let mut reader = File::open(output_path)
+            .map(BufReader::new)
+            .map(gff::io::Reader::new)
+            .expect("should read output file");
+
+        for (index, result) in reader.record_bufs().enumerate() {
+            let record = result.expect("should parse output gff record");
+            assert_eq!(record.reference_sequence_name(), "m123");
+            if index == 0 {
+                assert_eq!(record.source(), "gen-test");
+                assert_eq!(record.ty(), "Region");
+                assert_eq!(record.start().get(), 1);
+                assert_eq!(record.end().get(), 26);
+            } else {
+                assert_eq!(record.source(), "gen-test");
+                assert_eq!(record.ty(), "Gene");
+                assert_eq!(record.start().get(), 5);
+                assert_eq!(record.end().get(), 15);
+            }
+        }
+    }
+}

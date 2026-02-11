@@ -87,3 +87,141 @@ where
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::BufReader, path::PathBuf};
+
+    use gen_core::{HashId, PathBlock, Strand};
+    use gen_models::{
+        block_group::{BlockGroup, PathChange},
+        db::GraphConnection,
+        node::Node,
+        sample::Sample,
+        sequence::Sequence,
+    };
+
+    use super::translate_gff;
+    use crate::test_helpers::{get_connection, get_simple_sequence};
+
+    fn apply_foo_variant_from_simple_vcf(conn: &GraphConnection) {
+        Sample::get_or_create(conn, "foo");
+        let _ = Sample::get_or_create_child(conn, "test", "foo", None);
+
+        let sample_bg_id =
+            BlockGroup::get_or_create_sample_block_group(conn, "test", "foo", "m123", None)
+                .expect("should create child block group");
+        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
+        let tree = sample_path.intervaltree(conn);
+
+        let alt_seq = "C";
+
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence(alt_seq)
+            .save(conn);
+        let node_id = Node::create(
+            conn,
+            &sequence.hash,
+            &HashId::convert_str(&format!(
+                "{path_id}:3-4->{sequence_hash}",
+                path_id = sample_path.id,
+                sequence_hash = sequence.hash,
+            )),
+        );
+        let change = PathChange {
+            block_group_id: sample_bg_id,
+            path: sample_path,
+            path_accession: None,
+            start: 3,
+            end: 4,
+            block: PathBlock {
+                id: 0,
+                node_id,
+                block_sequence: alt_seq.to_string(),
+                sequence_start: 0,
+                sequence_end: alt_seq.len() as i64,
+                path_start: 3,
+                path_end: 4,
+                strand: Strand::Forward,
+            },
+            chromosome_index: 0,
+            phased: 0,
+            preserve_edge: false,
+        };
+
+        BlockGroup::insert_change(conn, &change, &tree)
+            .expect("should apply variant change from simple.vcf");
+    }
+
+    #[test]
+    fn translates_coordinates_to_nodes() {
+        let conn = get_connection();
+        let _ = get_simple_sequence(&conn);
+        apply_foo_variant_from_simple_vcf(&conn);
+
+        let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("./fixtures/complex.gff3");
+        let collection = "test".to_string();
+
+        let mut buffer = Vec::new();
+        translate_gff(
+            &conn,
+            &collection,
+            Some("foo"),
+            BufReader::new(File::open(gff_path.clone()).expect("should open fixture gff")),
+            &mut buffer,
+        )
+        .expect("should translate gff for sample foo");
+        let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
+        assert_eq!(
+            results,
+            concat!(
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t1\t3\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t4\t4\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t5\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t1\t3\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t5\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t5\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t4\t4\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t5\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t5\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t4\t4\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t5\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+            )
+        );
+
+        let mut buffer = Vec::new();
+        translate_gff(
+            &conn,
+            &collection,
+            None,
+            BufReader::new(File::open(gff_path).expect("should open fixture gff")),
+            &mut buffer,
+        )
+        .expect("should translate gff for default sample");
+        let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
+        assert_eq!(
+            results,
+            concat!(
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+            )
+        );
+    }
+}

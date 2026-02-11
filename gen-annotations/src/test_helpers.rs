@@ -5,10 +5,19 @@ use gen_models::{
     collection::Collection,
     db::GraphConnection,
     edge::Edge,
+    migrations::run_migrations,
     node::Node,
     path::Path,
     sequence::Sequence,
 };
+use rusqlite::Connection;
+
+pub fn get_connection() -> GraphConnection {
+    let mut conn = Connection::open_in_memory().expect("should open in-memory database");
+    rusqlite::vtab::array::load_module(&conn).expect("should load rarray module");
+    run_migrations(&mut conn);
+    GraphConnection(conn)
+}
 
 pub fn get_simple_sequence(conn: &GraphConnection) -> HashId {
     let collection = Collection::create(conn, "test");
