@@ -15,7 +15,7 @@ use crate::graphs::{
         CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
         parse_library,
     },
-    operators::{GraphOperationError, derive_chunks, make_stitch},
+    operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
 };
 
 #[derive(Error, Debug)]
@@ -88,7 +88,7 @@ pub fn update_with_library(
         });
     }
 
-    derive_chunks(
+    let chunk_block_groups = derive_chunks(
         context,
         collection_name,
         parent_sample_name,
@@ -107,30 +107,29 @@ pub fn update_with_library(
         new_sample_name,
     );
 
-    let path_changes_count =
-        create_library(conn, &intermediate_block_group, new_sample_name, parts_list)?;
+    let path_changes_count = create_library(
+        conn,
+        &intermediate_block_group.id,
+        new_sample_name,
+        parts_list,
+    )?;
 
-    let mut chunk_names = vec![];
-    let mut region_number = 1;
+    let mut block_groups_to_stitch = vec![];
     if start_coordinate > 0 {
-        chunk_names.push(format!("{}.{}", region_name, region_number));
-        region_number = 3;
+        block_groups_to_stitch.push(&chunk_block_groups[0]);
     }
 
-    chunk_names.push(intermediate_block_group.name);
+    block_groups_to_stitch.push(&intermediate_block_group);
 
     if end_coordinate < parent_path.length(conn) {
-        chunk_names.push(format!("{}.{}", region_name, region_number));
+        block_groups_to_stitch.push(&chunk_block_groups[2]);
     }
 
-    let str_chunk_names = chunk_names.iter().map(|n| n.as_str()).collect();
-
-    make_stitch(
+    make_stitch_from_block_groups(
         context,
         collection_name,
-        Some(&intermediate_sample_name),
         new_sample_name,
-        &str_chunk_names,
+        &block_groups_to_stitch,
         new_sample_name,
     )?;
 

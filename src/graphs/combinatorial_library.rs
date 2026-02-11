@@ -8,8 +8,7 @@ use std::{
 use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_models::{
-    block_group::BlockGroup, db::GraphConnection, edge::Edge, node::Node, path::Path,
-    sequence::Sequence, traits::Query,
+    db::GraphConnection, edge::Edge, node::Node, path::Path, sequence::Sequence, traits::Query,
 };
 use itertools::Itertools;
 use noodles::fasta;
@@ -110,7 +109,7 @@ pub fn parse_library(
 
 pub fn create_library(
     conn: &GraphConnection,
-    block_group: &BlockGroup,
+    block_group_id: &HashId,
     library_name: &str,
     parts_list: Vec<Vec<SequencePart>>,
 ) -> Result<u64, CombinatorialLibraryCreationError> {
@@ -179,7 +178,7 @@ pub fn create_library(
             parts1,
             source_coordinates,
             parts2,
-            block_group.id,
+            *block_group_id,
         ));
     }
 
@@ -202,7 +201,7 @@ pub fn create_library(
     Path::create(
         conn,
         format!("{library_name} default path").as_str(),
-        &block_group.id,
+        block_group_id,
         &path_edge_ids,
     );
 
