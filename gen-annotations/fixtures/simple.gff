@@ -1,0 +1,3 @@
+##gff-version 3
+m123	gen-test	Region	1	34	.	+	.	ID=m123_region;Is_circular=false;genome=chromosome;mol_type=genomic DNA
+m123	gen-test	Gene	5	20	.	+	.	ID=gene-a0001;gene_biotype=protein_coding

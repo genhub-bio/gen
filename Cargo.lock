@@ -1331,6 +1331,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "flate2",
  "gb-io",
+ "gen-annotations",
  "gen-core",
  "gen-diff",
  "gen-graph",
@@ -1368,6 +1369,19 @@ dependencies = [
  "url",
  "url-parse",
  "webbrowser",
+]
+
+[[package]]
+name = "gen-annotations"
+version = "0.1.0"
+dependencies = [
+ "gen-core",
+ "gen-graph",
+ "gen-models",
+ "interavl",
+ "noodles",
+ "rusqlite",
+ "tempfile",
 ]
 
 [[package]]
@@ -1420,6 +1434,7 @@ dependencies = [
 name = "gen-models"
 version = "0.1.22"
 dependencies = [
+ "anyhow",
  "cached",
  "capnp",
  "capnpc",

@@ -14,7 +14,6 @@ use std::{
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
-    annotations::{add_annotation, add_annotation_file, gff::propagate_gff},
     commands::{
         Cli, Commands,
         cli_context::CliContext,
@@ -28,16 +27,18 @@ use r#gen::{
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection, operation_management,
     operation_management::{parse_patch_operations, pull, push},
-    patch, track_database, translate,
+    patch, track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::view_block_group, diff::view_diff, operations::view_operations,
         patch::view_patches,
     },
 };
+use gen_annotations::{gff::propagate_gff, translate};
 use gen_core::{HashId, calculate_hash, config::Workspace};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
+    annotations::{add_annotation, add_annotation_file},
     block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},

@@ -1,16 +1,26 @@
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
     edge::Edge,
+    migrations::run_migrations,
     node::Node,
     path::Path,
+    sample::Sample,
     sequence::Sequence,
 };
+use rusqlite::Connection;
 
-pub fn get_simple_sequence(conn: &GraphConnection) -> HashId {
+pub fn get_connection() -> GraphConnection {
+    let mut conn = Connection::open_in_memory().expect("should open in-memory database");
+    rusqlite::vtab::array::load_module(&conn).expect("should load rarray module");
+    run_migrations(&mut conn);
+    GraphConnection(conn)
+}
+
+pub fn setup_test_data(conn: &GraphConnection) {
     let collection = Collection::create(conn, "test");
     let seq1 = Sequence::new()
         .sequence_type("DNA")
@@ -96,5 +106,52 @@ pub fn get_simple_sequence(conn: &GraphConnection) -> HashId {
         &block_group.id,
         &[edge_into.id, middle_edge.id, edge_out_of.id],
     );
-    block_group.id
+
+    Sample::get_or_create(conn, "foo");
+    let _ = Sample::get_or_create_child(conn, "test", "foo", None);
+
+    let sample_bg_id =
+        BlockGroup::get_or_create_sample_block_group(conn, "test", "foo", "m123", None)
+            .expect("should create child block group");
+    let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
+    let tree = sample_path.intervaltree(conn);
+
+    let alt_seq = "C";
+
+    let sequence = Sequence::new()
+        .sequence_type("DNA")
+        .sequence(alt_seq)
+        .save(conn);
+    let node_id = Node::create(
+        conn,
+        &sequence.hash,
+        &HashId::convert_str(&format!(
+            "{path_id}:3-4->{sequence_hash}",
+            path_id = sample_path.id,
+            sequence_hash = sequence.hash,
+        )),
+    );
+    let change = PathChange {
+        block_group_id: sample_bg_id,
+        path: sample_path,
+        path_accession: None,
+        start: 3,
+        end: 4,
+        block: PathBlock {
+            id: 0,
+            node_id,
+            block_sequence: alt_seq.to_string(),
+            sequence_start: 0,
+            sequence_end: alt_seq.len() as i64,
+            path_start: 3,
+            path_end: 4,
+            strand: Strand::Forward,
+        },
+        chromosome_index: 0,
+        phased: 0,
+        preserve_edge: false,
+    };
+
+    BlockGroup::insert_change(conn, &change, &tree)
+        .expect("should apply variant change from simple.vcf");
 }
