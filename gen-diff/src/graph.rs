@@ -1,17 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{
-    HashId, NO_CHROMOSOME_INDEX,
+    is_end_node, is_start_node, is_terminal, HashId,
     Strand::{self, Forward},
-    is_end_node, is_start_node, is_terminal,
+    NO_CHROMOSOME_INDEX,
 };
-use gen_graph::{ConnectBoundaryEdges, GenGraph, GraphEdge, GraphNode, connect_all_boundary_edges};
+use gen_graph::{connect_all_boundary_edges, ConnectBoundaryEdges, GenGraph, GraphEdge, GraphNode};
 use gen_models::{
     block_group_edge::BlockGroupEdge, changesets::ChangesetModels, edge::Edge, node::Node,
     sequence::Sequence, session_operations::DependencyModels,
 };
 use itertools::Itertools;
-use petgraph::{Direction, graphmap::DiGraphMap};
+use petgraph::{graphmap::DiGraphMap, Direction};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct DiffGraphNode {
@@ -309,7 +309,7 @@ pub fn connect_all_boundary_edges_diff(graph: &mut DiffGenGraph) {
 
 #[cfg(test)]
 mod tests {
-    use gen_core::{HashId, NO_CHROMOSOME_INDEX, Strand};
+    use gen_core::{HashId, Strand, NO_CHROMOSOME_INDEX};
     use gen_graph::{GraphEdge, GraphNode};
     use gen_models::{
         block_group::BlockGroup,
@@ -510,6 +510,9 @@ mod tests {
             accessions: vec![],
             accession_edges: vec![],
             accession_paths: vec![],
+            annotation_groups: vec![],
+            annotations: vec![],
+            annotation_group_samples: vec![],
         };
         let mut dependencies = base_dependencies(&start_node, &end_node);
         dependencies.sequences.push(seq.clone());

@@ -16,6 +16,9 @@ enum FileType {
   changeset @5;
   csv @6;
   none @7;
+  gff3 @8;
+  bed @9;
+  tabix @10;
 }
 
 # Core sequence and node models
@@ -197,9 +200,23 @@ struct DatabaseChangeset {
 struct ManifestOperation {
   operation @0 :Operation;
   fileAdditions @1 :List(FileAddition);
+  annotationFileAdditions @4 :List(FileAddition);
+  annotationFileDetails @5 :List(ManifestAnnotationFileAddition);
   operationSummary :union {
     none @2 :Void;
     some @3 :OperationSummary;
+  }
+}
+
+struct ManifestAnnotationFileAddition {
+  fileAddition @0 :FileAddition;
+  name :union {
+    none @1 :Void;
+    some @2 :Text;
+  }
+  indexFileAddition :union {
+    none @3 :Void;
+    some @4 :FileAddition;
   }
 }
 
@@ -218,10 +235,26 @@ struct ManifestDiff {
   missingInManifest1 @1 :List(ManifestOperation);
 }
 
-struct Annotation {
+struct AnnotationInterval {
   name @0 :Text;
   start @1 :Int64;
   end @2 :Int64;
+}
+
+struct Annotation {
+  id @0 :List(UInt8);
+  name @1 :Text;
+  annotationGroup @2 :Text;
+  accessionId @3 :List(UInt8);
+}
+
+struct AnnotationGroupSample {
+  annotationGroup @0 :Text;
+  sampleName @1 :Text;
+}
+
+struct AnnotationGroup {
+  name @0 :Text;
 }
 
 struct ChangesetModels {
@@ -237,6 +270,9 @@ struct ChangesetModels {
   accessions @9 :List(Accession);
   accessionEdges @10 :List(AccessionEdge);
   accessionPaths @11 :List(AccessionPath);
+  annotationGroups @12 :List(AnnotationGroup);
+  annotations @13 :List(Annotation);
+  annotationGroupSamples @14 :List(AnnotationGroupSample);
 }
 
 struct DependencyModels {

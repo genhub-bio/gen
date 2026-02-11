@@ -40,10 +40,13 @@ pub mod viewport_graph;
 // #[cfg(test)]
 // mod partition_bundle_test;
 
+pub use geometry::{WorldPos, WorldRect};
 pub use graph_algorithms::find_articulation_points;
 pub use graph_controller::GraphController;
 pub use graph_widget::GraphWidget;
-pub use layout::{LayoutEdge, LayoutEngine, LayoutNode};
+pub use layout::{LayoutEdge, LayoutEngine, LayoutNode, NodeRole, VisualDetail};
 pub use partition::{PartitionEdge, PartitionNode};
 pub use partition_controller::PartitionController;
 pub use plotter::{LineStyle, PathStyle};
+pub use viewport_graph::CroppedGraph;
+pub use viewport_state::ViewportState;

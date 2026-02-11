@@ -193,6 +193,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                 // User requested upgrade to full TUI
                                 view_block_group(
                                     graph_conn,
+                                    operation_conn,
+                                    &workspace,
                                     graph,
                                     sample,
                                     collection_name,
@@ -216,7 +218,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 // Use the full-screen viewer if --full is specified or no graph is provided
-                view_block_group(graph_conn, graph, sample, collection_name, position)?;
+                view_block_group(
+                    graph_conn,
+                    operation_conn,
+                    &workspace,
+                    graph,
+                    sample,
+                    collection_name,
+                    position,
+                )?;
             }
             Ok(())
         }

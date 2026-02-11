@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     error::Error,
     time::{Duration, Instant},
 };
@@ -8,9 +9,14 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
+use gen_models::{
+    block_group::BlockGroup,
+    db::{GraphConnection, OperationsConnection},
+    node::Node,
+    traits::Query,
+};
 use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
 use ratatui::{
@@ -25,16 +31,28 @@ use crate::{
     config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
+        annotation_track::{AnnotationTrack, annotation_panel_height, draw_annotations_panel},
+        annotations::{
+            AnnotationFileTrackRequest, load_annotation_file_track, load_annotations_for_group,
+        },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
         helpers::{install_tui_panic_hook, style_text},
+        messages::MessageBuffer,
     },
 };
 
 // Frequency by which we check for external updates to the db
 const REFRESH_INTERVAL: u64 = 3; // seconds
+const MESSAGE_BUFFER_LIMIT: usize = 10;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelMode {
+    Details,
+    Messages,
+}
 
 fn get_empty_graph() -> GenGraph {
     let mut g = GenGraph::new();
@@ -114,8 +132,54 @@ fn toggle_path_highlight(
     }
 }
 
+fn visible_ranges_by_node(block_graph: &GenGraph) -> HashMap<HashId, Vec<(i64, i64)>> {
+    let mut ranges_by_node: HashMap<HashId, Vec<(i64, i64)>> = HashMap::new();
+    for node in block_graph.nodes() {
+        if node.sequence_end <= node.sequence_start {
+            continue;
+        }
+        ranges_by_node
+            .entry(node.node_id)
+            .or_default()
+            .push((node.sequence_start, node.sequence_end));
+    }
+    ranges_by_node
+}
+
+/// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
+/// in the current viewport, using the graph controller's viewport graph.
+fn current_view_coordinate_window(
+    controller: &GraphController<&GenGraph, GenGraphNodeSizer>,
+) -> Option<(i64, i64)> {
+    use gen_core::{is_end_node, is_start_node};
+    use petgraph::visit::NodeIndexable;
+
+    let viewport_graph = controller.get_viewport_graph();
+    let graph = controller.graph;
+    let mut start = i64::MAX;
+    let mut end = i64::MIN;
+
+    for (_world_pos, domain_idx, _layout_node) in viewport_graph.data_nodes() {
+        let block = <&GenGraph as NodeIndexable>::from_index(&graph, domain_idx.index());
+        if is_start_node(block.node_id) || is_end_node(block.node_id) {
+            continue;
+        }
+        start = start.min(block.sequence_start);
+        end = end.max(block.sequence_end);
+    }
+
+    (start <= end).then_some((start, end))
+}
+
+fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
+    let span = (window.1 - window.0).max(1);
+    (window.0.saturating_sub(span), window.1.saturating_add(span))
+}
+
 pub fn view_block_group(
     conn: &GraphConnection,
+    op_conn: &OperationsConnection,
+    workspace: &Workspace,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,
@@ -142,7 +206,8 @@ pub fn view_block_group(
     };
 
     // Create explorer and its state that persists across frames
-    let mut explorer = CollectionExplorer::new(conn, collection_name);
+    let mut explorer =
+        CollectionExplorer::new(conn, op_conn, sample_name.as_deref(), collection_name);
     let mut explorer_state = CollectionExplorerState::new();
     if let Some(ref s) = sample_name {
         explorer_state.toggle_sample(s);
@@ -204,6 +269,13 @@ pub fn view_block_group(
 
     bar.finish();
 
+    let mut messages = MessageBuffer::new(MESSAGE_BUFFER_LIMIT);
+    let mut annotation_file_tracks: HashMap<HashId, AnnotationTrack> = HashMap::new();
+    let mut annotation_file_index_available: HashMap<HashId, bool> = HashMap::new();
+    let mut annotation_file_loaded_windows: HashMap<HashId, (i64, i64)> = HashMap::new();
+    let mut annotation_group_tracks: HashMap<String, AnnotationTrack> = HashMap::new();
+    let mut current_block_group = block_group_id.map(|bg_id| BlockGroup::get_by_id(conn, &bg_id));
+
     // Setup terminal
     install_tui_panic_hook();
 
@@ -217,6 +289,7 @@ pub fn view_block_group(
     let mut last_tick = Instant::now();
     let mut last_frame_time = Instant::now();
     let mut show_panel = false;
+    let mut panel_mode = PanelMode::Details;
     let show_sidebar = true;
     let mut tui_layout_change = false;
 
@@ -229,8 +302,20 @@ pub fn view_block_group(
         // Refresh explorer data and force reload on change
         // I do this every REFRESH_INTERVAL seconds.
         if last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
-            if explorer.refresh(conn, collection_name) {
+            let selected_sample = current_block_group
+                .as_ref()
+                .and_then(|bg| bg.sample_name.as_deref());
+            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
                 explorer.force_reload(&mut explorer_state);
+                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
+                annotation_file_tracks.retain(|id, _| explorer_state.is_annotation_file_active(id));
+                annotation_file_index_available
+                    .retain(|id, _| explorer_state.is_annotation_file_active(id));
+                annotation_file_loaded_windows
+                    .retain(|id, _| explorer_state.is_annotation_file_active(id));
+                annotation_group_tracks
+                    .retain(|name, _| explorer_state.is_annotation_group_active(name));
             }
             last_refresh = Instant::now();
         }
@@ -241,6 +326,69 @@ pub fn view_block_group(
             last_selected_block_group_id = explorer_state.selected_block_group_id;
         }
 
+        // Reload indexed annotation file tracks when the user scrolls past the loaded window
+        if !is_loading
+            && let Some(bg) = current_block_group.as_ref()
+            && let Some(visible_window) = current_view_coordinate_window(&graph_controller)
+        {
+            let query_window = expand_query_window(visible_window);
+            let node_filter: HashSet<HashId> =
+                block_graph.nodes().map(|node| node.node_id).collect();
+            for entry in &explorer.data.annotation_files {
+                let id = entry.file_addition.id;
+                if !explorer_state.is_annotation_file_active(&id) {
+                    continue;
+                }
+                if !annotation_file_index_available
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                let needs_reload = match annotation_file_loaded_windows.get(&id) {
+                    Some((loaded_start, loaded_end)) => {
+                        visible_window.0 < *loaded_start || visible_window.1 > *loaded_end
+                    }
+                    None => true,
+                };
+
+                if !needs_reload {
+                    continue;
+                }
+
+                let request = AnnotationFileTrackRequest {
+                    conn,
+                    workspace,
+                    collection_name,
+                    sample_name: bg.sample_name.as_deref(),
+                    block_group_name: Some(&bg.name),
+                    query_window: Some(query_window),
+                    node_filter: &node_filter,
+                    entry,
+                };
+                match load_annotation_file_track(&request) {
+                    Ok(load) => {
+                        annotation_file_tracks.insert(id, load.track);
+                        if let Some(window) = load.loaded_window {
+                            annotation_file_loaded_windows.insert(id, window);
+                        } else {
+                            annotation_file_loaded_windows.remove(&id);
+                        }
+                        annotation_file_index_available.insert(id, load.index_available);
+                    }
+                    Err(err) => {
+                        messages.push_warn(format!("{err}"));
+                        explorer_state.deactivate_annotation_file(&id);
+                        annotation_file_tracks.remove(&id);
+                        annotation_file_index_available.remove(&id);
+                        annotation_file_loaded_windows.remove(&id);
+                    }
+                }
+            }
+        }
+
         // Calculate frame delta for smooth animations
         let now = Instant::now();
         let frame_delta = now.duration_since(last_frame_time);
@@ -249,16 +397,25 @@ pub fn view_block_group(
         // Draw the UI
         terminal.draw(|frame| {
             let status_bar_height: u16 = 1;
+            let show_message_bar = !messages.is_empty();
 
             // The outer layout is a vertical split between the status bar and everything else
+            let mut outer_constraints = vec![ratatui::layout::Constraint::Min(1)];
+            if show_message_bar {
+                outer_constraints.push(ratatui::layout::Constraint::Length(1));
+            }
+            outer_constraints.push(ratatui::layout::Constraint::Length(status_bar_height));
+
             let outer_layout = ratatui::layout::Layout::default()
                 .direction(ratatui::layout::Direction::Vertical)
-                .constraints(vec![
-                    ratatui::layout::Constraint::Min(1),
-                    ratatui::layout::Constraint::Length(status_bar_height),
-                ])
+                .constraints(outer_constraints)
                 .split(frame.area());
-            let status_bar_area = outer_layout[1];
+            let status_bar_area = *outer_layout.last().unwrap();
+            let message_bar_area = if show_message_bar {
+                Some(outer_layout[1])
+            } else {
+                None
+            };
 
             // The sidebar is a horizontal split of the area above the status bar
             let sidebar_layout = ratatui::layout::Layout::default()
@@ -267,21 +424,60 @@ pub fn view_block_group(
                 .split(outer_layout[0]);
             let sidebar_area = sidebar_layout[0];
 
-            // The panel pops up in the canvas area, it does not overlap with the sidebar
+            let viewer_root_area = sidebar_layout[1];
+
+            // The panel pops up in the viewer area, it does not overlap with the sidebar
             let panel_layout = ratatui::layout::Layout::default()
                 .direction(ratatui::layout::Direction::Vertical)
                 .constraints(vec![Constraint::Percentage(80), Constraint::Percentage(20)])
-                .split(sidebar_layout[1]);
+                .split(viewer_root_area);
             let panel_area = panel_layout[1];
 
             let canvas_area = if show_panel {
                 panel_layout[0]
             } else {
-                sidebar_layout[1]
+                viewer_root_area
             };
 
-            // Set viewport bounds to the actual canvas area before updating animations
-            graph_controller.viewport_state.viewport_bounds = canvas_area;
+            // Collect active annotation tracks
+            let mut annotation_tracks: Vec<&AnnotationTrack> = Vec::new();
+            for entry in explorer.data.annotation_groups.iter() {
+                if let Some(track) = annotation_group_tracks.get(&entry.name) {
+                    annotation_tracks.push(track);
+                }
+            }
+            for entry in explorer.data.annotation_files.iter() {
+                if let Some(track) = annotation_file_tracks.get(&entry.file_addition.id) {
+                    annotation_tracks.push(track);
+                }
+            }
+
+            // Calculate annotation track panel heights
+            let min_graph_height = 1;
+            let mut remaining_height = canvas_area.height;
+            let mut track_panels: Vec<(&AnnotationTrack, u16)> = Vec::new();
+            for track in annotation_tracks {
+                if remaining_height <= min_graph_height {
+                    break;
+                }
+                let max_for_track = remaining_height - min_graph_height;
+                let height = annotation_panel_height(track, max_for_track);
+                if height == 0 {
+                    continue;
+                }
+                track_panels.push((track, height));
+                remaining_height = remaining_height.saturating_sub(height);
+            }
+
+            let graph_area = ratatui::layout::Rect {
+                x: canvas_area.x,
+                y: canvas_area.y,
+                width: canvas_area.width,
+                height: remaining_height.max(1),
+            };
+
+            // Set viewport bounds to the actual graph area before updating animations
+            graph_controller.viewport_state.viewport_bounds = graph_area;
 
             // Update animations with frame delta for smooth camera and cursor animations
             graph_controller.update_animations(frame_delta);
@@ -311,9 +507,13 @@ pub fn view_block_group(
             // Status bar
             let mut status_message = match focus_zone {
                 FocusZone::Canvas => {
-                    "*←→↑↓* pan | *+/-* zoom | *p* toggle path | *esc* back to sidebar".to_string()
+                    "*←→↑↓* pan | *+/-* zoom | *p* toggle path | *m* messages | *esc* back to sidebar"
+                        .to_string()
                 }
-                FocusZone::Panel => "*esc* close panel".to_string(),
+                FocusZone::Panel => match panel_mode {
+                    PanelMode::Messages => "*c* clear | *esc* close panel".to_string(),
+                    PanelMode::Details => "*esc* close panel".to_string(),
+                },
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
             status_message.push_str(" | *q* quit"); // Universal controls
@@ -334,6 +534,25 @@ pub fn view_block_group(
                 .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
 
             frame.render_widget(status_bar, status_bar_area);
+
+            // Message bar (latest warning)
+            if let Some(area) = message_bar_area
+                && let Some(latest) = messages.latest()
+            {
+                let extra = messages.len().saturating_sub(1);
+                let suffix = if extra > 0 {
+                    format!(" (+{extra})")
+                } else {
+                    String::new()
+                };
+                let message_line = format!("WARN: {latest}{suffix}");
+                let message_bar = Paragraph::new(message_line).style(
+                    Style::default()
+                        .fg(get_theme_color("error").unwrap())
+                        .bg(get_theme_color("statusbar").unwrap()),
+                );
+                frame.render_widget(message_bar, area);
+            }
 
             // Canvas area
             if is_loading {
@@ -360,20 +579,40 @@ pub fn view_block_group(
                 frame.render_widget(Clear, canvas_area); // Clear the canvas area first
                 frame.render_widget(loading_para, loading_area);
             } else {
+                // Render the graph
                 graph_controller.viewport_state.focus();
                 let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
                 let widget = create_gen_graph_widget(conn)
                     .detail_level(graph_controller.get_detail_level())
                     .style(canvas_style)
                     .cursor();
-                frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
+                frame.render_stateful_widget(widget, graph_area, &mut graph_controller);
+
+                // Render annotation track panels below the graph
+                if !track_panels.is_empty() {
+                    let mut current_y = graph_area.y + graph_area.height;
+                    for (track, height) in track_panels.iter() {
+                        let track_area = ratatui::layout::Rect {
+                            x: canvas_area.x,
+                            y: current_y,
+                            width: canvas_area.width,
+                            height: *height,
+                        };
+                        draw_annotations_panel(frame, track_area, track, &graph_controller);
+                        current_y = current_y.saturating_add(*height);
+                    }
+                }
             }
 
             // Panel
             if show_panel {
+                let panel_title = match panel_mode {
+                    PanelMode::Details => "Details",
+                    PanelMode::Messages => "Messages",
+                };
                 let panel_block = Block::bordered()
                     .padding(Padding::new(2, 2, 1, 1))
-                    .title("Details")
+                    .title(panel_title)
                     .style(
                         Style::default()
                             .bg(get_theme_color("panel").unwrap())
@@ -387,33 +626,55 @@ pub fn view_block_group(
                         Style::default().fg(get_theme_color("text").unwrap())
                     });
 
-                // TODO: Node selection not yet supported in GenGraphWidget
-                let panel_text = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            "Camera Position: ",
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!(
-                            "({}, {})",
-                            graph_controller.viewport_state.camera_current.x,
-                            graph_controller.viewport_state.camera_current.y
-                        )),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(
-                            "Detail Level: ",
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!("{:?}", graph_controller.get_detail_level())),
-                    ]),
-                    Line::from(vec![Span::styled(
-                        "Node selection not yet supported",
-                        Style::default()
-                            .fg(get_theme_color("text").unwrap())
-                            .add_modifier(Modifier::ITALIC),
-                    )]),
-                ];
+                let panel_text = match panel_mode {
+                    PanelMode::Details => {
+                        vec![
+                            Line::from(vec![
+                                Span::styled(
+                                    "Camera Position: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!(
+                                    "({}, {})",
+                                    graph_controller.viewport_state.camera_current.x,
+                                    graph_controller.viewport_state.camera_current.y
+                                )),
+                            ]),
+                            Line::from(vec![
+                                Span::styled(
+                                    "Detail Level: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!("{:?}", graph_controller.get_detail_level())),
+                            ]),
+                            Line::from(vec![Span::styled(
+                                "Node selection not yet supported",
+                                Style::default()
+                                    .fg(get_theme_color("text").unwrap())
+                                    .add_modifier(Modifier::ITALIC),
+                            )]),
+                        ]
+                    }
+                    PanelMode::Messages => {
+                        if messages.is_empty() {
+                            vec![Line::from(vec![Span::styled(
+                                "No messages",
+                                Style::default().fg(get_theme_color("text_muted").unwrap()),
+                            )])]
+                        } else {
+                            messages
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, message)| {
+                                    Line::from(vec![Span::raw(format!(
+                                        "{:>2}. {message}",
+                                        idx + 1
+                                    ))])
+                                })
+                                .collect()
+                        }
+                    }
+                };
 
                 let panel_content = Paragraph::new(panel_text)
                     .wrap(Wrap { trim: true })
@@ -438,7 +699,81 @@ pub fn view_block_group(
             connect_all_boundary_edges(&mut block_graph);
             // Update the graph controller
             graph_controller = create_gen_graph_controller(&block_graph);
-
+            current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
+            let selected_sample = current_block_group
+                .as_ref()
+                .and_then(|bg| bg.sample_name.as_deref());
+            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
+                explorer.force_reload(&mut explorer_state);
+                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
+            }
+            annotation_file_tracks.clear();
+            annotation_file_index_available.clear();
+            annotation_file_loaded_windows.clear();
+            annotation_group_tracks.clear();
+            if let Some(bg) = current_block_group.as_ref() {
+                let node_filter: HashSet<HashId> =
+                    block_graph.nodes().map(|node| node.node_id).collect();
+                let visible_node_ranges = visible_ranges_by_node(&block_graph);
+                let query_window =
+                    current_view_coordinate_window(&graph_controller).map(expand_query_window);
+                for entry in explorer.data.annotation_groups.iter() {
+                    if explorer_state.is_annotation_group_active(&entry.name) {
+                        let spans = match load_annotations_for_group(
+                            conn,
+                            &entry.name,
+                            &visible_node_ranges,
+                        ) {
+                            Ok(spans) => spans,
+                            Err(err) => {
+                                messages.push_warn(format!(
+                                    "Failed to load annotations for group {}: {err}",
+                                    entry.name
+                                ));
+                                Vec::new()
+                            }
+                        };
+                        if spans.is_empty() {
+                            continue;
+                        }
+                        annotation_group_tracks.insert(
+                            entry.name.clone(),
+                            AnnotationTrack::new(entry.name.clone(), spans),
+                        );
+                    }
+                }
+                for entry in explorer.data.annotation_files.iter() {
+                    let id = entry.file_addition.id;
+                    if explorer_state.is_annotation_file_active(&id) {
+                        let request = AnnotationFileTrackRequest {
+                            conn,
+                            workspace,
+                            collection_name,
+                            sample_name: bg.sample_name.as_deref(),
+                            block_group_name: Some(&bg.name),
+                            query_window,
+                            node_filter: &node_filter,
+                            entry,
+                        };
+                        match load_annotation_file_track(&request) {
+                            Ok(load) => {
+                                annotation_file_tracks.insert(id, load.track);
+                                annotation_file_index_available.insert(id, load.index_available);
+                                if let Some(window) = load.loaded_window {
+                                    annotation_file_loaded_windows.insert(id, window);
+                                }
+                            }
+                            Err(err) => {
+                                messages.push_warn(format!("{err}"));
+                                explorer_state.deactivate_annotation_file(&id);
+                                annotation_file_index_available.remove(&id);
+                                annotation_file_loaded_windows.remove(&id);
+                            }
+                        }
+                    }
+                }
+            }
             is_loading = false;
         }
 
@@ -453,6 +788,17 @@ pub fn view_block_group(
             // Global handlers
             match key.code {
                 KeyCode::Char('q') => break,
+                KeyCode::Char('m') => {
+                    if show_panel && panel_mode == PanelMode::Messages {
+                        show_panel = false;
+                        focus_zone = FocusZone::Canvas;
+                    } else {
+                        show_panel = true;
+                        panel_mode = PanelMode::Messages;
+                        focus_zone = FocusZone::Panel;
+                    }
+                    tui_layout_change = true;
+                }
                 KeyCode::Tab => {
                     // Tab - cycle forwards
                     focus_zone = match focus_zone {
@@ -488,8 +834,8 @@ pub fn view_block_group(
             match focus_zone {
                 FocusZone::Canvas => match key.code {
                     KeyCode::Enter => {
-                        // TODO: Node selection not yet supported, always show panel for now
                         show_panel = true;
+                        panel_mode = PanelMode::Details;
                         focus_zone = FocusZone::Panel;
                         tui_layout_change = true;
                     }
@@ -517,30 +863,117 @@ pub fn view_block_group(
                                     }
                                 }
                                 Err(err) => {
-                                    warn!("Failed to toggle path highlighting: {}", err);
+                                    messages.push_warn(err.to_string());
                                 }
                             }
                         } else {
-                            warn!("No block group selected for path highlighting");
+                            messages.push_warn("No block group selected".to_string());
                         }
                     }
                     _ => {
                         graph_controller.handle_key_event(key).ok();
                     }
                 },
-                FocusZone::Panel => {
-                    if key.code == KeyCode::Esc {
+                FocusZone::Panel => match key.code {
+                    KeyCode::Esc => {
                         show_panel = false;
                         focus_zone = FocusZone::Canvas;
                         tui_layout_change = true;
                     }
-                }
+                    KeyCode::Char('c') => {
+                        if panel_mode == PanelMode::Messages {
+                            messages.clear();
+                        }
+                    }
+                    _ => {}
+                },
                 FocusZone::Sidebar => {
                     explorer.handle_input(&mut explorer_state, key);
                     // Check if focus change was requested by the explorer
                     if let Some(requested_zone) = explorer_state.focus_change_requested {
                         focus_zone = requested_zone;
                         explorer_state.focus_change_requested = None;
+                    }
+                    if let Some(toggled_id) =
+                        explorer_state.annotation_file_toggle_requested.take()
+                    {
+                        if explorer_state.is_annotation_file_active(&toggled_id) {
+                            if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
+                                && let Some(bg) = current_block_group.as_ref()
+                            {
+                                let query_window = current_view_coordinate_window(&graph_controller)
+                                    .map(expand_query_window);
+                                let node_filter: HashSet<HashId> =
+                                    block_graph.nodes().map(|node| node.node_id).collect();
+                                let request = AnnotationFileTrackRequest {
+                                    conn,
+                                    workspace,
+                                    collection_name,
+                                    sample_name: bg.sample_name.as_deref(),
+                                    block_group_name: Some(&bg.name),
+                                    query_window,
+                                    node_filter: &node_filter,
+                                    entry,
+                                };
+                                match load_annotation_file_track(&request) {
+                                    Ok(load) => {
+                                        annotation_file_tracks.insert(toggled_id, load.track);
+                                        annotation_file_index_available
+                                            .insert(toggled_id, load.index_available);
+                                        if let Some(window) = load.loaded_window {
+                                            annotation_file_loaded_windows
+                                                .insert(toggled_id, window);
+                                        } else {
+                                            annotation_file_loaded_windows.remove(&toggled_id);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        messages.push_warn(format!("{err}"));
+                                        explorer_state.deactivate_annotation_file(&toggled_id);
+                                        annotation_file_tracks.remove(&toggled_id);
+                                        annotation_file_index_available.remove(&toggled_id);
+                                        annotation_file_loaded_windows.remove(&toggled_id);
+                                    }
+                                }
+                            }
+                        } else {
+                            annotation_file_tracks.remove(&toggled_id);
+                            annotation_file_index_available.remove(&toggled_id);
+                            annotation_file_loaded_windows.remove(&toggled_id);
+                        }
+                    }
+                    if let Some(toggled_group) =
+                        explorer_state.annotation_group_toggle_requested.take()
+                    {
+                        if explorer_state.is_annotation_group_active(&toggled_group) {
+                            if current_block_group.is_some() {
+                                let visible_node_ranges = visible_ranges_by_node(&block_graph);
+                                let spans = match load_annotations_for_group(
+                                    conn,
+                                    &toggled_group,
+                                    &visible_node_ranges,
+                                ) {
+                                    Ok(spans) => spans,
+                                    Err(err) => {
+                                        messages.push_warn(format!(
+                                            "Failed to load annotations for group {}: {err}",
+                                            toggled_group
+                                        ));
+                                        Vec::new()
+                                    }
+                                };
+                                if spans.is_empty() {
+                                    explorer_state.deactivate_annotation_group(&toggled_group);
+                                } else {
+                                    annotation_group_tracks.insert(
+                                        toggled_group.clone(),
+                                        AnnotationTrack::new(toggled_group, spans),
+                                    );
+                                }
+                            }
+                        } else {
+                            annotation_group_tracks.remove(&toggled_group);
+                        }
                     }
                 }
             }

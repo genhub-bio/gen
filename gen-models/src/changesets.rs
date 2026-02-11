@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    annotations::{
+        Annotation, AnnotationError, AnnotationGroup, AnnotationGroupError, AnnotationGroupSample,
+    },
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -89,6 +92,9 @@ pub struct ChangesetModels {
     pub accessions: Vec<Accession>,
     pub accession_edges: Vec<AccessionEdge>,
     pub accession_paths: Vec<AccessionPath>,
+    pub annotation_groups: Vec<AnnotationGroup>,
+    pub annotations: Vec<Annotation>,
+    pub annotation_group_samples: Vec<AnnotationGroupSample>,
 }
 
 impl<'a> Capnp<'a> for ChangesetModels {
@@ -195,6 +201,34 @@ impl<'a> Capnp<'a> for ChangesetModels {
             let mut accession_path_builder = accession_paths_builder.reborrow().get(i as u32);
             accession_path.write_capnp(&mut accession_path_builder);
         }
+
+        // Write annotation groups
+        let mut annotation_groups_builder = builder
+            .reborrow()
+            .init_annotation_groups(self.annotation_groups.len() as u32);
+        for (i, annotation_group) in self.annotation_groups.iter().enumerate() {
+            let mut annotation_group_builder = annotation_groups_builder.reborrow().get(i as u32);
+            annotation_group.write_capnp(&mut annotation_group_builder);
+        }
+
+        // Write annotations
+        let mut annotations_builder = builder
+            .reborrow()
+            .init_annotations(self.annotations.len() as u32);
+        for (i, annotation) in self.annotations.iter().enumerate() {
+            let mut annotation_builder = annotations_builder.reborrow().get(i as u32);
+            annotation.write_capnp(&mut annotation_builder);
+        }
+
+        // Write annotation group samples
+        let mut annotation_group_samples_builder = builder
+            .reborrow()
+            .init_annotation_group_samples(self.annotation_group_samples.len() as u32);
+        for (i, annotation_group_sample) in self.annotation_group_samples.iter().enumerate() {
+            let mut annotation_group_sample_builder =
+                annotation_group_samples_builder.reborrow().get(i as u32);
+            annotation_group_sample.write_capnp(&mut annotation_group_sample_builder);
+        }
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -284,6 +318,29 @@ impl<'a> Capnp<'a> for ChangesetModels {
             accession_paths.push(AccessionPath::read_capnp(accession_path_reader));
         }
 
+        // Read annotation groups
+        let annotation_groups_reader = reader.get_annotation_groups().unwrap();
+        let mut annotation_groups = Vec::new();
+        for annotation_group_reader in annotation_groups_reader.iter() {
+            annotation_groups.push(AnnotationGroup::read_capnp(annotation_group_reader));
+        }
+
+        // Read annotations
+        let annotations_reader = reader.get_annotations().unwrap();
+        let mut annotations = Vec::new();
+        for annotation_reader in annotations_reader.iter() {
+            annotations.push(Annotation::read_capnp(annotation_reader));
+        }
+
+        // Read annotation group samples
+        let annotation_group_samples_reader = reader.get_annotation_group_samples().unwrap();
+        let mut annotation_group_samples = Vec::new();
+        for annotation_group_sample_reader in annotation_group_samples_reader.iter() {
+            annotation_group_samples.push(AnnotationGroupSample::read_capnp(
+                annotation_group_sample_reader,
+            ));
+        }
+
         ChangesetModels {
             collections,
             samples,
@@ -297,6 +354,9 @@ impl<'a> Capnp<'a> for ChangesetModels {
             accessions,
             accession_edges,
             accession_paths,
+            annotation_groups,
+            annotations,
+            annotation_group_samples,
         }
     }
 }
@@ -377,6 +437,9 @@ pub fn process_changesetiter(
     let mut created_accessions = vec![];
     let mut created_accession_edges = vec![];
     let mut created_accession_paths = vec![];
+    let mut created_annotation_groups = vec![];
+    let mut created_annotations = vec![];
+    let mut created_annotation_group_samples = vec![];
 
     // Initialize collections for dependency tracking
     let mut previous_collections = HashSet::new();
@@ -621,6 +684,41 @@ pub fn process_changesetiter(
                         previous_accession_edges.insert(edge_id);
                     }
                 }
+                "annotations" => {
+                    let id = parse_hashid(item, pk_column);
+                    let name = parse_string(item, 1);
+                    let group = parse_string(item, 2);
+                    let accession_id = parse_hashid(item, 3);
+
+                    created_annotations.push(Annotation {
+                        id,
+                        name,
+                        group,
+                        accession_id,
+                    });
+
+                    if !created_accessions_set.contains(&accession_id) {
+                        previous_accessions.insert(accession_id);
+                    }
+                }
+                "annotation_groups" => {
+                    let name = parse_string(item, pk_column);
+
+                    created_annotation_groups.push(AnnotationGroup { name });
+                }
+                "annotation_group_samples" => {
+                    let annotation_group = parse_string(item, 0);
+                    let sample_name = parse_string(item, 1);
+
+                    created_annotation_group_samples.push(AnnotationGroupSample {
+                        annotation_group,
+                        sample_name: sample_name.clone(),
+                    });
+
+                    if !created_samples_set.contains(&sample_name) {
+                        previous_samples.insert(sample_name);
+                    }
+                }
                 t => {
                     println!("unhandled table {t}")
                 }
@@ -661,6 +759,9 @@ pub fn process_changesetiter(
         accessions: created_accessions,
         accession_edges: created_accession_edges,
         accession_paths: created_accession_paths,
+        annotation_groups: created_annotation_groups,
+        annotations: created_annotations,
+        annotation_group_samples: created_annotation_group_samples,
     };
 
     let dependency_models = DependencyModels {
@@ -814,6 +915,41 @@ pub fn apply_changeset(
             .map(|ap| ap.edge_id);
         AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>());
     }
+
+    for annotation_group in &changeset.annotation_groups {
+        AnnotationGroup::get_or_create(conn, &annotation_group.name).map_err(|err| match err {
+            AnnotationGroupError::DatabaseError(inner) => inner,
+        })?;
+    }
+
+    for annotation in &changeset.annotations {
+        Annotation::get_or_create(
+            conn,
+            &annotation.name,
+            &annotation.group,
+            &annotation.accession_id,
+        )
+        .map_err(|err| match err {
+            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
+                inner
+            }
+        })?;
+    }
+
+    for annotation_group_sample in &changeset.annotation_group_samples {
+        AnnotationGroupSample::create(
+            conn,
+            &annotation_group_sample.annotation_group,
+            &annotation_group_sample.sample_name,
+        )
+        .map_err(|err| match err {
+            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
+                inner
+            }
+        })?;
+    }
     Ok(())
 }
 
@@ -821,6 +957,35 @@ pub fn revert_changeset(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
 ) -> Result<(), ChangesetError> {
+    for annotation_group_sample in &changeset.annotation_group_samples {
+        AnnotationGroupSample::delete(
+            conn,
+            &annotation_group_sample.annotation_group,
+            &annotation_group_sample.sample_name,
+        )
+        .map_err(|err| match err {
+            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
+                inner
+            }
+        })?;
+    }
+    Annotation::delete_by_ids(
+        conn,
+        &changeset
+            .annotations
+            .iter()
+            .map(|obj| obj.id)
+            .collect::<Vec<_>>(),
+    );
+    AnnotationGroup::delete_by_ids(
+        conn,
+        &changeset
+            .annotation_groups
+            .iter()
+            .map(|group| group.name.clone())
+            .collect::<Vec<_>>(),
+    );
     AccessionPath::delete_by_ids(
         conn,
         &changeset
@@ -1066,6 +1231,19 @@ mod tests {
                 index_in_path: 0,
                 edge_id: HashId::pad_str(1),
             }],
+            annotation_groups: vec![AnnotationGroup {
+                name: "gff3".to_string(),
+            }],
+            annotations: vec![Annotation {
+                id: HashId::pad_str(1),
+                name: "test_annotation".to_string(),
+                group: "gff3".to_string(),
+                accession_id: HashId::pad_str(1),
+            }],
+            annotation_group_samples: vec![AnnotationGroupSample {
+                annotation_group: "gff3".to_string(),
+                sample_name: "test_sample".to_string(),
+            }],
         };
 
         let changeset = DatabaseChangeset {
@@ -1104,6 +1282,9 @@ mod tests {
                 accessions: vec![],
                 accession_edges: vec![],
                 accession_paths: vec![],
+                annotation_groups: vec![],
+                annotations: vec![],
+                annotation_group_samples: vec![],
             },
         };
 
@@ -1208,6 +1389,19 @@ mod tests {
                 index_in_path: 0,
                 edge_id: HashId::pad_str(1),
             }],
+            annotation_groups: vec![AnnotationGroup {
+                name: "gff3".to_string(),
+            }],
+            annotations: vec![Annotation {
+                id: HashId::pad_str(1),
+                name: "test_annotation".to_string(),
+                group: "gff3".to_string(),
+                accession_id: HashId::pad_str(1),
+            }],
+            annotation_group_samples: vec![AnnotationGroupSample {
+                annotation_group: "gff3".to_string(),
+                sample_name: "test_sample".to_string(),
+            }],
         };
 
         let mut message = TypedBuilder::<changeset_models::Owned>::new_default();
@@ -1217,6 +1411,62 @@ mod tests {
         let deserialized = ChangesetModels::read_capnp(root.into_reader());
 
         assert_eq!(changeset_models, deserialized);
+    }
+
+    #[test]
+    fn test_changeset_includes_annotations() {
+        use crate::block_group::PathCache;
+
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let _ = Sample::create(conn, "sample-1").unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let mut cache = PathCache::new(conn);
+        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
+        let accession = BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache);
+
+        let mut session = start_operation(conn);
+        let annotation = Annotation::get_or_create(conn, "gene-a", "gff3", &accession.id).unwrap();
+        annotation.add_samples(conn, &["sample-1"]).unwrap();
+
+        let operation = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![],
+                description: "annotation op".to_string(),
+            },
+            "annotation op",
+            None,
+        )
+        .unwrap();
+
+        let changeset = operation.get_changeset(context.workspace());
+        assert_eq!(
+            changeset.changes.annotation_groups,
+            vec![AnnotationGroup {
+                name: "gff3".to_string(),
+            }]
+        );
+        assert_eq!(changeset.changes.annotations, vec![annotation.clone()]);
+        assert_eq!(
+            changeset.changes.annotation_group_samples,
+            vec![AnnotationGroupSample {
+                annotation_group: annotation.group.clone(),
+                sample_name: "sample-1".to_string(),
+            }]
+        );
+
+        let dependencies = operation.get_changeset_dependencies(context.workspace());
+        assert_eq!(dependencies.samples.len(), 1);
+        assert_eq!(dependencies.samples[0].name, "sample-1");
+        assert_eq!(dependencies.accessions.len(), 1);
+        assert_eq!(dependencies.accessions[0].id, accession.id);
     }
 
     #[cfg(test)]
