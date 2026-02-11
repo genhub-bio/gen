@@ -2,7 +2,7 @@
 use core::ops::Range;
 use std::{
     fmt::Debug,
-    fs::File,
+    fs::{self, File},
     io,
     io::{BufReader, Write},
     ops::Deref,
@@ -14,7 +14,7 @@ use std::{
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
-    annotations::gff::propagate_gff,
+    annotations::{add_annotation, add_annotation_file, gff::propagate_gff},
     commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
     config,
     diffs::gfa::gfa_sample_diff,
@@ -35,7 +35,6 @@ use gen_models::{
     block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
-    file_types::FileTypes,
     metadata,
     operations::{
         Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
@@ -551,6 +550,42 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     f.write_all(dot.as_bytes())?;
                 }
             }
+            Ok(())
+        }
+        Some(Commands::AddAnnotation {
+            name,
+            group,
+            sample,
+            region,
+        }) => {
+            let collection_name = get_default_collection(operation_conn)?;
+            let operation = add_annotation(
+                &db_context,
+                &collection_name,
+                &name,
+                group.as_deref(),
+                sample.as_deref(),
+                &region,
+            )?;
+            println!("Annotation {name} added in operation {}", operation.hash);
+            Ok(())
+        }
+        Some(Commands::AddAnnotationFile {
+            path,
+            format,
+            index,
+            name,
+            message,
+        }) => {
+            let operation = add_annotation_file(
+                &db_context,
+                &path,
+                format.as_deref(),
+                index.as_deref(),
+                name.as_deref(),
+                message.as_deref(),
+            )?;
+            println!("Annotation file added in operation {}", operation.hash);
             Ok(())
         }
         None => Ok(()),

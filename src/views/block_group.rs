@@ -894,15 +894,15 @@ pub fn view_block_group(
                         focus_zone = requested_zone;
                         explorer_state.focus_change_requested = None;
                     }
-                    if let Some(toggled_id) =
-                        explorer_state.annotation_file_toggle_requested.take()
+                    if let Some(toggled_id) = explorer_state.annotation_file_toggle_requested.take()
                     {
                         if explorer_state.is_annotation_file_active(&toggled_id) {
                             if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
                                 && let Some(bg) = current_block_group.as_ref()
                             {
-                                let query_window = current_view_coordinate_window(&graph_controller)
-                                    .map(expand_query_window);
+                                let query_window =
+                                    current_view_coordinate_window(&graph_controller)
+                                        .map(expand_query_window);
                                 let node_filter: HashSet<HashId> =
                                     block_graph.nodes().map(|node| node.node_id).collect();
                                 let request = AnnotationFileTrackRequest {

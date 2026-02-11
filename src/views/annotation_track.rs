@@ -5,19 +5,14 @@ use std::{
 
 use gen_core::{HashId, is_end_node, is_start_node};
 use gen_graph::GenGraph;
-use gen_tui::{
-    CroppedGraph, GraphController, ViewportState, VisualDetail, WorldPos, WorldRect,
-};
+use gen_tui::{CroppedGraph, GraphController, ViewportState, VisualDetail, WorldPos, WorldRect};
 use petgraph::visit::NodeIndexable;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
 };
 
-use crate::{
-    config::get_theme_color,
-    views::gen_graph_widget::GenGraphNodeSizer,
-};
+use crate::{config::get_theme_color, views::gen_graph_widget::GenGraphNodeSizer};
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSegment {
@@ -131,10 +126,8 @@ fn collect_annotation_segments(
 
             // Map sequence coordinates to world X coordinates using relative positioning
             // (same algorithm as the annotations branch, but with integer world coordinates)
-            let seg_x1 =
-                x1 + (overlap_start - block.sequence_start) * label_len / node_len;
-            let seg_x2 =
-                x1 + (overlap_end - block.sequence_start) * label_len / node_len;
+            let seg_x1 = x1 + (overlap_start - block.sequence_start) * label_len / node_len;
+            let seg_x2 = x1 + (overlap_end - block.sequence_start) * label_len / node_len;
             let (seg_x1, seg_x2) = if seg_x2 < seg_x1 {
                 (seg_x2, seg_x1)
             } else {
@@ -223,9 +216,7 @@ pub fn draw_annotations_panel(
     let bg_style = Style::default().bg(bg_color);
     for row in inner.y..inner.y + inner.height {
         let blank = " ".repeat(inner.width as usize);
-        frame
-            .buffer_mut()
-            .set_string(inner.x, row, blank, bg_style);
+        frame.buffer_mut().set_string(inner.x, row, blank, bg_style);
     }
 
     let zoomed_out = controller.get_detail_level() == VisualDetail::Minimal;
@@ -286,16 +277,24 @@ pub fn draw_annotations_panel(
                 let center = (x1 + x2) / 2;
                 if let Some((term_x, _)) =
                     viewport_state.world_to_terminal(WorldPos::new(center, 0))
+                    && term_x >= inner.x
+                    && term_x < inner.x + inner.width
                 {
-                    if term_x >= inner.x && term_x < inner.x + inner.width {
-                        frame
-                            .buffer_mut()
-                            .set_string(term_x, terminal_y, "●", annotation_dot_style);
-                    }
+                    frame
+                        .buffer_mut()
+                        .set_string(term_x, terminal_y, "●", annotation_dot_style);
                 }
             } else {
                 // Draw a solid bar for the segment
-                place_bar(frame, inner, viewport_state, *x1, *x2, terminal_y, annotation_bar_style);
+                place_bar(
+                    frame,
+                    inner,
+                    viewport_state,
+                    *x1,
+                    *x2,
+                    terminal_y,
+                    annotation_bar_style,
+                );
             }
 
             // Draw dashed connectors between disconnected segments of the same annotation
@@ -386,13 +385,12 @@ fn draw_dashed_connector(
 
     let visible_width = (end_x - start_x + 1) as usize;
     // Compute the offset into the dash pattern based on how far we are from the start
-    let pattern_offset = (start_x as i64
-        - term_x1.unwrap_or(start_x) as i64)
-        .unsigned_abs() as usize;
+    let pattern_offset =
+        (start_x as i64 - term_x1.unwrap_or(start_x) as i64).unsigned_abs() as usize;
 
     let mut label = String::with_capacity(visible_width);
     for i in 0..visible_width {
-        if (pattern_offset + i) % 2 == 0 {
+        if (pattern_offset + i).is_multiple_of(2) {
             label.push('-');
         } else {
             label.push(' ');

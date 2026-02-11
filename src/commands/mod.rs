@@ -55,7 +55,7 @@ pub enum Commands {
         /// Position as "node id:coordinate" to center the graph on
         #[arg(short, long)]
         position: Option<String>,
-        /// Show the full TUI explorer instead of the inline preview. Includes sidebar explorer and additional interactive features.
+        /// Skip the inline widget and open the full TUI directly
         #[arg(short, long)]
         full: bool,
     },
@@ -211,6 +211,41 @@ pub enum Commands {
         /// The name of the output file
         #[arg(short, long)]
         output_gff: String,
+    },
+    /// Add an annotation and accession for a region
+    #[command(name = "add-annotation", arg_required_else_help(true))]
+    AddAnnotation {
+        /// The annotation name
+        #[arg(short, long)]
+        name: String,
+        /// The annotation group name
+        #[arg(short, long)]
+        group: Option<String>,
+        /// The sample name to annotate (defaults to the collection's default sample)
+        #[arg(short, long)]
+        sample: Option<String>,
+        /// The region to annotate (region:start-end)
+        #[clap(index = 1)]
+        region: String,
+    },
+    /// Add an annotation file without importing its intervals
+    #[command(name = "add-annotation-file", arg_required_else_help(true))]
+    AddAnnotationFile {
+        /// The annotation file path
+        #[clap(index = 1)]
+        path: String,
+        /// The annotation file format (gff3, bed, genbank). If omitted, infer from the file extension.
+        #[arg(short, long)]
+        format: Option<String>,
+        /// Optional tabix index file path for the annotation file
+        #[arg(long)]
+        index: Option<String>,
+        /// Optional annotation file name
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Optional operation summary message
+        #[arg(short, long)]
+        message: Option<String>,
     },
     /// List all samples in the current collection
     ListSamples {},

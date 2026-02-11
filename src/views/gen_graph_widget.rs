@@ -17,8 +17,10 @@ use crate::config::get_theme_color;
 
 /// Labels for special start/end nodes
 pub mod label {
-    pub const START: &str = "start╟";
-    pub const END: &str = "╢end";
+    pub const START: &str = "START ▶";
+    // or "start╟";
+    pub const END: &str = "▶ END";
+    // or "╢"
 }
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
