@@ -112,7 +112,7 @@ pub fn propagate_gff(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, fs::File, io::BufReader, path::PathBuf};
+    use std::{fs::File, io::BufReader, path::PathBuf};
 
     use gen_core::{
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,

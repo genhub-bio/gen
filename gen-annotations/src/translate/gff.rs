@@ -92,73 +92,13 @@ where
 mod tests {
     use std::{fs::File, io::BufReader, path::PathBuf};
 
-    use gen_core::{HashId, PathBlock, Strand};
-    use gen_models::{
-        block_group::{BlockGroup, PathChange},
-        db::GraphConnection,
-        node::Node,
-        sample::Sample,
-        sequence::Sequence,
-    };
-
     use super::translate_gff;
-    use crate::test_helpers::{get_connection, get_simple_sequence};
-
-    fn apply_foo_variant_from_simple_vcf(conn: &GraphConnection) {
-        Sample::get_or_create(conn, "foo");
-        let _ = Sample::get_or_create_child(conn, "test", "foo", None);
-
-        let sample_bg_id =
-            BlockGroup::get_or_create_sample_block_group(conn, "test", "foo", "m123", None)
-                .expect("should create child block group");
-        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
-        let tree = sample_path.intervaltree(conn);
-
-        let alt_seq = "C";
-
-        let sequence = Sequence::new()
-            .sequence_type("DNA")
-            .sequence(alt_seq)
-            .save(conn);
-        let node_id = Node::create(
-            conn,
-            &sequence.hash,
-            &HashId::convert_str(&format!(
-                "{path_id}:3-4->{sequence_hash}",
-                path_id = sample_path.id,
-                sequence_hash = sequence.hash,
-            )),
-        );
-        let change = PathChange {
-            block_group_id: sample_bg_id,
-            path: sample_path,
-            path_accession: None,
-            start: 3,
-            end: 4,
-            block: PathBlock {
-                id: 0,
-                node_id,
-                block_sequence: alt_seq.to_string(),
-                sequence_start: 0,
-                sequence_end: alt_seq.len() as i64,
-                path_start: 3,
-                path_end: 4,
-                strand: Strand::Forward,
-            },
-            chromosome_index: 0,
-            phased: 0,
-            preserve_edge: false,
-        };
-
-        BlockGroup::insert_change(conn, &change, &tree)
-            .expect("should apply variant change from simple.vcf");
-    }
+    use crate::test_helpers::{get_connection, setup_test_data};
 
     #[test]
     fn translates_coordinates_to_nodes() {
         let conn = get_connection();
-        let _ = get_simple_sequence(&conn);
-        apply_foo_variant_from_simple_vcf(&conn);
+        setup_test_data(&conn);
 
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("./fixtures/complex.gff3");
         let collection = "test".to_string();
