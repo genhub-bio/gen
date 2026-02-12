@@ -230,6 +230,7 @@ pub fn view_block_group(
     let mut last_tick = Instant::now();
     let mut show_panel = false;
     let mut panel_mode = PanelMode::Details;
+    let mut message_scroll: u16 = 0;
     let show_sidebar = true;
     let mut tui_layout_change = false;
 
@@ -437,7 +438,9 @@ pub fn view_block_group(
                         + " | *p* toggle current path | *m* messages | *esc* back to sidebar"
                 }
                 FocusZone::Panel => match panel_mode {
-                    PanelMode::Messages => "*c* clear | *esc* close panel".to_string(),
+                    PanelMode::Messages => {
+                        "*↑/↓* scroll messages | *c* clear | *esc* close panel".to_string()
+                    }
                     PanelMode::Details => "*esc* close panel".to_string(),
                 },
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
@@ -608,10 +611,13 @@ pub fn view_block_group(
                     }
                 };
 
-                let panel_content = Paragraph::new(panel_text)
+                let mut panel_content = Paragraph::new(panel_text)
                     .wrap(Wrap { trim: true })
                     .alignment(ratatui::layout::Alignment::Left)
                     .block(panel_block);
+                if panel_mode == PanelMode::Messages {
+                    panel_content = panel_content.scroll((message_scroll, 0));
+                }
 
                 // Clear the panel area if we just changed the layout
                 if tui_layout_change {
@@ -628,6 +634,7 @@ pub fn view_block_group(
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            messages.push_warn(format!("{block_graph:?}"));
             connect_all_boundary_edges(&mut block_graph);
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
@@ -731,6 +738,7 @@ pub fn view_block_group(
                             show_panel = true;
                             panel_mode = PanelMode::Messages;
                             focus_zone = FocusZone::Panel;
+                            message_scroll = 0;
                         }
                         tui_layout_change = true;
                     }
@@ -824,9 +832,20 @@ pub fn view_block_group(
                             focus_zone = FocusZone::Canvas;
                             tui_layout_change = true;
                         }
+                        KeyCode::Up => {
+                            if panel_mode == PanelMode::Messages {
+                                message_scroll = message_scroll.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if panel_mode == PanelMode::Messages {
+                                message_scroll = message_scroll.saturating_add(1);
+                            }
+                        }
                         KeyCode::Char('c') => {
                             if panel_mode == PanelMode::Messages {
                                 messages.clear();
+                                message_scroll = 0;
                             }
                         }
                         _ => {}
