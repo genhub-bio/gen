@@ -323,6 +323,9 @@ where
         assert!(num_partitions > 0, "No partitions created");
         log::trace!("{} partitions created", num_partitions);
 
+        // Sort inter_partition_edges for deterministic iteration
+        let sorted_inter_partition_edges: Vec<_> = inter_partition_edges.iter().collect();
+
         // Add stitching nodes to partitions (one per side, skip the bridges)
         // these are used to align the partitions with each other.
         // If we had to break outside of an articulation point, we don't add
@@ -356,17 +359,20 @@ where
 
             for (node_idx, domain_idx) in data_nodes {
                 // Find all incoming inter-partition edges to this domain node
-                let bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = inter_partition_edges
-                    .iter()
-                    // Keep only edges that belong to the current target partition
-                    .filter(|((_, tgt_partition), _)| *tgt_partition == partition_idx)
-                    // Expand the list of edges for each matching partition
-                    .flat_map(|(_, edges)| edges.iter())
-                    // Keep only edges whose target node matches the domain index
-                    .filter(|(_, tgt, _)| *tgt == domain_idx)
-                    // Convert to (source, target) pairs
-                    .map(|(src, tgt, _)| (*src, *tgt))
-                    .collect();
+                let mut bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> =
+                    sorted_inter_partition_edges
+                        .iter()
+                        // Keep only edges that belong to the current target partition
+                        .filter(|&((_, tgt_partition), _)| *tgt_partition == partition_idx)
+                        // Expand the list of edges for each matching partition
+                        .flat_map(|(_, edges)| edges.iter())
+                        // Keep only edges whose target node matches the domain index
+                        .filter(|(_, tgt, _)| *tgt == domain_idx)
+                        // Convert to (source, target) pairs
+                        .map(|(src, tgt, _)| (*src, *tgt))
+                        .collect();
+                // Sort to ensure deterministic ordering
+                bundles.sort_unstable();
 
                 // Check if node has any intra-partition incoming edges
                 let has_intra_partition_incoming = partition
@@ -430,17 +436,20 @@ where
 
             for (node_idx, domain_idx) in data_nodes {
                 // Find all outgoing inter-partition edges from this domain node
-                let bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = inter_partition_edges
-                    .iter()
-                    // Keep only edges from the current partition
-                    .filter(|((src_partition, _), _)| *src_partition == partition_idx)
-                    // Expand the list of edges for each matching partition
-                    .flat_map(|(_, edges)| edges.iter())
-                    // Keep only edges whose source node matches the domain index
-                    .filter(|(src, _, _)| *src == domain_idx)
-                    // Convert to (source, target) pairs
-                    .map(|(src, tgt, _)| (*src, *tgt))
-                    .collect();
+                let mut bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> =
+                    sorted_inter_partition_edges
+                        .iter()
+                        // Keep only edges from the current partition
+                        .filter(|&((src_partition, _), _)| *src_partition == partition_idx)
+                        // Expand the list of edges for each matching partition
+                        .flat_map(|(_, edges)| edges.iter())
+                        // Keep only edges whose source node matches the domain index
+                        .filter(|(src, _, _)| *src == domain_idx)
+                        // Convert to (source, target) pairs
+                        .map(|(src, tgt, _)| (*src, *tgt))
+                        .collect();
+                // Sort to ensure deterministic ordering
+                bundles.sort_unstable();
 
                 // Check if node has any intra-partition outgoing edges
                 let has_intra_partition_outgoing = partition
@@ -478,7 +487,8 @@ where
         }
 
         // For inter-partition edges that span multiple partitions, add edges from left to right stitch nodes to every intermediate partition.
-        for ((source_partition_idx, target_partition_idx), edges) in &inter_partition_edges {
+        for &((source_partition_idx, target_partition_idx), edges) in &sorted_inter_partition_edges
+        {
             // If the edge spans more than one partition (e.g., from partition 0 to 4),
             // we need to add edges from left to right stitch nodes to every intermediate partition.
             if *target_partition_idx > *source_partition_idx + 2 {
@@ -612,7 +622,12 @@ where
                     right_section,
                     partition_index
                 );
-                self.load_partition(right_section, original_sizer, original_graph, vertex_spacing)?;
+                self.load_partition(
+                    right_section,
+                    original_sizer,
+                    original_graph,
+                    vertex_spacing,
+                )?;
             }
 
             for detail_level in [
@@ -946,9 +961,13 @@ where
     //    C --- R
 
     fn make_bridge_graph(
-        sources: Vec<(NodeIndex<u32>, LayoutNode, LayoutEdge)>,
-        targets: Vec<(NodeIndex<u32>, LayoutNode, LayoutEdge)>,
+        mut sources: Vec<(NodeIndex<u32>, LayoutNode, LayoutEdge)>,
+        mut targets: Vec<(NodeIndex<u32>, LayoutNode, LayoutEdge)>,
     ) -> StableGraph<LayoutNode, LayoutEdge, Undirected, u32> {
+        // Sort to ensure deterministic ordering
+        sources.sort_by_key(|(idx, _, _)| *idx);
+        targets.sort_by_key(|(idx, _, _)| *idx);
+
         log::trace!(
             "make_bridge_graph: examining {} sources and {} targets",
             sources.len(),

@@ -104,13 +104,10 @@ fn enumerate_bicliques(
     let left_neighbors = part1.clone();
     let right_neighbors: HashSet<u64> = HashSet::new();
     let mut right_candidates = part2.clone().into_iter().collect::<Vec<u64>>();
-    right_candidates.sort_by(|x1, x2| {
-        graph
-            .neighbors(*x1)
-            .iter()
-            .collect::<Vec<_>>()
-            .len()
-            .cmp(&graph.neighbors(*x2).iter().collect::<Vec<_>>().len())
+    // Sort with stable key: first by neighbor count, then by node id for determinism
+    right_candidates.sort_by_key(|x| {
+        let neighbor_count = graph.neighbors(*x).len();
+        (neighbor_count, *x)
     });
     let clique_outsiders: Vec<u64> = vec![];
 
@@ -133,8 +130,11 @@ fn enumerate_bicliques(
     // and all edges from the original graph should be in the bicliques
     let edge_set = edges.iter().copied().collect::<HashSet<(u64, u64)>>();
     for biclique in &bicliques {
-        for u in &biclique.0 {
-            for v in &biclique.1 {
+        // Sort HashSet elements for deterministic iteration
+        let u_sorted: Vec<_> = biclique.0.iter().copied().collect();
+        let v_sorted: Vec<_> = biclique.1.iter().copied().collect();
+        for u in &u_sorted {
+            for v in &v_sorted {
                 assert!(edge_set.contains(&(*u, *v)));
             }
         }
@@ -265,8 +265,13 @@ fn make_nets(bicliques: &mut [(HashSet<u64>, HashSet<u64>)]) -> Vec<HashSet<(u64
         .sorted_by_key(|biclique| -(biclique.0.len() as i64 * biclique.1.len() as i64))
     {
         let mut biclique_edges = HashSet::new();
-        for u in &biclique.0 {
-            for v in &biclique.1 {
+        // Sort HashSet elements for deterministic iteration
+        let mut u_sorted: Vec<_> = biclique.0.iter().copied().collect();
+        u_sorted.sort_unstable();
+        let mut v_sorted: Vec<_> = biclique.1.iter().copied().collect();
+        v_sorted.sort_unstable();
+        for u in &u_sorted {
+            for v in &v_sorted {
                 biclique_edges.insert((*u, *v));
             }
         }
@@ -897,7 +902,10 @@ pub fn layout_layer(
 
     // Apply bundles to routing paths
     // For each edge in edge_bundles, find the path in layer_graph and label all edges with the bundle
-    for ((left_idx, right_idx), bundle) in edge_bundles.iter() {
+    // Sort the keys to ensure deterministic iteration order
+    let mut sorted_bundles: Vec<_> = edge_bundles.iter().collect();
+    sorted_bundles.sort_by_key(|((left, right), _)| (*left, *right));
+    for ((left_idx, right_idx), bundle) in sorted_bundles {
         let start_node = match left_array_idx_to_node.get(&left_idx.index()) {
             Some(&node) => node,
             None => continue, // Node not found, skip
