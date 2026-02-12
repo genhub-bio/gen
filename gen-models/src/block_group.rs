@@ -5,8 +5,9 @@ use std::{
 };
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
-    calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp,
+    HashId, NO_CHROMOSOME_INDEX, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, calculate_hash, is_end_node,
+    is_start_node, is_terminal, traits::Capnp,
 };
 use gen_graph::{
     GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
@@ -366,7 +367,7 @@ impl BlockGroup {
             let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
             for (source_node, target_node, edge_weights) in graph.edges(node) {
                 for edge_weight in edge_weights {
-                    if edge_weight.chromosome_index == -1 {
+                    if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX {
                         continue;
                     }
                     edges_by_ci
@@ -732,7 +733,7 @@ impl BlockGroup {
                     chromosome_index: change.chromosome_index,
                     phased: change.phased,
                 });
-                if change.preserve_edge && !is_terminal(end_block.node_id) {
+                if !is_terminal(end_block.node_id) {
                     new_edges.push(AugmentedEdgeData {
                         edge_data: EdgeData {
                             source_node_id: end_block.node_id,
@@ -742,11 +743,15 @@ impl BlockGroup {
                             target_coordinate,
                             target_strand: Strand::Forward,
                         },
-                        chromosome_index: 0,
+                        chromosome_index: if change.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
                         phased: 0,
                     });
                 }
-            } else if change.preserve_edge {
+            } else {
                 if !is_terminal(start_block.node_id) {
                     new_edges.push(AugmentedEdgeData {
                         edge_data: EdgeData {
@@ -757,7 +762,11 @@ impl BlockGroup {
                             target_coordinate: source_coordinate,
                             target_strand: Strand::Forward,
                         },
-                        chromosome_index: 0,
+                        chromosome_index: if change.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
                         phased: 0,
                     });
                 };
@@ -771,7 +780,11 @@ impl BlockGroup {
                             target_coordinate,
                             target_strand: Strand::Forward,
                         },
-                        chromosome_index: 0,
+                        chromosome_index: if change.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
                         phased: 0,
                     });
                 }
@@ -827,36 +840,43 @@ impl BlockGroup {
                 });
             }
 
-            if change.preserve_edge {
-                if !is_terminal(start_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: start_block.node_id,
-                            source_coordinate: insertion_start_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: start_block.node_id,
-                            target_coordinate: insertion_start_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: 0,
-                        phased: 0,
-                    });
-                }
-                if !is_terminal(end_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: end_block.node_id,
-                            source_coordinate: insertion_end_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: end_block.node_id,
-                            target_coordinate: insertion_end_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: 0,
-                        phased: 0,
-                    });
-                }
+            if !is_terminal(start_block.node_id) {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: start_block.node_id,
+                        source_coordinate: insertion_start_coordinate,
+                        source_strand: Strand::Forward,
+                        target_node_id: start_block.node_id,
+                        target_coordinate: insertion_start_coordinate,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: if change.preserve_edge {
+                        0
+                    } else {
+                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                    },
+                    phased: 0,
+                });
             }
+            if !is_terminal(end_block.node_id) {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: end_block.node_id,
+                        source_coordinate: insertion_end_coordinate,
+                        source_strand: Strand::Forward,
+                        target_node_id: end_block.node_id,
+                        target_coordinate: insertion_end_coordinate,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: if change.preserve_edge {
+                        0
+                    } else {
+                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                    },
+                    phased: 0,
+                });
+            }
+
             new_edges.push(new_augmented_start_edge);
             new_edges.push(new_augmented_end_edge);
         }
