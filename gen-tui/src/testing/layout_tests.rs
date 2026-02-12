@@ -1127,3 +1127,39 @@ fn test_diagonal_edge_viewport_intersection() {
         edges_in_viewport.len()
     );
 }
+
+/// Test for determinism by running the same layout multiple times and comparing snapshots.
+/// This test uses the complex_dag graph with node-based partitioning (which forces bridge creation)
+/// to ensure that HashMap/HashSet iterations produce consistent results.
+#[test]
+fn test_layout_determinism_with_partitioning() {
+    let _ = env_logger::try_init();
+    use crate::testing::mocks::TestGraphs;
+
+    // Generate the same layout 10 times
+    let num_iterations = 10;
+    let mut snapshots = Vec::new();
+
+    for i in 0..num_iterations {
+        // Clone the graph for each iteration since make_snapshot takes ownership
+        let graph = TestGraphs::domain_complex_dag();
+        let snapshot = make_snapshot(graph, 80, 25, usize::MAX, 3);
+        snapshots.push(snapshot);
+        log::trace!("Generated snapshot {} for determinism test", i);
+    }
+
+    // All snapshots should be identical
+    let first = &snapshots[0];
+    for (i, snapshot) in snapshots.iter().enumerate().skip(1) {
+        assert_eq!(
+            first, snapshot,
+            "Layout iteration {} produced different output than iteration 0. \
+             This indicates non-determinism in the layout algorithm. \
+             The difference suggests HashMap or HashSet iteration order is affecting the result.",
+            i
+        );
+    }
+
+    // Also verify against the stored snapshot to ensure the output is correct
+    insta::assert_snapshot!("determinism_check_complex_dag_node_partitioning", first);
+}
