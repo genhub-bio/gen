@@ -19,7 +19,10 @@ use ratatui::{
 
 use crate::{
     config::get_theme_color,
-    views::block_layout::{BaseLayout, ScaledLayout},
+    views::{
+        annotation_track::AnnotationTrack,
+        block_layout::{BaseLayout, ScaledLayout},
+    },
 };
 
 /// Labels used in the graph visualization (selected, not-selected)
@@ -265,6 +268,7 @@ pub struct Viewer<'a> {
     pub has_focus: bool,
     highlights: Vec<(Color, DiGraphMap<GraphNode, ()>)>,
     node_highlights: Vec<(Color, HashSet<GraphNode>)>,
+    annotation_tracks: Vec<AnnotationTrack>,
 }
 
 impl<'a> Viewer<'a> {
@@ -341,6 +345,7 @@ impl<'a> Viewer<'a> {
             has_focus: false,
             highlights: Vec::new(),
             node_highlights: Vec::new(),
+            annotation_tracks: Vec::new(),
         }
     }
 
@@ -387,6 +392,10 @@ impl<'a> Viewer<'a> {
 
     pub fn set_node_highlights(&mut self, highlights: Vec<(Color, HashSet<GraphNode>)>) {
         self.node_highlights = highlights;
+    }
+
+    pub fn set_annotation_tracks(&mut self, tracks: Vec<AnnotationTrack>) {
+        self.annotation_tracks = tracks;
     }
 
     /// Check if we currently have highlights of a specific color.
@@ -571,7 +580,7 @@ impl<'a> Viewer<'a> {
     }
 
     /// Print a block label at the given position.
-    fn place_label(
+    pub(crate) fn place_label(
         &self,
         ctx: &mut ratatui::widgets::canvas::Context,
         label: &str,
@@ -608,6 +617,79 @@ impl<'a> Viewer<'a> {
                 Span::styled(format!("↓({x:.1},{y:.1})"), Style::default().fg(Color::Red)),
             );
         }
+    }
+
+    pub(crate) fn place_bar(
+        &self,
+        ctx: &mut ratatui::widgets::canvas::Context,
+        start_x: f64,
+        y: f64,
+        width: usize,
+        style: ratatui::style::Style,
+    ) {
+        if width == 0 {
+            return;
+        }
+
+        let start = start_x.floor() as i64;
+        let end = start + width as i64 - 1;
+        let window_start = (self.state.offset_x + 1) as i64;
+        let window_end = (self.state.offset_x + self.state.viewport.width as i32 - 1) as i64;
+
+        if end < window_start || start > window_end {
+            return;
+        }
+
+        let visible_start = start.max(window_start);
+        let visible_end = end.min(window_end);
+        let visible_width = (visible_end - visible_start + 1) as usize;
+        if visible_width == 0 {
+            return;
+        }
+
+        let label = " ".repeat(visible_width);
+        ctx.print(visible_start as f64, y, Span::styled(label, style));
+    }
+
+    pub(crate) fn draw_dashed_connector(
+        &self,
+        ctx: &mut ratatui::widgets::canvas::Context,
+        start_x: f64,
+        end_x: f64,
+        y: f64,
+        style: ratatui::style::Style,
+    ) {
+        let start = start_x.ceil() as i64;
+        let end = end_x.floor() as i64;
+        if end <= start {
+            return;
+        }
+
+        let window_start = (self.state.offset_x + 1) as i64;
+        let window_end = (self.state.offset_x + self.state.viewport.width as i32 - 1) as i64;
+        if end < window_start || start > window_end {
+            return;
+        }
+
+        let visible_start = start.max(window_start);
+        let visible_end = end.min(window_end);
+        let visible_width = (visible_end - visible_start + 1) as usize;
+        if visible_width == 0 {
+            return;
+        }
+
+        let mut label = String::with_capacity(visible_width);
+        let mut idx = (visible_start - start) as usize;
+        for _ in 0..visible_width {
+            if idx.is_multiple_of(2) {
+                label.push('-');
+            } else {
+                label.push(' ');
+            }
+            idx += 1;
+        }
+
+        ctx.print(visible_start as f64, y, Span::styled(label, style));
     }
 
     /// Draw and render blocks and lines to a canvas through a scrollable window.
@@ -675,6 +757,7 @@ impl<'a> Viewer<'a> {
             let x_diff = viewport.x as i32 - self.state.viewport.x as i32;
             let y_diff = viewport.y as i32 - self.state.viewport.y as i32;
             let height_diff = viewport.height as i32 - self.state.viewport.height as i32;
+            let viewport_shrank = height_diff < 0;
 
             // Adjust offsets based on viewport changes
             self.state.offset_x -= x_diff;
@@ -686,6 +769,23 @@ impl<'a> Viewer<'a> {
                 viewport, self.state.viewport
             );
             self.state.viewport = viewport;
+
+            if viewport_shrank {
+                let target = if let Some(selected) = self.state.selected_block {
+                    Some(selected)
+                } else if let Some(origin) = self.origin_block {
+                    Some(origin)
+                } else {
+                    self.select_center_block()
+                };
+
+                if let Some(target) = target
+                    && !self.is_block_visible(target)
+                {
+                    self.state.world = self.compute_bounding_box();
+                    let _ = self.center_on_block(target);
+                }
+            }
         }
 
         // Set initial scroll offset if not already set, aligning the origin block:

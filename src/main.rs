@@ -2,7 +2,7 @@
 use core::ops::Range;
 use std::{
     fmt::Debug,
-    fs::File,
+    fs::{self, File},
     io,
     io::{BufReader, Write},
     ops::Deref,
@@ -14,7 +14,6 @@ use std::{
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
-    annotations::gff::propagate_gff,
     commands::{
         Cli, Commands,
         cli_context::CliContext,
@@ -28,25 +27,28 @@ use r#gen::{
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection, operation_management,
     operation_management::{parse_patch_operations, pull, push},
-    patch, track_database, translate,
+    patch, track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::view_block_group, diff::view_diff, operations::view_operations,
         patch::view_patches,
     },
 };
-use gen_core::config::Workspace;
+use gen_annotations::{gff::propagate_gff, translate};
+use gen_core::{HashId, calculate_hash, config::Workspace};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
+    annotations::{add_annotation, add_annotation_file},
     block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
-    file_types::FileTypes,
     metadata,
     operations::{
-        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
+        OperationSummary, parse_hash,
     },
     sample::Sample,
+    session_operations::{DependencyModels, end_operation, start_operation},
     traits::Query,
 };
 use itertools::Itertools;
@@ -169,6 +171,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(view_block_group(
                 graph_conn,
+                operation_conn,
+                &workspace,
                 graph.clone(),
                 sample.clone(),
                 collection_name,
@@ -531,6 +535,42 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             graph_conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
+        }
+        Some(Commands::AddAnnotation {
+            name,
+            group,
+            sample,
+            region,
+        }) => {
+            let collection_name = get_default_collection(operation_conn)?;
+            let operation = add_annotation(
+                &db_context,
+                &collection_name,
+                &name,
+                group.as_deref(),
+                sample.as_deref(),
+                &region,
+            )?;
+            println!("Annotation {name} added in operation {}", operation.hash);
+            Ok(())
+        }
+        Some(Commands::AddAnnotationFile {
+            path,
+            format,
+            index,
+            name,
+            message,
+        }) => {
+            let operation = add_annotation_file(
+                &db_context,
+                &path,
+                format.as_deref(),
+                index.as_deref(),
+                name.as_deref(),
+                message.as_deref(),
+            )?;
+            println!("Annotation file added in operation {}", operation.hash);
             Ok(())
         }
         Some(Commands::ListSamples {}) => {

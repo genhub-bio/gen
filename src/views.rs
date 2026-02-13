@@ -1,8 +1,13 @@
+pub mod annotation_files;
+pub mod annotation_groups;
+pub mod annotation_track;
+pub mod annotations;
 pub mod block_group;
 pub mod block_group_viewer;
 pub mod block_layout;
 pub mod collection;
 pub mod diff;
 pub mod edge_layout;
+pub mod messages;
 pub mod operations;
 pub mod patch;
