@@ -331,11 +331,16 @@ where
         // If we had to break outside of an articulation point, we don't add
         // more stitching nodes, but instead hook up more edges to the same stitch node.
         for (partition_idx, partition) in all_partitions.iter_mut().enumerate().step_by(2) {
-            // Add Left Stitching node
-            let left_stitch_idx = partition
-                .graph
-                .add_node(PartitionNode::Stitch(StitchSide::Left));
-            partition.left_stitch_idx = Some(left_stitch_idx);
+            // Add Left Stitching node (skip for partition 0)
+            let left_stitch_idx = if partition_idx > 0 {
+                let idx = partition
+                    .graph
+                    .add_node(PartitionNode::Stitch(StitchSide::Left));
+                partition.left_stitch_idx = Some(idx);
+                Some(idx)
+            } else {
+                None
+            };
 
             // Collect all data nodes with their domain indices
             let data_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
@@ -384,27 +389,30 @@ where
                 // Connect to left stitch if:
                 // 1. Node has inter-partition incoming edges, OR
                 // 2. Node has no intra-partition incoming edges (is a source node)
-                if !bundles.is_empty() {
-                    // Has inter-partition edges - add one edge per bundle
-                    for bundle in bundles {
+                // AND we have a left stitch node
+                if let Some(left_stitch_idx) = left_stitch_idx {
+                    if !bundles.is_empty() {
+                        // Has inter-partition edges - add one edge per bundle
+                        for bundle in bundles {
+                            log::trace!(
+                                "connecting left_stitch {:?} -> node {:?} with bundle {:?}",
+                                left_stitch_idx,
+                                node_idx,
+                                bundle
+                            );
+                            partition
+                                .graph
+                                .add_edge(left_stitch_idx, node_idx, Some(bundle));
+                        }
+                    } else if !has_intra_partition_incoming {
+                        // Source node with no inter-partition edges
                         log::trace!(
-                            "connecting left_stitch {:?} -> node {:?} with bundle {:?}",
+                            "connecting left_stitch {:?} -> node {:?} with no bundle",
                             left_stitch_idx,
                             node_idx,
-                            bundle
                         );
-                        partition
-                            .graph
-                            .add_edge(left_stitch_idx, node_idx, Some(bundle));
+                        partition.graph.add_edge(left_stitch_idx, node_idx, None);
                     }
-                } else if !has_intra_partition_incoming {
-                    // Source node with no inter-partition edges
-                    log::trace!(
-                        "connecting left_stitch {:?} -> node {:?} with no bundle",
-                        left_stitch_idx,
-                        node_idx,
-                    );
-                    partition.graph.add_edge(left_stitch_idx, node_idx, None);
                 }
             }
 
@@ -747,12 +755,6 @@ where
         let truncated_layout =
             layout_engine.compute_layout(&sizer_adapter, VisualDetail::Truncated)?;
 
-        // Label edges with domain node pairs after layout but before storing
-        // TODO: we now do this during the layout process, so this shouldn't be needed anymore:
-        // self.label_layout_edges(original_graph, partition_index, &mut base_layout)?;
-        // self.label_layout_edges(original_graph, partition_index, &mut full_layout)?;
-        // self.label_layout_edges(original_graph, partition_index, &mut truncated_layout)?;
-        //
         let partition = &mut self.partitions[partition_index];
         partition.layouts[VisualDetail::Minimal.as_index()] = Some(base_layout);
         partition.layouts[VisualDetail::Full.as_index()] = Some(full_layout);
@@ -765,61 +767,7 @@ where
             VisualDetail::Full,
             VisualDetail::Truncated,
         ] {
-            // TODO: simplify this by having each partition store its own nominal width and rise,
-            // and then during viewportgraph assembly widths and rises  are used to offset
-            // partitions
             if let Some(layout) = &partition.layouts[detail_level.as_index()] {
-                // // Vertical alignment logic:
-                // // - The rise value offsets the entire partition so that stitch nodes align
-                // // - Left stitch node of each partition should be at y=0 in local coordinates
-                // // - Rise should be set so that this partition's left stitch aligns with
-                // //   the previous partition's right stitch (both in global coordinates)
-                // //   -> not including bridge partitions
-                //
-                // // Calculate rise for current partition
-                // // The rise should offset this partition so its left stitch aligns with
-                // // the previous partition's right stitch
-                // let new_current_rise = if partition_index > 0 {
-                //     // Get both the previous partition's right stitch and current partition's left stitch
-                //     if let Some(prev_layout) = self.get_layout(partition_index - 1, detail_level) {
-                //         let curr_layout = layout;
-                //         let prev_partition = &self.partitions[partition_index - 1];
-                //         let curr_partition = &self.partitions[partition_index];
-                //
-                //         if let (Some(prev_right_stitch_idx), Some(curr_left_stitch_idx)) = (
-                //             prev_partition.right_stitch_idx,
-                //             curr_partition.left_stitch_idx,
-                //         ) {
-                //             if let (Some(prev_right_stitch_pos), Some(curr_left_stitch_pos)) = (
-                //                 prev_layout.get_node_position(prev_right_stitch_idx),
-                //                 curr_layout.get_node_position(curr_left_stitch_idx),
-                //             ) {
-                //                 // Previous partition's right stitch Y in global coordinates
-                //                 // (not including bridge)
-                //                 let prev_cumulative_rise = self.metrics[detail_level.as_index()]
-                //                     .rise
-                //                     .prefix_sum(partition_index - 2, 0);
-                //                 let prev_right_stitch_global_y =
-                //                     prev_right_stitch_pos.y + prev_cumulative_rise;
-                //
-                //                 // Current partition's left stitch Y in local coordinates
-                //                 let curr_left_stitch_local_y = curr_left_stitch_pos.y;
-                //
-                //                 // Rise needed to align current left stitch with previous right stitch
-                //                 prev_right_stitch_global_y - curr_left_stitch_local_y
-                //             } else {
-                //                 0 // No stitch node positions found
-                //             }
-                //         } else {
-                //             0 // No stitch nodes
-                //         }
-                //     } else {
-                //         0 // No previous layout available
-                //     }
-                // } else {
-                //     0 // First partition, no rise needed
-                // };
-
                 log::trace!("Partition {} is {} wide", partition_index, layout.width);
                 let metrics = &mut self.metrics[detail_level.as_index()];
                 metrics.widths.add_at(partition_index, layout.width);
@@ -1719,56 +1667,6 @@ mod tests {
         assert_eq!(table.section_count(), 4);
         assert_eq!(table.inter_partition_edges.len(), 4); // Multiple partition pairs including branching
     }
-
-    // #[test]
-    // fn test_partition_spanning_edges() {
-    //     // Create a graph where we'll have edges that span multiple partitions
-    //     // 1 -> 2    3 -> 4    5 -> 6
-    //     //  \____________/
-    //     let edges = vec![(1, 2), (1, 4), (3, 4), (5, 6)];
-    //     let graph = make_test_graph(edges, None);
-    //     let table = PartitionTable::new(&graph, 1, 2); // Force small partitions
-
-    //     assert_eq!(table.partitions.len(), 3);
-
-    //     let mut found_routing_edge = false;
-    //     for partition in &table.partitions {
-    //         for edge_idx in partition.graph.edge_indices() {
-    //             if let Some(edge_weight) = partition.graph.edge_weight(edge_idx) {
-    //                 if matches!(edge_weight.role, EdgeRole::Stitch) {
-    //                     found_routing_edge = true;
-
-    //                     // Verify this edge connects left and right stitch nodes
-    //                     if let Some((source, target)) = partition.graph.edge_endpoints(edge_idx) {
-    //                         let source_node = partition.graph.node_weight(source).unwrap();
-    //                         let target_node = partition.graph.node_weight(target).unwrap();
-
-    //                         assert!(matches!(
-    //                             source_node.role,
-    //                             NodeRole::Stitching(StitchSide::Left)
-    //                         ));
-    //                         assert!(matches!(
-    //                             target_node.role,
-    //                             NodeRole::Stitching(StitchSide::Right)
-    //                         ));
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     // We should have found at least one routing edge if there was a spanning connection
-    //     if table
-    //         .inter_partition_edges
-    //         .iter()
-    //         .any(|((s, t), _)| t - s > 1)
-    //     {
-    //         assert!(
-    //             found_routing_edge,
-    //             "Expected to find routing edges for spanning connections"
-    //         );
-    //     }
-    // }
 
     #[test]
     fn test_find_partition_idx() {
