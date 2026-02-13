@@ -710,16 +710,6 @@ impl<'a> LayoutEngine<'a> {
             self.vertex_layers = Some(run_sugiyama_algorithm(&mut self.vertex_graph, &self.config));
         }
 
-        // Check for single-layer disconnected graphs
-        // If we have multiple nodes but only 1 layer, it implies a lack of hierarchical connection
-        // which we treat as invalid/disconnected for this layout.
-        if let Some(layers) = &self.vertex_layers
-            && layers.len() <= 1
-            && self.partition_graph.node_count() > 1
-        {
-            return Err("Graph forms a single layer. This implies a disconnected or non-hierarchical structure which is not supported.".to_string());
-        }
-
         // Make a fresh copy for this specific layout computation
         // (if memory ends up being an issue, we can probably figure out
         // which variables to reset instead)
