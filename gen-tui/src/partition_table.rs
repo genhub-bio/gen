@@ -416,11 +416,23 @@ where
                 }
             }
 
-            // Add Right Stitching node
-            let right_stitch_idx = partition
-                .graph
-                .add_node(PartitionNode::Stitch(StitchSide::Right));
-            partition.right_stitch_idx = Some(right_stitch_idx);
+            // Add Right Stitching node (skip for the last partition)
+            // Note: we can't easily check against num_partitions here because we're iterating over
+            // a subset of partitions (every second one) from a mutable vector.
+            // But we can check if this is the last iteration if we knew the count.
+            // Instead, we can check if there are more partitions after this one + the bridge.
+            // The iteration step is 2, so the next partition would be partition_idx + 2.
+            let is_last_partition = partition_idx >= num_partitions - 1;
+
+            let right_stitch_idx = if !is_last_partition {
+                let idx = partition
+                    .graph
+                    .add_node(PartitionNode::Stitch(StitchSide::Right));
+                partition.right_stitch_idx = Some(idx);
+                Some(idx)
+            } else {
+                None
+            };
 
             // Collect all data nodes with their domain indices
             let data_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
@@ -469,27 +481,30 @@ where
                 // Connect to right stitch if:
                 // 1. Node has inter-partition outgoing edges, OR
                 // 2. Node has no intra-partition outgoing edges (is a sink node)
-                if !bundles.is_empty() {
-                    // Has inter-partition edges - add one edge per bundle
-                    for bundle in bundles {
+                // AND we have a right stitch node
+                if let Some(right_stitch_idx) = right_stitch_idx {
+                    if !bundles.is_empty() {
+                        // Has inter-partition edges - add one edge per bundle
+                        for bundle in bundles {
+                            log::trace!(
+                                "connecting node {:?} -> right_stitch {:?} with bundle {:?}",
+                                node_idx,
+                                right_stitch_idx,
+                                bundle
+                            );
+                            partition
+                                .graph
+                                .add_edge(node_idx, right_stitch_idx, Some(bundle));
+                        }
+                    } else if !has_intra_partition_outgoing {
+                        // Sink node with no inter-partition edges
                         log::trace!(
-                            "connecting node {:?} -> right_stitch {:?} with bundle {:?}",
+                            "connecting node {:?} -> right_stitch {:?} with no bundle",
                             node_idx,
                             right_stitch_idx,
-                            bundle
                         );
-                        partition
-                            .graph
-                            .add_edge(node_idx, right_stitch_idx, Some(bundle));
+                        partition.graph.add_edge(node_idx, right_stitch_idx, None);
                     }
-                } else if !has_intra_partition_outgoing {
-                    // Sink node with no inter-partition edges
-                    log::trace!(
-                        "connecting node {:?} -> right_stitch {:?} with no bundle",
-                        node_idx,
-                        right_stitch_idx,
-                    );
-                    partition.graph.add_edge(node_idx, right_stitch_idx, None);
                 }
             }
         }

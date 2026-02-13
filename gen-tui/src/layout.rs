@@ -645,11 +645,79 @@ impl<'a> LayoutEngine<'a> {
     where
         S: for<'g> NodeSizer<&'g StableDiGraph<PartitionNode, PartitionEdge, u32>>,
     {
+        // Check for empty graph
+        if self.partition_graph.node_count() == 0 {
+            return Err("Cannot compute layout for empty graph".to_string());
+        }
+
+        // Special case: Single node graph
+        // Bypass Sugiyama algorithm and edge routing entirely
+        if self.partition_graph.node_count() == 1 {
+            let node_idx = self.partition_graph.node_indices().next().unwrap();
+            let partition_node = &self.partition_graph[node_idx];
+
+            // Calculate size
+            let size = if let PartitionNode::Data(_domain_idx) = partition_node {
+                // For Data nodes, use the node sizer
+                node_sizer.get_node_size(&node_idx, detail_level)
+            } else {
+                // For Stitch nodes, use dummy size
+                node_sizer.get_dummy_size()
+            };
+
+            let (width, height) = (
+                (size.0 as f64 + self.config.vertex_spacing).round() as u64,
+                (size.1 as f64 + self.config.vertex_spacing).round() as u64,
+            );
+
+            // Create LayoutNode at (0,0)
+            let pos = LocalPos::new(self.partition_idx, LayoutPos::ZERO);
+            let role = match partition_node {
+                PartitionNode::Data(d) => NodeRole::Data(*d),
+                PartitionNode::Stitch(s) => NodeRole::Stitch(*s),
+            };
+            let layout_node = LayoutNode::new(role, pos, (width, height), Some(0));
+
+            let mut layout_graph = StableGraph::default();
+            layout_graph.add_node(layout_node);
+
+            let spatial_index = PartitionLayout::build_spatial_index(&layout_graph);
+
+            return Ok(PartitionLayout {
+                graph: layout_graph,
+                spatial_index,
+                width: width as i64,
+                height: height as i64,
+            });
+        }
+
+        // Check for disconnected graph (multiple components)
+        // A graph with multiple nodes must be connected to be laid out
+        // The sugiyama algorithm (phase 1: ranking) will panic if the graph is disconnected
+        // because it expects to be able to build a spanning tree.
+        let components = count_connected_components(&self.vertex_graph);
+        if components > 1 {
+            return Err(format!(
+                "Graph is disconnected ({} components). Layout requires a connected graph.",
+                components
+            ));
+        }
+
         // Phases 1 & 2 of the Sugiyama algorithm organize the nodes into layers
         // and add dummy nodes to the graph. We do this only once and store the result
         // in the LayoutEngine.
         if self.vertex_layers.is_none() {
             self.vertex_layers = Some(run_sugiyama_algorithm(&mut self.vertex_graph, &self.config));
+        }
+
+        // Check for single-layer disconnected graphs
+        // If we have multiple nodes but only 1 layer, it implies a lack of hierarchical connection
+        // which we treat as invalid/disconnected for this layout.
+        if let Some(layers) = &self.vertex_layers
+            && layers.len() <= 1
+            && self.partition_graph.node_count() > 1
+        {
+            return Err("Graph forms a single layer. This implies a disconnected or non-hierarchical structure which is not supported.".to_string());
         }
 
         // Make a fresh copy for this specific layout computation
@@ -779,6 +847,32 @@ impl<'a> LayoutEngine<'a> {
 
         layout_graph
     }
+}
+
+/// Helper to count connected components in an undirected sense for a StableGraph
+fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
+    let mut visited = std::collections::HashSet::new();
+    let mut components = 0;
+
+    for node in graph.node_indices() {
+        if !visited.contains(&node) {
+            components += 1;
+            // BFS traversal
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(node);
+            visited.insert(node);
+
+            while let Some(current) = queue.pop_front() {
+                for neighbor in graph.neighbors_undirected(current) {
+                    if !visited.contains(&neighbor) {
+                        visited.insert(neighbor);
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+    }
+    components
 }
 
 fn mean_y_for_x(
