@@ -632,11 +632,6 @@ pub fn view_block_group(
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
-<<<<<<< HEAD
-            messages.push_warn(format!("{block_graph:?}"));
-            connect_all_boundary_edges(&mut block_graph);
-=======
->>>>>>> 8336a54 (Remove boundary edge code)
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
             current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
