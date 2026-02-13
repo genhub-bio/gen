@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{
-    HashId, NO_CHROMOSOME_INDEX,
+    HashId,
     Strand::{self, Forward},
     is_end_node, is_start_node, is_terminal,
 };
-use gen_graph::{ConnectBoundaryEdges, GenGraph, GraphEdge, GraphNode, connect_all_boundary_edges};
+use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{
     block_group_edge::BlockGroupEdge, changesets::ChangesetModels, edge::Edge, node::Node,
     sequence::Sequence, session_operations::DependencyModels,
@@ -46,65 +46,6 @@ impl<'a> From<DiffGenGraphRef<'a>> for GenGraph {
             graph.add_edge(src.node, dest.node, mapped_edges);
         }
         graph
-    }
-}
-
-struct DiffGenGraphAdapter<'a>(&'a mut DiffGenGraph);
-
-impl<'a> ConnectBoundaryEdges for DiffGenGraphAdapter<'a> {
-    type Node = DiffGraphNode;
-    type NodeIter<'b>
-        = petgraph::graphmap::Nodes<'b, DiffGraphNode>
-    where
-        Self: 'b;
-
-    fn graph_nodes(&self) -> Self::NodeIter<'_> {
-        let graph: &DiffGenGraph = &*self.0;
-        graph.nodes()
-    }
-
-    fn is_terminal(&self, node: Self::Node) -> bool {
-        is_terminal(node.node.node_id)
-    }
-
-    fn can_connect_nodes(&self, node: Self::Node, other_node: Self::Node) -> bool {
-        other_node.node.node_id == node.node.node_id
-            && other_node.node.sequence_end == node.node.sequence_start
-    }
-
-    fn has_incoming(&self, node: Self::Node) -> bool {
-        let graph: &DiffGenGraph = &*self.0;
-        graph
-            .edges_directed(node, Direction::Incoming)
-            .next()
-            .is_some()
-    }
-
-    fn has_outgoing(&self, node: Self::Node) -> bool {
-        let graph: &DiffGenGraph = &*self.0;
-        graph
-            .edges_directed(node, Direction::Outgoing)
-            .next()
-            .is_some()
-    }
-
-    fn add_boundary_edge(&mut self, source: Self::Node, target: Self::Node) {
-        let graph: &mut DiffGenGraph = &mut *self.0;
-        graph.add_edge(
-            source,
-            target,
-            vec![DiffGraphEdge {
-                edge: GraphEdge {
-                    edge_id: HashId::pad_str(0),
-                    source_strand: Strand::Forward,
-                    target_strand: Strand::Forward,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                    created_on: 0,
-                },
-                is_new: source.is_new || target.is_new,
-            }],
-        );
     }
 }
 
@@ -303,13 +244,9 @@ pub fn get_diff_graph(
     block_graphs
 }
 
-pub fn connect_all_boundary_edges_diff(graph: &mut DiffGenGraph) {
-    connect_all_boundary_edges(&mut DiffGenGraphAdapter(graph));
-}
-
 #[cfg(test)]
 mod tests {
-    use gen_core::{HashId, NO_CHROMOSOME_INDEX, Strand};
+    use gen_core::{HashId, Strand};
     use gen_graph::{GraphEdge, GraphNode};
     use gen_models::{
         block_group::BlockGroup,
@@ -544,40 +481,5 @@ mod tests {
             find_edge(graph, block_node_insert_start, new_node_block).expect("internal edge");
         assert_eq!(internal_edges.len(), 1);
         assert!(internal_edges[0].is_new);
-    }
-
-    #[test]
-    fn connect_all_boundary_edges_connects_adjacent_blocks() {
-        let mut graph = DiffGenGraph::new();
-        let node_id = HashId::pad_str(12);
-        let block_a = DiffGraphNode {
-            node: GraphNode {
-                block_id: 1,
-                node_id,
-                sequence_start: 0,
-                sequence_end: 5,
-            },
-            is_new: true,
-        };
-        let block_b = DiffGraphNode {
-            node: GraphNode {
-                block_id: 2,
-                node_id,
-                sequence_start: 5,
-                sequence_end: 10,
-            },
-            is_new: true,
-        };
-        graph.add_node(block_a);
-        graph.add_node(block_b);
-
-        connect_all_boundary_edges_diff(&mut graph);
-
-        assert_eq!(graph.all_edges().count(), 1);
-        let edges = find_edge(&graph, block_a, block_b).expect("boundary edge");
-        assert_eq!(edges.len(), 1);
-        let edge = edges[0];
-        assert!(edge.is_new);
-        assert_eq!(edge.edge.chromosome_index, NO_CHROMOSOME_INDEX);
     }
 }

@@ -367,9 +367,11 @@ impl BlockGroup {
             let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
             for (source_node, target_node, edge_weights) in graph.edges(node) {
                 for edge_weight in edge_weights {
-                    if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX
-                        || edge_weight.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    {
+                    if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX {
+                        continue;
+                    }
+                    if edge_weight.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
+                        edges_to_remove.push((source_node, target_node));
                         continue;
                     }
                     edges_by_ci
@@ -556,10 +558,7 @@ impl BlockGroup {
             } else {
                 PathCache::get_intervaltree(cache, &change.path).unwrap()
             };
-            let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?
-                .into_iter()
-                .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
-                .collect::<Vec<_>>();
+            let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
             new_augmented_edges_by_block_group
                 .entry(&change.block_group_id)
                 .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
@@ -633,10 +632,7 @@ impl BlockGroup {
         change: &PathChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
     ) -> Result<(), ChangeError> {
-        let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?
-            .into_iter()
-            .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
-            .collect::<Vec<_>>();
+        let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
         let new_edges = new_augmented_edges
             .iter()
             .map(|augmented_edge| augmented_edge.edge_data)

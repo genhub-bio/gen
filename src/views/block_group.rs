@@ -10,7 +10,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_core::{HashId, PATH_START_NODE_ID, Workspace, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
     db::{GraphConnection, OperationsConnection},
@@ -195,8 +195,6 @@ pub fn view_block_group(
     } else {
         block_graph = get_empty_graph();
     }
-
-    connect_all_boundary_edges(&mut block_graph);
 
     bar.finish();
 
@@ -634,8 +632,11 @@ pub fn view_block_group(
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+<<<<<<< HEAD
             messages.push_warn(format!("{block_graph:?}"));
             connect_all_boundary_edges(&mut block_graph);
+=======
+>>>>>>> 8336a54 (Remove boundary edge code)
             // Update the viewer
             viewer = Viewer::new(&block_graph, conn, PlotParameters::default());
             current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));

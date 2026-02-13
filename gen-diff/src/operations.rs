@@ -9,7 +9,7 @@ use gen_models::{
 use petgraph::Direction;
 use thiserror::Error;
 
-use crate::graph::{DiffGenGraph, connect_all_boundary_edges_diff, get_diff_graph};
+use crate::graph::{DiffGenGraph, get_diff_graph};
 
 #[derive(Debug, Error)]
 pub enum OperationDiffError {
@@ -231,9 +231,8 @@ fn build_block_group_diffs(
 
         let mut block_groups = merged_graphs
             .into_iter()
-            .map(|(id, mut graph)| {
+            .map(|(id, graph)| {
                 let block_group = acc.block_group_info.get(&id).cloned();
-                connect_all_boundary_edges_diff(&mut graph);
                 BlockGroupDiff {
                     id,
                     block_group,
