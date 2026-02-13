@@ -157,62 +157,6 @@ impl Query for Annotation {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct AnnotationGroupSample {
-    pub annotation_group: String,
-    pub sample_name: String,
-}
-
-impl<'a> Capnp<'a> for AnnotationGroupSample {
-    type Builder = annotation_group_sample::Builder<'a>;
-    type Reader = annotation_group_sample::Reader<'a>;
-
-    fn write_capnp(&self, builder: &mut Self::Builder) {
-        builder.set_annotation_group(&self.annotation_group);
-        builder.set_sample_name(&self.sample_name);
-    }
-
-    fn read_capnp(reader: Self::Reader) -> Self {
-        let annotation_group = reader.get_annotation_group().unwrap().to_string().unwrap();
-        let sample_name = reader.get_sample_name().unwrap().to_string().unwrap();
-        AnnotationGroupSample {
-            annotation_group,
-            sample_name,
-        }
-    }
-}
-
-impl AnnotationGroupSample {
-    pub fn create(
-        conn: &GraphConnection,
-        annotation_group: &str,
-        sample_name: &str,
-    ) -> Result<(), AnnotationError> {
-        AnnotationGroup::get_or_create(conn, annotation_group)?;
-        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
-        let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![annotation_group, sample_name])?;
-        Ok(())
-    }
-
-    pub fn delete(
-        conn: &GraphConnection,
-        annotation_group: &str,
-        sample_name: &str,
-    ) -> Result<(), AnnotationError> {
-        let query = "DELETE FROM annotation_group_samples WHERE annotation_group = ?1 AND sample_name = ?2;";
-        let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![annotation_group, sample_name])?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum AnnotationGroupError {
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] rusqlite::Error),
-}
-
 #[derive(Debug, Error)]
 pub enum AnnotationError {
     #[error("Database error: {0}")]
@@ -326,6 +270,62 @@ impl Annotation {
         let query = "select * from annotations where annotation_group = ?1";
         Ok(Annotation::query(conn, query, params![group]))
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AnnotationGroupSample {
+    pub annotation_group: String,
+    pub sample_name: String,
+}
+
+impl<'a> Capnp<'a> for AnnotationGroupSample {
+    type Builder = annotation_group_sample::Builder<'a>;
+    type Reader = annotation_group_sample::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        builder.set_annotation_group(&self.annotation_group);
+        builder.set_sample_name(&self.sample_name);
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        let annotation_group = reader.get_annotation_group().unwrap().to_string().unwrap();
+        let sample_name = reader.get_sample_name().unwrap().to_string().unwrap();
+        AnnotationGroupSample {
+            annotation_group,
+            sample_name,
+        }
+    }
+}
+
+impl AnnotationGroupSample {
+    pub fn create(
+        conn: &GraphConnection,
+        annotation_group: &str,
+        sample_name: &str,
+    ) -> Result<(), AnnotationError> {
+        AnnotationGroup::get_or_create(conn, annotation_group)?;
+        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
+        let mut stmt = conn.prepare(query)?;
+        stmt.execute(params![annotation_group, sample_name])?;
+        Ok(())
+    }
+
+    pub fn delete(
+        conn: &GraphConnection,
+        annotation_group: &str,
+        sample_name: &str,
+    ) -> Result<(), AnnotationError> {
+        let query = "DELETE FROM annotation_group_samples WHERE annotation_group = ?1 AND sample_name = ?2;";
+        let mut stmt = conn.prepare(query)?;
+        stmt.execute(params![annotation_group, sample_name])?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum AnnotationGroupError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]

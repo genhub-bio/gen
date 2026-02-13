@@ -152,6 +152,5 @@ pub fn setup_test_data(conn: &GraphConnection) {
         preserve_edge: false,
     };
 
-    BlockGroup::insert_change(conn, &change, &tree)
-        .expect("should apply variant change from simple.vcf");
+    BlockGroup::insert_change(conn, &change, &tree).expect("should apply variant change");
 }
