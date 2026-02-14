@@ -83,21 +83,7 @@ Both are also dependent on the requested level of visual detail (minimal, full, 
 
 ## File Structure
 
-### Commands (`src/commands/`)
-- `import/` - Import FASTA, GenBank, GFA formats
-- `export/` - Export to various formats  
-- `update/` - Update sequences with new data (VCF, GAF, etc.)
-- CLI context and argument parsing
-
-### Views (`src/views/`)
-- Terminal UI components using ratatui
-- Block group viewers, graph widgets, operation displays
-- Specialized widget system for graph visualization
-
-### Core Libraries
-- `graph.rs` - Core graph operations and algorithms
-- `imports/`, `exports/` - Format-specific I/O handlers
-- `translate/` - Coordinate translation between formats
+TODO: redo this section
 
 ## Testing Architecture
 
@@ -136,12 +122,10 @@ Both are also dependent on the requested level of visual detail (minimal, full, 
 - LRU cache eviction for memory management
 
 
-A code editing task is not complete without staging changes with `git add .`, running `cargo fmt --all --`, staging any edits made by cargo fmt, running `cargo clippy --all-targets --all-features`, resolving ALL warnings (pre-commit hook will fail otherwise), and committing with a meaningful but concise commit message (no emoji)
+Commit to git only when the users asks to commit to git. Do this by first staging changes with `git add .`, running `cargo fmt --all --`, staging any edits made by cargo fmt, running `cargo clippy --all-targets --all-features`, resolving ALL warnings (pre-commit hook will fail otherwise), and committing with a meaningful but concise commit message (no emoji)
 
 **IMPORTANT**: All clippy warnings must be resolved before committing or the pre-commit hook will fail the commit. If you don't know how to resolve a warning:
 - Suggest adding `#[allow(clippy::warning_name)]` or `#[allow(unused_variables)]` annotations
 - Suggest commenting out problematic sections temporarily
 - Ask the user what to do with the specific warning
 
-
-- remember that we are in the subcrate gen-widget, so the location of the todo file should change as well. i will move the physical object, you do it digital

@@ -369,4 +369,199 @@ mod order {
             vec![n0, n1, n2, n3, n4, n5, n6, n7]
         );
     }
+
+    #[test]
+    fn deterministic_ordering_with_tiebreaker() {
+        let mut graph = StableDiGraph::new();
+        let l0_n0 = graph.add_node(vertex_with_rank(0));
+        let l0_n1 = graph.add_node(vertex_with_rank(0));
+        let l1_n0 = graph.add_node(vertex_with_rank(1));
+        let l1_n1 = graph.add_node(vertex_with_rank(1));
+        let l2_n0 = graph.add_node(vertex_with_rank(2));
+        let l2_n1 = graph.add_node(vertex_with_rank(2));
+        let l3_n0 = graph.add_node(vertex_with_rank(3));
+        let l3_n1 = graph.add_node(vertex_with_rank(3));
+
+        graph.add_edge(l0_n0, l1_n0, Edge::default());
+        graph.add_edge(l0_n0, l1_n1, Edge::default());
+        graph.add_edge(l0_n1, l1_n0, Edge::default());
+        graph.add_edge(l0_n1, l1_n1, Edge::default());
+
+        graph.add_edge(l1_n0, l2_n0, Edge::default());
+        graph.add_edge(l1_n0, l2_n1, Edge::default());
+        graph.add_edge(l1_n1, l2_n0, Edge::default());
+        graph.add_edge(l1_n1, l2_n1, Edge::default());
+
+        graph.add_edge(l2_n0, l3_n0, Edge::default());
+        graph.add_edge(l2_n0, l3_n1, Edge::default());
+        graph.add_edge(l2_n1, l3_n0, Edge::default());
+        graph.add_edge(l2_n1, l3_n1, Edge::default());
+
+        let layer0 = vec![l0_n0, l0_n1];
+        let layer1 = vec![l1_n0, l1_n1];
+        let layer2 = vec![l2_n0, l2_n1];
+        let layer3 = vec![l3_n0, l3_n1];
+
+        let original_order = vec![
+            layer0.clone(),
+            layer1.clone(),
+            layer2.clone(),
+            layer3.clone(),
+        ];
+        let order = Order::new(original_order);
+
+        let result = order_layer(&graph, true, &order, crate::p2_reduce_crossings::barycenter);
+
+        let l0_result = &result._inner[0];
+        let l1_result = &result._inner[1];
+        let l2_result = &result._inner[2];
+        let l3_result = &result._inner[3];
+
+        assert_eq!(l0_result[0], l0_n0);
+        assert_eq!(l0_result[1], l0_n1);
+        assert_eq!(l1_result[0], l1_n0);
+        assert_eq!(l1_result[1], l1_n1);
+        assert_eq!(l2_result[0], l2_n0);
+        assert_eq!(l2_result[1], l2_n1);
+        assert_eq!(l3_result[0], l3_n0);
+        assert_eq!(l3_result[1], l3_n1);
+    }
+
+    #[test]
+    fn deterministic_ordering_with_random_initial_orders() {
+        let mut graph = StableDiGraph::new();
+        let l0_n0 = graph.add_node(vertex_with_rank(0));
+        let l0_n1 = graph.add_node(vertex_with_rank(0));
+        let l1_n0 = graph.add_node(vertex_with_rank(1));
+        let l1_n1 = graph.add_node(vertex_with_rank(1));
+        let l2_n0 = graph.add_node(vertex_with_rank(2));
+        let l2_n1 = graph.add_node(vertex_with_rank(2));
+        let l3_n0 = graph.add_node(vertex_with_rank(3));
+        let l3_n1 = graph.add_node(vertex_with_rank(3));
+
+        graph.add_edge(l0_n0, l1_n0, Edge::default());
+        graph.add_edge(l0_n0, l1_n1, Edge::default());
+        graph.add_edge(l0_n1, l1_n0, Edge::default());
+        graph.add_edge(l0_n1, l1_n1, Edge::default());
+
+        graph.add_edge(l1_n0, l2_n0, Edge::default());
+        graph.add_edge(l1_n0, l2_n1, Edge::default());
+        graph.add_edge(l1_n1, l2_n0, Edge::default());
+        graph.add_edge(l1_n1, l2_n1, Edge::default());
+
+        graph.add_edge(l2_n0, l3_n0, Edge::default());
+        graph.add_edge(l2_n0, l3_n1, Edge::default());
+        graph.add_edge(l2_n1, l3_n0, Edge::default());
+        graph.add_edge(l2_n1, l3_n1, Edge::default());
+
+        let results: Vec<Vec<Vec<petgraph::stable_graph::NodeIndex>>> = (0..20)
+            .map(|_| {
+                let layer0 = vec![l0_n0, l0_n1];
+                let layer1 = vec![l1_n1, l1_n0];
+                let layer2 = vec![l2_n1, l2_n0];
+                let layer3 = vec![l3_n1, l3_n0];
+
+                let order = Order::new(vec![layer0, layer1, layer2, layer3]);
+                let result =
+                    order_layer(&graph, true, &order, crate::p2_reduce_crossings::barycenter);
+                result._inner.clone()
+            })
+            .collect();
+
+        let first = &results[0];
+        for result in &results {
+            assert_eq!(
+                result, first,
+                "All runs should produce the same ordering due to tiebreaker"
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_ordering_exhaustive_permutations_in_symmetric_k3_3() {
+        let mut graph = StableDiGraph::new();
+
+        let l0_n0 = graph.add_node(vertex_with_rank(0));
+        let l0_n1 = graph.add_node(vertex_with_rank(0));
+        let l0_n2 = graph.add_node(vertex_with_rank(0));
+
+        let l1_n0 = graph.add_node(vertex_with_rank(1));
+        let l1_n1 = graph.add_node(vertex_with_rank(1));
+        let l1_n2 = graph.add_node(vertex_with_rank(1));
+
+        let l2_n0 = graph.add_node(vertex_with_rank(2));
+        let l2_n1 = graph.add_node(vertex_with_rank(2));
+        let l2_n2 = graph.add_node(vertex_with_rank(2));
+
+        // Fully connect layer 0 -> layer 1 and layer 1 -> layer 2.
+        for &u in &[l0_n0, l0_n1, l0_n2] {
+            for &v in &[l1_n0, l1_n1, l1_n2] {
+                graph.add_edge(u, v, Edge::default());
+            }
+        }
+        for &u in &[l1_n0, l1_n1, l1_n2] {
+            for &v in &[l2_n0, l2_n1, l2_n2] {
+                graph.add_edge(u, v, Edge::default());
+            }
+        }
+
+        let layer0 = vec![l0_n0, l0_n1, l0_n2];
+
+        let perms_l1 = vec![
+            vec![l1_n0, l1_n1, l1_n2],
+            vec![l1_n0, l1_n2, l1_n1],
+            vec![l1_n1, l1_n0, l1_n2],
+            vec![l1_n1, l1_n2, l1_n0],
+            vec![l1_n2, l1_n0, l1_n1],
+            vec![l1_n2, l1_n1, l1_n0],
+        ];
+        let perms_l2 = vec![
+            vec![l2_n0, l2_n1, l2_n2],
+            vec![l2_n0, l2_n2, l2_n1],
+            vec![l2_n1, l2_n0, l2_n2],
+            vec![l2_n1, l2_n2, l2_n0],
+            vec![l2_n2, l2_n0, l2_n1],
+            vec![l2_n2, l2_n1, l2_n0],
+        ];
+
+        // In this symmetric graph, every vertex in layer 1 and layer 2 has the same barycenter.
+        // The final order must therefore be determined entirely by the tiebreaker.
+        for layer1 in &perms_l1 {
+            for layer2 in &perms_l2 {
+                let order = Order::new(vec![layer0.clone(), layer1.clone(), layer2.clone()]);
+                let result =
+                    order_layer(&graph, true, &order, crate::p2_reduce_crossings::barycenter);
+
+                assert_eq!(result._inner[1], vec![l1_n0, l1_n1, l1_n2]);
+                assert_eq!(result._inner[2], vec![l2_n0, l2_n1, l2_n2]);
+            }
+        }
+    }
+
+    #[test]
+    fn deterministic_ordering_uses_sort_bias_on_ties() {
+        let mut graph = StableDiGraph::new();
+
+        let l0 = graph.add_node(vertex_with_rank(0));
+
+        let l1_a = graph.add_node(vertex_with_rank(1));
+        let l1_b = graph.add_node(vertex_with_rank(1));
+        let l1_c = graph.add_node(vertex_with_rank(1));
+
+        // Connect the single upper node to all three, giving them identical barycenters.
+        graph.add_edge(l0, l1_a, Edge::default());
+        graph.add_edge(l0, l1_b, Edge::default());
+        graph.add_edge(l0, l1_c, Edge::default());
+
+        // Bias ordering: c (lowest) -> a -> b (highest).
+        graph[l1_a].set_sort_bias(0);
+        graph[l1_b].set_sort_bias(5);
+        graph[l1_c].set_sort_bias(-5);
+
+        // Scramble initial order to ensure tie-breaking is what fixes it.
+        let order = Order::new(vec![vec![l0], vec![l1_b, l1_a, l1_c]]);
+        let result = order_layer(&graph, true, &order, crate::p2_reduce_crossings::barycenter);
+
+        assert_eq!(result._inner[1], vec![l1_c, l1_a, l1_b]);
+    }
 }

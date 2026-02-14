@@ -48,6 +48,12 @@ mod p3_calculate_coordinates;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vertex {
     pub input_node_idx: Option<NodeIndex>,
+    /// Optional stable ordering preference used only as a *tiebreaker* during
+    /// crossing reduction when multiple orders yield equal heuristic scores.
+    ///
+    /// Default is 0. Positive/negative values allow callers to bias tied
+    /// vertices to one side or the other.
+    sort_bias: i32,
     size: (f64, f64),
     rank: i32,
     pos: usize,
@@ -77,6 +83,19 @@ impl Vertex {
             is_dummy: true,
             ..Default::default()
         }
+    }
+
+    pub fn with_sort_bias(mut self, sort_bias: i32) -> Self {
+        self.sort_bias = sort_bias;
+        self
+    }
+
+    pub fn set_sort_bias(&mut self, sort_bias: i32) {
+        self.sort_bias = sort_bias;
+    }
+
+    pub fn sort_bias(&self) -> i32 {
+        self.sort_bias
     }
 
     pub fn set_size(&mut self, (width, height): (u64, u64), vertex_spacing: f64) {
@@ -113,6 +132,7 @@ impl Default for Vertex {
     fn default() -> Self {
         Self {
             input_node_idx: None,
+            sort_bias: 0,
             size: (1.0, 1.0),
             rank: 0,
             pos: 0,

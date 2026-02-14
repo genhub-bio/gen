@@ -324,7 +324,8 @@ where
         log::trace!("{} partitions created", num_partitions);
 
         // Sort inter_partition_edges for deterministic iteration
-        let sorted_inter_partition_edges: Vec<_> = inter_partition_edges.iter().collect();
+        let mut sorted_inter_partition_edges: Vec<_> = inter_partition_edges.iter().collect();
+        sorted_inter_partition_edges.sort_by_key(|&((src, tgt), _)| (*src, *tgt));
 
         // Add stitching nodes to partitions (one per side, skip the bridges)
         // these are used to align the partitions with each other.
@@ -379,49 +380,26 @@ where
                 // Sort to ensure deterministic ordering
                 bundles.sort_unstable();
 
-                // Check if node has any intra-partition incoming edges
-                let has_intra_partition_incoming = partition
-                    .graph
-                    .neighbors_directed(node_idx, petgraph::Direction::Incoming)
-                    .next()
-                    .is_some();
-
-                // Connect to left stitch if:
-                // 1. Node has inter-partition incoming edges, OR
-                // 2. Node has no intra-partition incoming edges (is a source node)
-                // AND we have a left stitch node
-                if let Some(left_stitch_idx) = left_stitch_idx {
-                    if !bundles.is_empty() {
-                        // Has inter-partition edges - add one edge per bundle
-                        for bundle in bundles {
-                            log::trace!(
-                                "connecting left_stitch {:?} -> node {:?} with bundle {:?}",
-                                left_stitch_idx,
-                                node_idx,
-                                bundle
-                            );
-                            partition
-                                .graph
-                                .add_edge(left_stitch_idx, node_idx, Some(bundle));
-                        }
-                    } else if !has_intra_partition_incoming {
-                        // Source node with no inter-partition edges
+                // Connect to left stitch if Node has inter-partition incoming edges
+                if let Some(left_stitch_idx) = left_stitch_idx
+                    && !bundles.is_empty()
+                {
+                    // Has inter-partition edges - add one edge per bundle
+                    for original_edge in bundles {
                         log::trace!(
-                            "connecting left_stitch {:?} -> node {:?} with no bundle",
+                            "connecting left_stitch {:?} -> node {:?} with bundle {:?}",
                             left_stitch_idx,
                             node_idx,
+                            original_edge
                         );
-                        partition.graph.add_edge(left_stitch_idx, node_idx, None);
+                        partition
+                            .graph
+                            .add_edge(left_stitch_idx, node_idx, Some(original_edge));
                     }
                 }
             }
 
             // Add Right Stitching node (skip for the last partition)
-            // Note: we can't easily check against num_partitions here because we're iterating over
-            // a subset of partitions (every second one) from a mutable vector.
-            // But we can check if this is the last iteration if we knew the count.
-            // Instead, we can check if there are more partitions after this one + the bridge.
-            // The iteration step is 2, so the next partition would be partition_idx + 2.
             let is_last_partition = partition_idx >= num_partitions - 1;
 
             let right_stitch_idx = if !is_last_partition {
@@ -471,39 +449,22 @@ where
                 // Sort to ensure deterministic ordering
                 bundles.sort_unstable();
 
-                // Check if node has any intra-partition outgoing edges
-                let has_intra_partition_outgoing = partition
-                    .graph
-                    .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
-                    .next()
-                    .is_some();
-
                 // Connect to right stitch if:
-                // 1. Node has inter-partition outgoing edges, OR
-                // 2. Node has no intra-partition outgoing edges (is a sink node)
-                // AND we have a right stitch node
-                if let Some(right_stitch_idx) = right_stitch_idx {
-                    if !bundles.is_empty() {
-                        // Has inter-partition edges - add one edge per bundle
-                        for bundle in bundles {
-                            log::trace!(
-                                "connecting node {:?} -> right_stitch {:?} with bundle {:?}",
-                                node_idx,
-                                right_stitch_idx,
-                                bundle
-                            );
-                            partition
-                                .graph
-                                .add_edge(node_idx, right_stitch_idx, Some(bundle));
-                        }
-                    } else if !has_intra_partition_outgoing {
-                        // Sink node with no inter-partition edges
+                // 1. Node has inter-partition outgoing edges
+                if let Some(right_stitch_idx) = right_stitch_idx
+                    && !bundles.is_empty()
+                {
+                    // Has inter-partition edges - add one edge per bundle
+                    for original_edge in bundles {
                         log::trace!(
-                            "connecting node {:?} -> right_stitch {:?} with no bundle",
+                            "connecting node {:?} -> right_stitch {:?} with bundle {:?}",
                             node_idx,
                             right_stitch_idx,
+                            original_edge
                         );
-                        partition.graph.add_edge(node_idx, right_stitch_idx, None);
+                        partition
+                            .graph
+                            .add_edge(node_idx, right_stitch_idx, Some(original_edge));
                     }
                 }
             }

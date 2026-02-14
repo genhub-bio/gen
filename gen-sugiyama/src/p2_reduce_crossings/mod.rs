@@ -352,6 +352,23 @@ fn reduce_crossings_bilayer_sweep(
     debug!(target: "crossing_reduction", "Initial number of crossings: {best_crossings}");
     let mut last_best = 0;
     let mut best = order.clone();
+
+    fn prefer_order(graph: &StableDiGraph<Vertex, Edge>, a: &Order, b: &Order) -> bool {
+        // Lexicographic compare by (sort_bias, node_index) across layers.
+        for r in 0..a.max_rank() {
+            let la = &a._inner[r];
+            let lb = &b._inner[r];
+            for (va, vb) in la.iter().zip(lb.iter()) {
+                let ka = (graph[*va].sort_bias, va.index());
+                let kb = (graph[*vb].sort_bias, vb.index());
+                if ka != kb {
+                    return ka < kb;
+                }
+            }
+        }
+        false
+    }
+
     for i in 0.. {
         order = order_layer(graph, i % 2 == 0, &order, cm_method);
         if transpose {
@@ -359,12 +376,21 @@ fn reduce_crossings_bilayer_sweep(
         }
         let crossings = order.crossings(graph);
         trace!(target: "crossing_reduction", "Current number of crossings: {crossings}");
-        if crossings < best_crossings {
+
+        let improves_crossings = crossings < best_crossings;
+        let improves_preference = crossings == best_crossings && prefer_order(graph, &order, &best);
+
+        if improves_crossings {
             best_crossings = crossings;
             debug!(target: "crossing_reduction", "Lowest number of crossings so far: {best_crossings}");
             best = order.clone();
+            // Only reset the convergence counter on strict crossing improvements.
             last_best = 0;
         } else {
+            if improves_preference {
+                best = order.clone();
+            }
+            // Preference-only improvements do not extend the sweep loop.
             last_best += 1;
         }
         if last_best == 4 {
@@ -437,7 +463,17 @@ fn order_layer(
             .map(|n| (*n, cm_method(graph, *n, move_down, &positions)))
             .collect::<HashMap<NodeIndex, f64>>();
 
-        new_order[rank].sort_by(|a, b| ordering.get(a).partial_cmp(&ordering.get(b)).unwrap());
+        new_order[rank].sort_by(|a, b| {
+            let a_val = ordering.get(a).unwrap();
+            let b_val = ordering.get(b).unwrap();
+            a_val
+                .partial_cmp(b_val)
+                .unwrap()
+                // If multiple orderings are equally good (same heuristic score),
+                // apply a stable, caller-provided preference.
+                .then_with(|| graph[*a].sort_bias.cmp(&graph[*b].sort_bias))
+                .then_with(|| a.index().cmp(&b.index()))
+        });
 
         new_order[rank].iter().enumerate().for_each(|(pos, v)| {
             positions.insert(*v, pos);

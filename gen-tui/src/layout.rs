@@ -577,7 +577,15 @@ impl<'a> LayoutEngine<'a> {
         let node_map: HashMap<NodeIndex<u32>, NodeIndex<u32>> = partition_graph
             .node_indices()
             .map(|partition_idx| {
-                let vertex = Vertex::new(partition_idx);
+                let mut vertex = Vertex::new(partition_idx);
+                let sort_bias = match &partition_graph[partition_idx] {
+                    PartitionNode::Data(domain_idx) => {
+                        let d: i32 = i32::try_from(domain_idx.index()).unwrap_or(i32::MAX);
+                        i32::MAX.saturating_sub(d)
+                    }
+                    PartitionNode::Stitch(_) => 0,
+                };
+                vertex.set_sort_bias(sort_bias);
                 let new_vertex_idx = vertex_graph.add_node(vertex);
                 (partition_idx, new_vertex_idx)
             })
