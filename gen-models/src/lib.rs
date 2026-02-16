@@ -1,4 +1,5 @@
 pub mod accession;
+pub mod annotations;
 pub mod block_group;
 pub mod block_group_edge;
 pub mod changesets;

@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
+use gen_annotations::translate;
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
@@ -22,7 +23,7 @@ use r#gen::{
     graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
     operation_management,
     operation_management::{parse_patch_operations, pull, push},
-    patch, track_database, translate,
+    patch, track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
@@ -32,6 +33,7 @@ use r#gen::{
 use gen_core::config::Workspace;
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
+    annotations::{add_annotation, add_annotation_file},
     block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
@@ -193,6 +195,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                 // User requested upgrade to full TUI
                                 view_block_group(
                                     graph_conn,
+                                    operation_conn,
+                                    &workspace,
                                     graph,
                                     sample,
                                     collection_name,
@@ -216,7 +220,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 // Use the full-screen viewer if --full is specified or no graph is provided
-                view_block_group(graph_conn, graph, sample, collection_name, position)?;
+                view_block_group(graph_conn, operation_conn, &workspace, graph, sample, collection_name, position)?;
             }
             Ok(())
         }
@@ -576,6 +580,42 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             graph_conn.execute("END TRANSACTION", [])?;
             operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
+        }
+        Some(Commands::AddAnnotation {
+            name,
+            group,
+            sample,
+            region,
+        }) => {
+            let collection_name = get_default_collection(operation_conn)?;
+            let operation = add_annotation(
+                &db_context,
+                &collection_name,
+                &name,
+                group.as_deref(),
+                sample.as_deref(),
+                &region,
+            )?;
+            println!("Annotation {name} added in operation {}", operation.hash);
+            Ok(())
+        }
+        Some(Commands::AddAnnotationFile {
+            path,
+            format,
+            index,
+            name,
+            message,
+        }) => {
+            let operation = add_annotation_file(
+                &db_context,
+                &path,
+                format.as_deref(),
+                index.as_deref(),
+                name.as_deref(),
+                message.as_deref(),
+            )?;
+            println!("Annotation file added in operation {}", operation.hash);
             Ok(())
         }
         Some(Commands::ListSamples {}) => {

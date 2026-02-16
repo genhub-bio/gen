@@ -302,6 +302,16 @@ impl Accession {
             }
         }
     }
+
+    pub fn get_edges_by_id(conn: &GraphConnection, accession_id: &HashId) -> Vec<AccessionEdge> {
+        let query = "\
+            select ae.* \
+            from accession_edges ae \
+            join accession_paths ap on ap.edge_id = ae.id \
+            where ap.accession_id = ?1 \
+            order by ap.index_in_path;";
+        AccessionEdge::query(conn, query, params![accession_id])
+    }
 }
 
 impl Query for Accession {

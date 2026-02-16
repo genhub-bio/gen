@@ -17,7 +17,7 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama"]
+members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations"]
 default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff"]
 exclude = ["gen-python"]
 
@@ -34,6 +34,7 @@ gen-diff = { path = "gen-diff" }
 gen-models = { path = "gen-models" }
 gen-graph = { path = "gen-graph" }
 gen-tui = { path = "gen-tui" }
+gen-annotations = { path = "gen-annotations" }
 clap = { version = "4.5.32", features = ["derive"] }
 clap-nested-commands = "0.0.6"
 convert_case = "0.8.0"

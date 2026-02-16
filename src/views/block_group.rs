@@ -8,9 +8,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
+use gen_models::{block_group::BlockGroup, db::{GraphConnection, OperationsConnection}, node::Node, traits::Query};
 use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
 use ratatui::{
@@ -25,11 +25,17 @@ use crate::{
     config::get_theme_color,
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
+        annotation_track::AnnotationTrack,
+        annotations::{
+            AnnotationFileTrackRequest, load_annotation_file_track,
+            load_annotations_for_group,
+        },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
         helpers::{install_tui_panic_hook, style_text},
+        messages::MessageBuffer,
     },
 };
 
@@ -116,6 +122,8 @@ fn toggle_path_highlight(
 
 pub fn view_block_group(
     conn: &GraphConnection,
+    op_conn: &gen_models::db::OperationsConnection,
+    workspace: &gen_core::config::Workspace,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,

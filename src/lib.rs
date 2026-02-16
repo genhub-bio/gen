@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
     str,
 };
-pub mod annotations;
 pub mod base16;
 pub mod commands;
 pub mod config;
@@ -29,11 +28,11 @@ pub mod patch;
 mod progress_bar;
 #[cfg(any(test, debug_assertions))]
 pub mod test_helpers;
-pub mod translate;
 pub mod updates;
 pub mod views;
 
 // reexports for public api, put behind features as needed
+pub use gen_annotations as annotations;
 pub use gen_core as core;
 use gen_core::config::Workspace;
 #[cfg(feature = "diff")]

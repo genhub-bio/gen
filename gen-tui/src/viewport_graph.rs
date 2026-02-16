@@ -328,6 +328,18 @@ impl CroppedGraph {
         self.node_data_by_pos.iter()
     }
 
+    /// Get all Data nodes in the viewport graph with their world position, domain index, and layout info.
+    /// Filters out Routing and Stitch nodes, returning only nodes that represent original graph data.
+    pub fn data_nodes(&self) -> impl Iterator<Item = (WorldPos, NodeIndex, &LayoutNode)> + '_ {
+        self.node_data_by_pos.iter().filter_map(|(pos, node)| {
+            if let NodeRole::Data(idx) = &node.role {
+                Some((*pos, *idx, node))
+            } else {
+                None
+            }
+        })
+    }
+
     /// Get all edges in the viewport graph
     pub fn edges(
         &self,

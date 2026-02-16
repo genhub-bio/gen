@@ -4,6 +4,7 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent};
+use gen_core::HashId;
 use gen_models::{
     block_group::BlockGroup, collection::Collection, db::GraphConnection, sample::Sample,
     traits::Query,
@@ -219,11 +220,19 @@ pub struct CollectionExplorerState {
     pub total_items: usize,
     pub has_focus: bool,
     /// The currently selected block group
-    pub selected_block_group_id: Option<gen_core::HashId>,
+    pub selected_block_group_id: Option<HashId>,
     /// Tracks which samples are expanded/collapsed
     expanded_samples: HashSet<String>,
     /// Indicates which focus zone should receive focus (if any)
     pub focus_change_requested: Option<FocusZone>,
+    /// Active annotation files
+    pub active_annotation_files: HashSet<HashId>,
+    /// Active annotation groups
+    pub active_annotation_groups: HashSet<String>,
+    /// Pending annotation file toggle request
+    pub annotation_file_toggle_requested: Option<HashId>,
+    /// Pending annotation group toggle request
+    pub annotation_group_toggle_requested: Option<String>,
 }
 
 impl CollectionExplorerState {
@@ -231,7 +240,7 @@ impl CollectionExplorerState {
         Self::with_selected_block_group(None)
     }
 
-    pub fn with_selected_block_group(block_group_id: Option<gen_core::HashId>) -> Self {
+    pub fn with_selected_block_group(block_group_id: Option<HashId>) -> Self {
         Self {
             list_state: ListState::default(),
             total_items: 0,
@@ -239,6 +248,10 @@ impl CollectionExplorerState {
             selected_block_group_id: block_group_id,
             expanded_samples: HashSet::new(),
             focus_change_requested: None,
+            active_annotation_files: HashSet::new(),
+            active_annotation_groups: HashSet::new(),
+            annotation_file_toggle_requested: None,
+            annotation_group_toggle_requested: None,
         }
     }
 
