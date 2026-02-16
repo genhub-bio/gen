@@ -4,7 +4,6 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 pub mod block_group;
 pub mod factory;
 pub mod hash_id;
-pub mod layouts;
 pub mod node_key;
 pub mod repository;
 pub mod utils;
@@ -17,12 +16,8 @@ use crate::{
     imports::{import_fasta, import_genbank, import_gfa, import_library},
     init,
     python_api::{
-        block_group::PyBlockGroup,
-        hash_id::PyHashId,
-        layouts::{PyBaseLayout, PyScaledLayout},
-        node_key::PyNodeKey,
-        repository::PyRepository,
-        utils::get_gen_dir_py,
+        block_group::PyBlockGroup, hash_id::PyHashId, node_key::PyNodeKey,
+        repository::PyRepository, utils::get_gen_dir_py,
     },
     updates::{
         update_with_fasta, update_with_gaf, update_with_genbank, update_with_gfa,
@@ -59,8 +54,6 @@ pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBlockGroup>()?;
     m.add_class::<PyHashId>()?;
-    m.add_class::<PyBaseLayout>()?;
-    m.add_class::<PyScaledLayout>()?;
     m.add_class::<PyNodeKey>()?;
 
     Ok(())
