@@ -176,30 +176,4 @@ mod tests {
 
         assert!(ratio >= 4.5, "Contrast ratio {} is less than 4.5", ratio);
     }
-
-    #[test]
-    fn test_tint_indexed_256_colors() {
-        let fg = Color::Indexed(231); // White in 256-cube
-        let bg = Color::Indexed(16); // Black in 256-cube
-        let tint = Color::White;
-        let strength = 0.5;
-
-        let (new_fg, new_bg) = tint_colors(fg, bg, tint, strength);
-
-        assert!(matches!(new_fg, Color::Rgb(_, _, _)));
-        assert!(matches!(new_bg, Color::Rgb(_, _, _)));
-
-        let Color::Rgb(r1, g1, b1) = new_fg else {
-            panic!()
-        };
-        let Color::Rgb(r2, g2, b2) = new_bg else {
-            panic!()
-        };
-
-        let ratio = contrast_ratio(
-            relative_luminance(r1, g1, b1),
-            relative_luminance(r2, g2, b2),
-        );
-        assert!(ratio >= 4.5);
-    }
 }

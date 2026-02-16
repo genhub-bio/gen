@@ -6,7 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gen_core::{is_end_node, is_start_node, HashId, Workspace};
+use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
+use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_models::{
     accession::{Accession, AccessionEdge},
     annotations::{Annotation, AnnotationError},
@@ -20,7 +21,6 @@ use crate::views::{
     annotation_files::AnnotationFileEntry,
     annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
 };
-use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
 
 fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
     let mut segments = Vec::new();

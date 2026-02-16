@@ -13,7 +13,6 @@ use std::{
 
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
-use gen_annotations::translate;
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
@@ -30,6 +29,7 @@ use r#gen::{
         diff::view_diff, operations::view_operations, patch::view_patches,
     },
 };
+use gen_annotations::translate;
 use gen_core::config::Workspace;
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
@@ -220,7 +220,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 // Use the full-screen viewer if --full is specified or no graph is provided
-                view_block_group(graph_conn, operation_conn, &workspace, graph, sample, collection_name, position)?;
+                view_block_group(
+                    graph_conn,
+                    operation_conn,
+                    &workspace,
+                    graph,
+                    sample,
+                    collection_name,
+                    position,
+                )?;
             }
             Ok(())
         }
