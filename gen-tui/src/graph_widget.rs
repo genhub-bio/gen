@@ -7,13 +7,13 @@ use petgraph::visit::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    prelude::StatefulWidget,
-    style::Style,
-    widgets::{Block, Widget},
+    style::{Modifier, Style},
+    widgets::{Block, StatefulWidget, Widget},
 };
 
 use crate::{
-    geometry::WorldRect,
+    color_utils::tint_colors,
+    geometry::{BigRect, WorldPos, WorldRect},
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer, plot_viewport_graph_with_highlights},
@@ -272,23 +272,77 @@ where
         }
 
         if controller.cursor.is_visible() {
-            // Get cursor world position for rendering
-            if let Some(cursor_world_pos) = controller
-                .cursor
-                .to_world_pos(controller.get_viewport_graph())
-            {
-                let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
+            let viewport_graph = controller.get_viewport_graph();
 
-                // Get the current character at cursor position
-                if let Some(current_char) = cursor_buffer.get_char(cursor_world_pos) {
-                    // Get cursor colors from theme
-                    let cursor_bg = controller.theme.cursor_bg;
-                    let cursor_fg = controller.theme.cursor_fg;
+            if controller.cursor.is_coarse_mode() {
+                // Highlight the whole node in coarse mode
+                if let Some(node_idx) = controller.cursor.node_idx()
+                    && let Some(&node_center) = viewport_graph.node_positions.get(&node_idx)
+                    && let Some(node_data) = viewport_graph.node_data_by_pos.get(&node_center)
+                {
+                    let node_rect = BigRect::from_center_and_size(node_center, node_data.size);
+                    let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
 
-                    let cursor_style = Style::default().bg(cursor_bg).fg(cursor_fg);
+                    // Invert every cell in the node that is currently on-screen
+                    for y in node_rect.bottom()..=node_rect.top() {
+                        for x in node_rect.left()..=node_rect.right() {
+                            let pos = WorldPos::new(x, y);
+                            if let Some((current_char, current_style)) =
+                                cursor_buffer.get_char_styled(pos)
+                            {
+                                let highlight = controller.theme.highlight;
 
-                    // Write the same character back with cursor styling
-                    cursor_buffer.set_char_styled(cursor_world_pos, current_char, cursor_style);
+                                // For node glyphs: use highlight color as fg, keep original bg, render as filled square
+                                // For other characters: tint colors and apply reversed modifier
+                                let (char_to_render, new_style) = if current_char == NODE_GLYPH {
+                                    let new_style = current_style.fg(highlight);
+                                    ('■', new_style)
+                                } else {
+                                    let fg = current_style.fg.unwrap_or(controller.theme.node_fg);
+                                    let bg = current_style.bg.unwrap_or(controller.theme.node_bg);
+                                    let (tinted_fg, tinted_bg) =
+                                        tint_colors(fg, bg, highlight, 0.4);
+                                    let new_style = current_style
+                                        .fg(tinted_fg)
+                                        .bg(tinted_bg)
+                                        .add_modifier(Modifier::REVERSED);
+                                    (current_char, new_style)
+                                };
+
+                                cursor_buffer.set_char_styled(pos, char_to_render, new_style);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Single cell cursor in normal mode
+                // Get cursor world position for rendering
+                if let Some(cursor_world_pos) = controller.cursor.to_world_pos(viewport_graph) {
+                    let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
+
+                    // Get the current character and style at cursor position
+                    if let Some((current_char, current_style)) =
+                        cursor_buffer.get_char_styled(cursor_world_pos)
+                    {
+                        let highlight = controller.theme.highlight;
+
+                        // Apply the same styling logic as coarse mode, but to a single cell
+                        let (char_to_render, new_style) = if current_char == NODE_GLYPH {
+                            let new_style = current_style.fg(highlight);
+                            ('■', new_style)
+                        } else {
+                            let fg = current_style.fg.unwrap_or(ratatui::style::Color::Reset);
+                            let bg = current_style.bg.unwrap_or(ratatui::style::Color::Reset);
+                            let (tinted_fg, tinted_bg) = tint_colors(fg, bg, highlight, 0.4);
+                            let new_style = current_style
+                                .fg(tinted_fg)
+                                .bg(tinted_bg)
+                                .add_modifier(Modifier::REVERSED);
+                            (current_char, new_style)
+                        };
+
+                        cursor_buffer.set_char_styled(cursor_world_pos, char_to_render, new_style);
+                    }
                 }
             }
         }
@@ -323,7 +377,7 @@ mod tests {
         fn render_node(
             &mut self,
             _buffer: &mut WorldBuffer,
-            _area: crate::geometry::WorldRect,
+            _area: WorldRect,
             _node_id: &petgraph::graph::NodeIndex,
             _detail_level: VisualDetail,
         ) {

@@ -12,6 +12,7 @@ pub struct Theme {
     pub edge_bg: Color,
     pub cursor_fg: Color,
     pub cursor_bg: Color,
+    pub highlight: Color,
 }
 
 impl Default for Theme {
@@ -24,6 +25,7 @@ impl Default for Theme {
             edge_bg: Color::Reset,                                       // canvas
             cursor_fg: Color::from_str("#45475A").unwrap_or(Color::Blue), // node_bg
             cursor_bg: Color::from_str("#cdd6f4").unwrap_or(Color::White), // node_fg
+            highlight: Color::Cyan,
         }
     }
 }

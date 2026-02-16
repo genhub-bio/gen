@@ -45,6 +45,9 @@ pub struct Cursor {
 
     /// Character to render for cursor
     glyph: char,
+
+    /// Whether coarse navigation mode is active
+    pub coarse_mode: bool,
 }
 
 impl Default for Cursor {
@@ -61,6 +64,7 @@ impl Cursor {
             fractional_pos: (0.0, 0.0),
             visible: false,
             glyph: '█',
+            coarse_mode: true,
         }
     }
 
@@ -214,6 +218,16 @@ impl Cursor {
     /// Set cursor glyph
     pub fn set_glyph(&mut self, glyph: char) {
         self.glyph = glyph;
+    }
+
+    /// Check if coarse navigation mode is active
+    pub fn is_coarse_mode(&self) -> bool {
+        self.coarse_mode
+    }
+
+    /// Set coarse navigation mode
+    pub fn set_coarse_mode(&mut self, active: bool) {
+        self.coarse_mode = active;
     }
 
     // ==================== Synchronization Methods ====================

@@ -94,7 +94,7 @@ pub fn get_theme_color(color_name: &str) -> Result<Color, String> {
         "base0b" | "base0B" => Ok(palette.base0b),             // Accent color 1
         "base0c" | "base0C" => Ok(palette.base0c),             // Accent color 2
         "base0d" | "base0D" => Ok(palette.base0d),             // Accent color 3
-        "base0e" | "base0E" => Ok(palette.base0e),             // Accent color 4
+        "base0e" | "base0E" | "cursor_highlight" => Ok(palette.base0e), // Accent color 4
         "base0f" | "base0F" => Ok(palette.base0f),             // Accent color 5
         _ => Err(format!("Color '{color_name}' not found in palette")),
     }

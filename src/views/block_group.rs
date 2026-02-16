@@ -14,7 +14,7 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, trait
 use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
 use ratatui::{
-    layout::Constraint,
+    layout::{Constraint, Direction, HorizontalAlignment, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
@@ -237,7 +237,15 @@ pub fn view_block_group(
 
         // Trigger reload if selection changed to a new block group
         if explorer_state.selected_block_group_id != last_selected_block_group_id {
-            is_loading = true;
+            if explorer_state.selected_block_group_id.is_some() {
+                is_loading = true;
+            } else {
+                // Reset to empty graph if unselected
+                block_graph = get_empty_graph();
+                connect_all_boundary_edges(&mut block_graph);
+                graph_controller = create_gen_graph_controller(&block_graph);
+                is_loading = false;
+            }
             last_selected_block_group_id = explorer_state.selected_block_group_id;
         }
 
@@ -251,25 +259,25 @@ pub fn view_block_group(
             let status_bar_height: u16 = 1;
 
             // The outer layout is a vertical split between the status bar and everything else
-            let outer_layout = ratatui::layout::Layout::default()
-                .direction(ratatui::layout::Direction::Vertical)
+            let outer_layout = Layout::default()
+                .direction(Direction::Vertical)
                 .constraints(vec![
-                    ratatui::layout::Constraint::Min(1),
-                    ratatui::layout::Constraint::Length(status_bar_height),
+                    Constraint::Min(1),
+                    Constraint::Length(status_bar_height),
                 ])
                 .split(frame.area());
             let status_bar_area = outer_layout[1];
 
             // The sidebar is a horizontal split of the area above the status bar
-            let sidebar_layout = ratatui::layout::Layout::default()
-                .direction(ratatui::layout::Direction::Horizontal)
+            let sidebar_layout = Layout::default()
+                .direction(Direction::Horizontal)
                 .constraints(vec![Constraint::Percentage(20), Constraint::Percentage(80)])
                 .split(outer_layout[0]);
             let sidebar_area = sidebar_layout[0];
 
             // The panel pops up in the canvas area, it does not overlap with the sidebar
-            let panel_layout = ratatui::layout::Layout::default()
-                .direction(ratatui::layout::Direction::Vertical)
+            let panel_layout = Layout::default()
+                .direction(Direction::Vertical)
                 .constraints(vec![Constraint::Percentage(80), Constraint::Percentage(20)])
                 .split(sidebar_layout[1]);
             let panel_area = panel_layout[1];
@@ -311,7 +319,13 @@ pub fn view_block_group(
             // Status bar
             let mut status_message = match focus_zone {
                 FocusZone::Canvas => {
-                    "*←→↑↓* pan | *+/-* zoom | *p* toggle path | *esc* back to sidebar".to_string()
+                    if graph_controller.cursor.is_coarse_mode() {
+                        "*←→↑↓* move | *enter* fine nav | *+/-* zoom | *p* path | *esc* sidebar"
+                            .to_string()
+                    } else {
+                        "*←→↑↓* move | *enter* details | *+/-* zoom | *p* path | *esc* coarse nav"
+                            .to_string()
+                    }
                 }
                 FocusZone::Panel => "*esc* close panel".to_string(),
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
@@ -344,21 +358,59 @@ pub fn view_block_group(
                         .fg(get_theme_color("text").unwrap())
                         .add_modifier(Modifier::BOLD),
                 );
-                let loading_para = Paragraph::new(loading_text)
-                    .alignment(ratatui::layout::HorizontalAlignment::Center);
+                let loading_para =
+                    Paragraph::new(loading_text).alignment(HorizontalAlignment::Center);
 
                 // Center the loading message vertically in the canvas area
-                let loading_area = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
+                let loading_area = Layout::default()
+                    .direction(Direction::Vertical)
                     .constraints([
-                        ratatui::layout::Constraint::Percentage(45),
-                        ratatui::layout::Constraint::Length(1),
-                        ratatui::layout::Constraint::Percentage(45),
+                        Constraint::Percentage(45),
+                        Constraint::Length(1),
+                        Constraint::Percentage(45),
                     ])
                     .split(canvas_area)[1];
 
                 frame.render_widget(Clear, canvas_area); // Clear the canvas area first
                 frame.render_widget(loading_para, loading_area);
+            } else if explorer_state.selected_block_group_id.is_none() {
+                // Render splash screen
+                let splashscreen_lines = [
+                    " ██████╗ ███████╗███╗   ██╗",
+                    "██╔════╝ ██╔════╝████╗  ██║",
+                    "██║  ███╗█████╗  ██╔██╗ ██║",
+                    "██║   ██║██╔══╝  ██║╚██╗██║",
+                    "╚██████╔╝███████╗██║ ╚████║",
+                    " ╚═════╝ ╚══════╝╚═╝  ╚═══╝",
+                ];
+
+                let splash_text = Text::from(
+                    splashscreen_lines
+                        .iter()
+                        .map(|&l| {
+                            Line::from(Span::styled(
+                                l,
+                                Style::default().fg(get_theme_color("highlight").unwrap()),
+                            ))
+                        })
+                        .collect::<Vec<_>>(),
+                );
+
+                let splash_para =
+                    Paragraph::new(splash_text).alignment(HorizontalAlignment::Center);
+
+                // Center the splash screen vertically in the canvas area
+                let splash_area = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(40),
+                        Constraint::Length(splashscreen_lines.len() as u16),
+                        Constraint::Percentage(40),
+                    ])
+                    .split(canvas_area)[1];
+
+                frame.render_widget(Clear, canvas_area);
+                frame.render_widget(splash_para, splash_area);
             } else {
                 graph_controller.viewport_state.focus();
                 let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
@@ -417,7 +469,7 @@ pub fn view_block_group(
 
                 let panel_content = Paragraph::new(panel_text)
                     .wrap(Wrap { trim: true })
-                    .alignment(ratatui::layout::HorizontalAlignment::Left)
+                    .alignment(HorizontalAlignment::Left)
                     .block(panel_block);
 
                 // Clear the panel area if we just changed the layout
@@ -488,13 +540,19 @@ pub fn view_block_group(
             match focus_zone {
                 FocusZone::Canvas => match key.code {
                     KeyCode::Enter => {
-                        // TODO: Node selection not yet supported, always show panel for now
-                        show_panel = true;
-                        focus_zone = FocusZone::Panel;
-                        tui_layout_change = true;
+                        if graph_controller.cursor.is_coarse_mode() {
+                            graph_controller.cursor.set_coarse_mode(false);
+                        } else {
+                            // TODO: Node selection not yet supported, always show panel for now
+                            show_panel = true;
+                            focus_zone = FocusZone::Panel;
+                            tui_layout_change = true;
+                        }
                     }
                     KeyCode::Esc => {
-                        if !show_panel {
+                        if !graph_controller.cursor.is_coarse_mode() {
+                            graph_controller.cursor.set_coarse_mode(true);
+                        } else if !show_panel {
                             focus_zone = FocusZone::Sidebar;
                         }
                     }

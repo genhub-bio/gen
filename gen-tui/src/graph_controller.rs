@@ -593,17 +593,41 @@ where
 
             // Graph navigation controls - move cursor with node awareness
             KeyCode::Left | KeyCode::Char('h') => {
-                self.cursor.move_horizontal(-1, &self.viewport_graph)?;
+                let vp_w = self.viewport_state.viewport_bounds.width as i64;
+                let delta = if self.cursor.is_coarse_mode() {
+                    -vp_w
+                } else {
+                    -1
+                };
+                self.cursor.move_horizontal(delta, &self.viewport_graph)?;
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                self.cursor.move_horizontal(1, &self.viewport_graph)?;
+                let vp_w = self.viewport_state.viewport_bounds.width as i64;
+                let delta = if self.cursor.is_coarse_mode() {
+                    vp_w
+                } else {
+                    1
+                };
+                self.cursor.move_horizontal(delta, &self.viewport_graph)?;
             }
             // Note: In world coordinates, Y increases upward
             KeyCode::Up | KeyCode::Char('k') => {
-                self.cursor.move_vertical(1, &self.viewport_graph)?;
+                let vp_h = self.viewport_state.viewport_bounds.height as i64;
+                let delta = if self.cursor.is_coarse_mode() {
+                    vp_h
+                } else {
+                    1
+                };
+                self.cursor.move_vertical(delta, &self.viewport_graph)?;
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.cursor.move_vertical(-1, &self.viewport_graph)?; // Move down = negative Y
+                let vp_h = self.viewport_state.viewport_bounds.height as i64;
+                let delta = if self.cursor.is_coarse_mode() {
+                    -vp_h
+                } else {
+                    -1
+                };
+                self.cursor.move_vertical(delta, &self.viewport_graph)?; // Move down = negative Y
             }
 
             // Zoom/Scale controls

@@ -16,7 +16,7 @@ use crate::{
     color_utils::{brighten_colors, tint_colors},
     geometry::{BigRect, Point, WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
-    graph_widget::GraphWidget,
+    graph_widget::{GraphWidget, NODE_GLYPH},
     layout::{JunctionSymbol, NodeRole, VisualDetail},
     theme::Theme,
     viewport_graph::CroppedGraph,
@@ -351,9 +351,17 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let fg = style.fg.unwrap_or(Color::Reset);
                                 let bg = style.bg.unwrap_or(Color::Reset);
-                                let (new_fg, new_bg) = match path_style.color {
-                                    Color::Reset => brighten_colors(fg, bg, 0.2),
-                                    _ => tint_colors(fg, bg, path_style.color, 0.4),
+                                let (new_fg, new_bg) = if ch == NODE_GLYPH {
+                                    let new_fg = match path_style.color {
+                                        Color::Reset => brighten_colors(fg, bg, 0.2).0,
+                                        color => color,
+                                    };
+                                    (new_fg, bg)
+                                } else {
+                                    match path_style.color {
+                                        Color::Reset => brighten_colors(fg, bg, 0.2),
+                                        _ => tint_colors(fg, bg, path_style.color, 0.4),
+                                    }
                                 };
                                 let new_style = style.fg(new_fg).bg(new_bg);
                                 buffer.set_char_styled(pos, ch, new_style);

@@ -134,6 +134,7 @@ impl<'a> InlineGenGraphState<'a> {
             edge_bg: Color::Reset,
             cursor_fg: get_theme_color("cursor_fg").unwrap(),
             cursor_bg: get_theme_color("cursor_bg").unwrap(),
+            highlight: get_theme_color("cursor_highlight").unwrap(),
         });
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();

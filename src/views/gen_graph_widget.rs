@@ -11,7 +11,7 @@ use gen_tui::{
     plotter::{NodeRenderer, NodeSizer},
     theme::Theme,
 };
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 
 use crate::config::get_theme_color;
 
@@ -213,6 +213,7 @@ pub fn create_gen_graph_controller(
         edge_bg: get_theme_color("canvas").unwrap(),
         cursor_fg: get_theme_color("cursor_fg").unwrap(),
         cursor_bg: get_theme_color("cursor_bg").unwrap(),
+        highlight: Color::Cyan,
     });
     controller.set_detail_level(VisualDetail::Truncated);
     controller.show_cursor();

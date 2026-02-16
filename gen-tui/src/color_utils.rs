@@ -106,17 +106,31 @@ pub fn tint_colors(fg: Color, bg: Color, tint: Color, strength: f32) -> (Color, 
 
     // If contrast is too low, reduce the blend strength until we reach acceptable contrast
     if ratio < 4.5 {
-        let mut adjusted_strength = strength;
+        let mut min_strength = 0.0;
+        let mut max_strength = strength;
+
+        // Binary search for the maximum strength that satisfies the contrast requirement
         for _ in 0..10 {
-            // Limit iterations to avoid infinite loop
-            adjusted_strength *= 0.9; // Reduce strength by 10%
-            new_fg_rgb = blend_rgb(fg_rgb, tint_rgb, adjusted_strength);
-            new_bg_rgb = blend_rgb(bg_rgb, tint_rgb, adjusted_strength);
-            let new_fg_lum = relative_luminance(new_fg_rgb.0, new_fg_rgb.1, new_fg_rgb.2);
-            let new_bg_lum = relative_luminance(new_bg_rgb.0, new_bg_rgb.1, new_bg_rgb.2);
-            if contrast_ratio(new_fg_lum, new_bg_lum) >= 4.5 {
-                break;
+            let mid_strength = (min_strength + max_strength) / 2.0;
+            let test_fg = blend_rgb(fg_rgb, tint_rgb, mid_strength);
+            let test_bg = blend_rgb(bg_rgb, tint_rgb, mid_strength);
+            let test_fg_lum = relative_luminance(test_fg.0, test_fg.1, test_fg.2);
+            let test_bg_lum = relative_luminance(test_bg.0, test_bg.1, test_bg.2);
+
+            if contrast_ratio(test_fg_lum, test_bg_lum) >= 4.5 {
+                min_strength = mid_strength;
+                new_fg_rgb = test_fg;
+                new_bg_rgb = test_bg;
+            } else {
+                max_strength = mid_strength;
             }
+        }
+
+        // If even with strength 0 we didn't reach 4.5, it means the original colors
+        // already had low contrast. In that case, we at least return the original colors.
+        if min_strength == 0.0 {
+            new_fg_rgb = fg_rgb;
+            new_bg_rgb = bg_rgb;
         }
     }
 
@@ -134,4 +148,58 @@ pub fn brighten_colors(fg: Color, bg: Color, strength: f32) -> (Color, Color) {
 /// Dim colors by tinting towards black
 pub fn dim_colors(fg: Color, bg: Color, strength: f32) -> (Color, Color) {
     tint_colors(fg, bg, Color::Black, strength)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tint_contrast_preservation() {
+        let fg = Color::White;
+        let bg = Color::Black;
+        let tint = Color::White;
+        let strength = 1.0;
+
+        let (new_fg, new_bg) = tint_colors(fg, bg, tint, strength);
+
+        let Color::Rgb(r1, g1, b1) = new_fg else {
+            panic!("Expected Rgb")
+        };
+        let Color::Rgb(r2, g2, b2) = new_bg else {
+            panic!("Expected Rgb")
+        };
+
+        let lum1 = relative_luminance(r1, g1, b1);
+        let lum2 = relative_luminance(r2, g2, b2);
+        let ratio = contrast_ratio(lum1, lum2);
+
+        assert!(ratio >= 4.5, "Contrast ratio {} is less than 4.5", ratio);
+    }
+
+    #[test]
+    fn test_tint_indexed_256_colors() {
+        let fg = Color::Indexed(231); // White in 256-cube
+        let bg = Color::Indexed(16); // Black in 256-cube
+        let tint = Color::White;
+        let strength = 0.5;
+
+        let (new_fg, new_bg) = tint_colors(fg, bg, tint, strength);
+
+        assert!(matches!(new_fg, Color::Rgb(_, _, _)));
+        assert!(matches!(new_bg, Color::Rgb(_, _, _)));
+
+        let Color::Rgb(r1, g1, b1) = new_fg else {
+            panic!()
+        };
+        let Color::Rgb(r2, g2, b2) = new_bg else {
+            panic!()
+        };
+
+        let ratio = contrast_ratio(
+            relative_luminance(r1, g1, b1),
+            relative_luminance(r2, g2, b2),
+        );
+        assert!(ratio >= 4.5);
+    }
 }
