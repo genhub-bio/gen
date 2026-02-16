@@ -1586,7 +1586,6 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rusqlite_migration",
- "rust-sugiyama",
  "serde",
  "serde_json",
  "serde_with",
@@ -4738,15 +4737,6 @@ dependencies = [
  "include_dir",
  "log",
  "rusqlite",
-]
-
-[[package]]
-name = "rust-sugiyama"
-version = "0.3.0"
-source = "git+https://github.com/paddison/rust-sugiyama?rev=4d15b35124adac1de3a3b2cc42af8d68290935f2#4d15b35124adac1de3a3b2cc42af8d68290935f2"
-dependencies = [
- "log",
- "petgraph 0.6.5",
 ]
 
 [[package]]
