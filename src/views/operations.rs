@@ -1,6 +1,3 @@
-// Note: Using patched tui-textarea from https://github.com/phsym/tui-textarea
-// This fork has ratatui 0.30.0 compatibility fixes that haven't been merged upstream yet
-
 use std::{collections::HashMap, io, rc::Rc, time::Instant};
 
 use crossterm::{
@@ -17,16 +14,19 @@ use gen_models::{
     traits::Query,
 };
 use itertools::Itertools;
+use rat_text::{
+    HasScreenCursor,
+    text_area::{TextArea, TextAreaState},
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    prelude::{Color, Style},
+    prelude::{Color, StatefulWidget, Style},
     style::Modifier,
     widgets::{Block, Borders, Paragraph, Row, Table},
 };
 use rusqlite::{params, types::Value};
-use tui_textarea::TextArea;
 
 use crate::{
     config::get_theme_color,
@@ -86,7 +86,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut textarea = TextArea::default();
+    let mut textarea = TextAreaState::new();
     let mut empty_graph: GenGraph = GenGraph::new();
     let mut blockgroup_graphs: Vec<(HashId, String, GenGraph)> = vec![];
     let mut selected_blockgroup_graph: usize = 0;
@@ -212,18 +212,16 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 "Operation Summary"
             };
 
-            textarea.set_block(
-                Block::default()
-                    .title(msg_editor_title)
-                    .borders(Borders::ALL)
-                    .border_style(if panel_activated && panel_focus == "message_editor" {
-                        focused_style // Blue bold when active
-                    } else if !panel_activated && panel_focus == "message_editor" {
-                        selected_style // Cyan bold when selected but not active
-                    } else {
-                        unfocused_style // Gray when not selected
-                    }),
-            );
+            let msg_editor_block = Block::default()
+                .title(msg_editor_title)
+                .borders(Borders::ALL)
+                .border_style(if panel_activated && panel_focus == "message_editor" {
+                    focused_style // Blue bold when active
+                } else if !panel_activated && panel_focus == "message_editor" {
+                    selected_style // Cyan bold when selected but not active
+                } else {
+                    unfocused_style // Gray when not selected
+                });
 
             // Determine the canvas area for the graph and render all panels
             let canvas_area = if view_message_panel {
@@ -237,10 +235,18 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         .direction(Direction::Horizontal)
                         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                         .split(chunks[1]);
-                    f.render_widget(&textarea, sub_chunk[0]);
+                    TextArea::new().block(msg_editor_block.clone()).render(
+                        sub_chunk[0],
+                        f.buffer_mut(),
+                        &mut textarea,
+                    );
                     Some(sub_chunk[1])
                 } else {
-                    f.render_widget(&textarea, chunks[1]);
+                    TextArea::new().block(msg_editor_block.clone()).render(
+                        chunks[1],
+                        f.buffer_mut(),
+                        &mut textarea,
+                    );
                     None
                 }
             } else if view_graph {
@@ -314,6 +320,15 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
             let status_bar = Paragraph::new(status_line)
                 .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
             f.render_widget(status_bar, status_bar_area);
+
+            // Set cursor position for the message editor when focused
+            if view_message_panel
+                && panel_activated
+                && panel_focus == "message_editor"
+                && let Some((cursor_x, cursor_y)) = textarea.screen_cursor()
+            {
+                f.set_cursor_position((cursor_x, cursor_y));
+            }
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))?
@@ -444,9 +459,8 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 }
                                 KeyCode::Char('e') => {
                                     // Open message editor
-                                    textarea = TextArea::from_iter(
-                                        operation_summaries[selected].summary.summary.split("\n"),
-                                    );
+                                    textarea
+                                        .set_text(&operation_summaries[selected].summary.summary);
                                     view_message_panel = true;
                                     // Add to focus_rotation if not present
                                     focus_index = if let Some((i, _)) = focus_rotation
@@ -518,7 +532,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 && key.modifiers.contains(KeyModifiers::CONTROL)
                             {
                                 // Save message
-                                let new_summary = textarea.lines().iter().join("\n");
+                                let new_summary = textarea.text();
                                 let _ = OperationSummary::set_message(
                                     op_conn,
                                     operation_summaries[selected].summary.id,
@@ -526,7 +540,12 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 );
                                 operation_summaries[selected].summary.summary = new_summary;
                             } else {
-                                textarea.input(key);
+                                // Convert crossterm KeyEvent to rat-text event
+                                let _outcome = rat_text::text_area::handle_events(
+                                    &mut textarea,
+                                    true, // focused
+                                    &crossterm::event::Event::Key(key),
+                                );
                             }
                         }
                         "graph_view" => {

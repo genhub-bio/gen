@@ -62,7 +62,8 @@ ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29.0"
 log = "0.4.26"
 env_logger = "0.11.7"
-tui-textarea = { git = "https://github.com/phsym/tui-textarea", branch = "main" }
+rat-text = "3.0.3"
+rat-cursor = "2.0.0"
 tui-widget-list = "0.15.0"
 paste = "1.0.15"
 url-parse = "1.0.10"
