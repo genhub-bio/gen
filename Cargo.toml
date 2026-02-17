@@ -1,9 +1,9 @@
 [package]
 name = "gen"
 description = "A sequence graph and version control system."
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
-repository = "https://github.com/ginkgobioworks/gen"
+repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
 include = ["/src", "LICENSE", "migrations"]
