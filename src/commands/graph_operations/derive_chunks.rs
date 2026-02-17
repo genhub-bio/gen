@@ -134,6 +134,7 @@ pub fn derive_chunks_operation(
         &region_name.to_string(),
         backbone.as_deref(),
         chunk_ranges,
+        None,
     ) {
         graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
         operation_conn.execute("ROLLBACK TRANSACTION;", [])?;

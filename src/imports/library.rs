@@ -66,9 +66,10 @@ pub fn import_library<'a>(
     let new_block_group = BlockGroup::create(conn, collection_name, sample, library_name);
 
     let parts_list = parse_library(parts_file_path, library_file_path)?;
-    let path_changes_count = create_library(conn, &new_block_group.id, library_name, parts_list)?;
+    let _block_group_boundaries =
+        create_library(conn, new_block_group.id, library_name, parts_list, true)?;
 
-    let summary_str = format!("{library_name}: {path_changes_count} changes.\n");
+    let summary_str = format!("{library_name} created.\n");
     let op = session_operations::end_operation(
         context,
         &mut session,

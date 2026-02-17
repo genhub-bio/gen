@@ -1,12 +1,12 @@
 use core::ops::Range;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use gen_core::{HashId, Strand, is_end_node, is_start_node};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
-    edge::{Edge, EdgeData},
+    edge::Edge,
     errors::OperationError,
     path::Path,
     path_edge::PathEdge,
@@ -15,6 +15,8 @@ use gen_models::{
 };
 use itertools::Itertools;
 use thiserror::Error;
+
+use crate::graphs::{BlockGroupChunk, NodePoint, get_block_group_chunk, stitch};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum GraphOperationError {
@@ -67,6 +69,7 @@ pub fn derive_chunks(
     region_name: &str,
     backbone: Option<&str>,
     chunk_ranges: Vec<Range<i64>>,
+    child_block_group_id: Option<HashId>,
 ) -> Result<Vec<BlockGroup>, GraphOperationError> {
     let conn = context.graph().conn();
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
@@ -88,21 +91,27 @@ pub fn derive_chunks(
     let chunk_ranges_length = chunk_ranges.len();
 
     let mut result_block_groups = vec![];
-    for (i, chunk_range) in chunk_ranges.clone().into_iter().enumerate() {
-        let child_block_group_name = if chunk_ranges_length > 1 {
-            format!("{}.{}", region_name, i + 1)
-        } else {
-            region_name.to_string()
-        };
+    let mut block_group_chunks = vec![];
 
-        let child_block_group = BlockGroup::create(
-            conn,
-            collection_name,
-            Some(new_sample_name),
-            child_block_group_name.as_str(),
-        );
-        let child_block_group_id = child_block_group.id;
-        result_block_groups.push(child_block_group.clone());
+    for (i, chunk_range) in chunk_ranges.clone().into_iter().enumerate() {
+        let child_block_group_id = if let Some(child_block_group_id) = child_block_group_id {
+            child_block_group_id
+        } else {
+            let child_block_group_name = if chunk_ranges_length > 1 {
+                format!("{}.{}", region_name, i + 1)
+            } else {
+                region_name.to_string()
+            };
+
+            let child_block_group = BlockGroup::create(
+                conn,
+                collection_name,
+                Some(new_sample_name),
+                child_block_group_name.as_str(),
+            );
+            result_block_groups.push(child_block_group.clone());
+            child_block_group.id
+        };
 
         let start_coordinate = chunk_range.start;
         let end_coordinate = chunk_range.end;
@@ -215,6 +224,19 @@ pub fn derive_chunks(
             &child_block_group_id,
             &new_path_edge_ids,
         );
+
+        block_group_chunks.push(BlockGroupChunk {
+            entry_node_points: vec![NodePoint {
+                id: new_start_edge.edge.target_node_id,
+                coordinate: new_start_edge.edge.target_coordinate,
+                strand: new_start_edge.edge.target_strand,
+            }],
+            exit_node_points: vec![NodePoint {
+                id: new_end_edge.edge.source_node_id,
+                coordinate: new_end_edge.edge.source_coordinate,
+                strand: new_end_edge.edge.source_strand,
+            }],
+        });
     }
 
     Ok(result_block_groups)
@@ -262,10 +284,39 @@ pub fn make_stitch(
         }
     }
 
+    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+
+    let child_block_group = BlockGroup::create(
+        conn,
+        collection_name,
+        Some(new_sample_name),
+        new_region_name,
+    );
+
     let mut ordered_block_groups = vec![];
+    let mut block_group_chunks = vec![];
     for region_name in region_names {
         if let Some(block_group) = block_groups_by_name.get(region_name) {
             ordered_block_groups.push(block_group);
+            let chunks = get_block_group_chunk(conn, block_group.id);
+            block_group_chunks.push(chunks.clone());
+
+            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+
+            let nonterminal_edges: Vec<_> = edges
+                .iter()
+                .filter(|edge| !edge.edge.is_start_edge() && !edge.edge.is_end_edge())
+                .collect();
+            let bg_edges = nonterminal_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: child_block_group.id,
+                    edge_id: edge.edge.id,
+                    chromosome_index: edge.chromosome_index,
+                    phased: edge.phased,
+                })
+                .collect::<Vec<_>>();
+            BlockGroupEdge::bulk_create(conn, &bg_edges);
         } else {
             return Err(GraphOperationError::RegionNotFound(format!(
                 "No region found with name: {region_name}"
@@ -275,28 +326,30 @@ pub fn make_stitch(
 
     make_stitch_from_block_groups(
         context,
-        collection_name,
-        new_sample_name,
         &ordered_block_groups,
+        &block_group_chunks,
+        child_block_group.id,
         new_region_name,
     )
 }
 
 pub fn make_stitch_from_block_groups(
     context: &DbContext,
-    collection_name: &str,
-    new_sample_name: &str,
     block_groups: &Vec<&BlockGroup>,
+    block_group_chunks: &[BlockGroupChunk],
+    child_block_group_id: HashId,
     new_region_name: &str,
 ) -> Result<(), GraphOperationError> {
     let conn = context.graph().conn();
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let mut source_node_points: Vec<NodePoint> = vec![NodePoint {
+        id: PATH_START_NODE_ID,
+        coordinate: 0,
+        strand: Strand::Forward,
+    }];
 
-    let mut source_node_coordinates: Vec<(HashId, i64, Strand)> = vec![];
-    let mut edges_to_reuse = vec![];
-    let mut edges_to_create = vec![];
     let mut concatenated_path_edges = vec![];
+    let mut created_edge_ids = vec![];
 
     // Part 1
     // * Collect all the existing edges from the regions to be stitched together
@@ -304,92 +357,36 @@ pub fn make_stitch_from_block_groups(
     // * Also build up a list of edges to create to stitch end nodes of one region to start nodes of
     // the next region
     for block_group in block_groups {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        let chunks = get_block_group_chunk(conn, block_group.id);
 
-        let nonterminal_edges = edges
-            .iter()
-            .filter(|edge| !edge.edge.is_start_edge() && !edge.edge.is_end_edge())
-            .cloned();
-        edges_to_reuse.extend(nonterminal_edges);
+        created_edge_ids.extend(stitch(
+            conn,
+            &source_node_points,
+            &chunks.entry_node_points,
+            child_block_group_id,
+        ));
 
-        let start_edges = edges
-            .iter()
-            .filter(|edge| edge.edge.is_start_edge())
-            .collect::<Vec<_>>();
-        // Add all edges between the end nodes of the previous region and the start nodes of
-        // this region
-        for source_node_coordinate in &source_node_coordinates {
-            for start_edge in &start_edges {
-                edges_to_create.push(EdgeData {
-                    source_node_id: source_node_coordinate.0,
-                    source_coordinate: source_node_coordinate.1,
-                    source_strand: source_node_coordinate.2,
-                    target_node_id: start_edge.edge.target_node_id,
-                    target_coordinate: start_edge.edge.target_coordinate,
-                    target_strand: start_edge.edge.target_strand,
-                });
-            }
-        }
-
-        let end_edges = edges.iter().filter(|edge| edge.edge.is_end_edge());
-        source_node_coordinates = end_edges
-            .map(|edge| {
-                (
-                    edge.edge.source_node_id,
-                    edge.edge.source_coordinate,
-                    edge.edge.source_strand,
-                )
-            })
-            .collect();
+        source_node_points = chunks.exit_node_points;
 
         let current_path = BlockGroup::get_current_path(conn, &block_group.id);
         concatenated_path_edges.extend(PathEdge::edges_for_path(conn, &current_path.id));
     }
 
-    // Part 2:
-    // * Add in existing edges from the virtual start node to the start nodes of the first region
-    // * Add in existing edges from the end nodes of the last region to the virtual end node
-    let start_region = &block_groups[0];
-    let start_region_edges = BlockGroupEdge::edges_for_block_group(conn, &start_region.id);
-    for start_region_edge in &start_region_edges {
-        if start_region_edge.edge.is_start_edge() {
-            edges_to_reuse.push(start_region_edge.clone());
-        }
-    }
-
-    let end_region = &block_groups[block_groups.len() - 1];
-    let end_region_edges = BlockGroupEdge::edges_for_block_group(conn, &end_region.id);
-    for end_region_edge in &end_region_edges {
-        if end_region_edge.edge.is_end_edge() {
-            edges_to_reuse.push(end_region_edge.clone());
-        }
-    }
-
-    // Part 3: Set up the block group, set up bg edges for the edges to reuse, create the necessary
-    // new edges.
-    // We'll do a bulk create for the bg edges later in one big call, once we have more information
-    // for the new edges (which will also get bg edges created then)
-    let child_block_group = BlockGroup::create(
+    let target_node_points = vec![NodePoint {
+        id: PATH_END_NODE_ID,
+        coordinate: 0,
+        strand: Strand::Forward,
+    }];
+    created_edge_ids.extend(stitch(
         conn,
-        collection_name,
-        Some(new_sample_name),
-        new_region_name,
-    );
+        &source_node_points,
+        &target_node_points,
+        child_block_group_id,
+    ));
 
-    let mut bg_edges = edges_to_reuse
-        .iter()
-        .map(|edge| BlockGroupEdgeData {
-            block_group_id: child_block_group.id,
-            edge_id: edge.edge.id,
-            chromosome_index: edge.chromosome_index,
-            phased: edge.phased,
-        })
-        .collect::<Vec<_>>();
-
-    let created_edge_ids = Edge::bulk_create(conn, &edges_to_create);
     let created_edges = Edge::query_by_ids(conn, &created_edge_ids);
 
-    // Part 4: Set up a new path
+    // Part 2: Set up a new path
     let created_edges_by_node_info = created_edges
         .iter()
         .map(|edge| {
@@ -439,40 +436,10 @@ pub fn make_stitch_from_block_groups(
 
     new_path_edge_ids.push(concatenated_path_edges[concatenated_path_edges.len() - 1].id);
 
-    // Part 5: Create bg edges for the new edges
-    let mut chromosome_index_counter = edges_to_reuse
-        .iter()
-        .max_by(|x, y| x.chromosome_index.cmp(&y.chromosome_index))
-        .unwrap()
-        .chromosome_index
-        + 1;
-
-    let path_edge_id_set = new_path_edge_ids.iter().collect::<HashSet<_>>();
-    for created_edge in created_edges {
-        if path_edge_id_set.contains(&created_edge.id) {
-            bg_edges.push(BlockGroupEdgeData {
-                block_group_id: child_block_group.id,
-                edge_id: created_edge.id,
-                chromosome_index: 0,
-                phased: 0,
-            });
-        } else {
-            bg_edges.push(BlockGroupEdgeData {
-                block_group_id: child_block_group.id,
-                edge_id: created_edge.id,
-                chromosome_index: chromosome_index_counter,
-                phased: 0,
-            });
-            chromosome_index_counter += 1;
-        }
-    }
-
-    BlockGroupEdge::bulk_create(conn, &bg_edges);
-
     Path::create(
         conn,
         new_region_name,
-        &child_block_group.id,
+        &child_block_group_id,
         &new_path_edge_ids,
     );
 
@@ -481,7 +448,7 @@ pub fn make_stitch_from_block_groups(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::HashSet, path::PathBuf};
 
     use gen_core::Strand;
     use gen_models::{
@@ -606,6 +573,7 @@ mod tests {
             "chr1",
             None,
             vec![Range { start: 15, end: 25 }],
+            None,
         )
         .unwrap();
 
@@ -706,6 +674,7 @@ mod tests {
                 Range { start: 8, end: 25 },
                 Range { start: 25, end: 31 },
             ],
+            None,
         )
         .unwrap();
 
@@ -819,6 +788,7 @@ mod tests {
                 Range { start: 8, end: 25 },
                 Range { start: 25, end: 31 },
             ],
+            None,
         )
         .unwrap();
 

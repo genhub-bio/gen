@@ -78,6 +78,7 @@ pub fn derive_subgraph_operation(
             start: start_coordinate,
             end: end_coordinate,
         }],
+        None,
     ) {
         graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
         operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
