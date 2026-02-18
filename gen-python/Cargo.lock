@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "gen"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "base64",
@@ -982,10 +982,12 @@ dependencies = [
  "fallible-streaming-iterator",
  "flate2",
  "gb-io",
+ "gen-annotations",
  "gen-core",
  "gen-diff",
  "gen-graph",
  "gen-models",
+ "gen-sugiyama",
  "getrandom 0.3.4",
  "html-escape",
  "httparse",
@@ -1007,7 +1009,6 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rusqlite_migration",
- "rust-sugiyama",
  "serde",
  "serde_json",
  "sha2",
@@ -1021,8 +1022,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gen-annotations"
+version = "0.1.0"
+dependencies = [
+ "gen-core",
+ "gen-graph",
+ "gen-models",
+ "interavl",
+ "noodles",
+]
+
+[[package]]
 name = "gen-core"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "capnp",
  "capnpc",
@@ -1041,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "gen-diff"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1055,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "gen-graph"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "gen-core",
  "interavl",
@@ -1067,8 +1079,9 @@ dependencies = [
 
 [[package]]
 name = "gen-models"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
+ "anyhow",
  "cached",
  "capnp",
  "capnpc",
@@ -1093,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "gen-python"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "flate2",
  "gen",
@@ -1104,6 +1117,14 @@ dependencies = [
  "pyo3",
  "pyo3-build-config 0.26.0",
  "rusqlite",
+]
+
+[[package]]
+name = "gen-sugiyama"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "petgraph",
 ]
 
 [[package]]
@@ -2791,15 +2812,6 @@ dependencies = [
  "include_dir",
  "log",
  "rusqlite",
-]
-
-[[package]]
-name = "rust-sugiyama"
-version = "0.3.0"
-source = "git+https://github.com/paddison/rust-sugiyama?rev=4d15b35124adac1de3a3b2cc42af8d68290935f2#4d15b35124adac1de3a3b2cc42af8d68290935f2"
-dependencies = [
- "log",
- "petgraph",
 ]
 
 [[package]]

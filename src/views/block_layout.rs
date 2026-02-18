@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use gen_core::is_terminal;
 use gen_graph::{GenGraph, GraphEdge, GraphNode, find_articulation_points};
 use gen_models::node::Node;
+use gen_sugiyama::{Config, Edge, Vertex, assign_coordinates, run_sugiyama_algorithm};
 use log::{debug, info, warn};
 use petgraph::{
     Directed, algo::toposort, graph::NodeIndex, graphmap::GraphMap, stable_graph::StableDiGraph,
 };
-use rust_sugiyama::configure::Config;
 
 use crate::views::block_group_viewer::PlotParameters;
 
@@ -20,7 +20,7 @@ const MAX_CHUNK_SIZE: usize = 1e5 as usize;
 /// A graph that is compatible with the sugiyama crate.
 pub type SugiyamaGraph = StableDiGraph<GraphNode, Vec<GraphEdge>, u32>;
 
-/// Raw layout data in the format returned by the rust_sugiyama crate
+/// Raw layout data in the format returned by the layout engine
 pub type RawLayout = Vec<(NodeIndex, (f64, f64))>;
 
 /// Type alias for inter-partition edges
@@ -142,7 +142,6 @@ impl Partition {
 /// - `right_idx` = the partition index of the rightmost subgraph in the current layout
 ///
 /// Private fields:
-/// - `_vertex_size` = closure that specifies the size of each node for the layout algorithm
 /// - `_sugiyama_config` = configuration for the layout algorithm
 /// - `_partial_layouts` = hashmap of partition index to individiual subgraph layouts
 #[derive(Debug)]
@@ -153,8 +152,7 @@ pub struct BaseLayout {
     pub partition: Partition,
     pub left_idx: usize,
     pub right_idx: usize,
-    _vertex_size: fn(_id: NodeIndex<u32>, _v: &GraphNode) -> (f64, f64),
-    _sugiyama_config: rust_sugiyama::configure::Config,
+    _sugiyama_config: Config,
     _partial_layouts: HashMap<usize, PartialLayout>,
 }
 
@@ -250,9 +248,9 @@ impl BaseLayout {
         // Set up the config for the layout algorithm
         // We set the vertex size to 1.0, 1.0 so that the layout algorithm does not take individual node size into account
         // since we do our own stretching/scaling later.
-        let _vertex_size = |_id: NodeIndex<u32>, _v: &GraphNode| (1.0, 1.0);
         let _sugiyama_config = Config {
             vertex_spacing: 1.0,
+            dummy_vertices: false,
             ..Default::default()
         };
 
@@ -263,7 +261,6 @@ impl BaseLayout {
             partition,
             left_idx: origin_idx,
             right_idx: origin_idx,
-            _vertex_size,
             _sugiyama_config,
             _partial_layouts: HashMap::new(),
         };
@@ -344,32 +341,64 @@ impl BaseLayout {
             }
         }
 
-        // Run the layout algorithm
-        let layouts =
-            rust_sugiyama::from_graph(&subgraph, &self._vertex_size, &self._sugiyama_config);
+        let mut vertex_graph = StableDiGraph::<Vertex, Edge, u32>::with_capacity(
+            subgraph.node_count(),
+            subgraph.edge_count(),
+        );
+        let mut subgraph_to_vertex_map: HashMap<NodeIndex<u32>, NodeIndex<u32>> =
+            HashMap::with_capacity(subgraph.node_count());
 
-        // Confirm that there is only one layout, which means that the graph is connected
+        for subgraph_idx in subgraph.node_indices() {
+            let mut vertex = Vertex::new(subgraph_idx);
+            // Preserve a stable layer ordering across equivalent layouts.
+            let node_rank = i32::try_from(subgraph_idx.index()).unwrap_or(i32::MAX);
+            vertex.set_sort_bias(i32::MAX.saturating_sub(node_rank));
+            vertex.set_size((1, 1), self._sugiyama_config.vertex_spacing);
+            let vertex_idx = vertex_graph.add_node(vertex);
+            subgraph_to_vertex_map.insert(subgraph_idx, vertex_idx);
+        }
+
+        for edge_idx in subgraph.edge_indices() {
+            if let Some((source_idx, target_idx)) = subgraph.edge_endpoints(edge_idx) {
+                let source_vertex_idx = subgraph_to_vertex_map[&source_idx];
+                let target_vertex_idx = subgraph_to_vertex_map[&target_idx];
+                vertex_graph.add_edge(
+                    source_vertex_idx,
+                    target_vertex_idx,
+                    Edge::default().with_label((source_idx, target_idx)),
+                );
+            }
+        }
+
         assert!(
-            layouts.len() <= 1,
+            count_connected_components(&vertex_graph) <= 1,
             "Disconnected graphs are not supported in the viewer currently."
         );
-        assert_eq!(
-            layouts.len(),
-            1,
-            "Could not compute layout for the selected partition."
-        );
 
-        let (idx_positions, width, height) = &layouts[0];
+        let mut layers = run_sugiyama_algorithm(&mut vertex_graph, &self._sugiyama_config);
+        let idx_positions = assign_coordinates(&mut layers, &mut vertex_graph);
 
-        // Transpose x and y (converts top-to-bottom to left-to-right) and remap to GraphNodes
+        // Remap algorithm coordinates back to GraphNodes.
         let node_positions: Vec<(GraphNode, (f64, f64))> = idx_positions
             .iter()
-            .map(|(idx, (x, y))| (*subgraph.node_weight(*idx).unwrap(), (*y, *x)))
+            .map(|(vertex_idx, (x, y))| {
+                let original_idx = vertex_graph
+                    .node_weight(*vertex_idx)
+                    .and_then(|vertex| vertex.input_node_idx)
+                    .unwrap_or_else(|| panic!("Missing source index for vertex {:?}", vertex_idx));
+                (
+                    *subgraph.node_weight(original_idx).unwrap(),
+                    (*x as f64, *y as f64),
+                )
+            })
             .collect();
 
-        // Store the layout along with its width and height transposed
+        let width = layers.len() as f64;
+        let height = layers.iter().map(std::vec::Vec::len).max().unwrap_or(0) as f64;
+
+        // Store the layout for this partition
         self._partial_layouts
-            .insert(partition_index, (node_positions.clone(), *height, *width));
+            .insert(partition_index, (node_positions, width, height));
     }
 
     /// Expand the layout to the right by adding a new partition subgraph
@@ -518,13 +547,37 @@ impl BaseLayout {
     }
 }
 
+fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
+    let mut visited = std::collections::HashSet::new();
+    let mut components = 0;
+
+    for node_idx in graph.node_indices() {
+        if visited.contains(&node_idx) {
+            continue;
+        }
+        components += 1;
+        let mut queue = std::collections::VecDeque::from([node_idx]);
+        visited.insert(node_idx);
+
+        while let Some(current_idx) = queue.pop_front() {
+            for neighbor_idx in graph.neighbors_undirected(current_idx) {
+                if visited.insert(neighbor_idx) {
+                    queue.push_back(neighbor_idx);
+                }
+            }
+        }
+    }
+
+    components
+}
+
 /// Holds processed and scaled layout data, but not the actual sequences.
 /// - `lines` = pairs of coordinates for each edge.
 /// - `labels` = starting and ending coordinates for each label.
 ///
-/// The raw layout from the Sugiyama algorithm is processed as follow:
-/// - The coordinates are rounded to the nearest integer and transposed to go from top-to-bottom to left-to-right.
-/// - Each block is assigned a layer (or rank) based on its x-coordinate (transposed y-coordinate).
+/// The raw layout from the Sugiyama algorithm is processed as follows:
+/// - The coordinates are rounded to the nearest integer.
+/// - Each block is assigned a layer (or rank) based on its x-coordinate.
 /// - The width of each layer is determined by the widest label in that layer.
 /// - The distance between layers is scaled horizontally and vertically
 #[allow(clippy::type_complexity)]

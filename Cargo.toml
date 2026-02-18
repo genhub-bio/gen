@@ -33,6 +33,7 @@ gen-core = { path = "gen-core" }
 gen-diff = { path = "gen-diff" }
 gen-models = { path = "gen-models" }
 gen-graph = { path = "gen-graph" }
+gen-sugiyama = { path = "gen-sugiyama" }
 gen-annotations = { path = "gen-annotations" }
 clap = { version = "4.5.32", features = ["derive"] }
 clap-nested-commands = "0.0.6"
@@ -57,7 +58,6 @@ gb-io = "0.8.0"
 thiserror = "2.0.12"
 indicatif = "0.18.3"
 html-escape = "0.2.13"
-rust-sugiyama = {git = "https://github.com/paddison/rust-sugiyama", rev = "4d15b35124adac1de3a3b2cc42af8d68290935f2" }
 ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28.1"
 log = "0.4.26"
