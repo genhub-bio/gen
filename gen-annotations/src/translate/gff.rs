@@ -5,7 +5,7 @@ use std::{
 };
 
 use gen_core::{HashId, Strand, is_terminal};
-use gen_graph::{GraphNode, connect_all_boundary_edges, project_path};
+use gen_graph::{GraphNode, project_path};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
 use interavl::IntervalTree;
 use noodles::{core::Position, gff};
@@ -41,8 +41,7 @@ where
         if let Some(bg) = sample_bgs.get(&ref_name) {
             let projection = paths.entry(bg.id).or_insert_with(|| {
                 let path = BlockGroup::get_current_path(conn, &bg.id);
-                let mut graph = BlockGroup::get_graph(conn, &bg.id);
-                connect_all_boundary_edges(&mut graph);
+                let graph = BlockGroup::get_graph(conn, &bg.id);
                 let mut tree = IntervalTree::default();
                 let mut position: i64 = 0;
                 for (node, strand) in project_path(&graph, &path.blocks(conn)) {

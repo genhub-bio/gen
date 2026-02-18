@@ -1709,22 +1709,21 @@ mod tests {
             Operation::query(op_conn, "select * from operations", rusqlite::params!()).len();
         // NOTE: 3 block groups get created with the update from vcf, corresponding to the unknown, G1, and foo samples
         assert_eq!(block_group_count, 4);
-        // NOTE: The edge count is 5 because of the following:
+        // NOTE: The edge count is 8 because of the following:
         // * 1 edge from the source node to the node created by the fasta import
         // * 1 edge from the node created by the fasta import to the sink node
-        // * 1 edge representing the deletion
-        // * 2 edges to and from the node representing the second alt sequence
-        assert_eq!(edge_count, 5);
-        // NOTE: The block group edge count is 16 because of the following:
+        // * 1 edge representing the deletion + 2 edges for the edit site preservation. For deletions we preserve both the before + after sides of the deleted portion
+        // * 2 edges to and from the node representing the second alt sequence + 1 edge for edit site preservation
+        assert_eq!(edge_count, 8);
+        // NOTE: The block group edge count is 21 because of the following:
         // * 4 edges (one per block group) from the virtual source node
         // * 4 edges (one per block group) to the virtual sink node
-        // * 2 block group edges for the G1 sample (1 edge for the first alt sequence, a deletion, with both the 0 and 1 chromosome indices for those edges, 1 * 2 = 2)
-        // * 6 block group edges for the foo sample (1 edge to and from the node representing the
-        // first alt sequence, with both the 0 and 1 chromosome indices for those edges, 1 * 2 = 2;
-        // 2 edges to and from the node representing the second alt sequence, with both the 0 and 1
-        // chromosome indices for those edges, 2 * 2 = 4)
-        // 4 + 4 + 2 + 6 = 16
-        assert_eq!(block_group_edge_count, 16);
+        // * 9 block group edges for the unknown sample:
+        //     4 edges for the first alt:  (1 edge for the first alt sequence, a deletion, with both the 0 and 1 chromosome indices for those edges, 1 * 2 = 2. +2 edit preservation edges)
+        //     5 edges for the second alt: (2 edges for the second alt sequence, an insertion, with both the 0 and 1 chromosome indices for those edges, 2 * 2 = 4. +1 edit preservation edges)
+        // * 4 block group edges for the foo sample, just having the first alt sequence
+        // 4 + 4 + 9 + 4 = 21
+        assert_eq!(block_group_edge_count, 21);
         // NOTE: The node count is 5:
         // * 2 source and sink nodes
         // * 1 node created by the initial fasta import
@@ -1775,8 +1774,8 @@ mod tests {
         let op_count =
             Operation::query(op_conn, "select * from operations", rusqlite::params!()).len();
         assert_eq!(block_group_count, 4);
-        assert_eq!(edge_count, 5);
-        assert_eq!(block_group_edge_count, 16);
+        assert_eq!(edge_count, 8);
+        assert_eq!(block_group_edge_count, 21);
         assert_eq!(node_count, 5);
         assert_eq!(sample_count, 3);
         assert_eq!(op_count, 2);
@@ -1955,8 +1954,8 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count =
             Operation::query(op_conn, "select * from operations", rusqlite::params!()).len();
-        assert_eq!(edge_count, 5);
-        assert_eq!(block_group_edge_count, 16);
+        assert_eq!(edge_count, 8);
+        assert_eq!(block_group_edge_count, 21);
         assert_eq!(node_count, 5);
         assert_eq!(sample_count, 3);
         assert_eq!(op_count, 2);
@@ -2002,8 +2001,8 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count =
             Operation::query(op_conn, "select * from operations", rusqlite::params!()).len();
-        assert_eq!(edge_count, 3);
-        assert_eq!(block_group_edge_count, 6);
+        assert_eq!(edge_count, 5);
+        assert_eq!(block_group_edge_count, 8);
         assert_eq!(node_count, 4);
         assert_eq!(sample_count, 1);
         assert_eq!(op_count, 3);
@@ -2023,8 +2022,8 @@ mod tests {
         let sample_count = Sample::query(conn, "select * from samples", rusqlite::params!()).len();
         let op_count =
             Operation::query(op_conn, "select * from operations", rusqlite::params!()).len();
-        assert_eq!(edge_count, 5);
-        assert_eq!(block_group_edge_count, 16);
+        assert_eq!(edge_count, 8);
+        assert_eq!(block_group_edge_count, 21);
         assert_eq!(node_count, 5);
         assert_eq!(sample_count, 3);
         assert_eq!(op_count, 3);
