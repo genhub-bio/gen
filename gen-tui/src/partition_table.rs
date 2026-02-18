@@ -35,7 +35,7 @@ pub struct PartitionConfig {
 impl Default for PartitionConfig {
     fn default() -> Self {
         Self {
-            layer_count: 10,
+            layer_count: 100,
             node_count: usize::MAX,
         }
     }
@@ -577,12 +577,12 @@ where
                 "load_partition: loading section partition {}",
                 partition_index
             );
-            _ = self.compute_partition_layouts(
+            self.compute_partition_layouts(
                 partition_index,
                 original_sizer,
                 original_graph,
                 vertex_spacing,
-            );
+            )?;
         } else {
             // Bridge partition
             log::trace!(

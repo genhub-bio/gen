@@ -27,7 +27,7 @@ pub struct ControllerConfig {
 impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
-            max_loaded_partitions: 10,
+            max_loaded_partitions: 1000,
         }
     }
 }
@@ -774,7 +774,7 @@ mod tests {
             node_count: 3,  // Small node count to force multiple partitions
         };
         let config = ControllerConfig {
-            max_loaded_partitions: 20,
+            max_loaded_partitions: usize::MAX,
         };
 
         let mut controller = PartitionController::new_with_config(
