@@ -17,7 +17,7 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-annotations"]
+members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-sugiyama", "gen-annotations"]
 default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff"]
 exclude = ["gen-python"]
 
