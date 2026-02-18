@@ -16,7 +16,7 @@
 //!
 //! See the submodules for each phase for more details on the implementation
 //! and references used.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use log::info;
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
@@ -28,6 +28,9 @@ mod util;
 
 // Re-export types for external use
 pub use config::{Config, CrossingMinimization, RankingType, VERTEX_SPACING_DEFAULT};
+pub mod configure {
+    pub use crate::{Config, CrossingMinimization, RankingType, VERTEX_SPACING_DEFAULT};
+}
 // Algorithm phases
 #[allow(unused_imports)]
 use p0_cycle_removal as p0;
@@ -280,4 +283,95 @@ pub fn assign_coordinates(
 fn slack(graph: &StableDiGraph<Vertex, Edge>, edge: EdgeIndex, minimum_length: i32) -> i32 {
     let (tail, head) = graph.edge_endpoints(edge).unwrap();
     graph[head].rank - graph[tail].rank - minimum_length
+}
+
+pub type Layout = (Vec<(NodeIndex<u32>, (f64, f64))>, f64, f64);
+
+pub fn from_graph<N, E, F>(
+    graph: &StableDiGraph<N, E, u32>,
+    vertex_size: &F,
+    config: &Config,
+) -> Vec<Layout>
+where
+    F: Fn(NodeIndex<u32>, &N) -> (f64, f64),
+{
+    let component_count = count_connected_components(graph);
+    if component_count > 1 {
+        return vec![(Vec::new(), 0.0, 0.0); component_count];
+    }
+    if graph.node_count() == 0 {
+        return Vec::new();
+    }
+
+    let mut vertex_graph =
+        StableDiGraph::<Vertex, Edge, u32>::with_capacity(graph.node_count(), graph.edge_count());
+    let mut graph_to_vertex_map: HashMap<NodeIndex<u32>, NodeIndex<u32>> =
+        HashMap::with_capacity(graph.node_count());
+
+    for graph_idx in graph.node_indices() {
+        let mut vertex = Vertex::new(graph_idx);
+        let node_rank = i32::try_from(graph_idx.index()).unwrap_or(i32::MAX);
+        vertex.set_sort_bias(i32::MAX.saturating_sub(node_rank));
+
+        let (width, height) = vertex_size(graph_idx, &graph[graph_idx]);
+        let width = width.max(1.0).round() as u64;
+        let height = height.max(1.0).round() as u64;
+        vertex.set_size((width, height), config.vertex_spacing);
+
+        let vertex_idx = vertex_graph.add_node(vertex);
+        graph_to_vertex_map.insert(graph_idx, vertex_idx);
+    }
+
+    for edge_idx in graph.edge_indices() {
+        if let Some((source_idx, target_idx)) = graph.edge_endpoints(edge_idx) {
+            let source_vertex_idx = graph_to_vertex_map[&source_idx];
+            let target_vertex_idx = graph_to_vertex_map[&target_idx];
+            vertex_graph.add_edge(
+                source_vertex_idx,
+                target_vertex_idx,
+                Edge::default().with_label((source_idx, target_idx)),
+            );
+        }
+    }
+
+    let mut layers = run_sugiyama_algorithm(&mut vertex_graph, config);
+    let idx_positions = assign_coordinates(&mut layers, &mut vertex_graph);
+
+    let positions = idx_positions
+        .into_iter()
+        .filter_map(|(vertex_idx, (x, y))| {
+            vertex_graph[vertex_idx]
+                .input_node_idx
+                .map(|graph_idx| (graph_idx, (y as f64, x as f64)))
+        })
+        .collect::<Vec<_>>();
+
+    let width = layers.iter().map(std::vec::Vec::len).max().unwrap_or(0) as f64;
+    let height = layers.len() as f64;
+
+    vec![(positions, width, height)]
+}
+
+fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
+    let mut visited = HashSet::new();
+    let mut components = 0;
+
+    for node_idx in graph.node_indices() {
+        if visited.contains(&node_idx) {
+            continue;
+        }
+        components += 1;
+        let mut queue = VecDeque::from([node_idx]);
+        visited.insert(node_idx);
+
+        while let Some(current_idx) = queue.pop_front() {
+            for neighbor_idx in graph.neighbors_undirected(current_idx) {
+                if visited.insert(neighbor_idx) {
+                    queue.push_back(neighbor_idx);
+                }
+            }
+        }
+    }
+
+    components
 }
