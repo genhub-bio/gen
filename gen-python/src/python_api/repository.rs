@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Mutex};
 
-use r#gen::{core::HashId, get_connection, views::block_layout::BaseLayout};
+use r#gen::{core::HashId, get_connection};
 use gen_core::config::Workspace;
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use pyo3::{prelude::*, types::PyModule};
@@ -8,7 +8,6 @@ use pyo3::{prelude::*, types::PyModule};
 use super::{
     block_group::PyBlockGroup,
     factory::Factory,
-    layouts::PyBaseLayout,
     node_key::PyNodeKey,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
@@ -262,24 +261,6 @@ impl PyRepository {
                 collection_name: block_group.collection_name,
                 sample_name: block_group.sample_name,
                 name: block_group.name,
-            })
-        })
-    }
-
-    /// Creates a BaseLayout from a BlockGroup
-    ///
-    /// Args:
-    ///     block_group: The BlockGroup to create a layout for
-    ///
-    /// Returns:
-    ///     A PyBaseLayout instance
-    fn create_base_layout(&self, block_group: &PyBlockGroup) -> PyResult<PyBaseLayout> {
-        self.with_connection(|conn| {
-            let graph = BlockGroup::get_graph(conn, &block_group.id);
-            let block_layout = BaseLayout::new(&graph);
-
-            Ok(PyBaseLayout {
-                layout: block_layout,
             })
         })
     }
