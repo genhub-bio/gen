@@ -20,3 +20,6 @@ This directory contains a self-contained implementation of the Sugiyama algorith
 - `Config` - Configuration options
 - `RankingType` - Vertical placement strategy
 - `CrossingMinimization` - Crossing reduction heuristic 
+## License and Notice
+See `../LICENSE` and `../NOTICE` for the licensing and third-party attribution
+information for this vendored crate.

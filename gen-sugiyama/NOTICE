@@ -1,5 +1,12 @@
-The contents of this folder were derived from the rust-sugiyama project (https://github.com/paddison/rust-sugiyama)
-under the following license:
+gen-sugiyama
+
+This crate includes a vendored and modified copy of code from rust-sugiyama:
+https://github.com/paddison/rust-sugiyama
+
+This vendored copy is distributed under the Apache License, Version 2.0.
+See LICENSE in this directory for the full license text.
+
+Third-party attribution retained from upstream rust-sugiyama:
 
 MIT License
 
