@@ -3,7 +3,7 @@ name = "gen-sugiyama"
 description = "Sugiyama algorithm implementation for graph layout"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
 
 [dependencies]
 petgraph = "0.6.5"
