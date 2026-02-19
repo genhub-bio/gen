@@ -2,7 +2,7 @@
 use core::ops::Range;
 use std::{
     fmt::Debug,
-    fs::{self, File},
+    fs::File,
     io,
     io::{BufReader, Write},
     ops::Deref,
@@ -14,41 +14,35 @@ use std::{
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
-    commands::{
-        Cli, Commands,
-        cli_context::CliContext,
-        graph_operations::{
-            derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
-            make_stitch::make_stitch_operation,
-        },
-        remote::handle_remote_command,
-    },
+    annotations::gff::propagate_gff,
+    commands::{Cli, Commands, cli_context::CliContext, remote::handle_remote_command},
     config,
     diffs::gfa::gfa_sample_diff,
-    get_connection, get_operation_connection, operation_management,
+    get_connection, get_operation_connection,
+    graph_operators::{GraphOperationError, derive_chunks, get_path, make_stitch},
+    operation_management,
     operation_management::{parse_patch_operations, pull, push},
     patch, track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, diff::view_diff, operations::view_operations,
-        patch::view_patches,
+        block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
+        diff::view_diff, operations::view_operations, patch::view_patches,
     },
 };
-use gen_annotations::{gff::propagate_gff, translate};
-use gen_core::{HashId, calculate_hash, config::Workspace};
+use gen_annotations::translate;
+use gen_core::config::Workspace;
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     annotations::{add_annotation, add_annotation_file},
     block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::{OperationError, RemoteError},
+    file_types::FileTypes,
     metadata,
     operations::{
-        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
-        OperationSummary, parse_hash,
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
     },
     sample::Sample,
-    session_operations::{DependencyModels, end_operation, start_operation},
     traits::Query,
 };
 use itertools::Itertools;
@@ -163,21 +157,80 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             sample,
             collection,
             position,
+            full,
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
                 None => get_default_collection(operation_conn)?,
             });
 
-            Ok(view_block_group(
-                graph_conn,
-                operation_conn,
-                &workspace,
-                graph.clone(),
-                sample.clone(),
-                collection_name,
-                position.clone(),
-            )?)
+            if !full && let Some(name) = graph.as_ref() {
+                // Use the inline widget by default if a graph is specified
+                let block_group = if let Some(ref sample_name) = sample {
+                    BlockGroup::get(
+                        graph_conn,
+                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+                        params![collection_name, sample_name, name],
+                    )
+                } else {
+                    BlockGroup::get(
+                        graph_conn,
+                        "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
+                        params![collection_name, name],
+                    )
+                };
+
+                match block_group {
+                    Ok(bg) => {
+                        let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                        let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
+                        // Use a default height of 10 for now
+                        match show_inline_gen_graph_widget(
+                            graph_conn,
+                            &block_graph,
+                            vec![current_path],
+                            10,
+                        ) {
+                            Ok(true) => {
+                                // User requested upgrade to full TUI
+                                view_block_group(
+                                    graph_conn,
+                                    operation_conn,
+                                    &workspace,
+                                    graph,
+                                    sample,
+                                    collection_name,
+                                    position,
+                                )?;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                eprintln!("Error showing inline widget: {}", e);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "No block group found with name {:?} and sample {:?} in collection {}",
+                            name,
+                            sample.clone().unwrap_or_else(|| "null".to_string()),
+                            collection_name
+                        );
+                    }
+                }
+            } else {
+                // Use the full-screen viewer if --full is specified or no graph is provided
+                view_block_group(
+                    graph_conn,
+                    operation_conn,
+                    &workspace,
+                    graph,
+                    sample,
+                    collection_name,
+                    position,
+                )?;
+            }
+            Ok(())
         }
         Some(Commands::ViewDiff { from, to }) => {
             let to_ref = to.clone().unwrap_or_else(|| {
@@ -673,11 +726,33 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             region,
             backbone,
         }) => {
-            match derive_subgraph_operation(&db_context, name, sample, new_sample, region, backbone)
-            {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("Error deriving subgraph: {e}").into()),
-            }
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
+            let sample_name = sample.clone();
+            let new_sample_name = new_sample.clone();
+            let parsed_region = region.parse::<Region>()?;
+            let interval = parsed_region.interval();
+            let start_coordinate = interval.start().ok_or("Region missing start")?.get() as i64;
+            let end_coordinate = interval.end().ok_or("Region missing end")?.get() as i64;
+            derive_chunks(
+                &db_context,
+                collection_name,
+                sample_name.as_deref(),
+                &new_sample_name,
+                &parsed_region.name().to_string(),
+                backbone.as_deref(),
+                vec![Range {
+                    start: start_coordinate,
+                    end: end_coordinate,
+                }],
+            )?;
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::DeriveChunks {
             name,
@@ -688,19 +763,78 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             breakpoints,
             chunk_size,
         }) => {
-            match derive_chunks_operation(
-                &db_context,
-                name,
-                sample,
-                new_sample,
-                region,
-                backbone,
-                breakpoints,
-                chunk_size,
-            ) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("Error deriving chunks: {e}").into()),
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
+            let sample_name = sample.clone();
+            let new_sample_name = new_sample.clone();
+            let parsed_region = region.parse::<Region>()?;
+
+            let path_length = get_path(
+                graph_conn,
+                collection_name,
+                sample_name.as_deref(),
+                &parsed_region.name().to_string(),
+                backbone.as_deref(),
+            )?
+            .length(graph_conn);
+
+            let chunk_points = if let Some(breakpoints) = breakpoints {
+                breakpoints
+                    .split(",")
+                    .map(|x| {
+                        x.parse::<i64>()
+                            .map_err(|e| format!("Invalid breakpoint: {e}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .sorted()
+                    .collect::<Vec<i64>>()
+            } else if let Some(chunk_size) = chunk_size {
+                let chunk_count = path_length / chunk_size;
+                (0..chunk_count)
+                    .map(|i| i * chunk_size)
+                    .collect::<Vec<i64>>()
+            } else {
+                return Err("No chunking method specified.".into());
+            };
+
+            if chunk_points.is_empty() {
+                return Err("No chunk coordinates provided.".into());
             }
+            if chunk_points[chunk_points.len() - 1] > path_length {
+                return Err("At least one chunk coordinate exceeds path length.".into());
+            }
+
+            let mut range_start = 0;
+            let mut chunk_ranges = vec![];
+            for chunk_point in chunk_points {
+                chunk_ranges.push(Range {
+                    start: range_start,
+                    end: chunk_point,
+                });
+                range_start = chunk_point;
+            }
+            chunk_ranges.push(Range {
+                start: range_start,
+                end: path_length,
+            });
+
+            derive_chunks(
+                &db_context,
+                collection_name,
+                sample_name.as_deref(),
+                &new_sample_name,
+                &parsed_region.name().to_string(),
+                backbone.as_deref(),
+                chunk_ranges,
+            )?;
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::MakeStitch {
             name,
@@ -709,11 +843,32 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             regions,
             new_region,
         }) => {
-            match make_stitch_operation(&db_context, name, sample, new_sample, regions, new_region)
-            {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("Error making a stitch: {e}").into()),
+            graph_conn.execute("BEGIN TRANSACTION", [])?;
+            operation_conn.execute("BEGIN TRANSACTION", [])?;
+            let collection_name = &(match name {
+                Some(collection) => collection,
+                None => get_default_collection(operation_conn)?,
+            });
+            let sample_name = sample.clone();
+            let new_sample_name = new_sample.clone();
+
+            let region_names = regions.split(",").collect::<Vec<&str>>();
+
+            match make_stitch(
+                &db_context,
+                collection_name,
+                sample_name.as_deref(),
+                &new_sample_name,
+                &region_names,
+                &new_region,
+            ) {
+                Ok(_) => {}
+                Err(GraphOperationError::OperationError(OperationError::NoChanges)) => {}
+                Err(e) => return Err(format!("Error stitching subgraphs: {e}").into()),
             }
+            graph_conn.execute("END TRANSACTION", [])?;
+            operation_conn.execute("END TRANSACTION", [])?;
+            Ok(())
         }
         Some(Commands::Push { remote }) => {
             push(&db_context, remote.as_deref())?;
