@@ -2,13 +2,16 @@
 name = "gen-annotations"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
+anyhow = "1.0"
 gen-core = { path = "../gen-core" }
 gen-graph = { path = "../gen-graph" }
 gen-models = { path = "../gen-models" }
 interavl = "0.3.0"
 noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }
+rusqlite = { version = "0.32.1", features = ["array", "bundled"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.32.1", features = ["array", "bundled"] }
