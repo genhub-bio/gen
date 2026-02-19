@@ -1437,3 +1437,223 @@ fn test_double_chain() {
 
     insta::assert_snapshot!("double_chain", snapshot);
 }
+
+/// Test rendering and positioning of very large nodes during zoom operations.
+///
+/// This test verifies that nodes with extreme widths (1000+ characters) are rendered
+/// correctly without coordinate overflow issues. The test zooms through different
+/// detail levels and ensures that:
+/// 1. Large nodes don't cause coordinate wraparound or positioning errors
+/// 2. Spatial relationships between nodes are maintained (left node < right node)
+/// 3. Cursor positioning remains stable during zoom operations
+///
+/// This test specifically addresses coordinate overflow bugs where very wide nodes
+/// could exceed u16::MAX coordinates and cause rendering artifacts.
+#[test]
+fn test_large_node_rendering_with_zoom() {
+    let _ = env_logger::try_init();
+
+    use crate::{
+        geometry::WorldRect,
+        graph_controller::{GraphConfig, GraphController, WorldBuffer},
+        layout::VisualDetail,
+        plotter::{NodeRenderer, NodeSizer},
+        testing::{create_test_terminal, mocks::MockDomainGraph},
+    };
+
+    // 1. Create a 3-node chain graph: 0 -> 1 -> 2
+    let mut domain_graph = MockDomainGraph::new();
+    let n0 = domain_graph.add_node(());
+    let n1 = domain_graph.add_node(());
+    let n2 = domain_graph.add_node(());
+    domain_graph.add_edge(n0, n1, ());
+    domain_graph.add_edge(n1, n2, ());
+
+    // 2. Custom NodeSizer with adjustable node length
+    #[derive(Debug, Clone)]
+    struct VariableDetailSizer;
+
+    impl NodeSizer<MockDomainGraph> for VariableDetailSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            scale: VisualDetail,
+        ) -> (u64, u64) {
+            match scale {
+                VisualDetail::Minimal => (1, 1),
+                VisualDetail::Truncated => (10, 1),
+                VisualDetail::Full => match node.index() {
+                    0 => (5, 1),
+                    1 => (1000, 1),
+                    2 => (5, 1),
+                    _ => (1, 1),
+                },
+            }
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    impl NodeSizer<&MockDomainGraph> for VariableDetailSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            scale: VisualDetail,
+        ) -> (u64, u64) {
+            match scale {
+                VisualDetail::Minimal => (1, 1),
+                VisualDetail::Truncated => (10, 1),
+                VisualDetail::Full => match node.index() {
+                    0 => (5, 1),
+                    1 => (1000, 1),
+                    2 => (5, 1),
+                    _ => (1, 1),
+                },
+            }
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct UltrawideRenderer;
+
+    impl NodeRenderer<&MockDomainGraph> for UltrawideRenderer {
+        fn render_node(
+            &mut self,
+            buffer: &mut WorldBuffer,
+            area: WorldRect,
+            node_id: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) {
+            // Viewport-aware rendering: only render the visible portion of large nodes
+            // This is critical for performance with very large nodes (1000+ width)
+
+            let Some(visible_area) = buffer.calculate_visible_area(area) else {
+                // Node is completely outside viewport - don't render anything
+                return;
+            };
+
+            let symbol = format!("{}", node_id.index()).chars().next().unwrap();
+
+            // Only render the visible portion
+            for y in visible_area.min.y..=visible_area.max.y {
+                // Calculate the visible width for this row
+                let visible_width = (visible_area.max.x - visible_area.min.x + 1) as usize;
+                let content = symbol.to_string().repeat(visible_width);
+
+                let start_pos = crate::geometry::WorldPos::new(visible_area.min.x, y);
+                buffer.set_string(start_pos, &content);
+            }
+        }
+    }
+
+    let viewport_width = 80;
+    let viewport_height = 20;
+    let mut terminal = create_test_terminal(viewport_width, viewport_height);
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = usize::MAX;
+    config.partition.node_count = usize::MAX;
+
+    let mut controller =
+        GraphController::new_with_config(&domain_graph, VariableDetailSizer, config);
+
+    // 4. Starts in minimal level-of-detail
+    controller.set_detail_level(VisualDetail::Minimal);
+
+    // 5. Cursor setup (not visible in the snapshots though)
+    controller.show_cursor();
+    controller.initialize_cursor();
+    controller.cursor.set_node(n0, (0.0, 0.0));
+
+    // Set cursor to the center of the viewport
+    let vp_center_x = viewport_width / 2;
+    let vp_center_y = viewport_height / 2;
+    let initial_cursor_viewport_pos = crate::geometry::ViewportPos::new(vp_center_x, vp_center_y);
+    controller
+        .cursor
+        .set_viewport_pos(initial_cursor_viewport_pos);
+
+    let renderer = UltrawideRenderer;
+
+    // 6. Snapshot 1: Minimal detail level
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+
+        let widget = crate::graph_widget::GraphWidget::with_renderer(renderer.clone())
+            .detail_level(VisualDetail::Minimal)
+            .cursor();
+        f.render_stateful_widget(widget, area, &mut controller);
+    });
+    let minimal_snapshot = format!("{}", terminal.backend());
+    insta::assert_snapshot!("variable_detail_chain_minimal", minimal_snapshot);
+
+    // 7. Simulate hitting '+' to zoom in (goes to Truncated)
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let plus_key = KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE);
+    controller.handle_key_event(plus_key).unwrap();
+    controller.trigger_rebuild();
+
+    // Snapshot 2: Truncated detail level
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+
+        let widget = crate::graph_widget::GraphWidget::with_renderer(renderer.clone())
+            .detail_level(controller.get_detail_level())
+            .cursor();
+        f.render_stateful_widget(widget, area, &mut controller);
+    });
+    let truncated_snapshot = format!("{}", terminal.backend());
+    insta::assert_snapshot!("variable_detail_chain_truncated", truncated_snapshot);
+
+    // 8. Simulate hitting '+' again to zoom in (goes to Full)
+    controller.handle_key_event(plus_key).unwrap();
+    controller.trigger_rebuild();
+
+    // Snapshot 3: Full detail level
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+
+        let widget = crate::graph_widget::GraphWidget::with_renderer(renderer.clone())
+            .detail_level(controller.get_detail_level())
+            .cursor();
+        f.render_stateful_widget(widget, area, &mut controller);
+    });
+    let full_snapshot = format!("{}", terminal.backend());
+    insta::assert_snapshot!("variable_detail_chain_full", full_snapshot);
+
+    // 9. Confirms node 1's minimum x is to the right of node 0's maximum x
+
+    let viewport_graph = controller.get_viewport_graph();
+
+    let pos0 = viewport_graph.node_positions.get(&n0).unwrap();
+    let pos1 = viewport_graph.node_positions.get(&n1).unwrap();
+
+    let node0 = viewport_graph.get_node(pos0).unwrap();
+    let node1 = viewport_graph.get_node(pos1).unwrap();
+
+    let rect0 = WorldRect::from_center_and_size(*pos0, node0.size);
+    let rect1 = WorldRect::from_center_and_size(*pos1, node1.size);
+
+    assert!(
+        rect1.min.x > rect0.max.x,
+        "Node 1's minimum x ({}) should be to the right of node 0's maximum x ({})",
+        rect1.min.x,
+        rect0.max.x
+    );
+
+    // Verify that the cursor has maintained its viewport position throughout the zoom operations
+    let final_cursor_viewport_pos = controller.cursor.viewport_pos;
+    assert_eq!(
+        initial_cursor_viewport_pos, final_cursor_viewport_pos,
+        "Cursor viewport position should remain stable during zoom operations. Initial: {:?}, Final: {:?}",
+        initial_cursor_viewport_pos, final_cursor_viewport_pos
+    );
+}
