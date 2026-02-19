@@ -103,49 +103,99 @@ impl NodeRenderer<&GenGraph> for GenGraphNodeRenderer<'_> {
         node_id: &GraphNode,
         detail_level: VisualDetail,
     ) {
+        // Viewport-aware rendering: only render visible portions of large genomic sequences
+        // This is critical for performance when viewing large genomic regions (100K+ bp)
+        let Some(visible_area) = buffer.calculate_visible_area(area) else {
+            // Genomic node is completely outside viewport - skip rendering entirely
+            return;
+        };
+
         let background_style = Style::default().bg(get_theme_color("node").unwrap_or_default());
         let text_style = Style::default()
             .bg(get_theme_color("node").unwrap_or(ratatui::style::Color::Blue))
             .fg(get_theme_color("text").unwrap_or(ratatui::style::Color::White));
 
-        buffer.fill_rect(area, ' ');
-        buffer.set_char_styled(area.left_center(), ' ', background_style);
+        // Fill background only for the visible area (not the entire node area)
+        for y in visible_area.min.y..=visible_area.max.y {
+            for x in visible_area.min.x..=visible_area.max.x {
+                let pos = gen_tui::geometry::WorldPos::new(x, y);
+                buffer.set_char_styled(pos, ' ', background_style);
+            }
+        }
 
-        // Handle special start/end nodes (always show full label)
+        // Handle special start/end nodes (always show full label if visible)
         if is_start_node(node_id.node_id) {
             let edge_style = Style::default()
                 .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
                 .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
-            buffer.set_string_styled(area.left_center(), label::START, edge_style);
+
+            // Only render if the label position is within visible area
+            let label_pos = area.left_center();
+            if visible_area.contains(label_pos) {
+                buffer.set_string_styled(label_pos, label::START, edge_style);
+            }
             return;
         }
         if is_end_node(node_id.node_id) {
             let edge_style = Style::default()
                 .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
                 .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
-            buffer.set_string_styled(area.left_center(), label::END, edge_style);
+
+            // Only render if the label position is within visible area
+            let label_pos = area.left_center();
+            if visible_area.contains(label_pos) {
+                buffer.set_string_styled(label_pos, label::END, edge_style);
+            }
             return;
         }
 
         match detail_level {
             VisualDetail::Minimal => {
-                // Base scale: Just show a simple glyph
+                // Base scale: Just show a simple glyph if visible
                 let text_style = Style::default()
                     .fg(get_theme_color("text").unwrap_or(ratatui::style::Color::White))
                     .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue));
-                buffer.set_string_styled(area.left_center(), &NODE_GLYPH.to_string(), text_style);
+
+                let glyph_pos = area.left_center();
+                if visible_area.contains(glyph_pos) {
+                    buffer.set_string_styled(glyph_pos, &NODE_GLYPH.to_string(), text_style);
+                }
             }
             VisualDetail::Truncated => {
                 // Truncated scale: Show sequence with truncation to max 12 chars
                 let sequence = self.get_sequence(node_id);
                 let max_width = 12u32;
                 let truncated = inner_truncation(&sequence, max_width);
-                buffer.set_string_styled(area.left_center(), &truncated, text_style);
+
+                let text_pos = area.left_center();
+                if visible_area.contains(text_pos) {
+                    buffer.set_string_styled(text_pos, &truncated, text_style);
+                }
             }
             VisualDetail::Full => {
-                // Full scale: Show complete sequence (truncated only by area width)
+                // Full scale: Render only the visible portion of large genomic sequences
+                // This is where the major performance improvement occurs for large sequences
                 let sequence = self.get_sequence(node_id);
-                buffer.set_string_styled(area.left_center(), &sequence, text_style);
+
+                // Calculate which portion of the sequence is actually visible
+                let seq_start_world = area.min.x;
+                let visible_start_offset = (visible_area.min.x - seq_start_world).max(0) as usize;
+                let visible_width = (visible_area.max.x - visible_area.min.x + 1) as usize;
+
+                // Extract only the visible portion of the sequence
+                let visible_sequence = if visible_start_offset < sequence.len() {
+                    let end_offset = (visible_start_offset + visible_width).min(sequence.len());
+                    &sequence[visible_start_offset..end_offset]
+                } else {
+                    // Start offset is beyond sequence length
+                    ""
+                };
+
+                if !visible_sequence.is_empty() {
+                    let render_pos =
+                        gen_tui::geometry::WorldPos::new(visible_area.min.x, area.left_center().y);
+                    buffer.set_string_styled(render_pos, visible_sequence, text_style);
+                }
             }
         }
     }

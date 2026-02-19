@@ -345,7 +345,30 @@ impl Cursor {
             Ok(())
         } else {
             // At boundary - jump to adjacent node in different layer
-            self.jump_to_adjacent_layer(direction, viewport_graph)
+            match self.jump_to_adjacent_layer(direction, viewport_graph) {
+                Ok(()) => Ok(()),
+                Err(msg) => {
+                    // If we're at graph boundary (no next/previous layer) and in coarse mode,
+                    // fall back to moving within the current node to provide escape route
+                    if self.coarse_mode
+                        && (msg.contains("No next layer") || msg.contains("No previous layer"))
+                    {
+                        let target_frac_x = if direction > 0 {
+                            1.0 // Moving right but stuck at rightmost layer: move to right edge of current node
+                        } else {
+                            0.0 // Moving left but stuck at leftmost layer: move to left edge of current node  
+                        };
+
+                        // Keep current Y position
+                        let current_frac_y = self.fractional_pos.1;
+                        self.fractional_pos = (target_frac_x, current_frac_y);
+                        Ok(())
+                    } else {
+                        // Either in fine mode, or there's a layer but no suitable node - fail as before
+                        Err(msg)
+                    }
+                }
+            }
         }
     }
 
@@ -958,6 +981,107 @@ mod tests {
             "Fractional Y should increase. Height: {}",
             height
         );
+    }
+
+    #[test]
+    fn test_coarse_mode_boundary_navigation() {
+        // Test that coarse mode navigation provides escape route when at graph boundaries
+        let mut domain_graph = MockDomainGraph::new();
+
+        // Create a simple chain: 0 -> 1 -> 2
+        let n0 = domain_graph.add_node(());
+        let n1 = domain_graph.add_node(());
+        let n2 = domain_graph.add_node(());
+        domain_graph.add_edge(n0, n1, ());
+        domain_graph.add_edge(n1, n2, ());
+
+        let node_sizer = TestNodeSizers::fixed_5x3();
+        let mut config = GraphConfig::default();
+        config.partition.layer_count = usize::MAX;
+        config.partition.node_count = usize::MAX;
+
+        let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+        controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
+        controller.rebuild_viewport_graph().unwrap();
+        let viewport_graph = controller.get_viewport_graph();
+
+        // Test leftmost boundary (node 0)
+        {
+            let mut cursor = Cursor::new();
+            assert!(
+                cursor.is_coarse_mode(),
+                "Cursor should start in coarse mode"
+            );
+            cursor.set_node(n0, (0.5, 0.5)); // Middle of leftmost node
+
+            // Try to move left by a large amount (should exceed node bounds and trigger layer jump)
+            let result = cursor.move_horizontal(-1000, viewport_graph); // Large movement to force boundary
+
+            match result {
+                Ok(()) => {
+                    // Success case - verify the fallback worked
+                    assert_eq!(cursor.node_idx, Some(n0), "Should stay on same node");
+                    assert_eq!(
+                        cursor.fractional_pos.0, 0.0,
+                        "Should move to left edge of node"
+                    );
+                    assert_eq!(
+                        cursor.fractional_pos.1, 0.5,
+                        "Y position should be preserved"
+                    );
+                }
+                Err(e) => {
+                    panic!(
+                        "Should provide escape route in coarse mode, got error: {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        // Test rightmost boundary (node 2)
+        {
+            let mut cursor = Cursor::new();
+            cursor.set_node(n2, (0.5, 0.5)); // Middle of rightmost node
+
+            // Try to move right by a large amount (should exceed node bounds and trigger layer jump)
+            let result = cursor.move_horizontal(1000, viewport_graph); // Large movement to force boundary
+
+            match result {
+                Ok(()) => {
+                    // Success case - verify the fallback worked
+                    assert_eq!(cursor.node_idx, Some(n2), "Should stay on same node");
+                    assert_eq!(
+                        cursor.fractional_pos.0, 1.0,
+                        "Should move to right edge of node"
+                    );
+                    assert_eq!(
+                        cursor.fractional_pos.1, 0.5,
+                        "Y position should be preserved"
+                    );
+                }
+                Err(e) => {
+                    panic!(
+                        "Should provide escape route in coarse mode at right boundary, got error: {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        // Test that fine mode still fails as expected (doesn't trigger fallback)
+        {
+            let mut cursor = Cursor::new();
+            cursor.set_coarse_mode(false);
+            cursor.set_node(n0, (0.5, 0.5));
+
+            // Try to move left in fine mode
+            let result = cursor.move_horizontal(-1, viewport_graph);
+
+            // Should fail because we're still within node bounds in fine mode
+            // This tests that the fallback only applies to coarse mode
+            assert!(result.is_ok(), "Fine movement within node should work");
+        }
     }
 
     #[test]

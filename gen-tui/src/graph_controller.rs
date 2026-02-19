@@ -181,8 +181,8 @@ where
 
     /// Check camera movement and viewport bounds changes to determine if a rebuild is needed
     pub fn detect_motion(&self) -> bool {
-        let threshold_x = self.viewport_state.viewport_bounds.width as i64 / 2;
-        let threshold_y = self.viewport_state.viewport_bounds.height as i64 / 2;
+        let threshold_x = self.viewport_state.viewport_bounds.width as i64 / 3;
+        let threshold_y = self.viewport_state.viewport_bounds.height as i64 / 3;
 
         let current_camera = self.viewport_state.camera_current;
         let movement_x = (current_camera.x - self.last_rebuild_camera_center.x).abs();
