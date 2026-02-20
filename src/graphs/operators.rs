@@ -13,7 +13,6 @@ use gen_models::{
     sample::Sample,
     traits::Query,
 };
-use itertools::Itertools;
 use thiserror::Error;
 
 use crate::graphs::{BlockGroupChunk, NodePoint, get_block_group_chunk, stitch};
@@ -70,7 +69,8 @@ pub fn derive_chunks(
     backbone: Option<&str>,
     chunk_ranges: Vec<Range<i64>>,
     child_block_group_id: Option<HashId>,
-) -> Result<Vec<BlockGroup>, GraphOperationError> {
+    create_block_group: bool,
+) -> Result<Vec<BlockGroupChunk>, GraphOperationError> {
     let conn = context.graph().conn();
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
 
@@ -85,12 +85,12 @@ pub fn derive_chunks(
     )?;
 
     let current_path_length = current_path.length(conn);
+
     let current_intervaltree = current_path.intervaltree(conn);
     let current_path_edges = PathEdge::edges_for_path(conn, &current_path.id);
 
     let chunk_ranges_length = chunk_ranges.len();
 
-    let mut result_block_groups = vec![];
     let mut block_group_chunks = vec![];
 
     for (i, chunk_range) in chunk_ranges.clone().into_iter().enumerate() {
@@ -109,7 +109,6 @@ pub fn derive_chunks(
                 Some(new_sample_name),
                 child_block_group_name.as_str(),
             );
-            result_block_groups.push(child_block_group.clone());
             child_block_group.id
         };
 
@@ -147,6 +146,7 @@ pub fn derive_chunks(
             start_node_coordinate,
             end_node_coordinate,
             &child_block_group_id,
+            create_block_group,
         );
 
         let child_block_group_edges =
@@ -175,16 +175,27 @@ pub fn derive_chunks(
         // map returned by derive_subgraph to find the edges in the child graph that correspond to
         // path edges in the parent graph, and create a new path from the child edges.
         let mut new_path_edge_ids = vec![];
+        let mut new_internal_path_edge_ids = vec![];
+
         let new_start_target_node_id = new_node_ids_by_old.get(&start_block.node_id).unwrap();
-        let new_start_edge = child_block_group_edges
-            .iter()
-            .find(|e| {
-                is_start_node(e.edge.source_node_id)
-                    && e.edge.target_node_id == *new_start_target_node_id
-                    && e.edge.target_coordinate == start_node_coordinate
-            })
-            .unwrap();
-        new_path_edge_ids.push(new_start_edge.edge.id);
+
+        let start_node_point = NodePoint {
+            id: *new_start_target_node_id,
+            coordinate: start_node_coordinate,
+            strand: Strand::Forward,
+        };
+
+        if create_block_group {
+            let new_start_edge = child_block_group_edges
+                .iter()
+                .find(|e| {
+                    is_start_node(e.edge.source_node_id)
+                        && e.edge.target_node_id == *new_start_target_node_id
+                        && e.edge.target_coordinate == start_node_coordinate
+                })
+                .unwrap();
+            new_path_edge_ids.push(new_start_edge.edge.id);
+        }
 
         for edge in &current_path_edges {
             let new_source_node_id = new_node_ids_by_old.get(&edge.source_node_id);
@@ -203,43 +214,49 @@ pub fn derive_chunks(
                 let child_edge_id = child_edge_ids_by_key.get(key);
                 if let Some(child_edge_id) = child_edge_id {
                     new_path_edge_ids.push(*child_edge_id);
+                    new_internal_path_edge_ids.push(*child_edge_id);
                 }
             }
         }
 
         let new_end_source_node_id = new_node_ids_by_old.get(&end_block.node_id).unwrap();
-        let new_end_edge = child_block_group_edges
-            .iter()
-            .find(|e| {
-                is_end_node(e.edge.target_node_id)
-                    && e.edge.source_node_id == *new_end_source_node_id
-                    && e.edge.source_coordinate == end_node_coordinate
-            })
-            .unwrap();
-        new_path_edge_ids.push(new_end_edge.edge.id);
+        let end_node_point = NodePoint {
+            id: *new_end_source_node_id,
+            coordinate: end_node_coordinate,
+            strand: Strand::Forward,
+        };
 
-        Path::create(
-            conn,
-            &current_path.name,
-            &child_block_group_id,
-            &new_path_edge_ids,
-        );
+        if create_block_group {
+            let new_end_edge = child_block_group_edges
+                .iter()
+                .find(|e| {
+                    is_end_node(e.edge.target_node_id)
+                        && e.edge.source_node_id == *new_end_source_node_id
+                        && e.edge.source_coordinate == end_node_coordinate
+                })
+                .unwrap();
+            new_path_edge_ids.push(new_end_edge.edge.id);
+
+            let _path = Path::create(
+                conn,
+                &current_path.name,
+                &child_block_group_id,
+                &new_path_edge_ids,
+            );
+        }
+
+        let path_edges = Edge::query_by_ids(conn, &new_path_edge_ids);
 
         block_group_chunks.push(BlockGroupChunk {
-            entry_node_points: vec![NodePoint {
-                id: new_start_edge.edge.target_node_id,
-                coordinate: new_start_edge.edge.target_coordinate,
-                strand: new_start_edge.edge.target_strand,
-            }],
-            exit_node_points: vec![NodePoint {
-                id: new_end_edge.edge.source_node_id,
-                coordinate: new_end_edge.edge.source_coordinate,
-                strand: new_end_edge.edge.source_strand,
-            }],
+            entry_node_points: vec![start_node_point.clone()],
+            exit_node_points: vec![end_node_point.clone()],
+            path_edges,
+            path_start_point: Some(start_node_point.clone()),
+            path_end_point: Some(end_node_point.clone()),
         });
     }
 
-    Ok(result_block_groups)
+    Ok(block_group_chunks)
 }
 
 fn get_block_group_id(
@@ -293,13 +310,12 @@ pub fn make_stitch(
         new_region_name,
     );
 
-    let mut ordered_block_groups = vec![];
     let mut block_group_chunks = vec![];
+
     for region_name in region_names {
         if let Some(block_group) = block_groups_by_name.get(region_name) {
-            ordered_block_groups.push(block_group);
-            let chunks = get_block_group_chunk(conn, block_group.id);
-            block_group_chunks.push(chunks.clone());
+            let chunk = get_block_group_chunk(conn, block_group.id);
+            block_group_chunks.push(chunk.clone());
 
             let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
 
@@ -326,7 +342,6 @@ pub fn make_stitch(
 
     make_stitch_from_block_groups(
         context,
-        &ordered_block_groups,
         &block_group_chunks,
         child_block_group.id,
         new_region_name,
@@ -335,113 +350,64 @@ pub fn make_stitch(
 
 pub fn make_stitch_from_block_groups(
     context: &DbContext,
-    block_groups: &Vec<&BlockGroup>,
     block_group_chunks: &[BlockGroupChunk],
     child_block_group_id: HashId,
     new_region_name: &str,
 ) -> Result<(), GraphOperationError> {
     let conn = context.graph().conn();
 
-    let mut source_node_points: Vec<NodePoint> = vec![NodePoint {
+    let start_node_point = NodePoint {
         id: PATH_START_NODE_ID,
         coordinate: 0,
         strand: Strand::Forward,
-    }];
+    };
+    let mut result_block_group_chunk = BlockGroupChunk {
+        entry_node_points: vec![start_node_point.clone()],
+        exit_node_points: vec![start_node_point.clone()],
+        path_edges: vec![],
+        path_start_point: Some(start_node_point.clone()),
+        path_end_point: Some(start_node_point.clone()),
+    };
 
-    let mut concatenated_path_edges = vec![];
-    let mut created_edge_ids = vec![];
-
-    // Part 1
-    // * Collect all the existing edges from the regions to be stitched together
-    // * Except edges to/from terminal nodes
-    // * Also build up a list of edges to create to stitch end nodes of one region to start nodes of
-    // the next region
-    for block_group in block_groups {
-        let chunks = get_block_group_chunk(conn, block_group.id);
-
-        created_edge_ids.extend(stitch(
-            conn,
-            &source_node_points,
-            &chunks.entry_node_points,
-            child_block_group_id,
-        ));
-
-        source_node_points = chunks.exit_node_points;
-
-        let current_path = BlockGroup::get_current_path(conn, &block_group.id);
-        concatenated_path_edges.extend(PathEdge::edges_for_path(conn, &current_path.id));
+    for chunk in block_group_chunks {
+        result_block_group_chunk =
+            stitch(conn, &result_block_group_chunk, chunk, child_block_group_id);
     }
 
-    let target_node_points = vec![NodePoint {
+    let end_node_point = NodePoint {
         id: PATH_END_NODE_ID,
         coordinate: 0,
         strand: Strand::Forward,
-    }];
-    created_edge_ids.extend(stitch(
+    };
+    let end_chunk = BlockGroupChunk {
+        entry_node_points: vec![end_node_point.clone()],
+        exit_node_points: vec![end_node_point.clone()],
+        path_edges: vec![],
+        path_start_point: Some(end_node_point.clone()),
+        path_end_point: Some(end_node_point.clone()),
+    };
+
+    result_block_group_chunk = stitch(
         conn,
-        &source_node_points,
-        &target_node_points,
+        &result_block_group_chunk,
+        &end_chunk,
         child_block_group_id,
-    ));
-
-    let created_edges = Edge::query_by_ids(conn, &created_edge_ids);
-
-    // Part 2: Set up a new path
-    let created_edges_by_node_info = created_edges
-        .iter()
-        .map(|edge| {
-            (
-                (
-                    edge.source_node_id,
-                    edge.source_coordinate,
-                    edge.source_strand,
-                    edge.target_node_id,
-                    edge.target_coordinate,
-                    edge.target_strand,
-                ),
-                edge.clone(),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-
-    let mut stitch_path_edge_ids = vec![];
-    for (path_edge1, path_edge2) in concatenated_path_edges.iter().tuple_windows() {
-        if is_end_node(path_edge1.target_node_id) && is_start_node(path_edge2.source_node_id) {
-            stitch_path_edge_ids.push(
-                created_edges_by_node_info[&(
-                    path_edge1.source_node_id,
-                    path_edge1.source_coordinate,
-                    path_edge1.source_strand,
-                    path_edge2.target_node_id,
-                    path_edge2.target_coordinate,
-                    path_edge2.target_strand,
-                )]
-                    .id,
-            );
-        }
-    }
-
-    let mut new_path_edge_ids = vec![concatenated_path_edges[0].id];
-    let mut stitch_count = 0;
-    for path_edge in &concatenated_path_edges {
-        if path_edge.is_end_edge() {
-            if stitch_count < stitch_path_edge_ids.len() {
-                new_path_edge_ids.push(stitch_path_edge_ids[stitch_count]);
-                stitch_count += 1;
-            }
-        } else if !path_edge.is_start_edge() {
-            new_path_edge_ids.push(path_edge.id);
-        }
-    }
-
-    new_path_edge_ids.push(concatenated_path_edges[concatenated_path_edges.len() - 1].id);
-
-    Path::create(
-        conn,
-        new_region_name,
-        &child_block_group_id,
-        &new_path_edge_ids,
     );
+
+    if !result_block_group_chunk.path_edges.is_empty() {
+        let new_path_edge_ids = result_block_group_chunk
+            .path_edges
+            .iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<HashId>>();
+
+        Path::create(
+            conn,
+            new_region_name,
+            &child_block_group_id,
+            &new_path_edge_ids,
+        );
+    }
 
     Ok(())
 }
@@ -574,6 +540,7 @@ mod tests {
             None,
             vec![Range { start: 15, end: 25 }],
             None,
+            true,
         )
         .unwrap();
 
@@ -675,6 +642,7 @@ mod tests {
                 Range { start: 25, end: 31 },
             ],
             None,
+            true,
         )
         .unwrap();
 
@@ -789,6 +757,7 @@ mod tests {
                 Range { start: 25, end: 31 },
             ],
             None,
+            true,
         )
         .unwrap();
 

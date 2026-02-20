@@ -7,10 +7,7 @@ use std::{
 
 use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_models::{
-    db::GraphConnection, edge::Edge, node::Node, path::Path, sequence::Sequence, traits::Query,
-};
-use itertools::Itertools;
+use gen_models::{db::GraphConnection, node::Node, path::Path, sequence::Sequence};
 use noodles::fasta;
 use thiserror::Error;
 
@@ -112,7 +109,7 @@ pub fn create_library(
     block_group_id: HashId,
     library_name: &str,
     parts_list: Vec<Vec<SequencePart>>,
-    create_terminal_edges: bool,
+    create_block_group: bool,
 ) -> Result<BlockGroupChunk, CombinatorialLibraryCreationError> {
     let mut parts_set = HashSet::new();
     for parts in &parts_list {
@@ -131,7 +128,7 @@ pub fn create_library(
 
     let mut part_nodes_list = vec![];
     let mut sequence_lengths_by_node_id = HashMap::new();
-    if create_terminal_edges {
+    if create_block_group {
         part_nodes_list.push(vec![PATH_START_NODE_ID]);
         sequence_lengths_by_node_id.insert(PATH_START_NODE_ID, 0);
     }
@@ -162,27 +159,49 @@ pub fn create_library(
         part_nodes_list.push(part_nodes);
     }
 
-    if create_terminal_edges {
+    if create_block_group {
         part_nodes_list.push(vec![PATH_END_NODE_ID]);
         sequence_lengths_by_node_id.insert(PATH_END_NODE_ID, 0);
     }
 
-    let mut new_edge_ids = vec![];
+    let mut source_node_points = vec![];
+    let mut target_node_points = vec![];
 
-    for (parts1, parts2) in part_nodes_list.iter().tuple_windows() {
-        let mut source_node_points = vec![];
-        for part1 in parts1 {
-            let part1_length = sequence_lengths_by_node_id.get(part1).ok_or_else(|| {
-                CombinatorialLibraryCreationError::CreationFailed(format!("Part {part1} missing."))
-            })?;
-            source_node_points.push(NodePoint {
-                id: *part1,
-                coordinate: *part1_length,
-                strand: Strand::Forward,
-            });
-        }
+    for part in &part_nodes_list[0] {
+        target_node_points.push(NodePoint {
+            id: *part,
+            coordinate: 0,
+            strand: Strand::Forward,
+        });
+        let part_length = sequence_lengths_by_node_id.get(part).ok_or_else(|| {
+            CombinatorialLibraryCreationError::CreationFailed(format!("Part {part} missing."))
+        })?;
+        source_node_points.push(NodePoint {
+            id: *part,
+            coordinate: *part_length,
+            strand: Strand::Forward,
+        });
+    }
 
-        let target_node_points = parts2
+    let (path_start_point, path_end_point) = if create_block_group {
+        (
+            Some(target_node_points[0].clone()),
+            Some(source_node_points[0].clone()),
+        )
+    } else {
+        (None, None)
+    };
+
+    let mut result_block_group_chunk = BlockGroupChunk {
+        entry_node_points: target_node_points.clone(),
+        exit_node_points: source_node_points.clone(),
+        path_edges: vec![],
+        path_start_point,
+        path_end_point,
+    };
+
+    for parts in &part_nodes_list[1..] {
+        let target_node_points: Vec<NodePoint> = parts
             .iter()
             .map(|part| NodePoint {
                 id: *part,
@@ -191,63 +210,58 @@ pub fn create_library(
             })
             .collect();
 
-        new_edge_ids.extend(stitch(
+        source_node_points = vec![];
+        for part in parts {
+            let part_length = sequence_lengths_by_node_id.get(part).ok_or_else(|| {
+                CombinatorialLibraryCreationError::CreationFailed(format!("Part {part} missing."))
+            })?;
+            source_node_points.push(NodePoint {
+                id: *part,
+                coordinate: *part_length,
+                strand: Strand::Forward,
+            });
+        }
+
+        let (path_start_point, path_end_point) = if create_block_group {
+            (
+                Some(target_node_points[0].clone()),
+                Some(source_node_points[0].clone()),
+            )
+        } else {
+            (None, None)
+        };
+
+        let target_chunk = BlockGroupChunk {
+            entry_node_points: target_node_points.clone(),
+            exit_node_points: source_node_points.clone(),
+            path_edges: vec![],
+            path_start_point,
+            path_end_point,
+        };
+
+        result_block_group_chunk = stitch(
             conn,
-            &source_node_points,
-            &target_node_points,
+            &result_block_group_chunk,
+            &target_chunk,
             block_group_id,
-        ));
+        );
     }
 
-    let path_node_ids: Vec<_> = part_nodes_list.iter().map(|parts| parts[0]).collect();
+    if create_block_group {
+        let path_edge_ids = result_block_group_chunk
+            .clone()
+            .path_edges
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<HashId>>();
 
-    let new_edges = Edge::query_by_ids(conn, &new_edge_ids);
-    let new_edge_ids_by_source_and_target_node = new_edges
-        .iter()
-        .map(|edge| ((edge.source_node_id, edge.target_node_id), edge.id))
-        .collect::<HashMap<_, _>>();
-    let path_edge_ids = path_node_ids
-        .iter()
-        .tuple_windows()
-        .map(|(source_node_id, target_node_id)| {
-            *new_edge_ids_by_source_and_target_node
-                .get(&(*source_node_id, *target_node_id))
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-
-    Path::create(
-        conn,
-        format!("{library_name} default path").as_str(),
-        &block_group_id,
-        &path_edge_ids,
-    );
-
-    let mut entry_node_points = vec![];
-    for part in &part_nodes_list[0] {
-        let part_length = sequence_lengths_by_node_id.get(part).ok_or_else(|| {
-            CombinatorialLibraryCreationError::CreationFailed(format!("Part {part} missing."))
-        })?;
-        entry_node_points.push(NodePoint {
-            id: *part,
-            coordinate: *part_length,
-            strand: Strand::Forward,
-        });
+        Path::create(
+            conn,
+            format!("{library_name} default path").as_str(),
+            &block_group_id,
+            &path_edge_ids,
+        );
     }
 
-    let exit_node_points = part_nodes_list[part_nodes_list.len() - 1]
-        .iter()
-        .map(|part| NodePoint {
-            id: *part,
-            coordinate: 0,
-            strand: Strand::Forward,
-        })
-        .collect();
-
-    let block_group_chunk = BlockGroupChunk {
-        entry_node_points,
-        exit_node_points,
-    };
-
-    Ok(block_group_chunk)
+    Ok(result_block_group_chunk)
 }

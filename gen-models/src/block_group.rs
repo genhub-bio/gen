@@ -942,6 +942,7 @@ impl BlockGroup {
         start_node_coordinate: i64,
         end_node_coordinate: i64,
         target_block_group_id: &HashId,
+        create_terminal_edges: bool,
     ) -> HashMap<HashId, HashId> {
         let current_graph = BlockGroup::get_graph(conn, source_block_group_id);
         let start_node = current_graph
@@ -1090,41 +1091,46 @@ impl BlockGroup {
             })
             .collect::<Vec<_>>();
 
-        let new_start_node_id = new_node_ids_by_old.get(&start_block.node_id).unwrap();
-        let new_start_edge = Edge::create(
-            conn,
-            PATH_START_NODE_ID,
-            0,
-            Strand::Forward,
-            *new_start_node_id,
-            start_node_coordinate,
-            start_block.strand,
-        );
-        let new_start_edge_data = BlockGroupEdgeData {
-            block_group_id: *target_block_group_id,
-            edge_id: new_start_edge.id,
-            chromosome_index: 0,
-            phased: 0,
-        };
-        let new_end_node_id = new_node_ids_by_old.get(&end_block.node_id).unwrap();
-        let new_end_edge = Edge::create(
-            conn,
-            *new_end_node_id,
-            end_node_coordinate,
-            end_block.strand,
-            PATH_END_NODE_ID,
-            0,
-            Strand::Forward,
-        );
-        let new_end_edge_data = BlockGroupEdgeData {
-            block_group_id: *target_block_group_id,
-            edge_id: new_end_edge.id,
-            chromosome_index: 0,
-            phased: 0,
-        };
         let mut all_edges = subgraph_edge_inputs.clone();
-        all_edges.push(new_start_edge_data);
-        all_edges.push(new_end_edge_data);
+
+        if create_terminal_edges {
+            let new_start_node_id = new_node_ids_by_old.get(&start_block.node_id).unwrap();
+            let new_start_edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                *new_start_node_id,
+                start_node_coordinate,
+                start_block.strand,
+            );
+            let new_start_edge_data = BlockGroupEdgeData {
+                block_group_id: *target_block_group_id,
+                edge_id: new_start_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            };
+            let new_end_node_id = new_node_ids_by_old.get(&end_block.node_id).unwrap();
+            let new_end_edge = Edge::create(
+                conn,
+                *new_end_node_id,
+                end_node_coordinate,
+                end_block.strand,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            );
+            let new_end_edge_data = BlockGroupEdgeData {
+                block_group_id: *target_block_group_id,
+                edge_id: new_end_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            };
+
+            all_edges.push(new_start_edge_data);
+            all_edges.push(new_end_edge_data);
+        }
+
         BlockGroupEdge::bulk_create(conn, &all_edges);
 
         new_node_ids_by_old
@@ -2895,6 +2901,7 @@ mod tests {
                 start_node_coordinate,
                 end_node_coordinate,
                 &block_group2.id,
+                true,
             );
             let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
             assert_eq!(
@@ -3101,6 +3108,7 @@ mod tests {
                 start_node_coordinate,
                 end_node_coordinate,
                 &block_group2.id,
+                true,
             );
             let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
             assert_eq!(
@@ -3364,6 +3372,7 @@ mod tests {
                 start_node_coordinate,
                 end_node_coordinate,
                 &block_group2.id,
+                true,
             );
             let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
             assert_eq!(

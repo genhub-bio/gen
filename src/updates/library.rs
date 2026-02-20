@@ -3,7 +3,6 @@ use std::str;
 
 use gen_models::{
     block_group::BlockGroup,
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
@@ -89,51 +88,6 @@ pub fn update_with_library(
         });
     }
 
-    let derived_block_groups = derive_chunks(
-        context,
-        collection_name,
-        parent_sample_name,
-        &intermediate_sample_name,
-        region_name,
-        None,
-        chunk_ranges,
-        None, // TODO: Set this to target block group ID
-    )?;
-
-    let parts_list = parse_library(parts_file_path, library_file_path)?;
-
-    let intermediate_block_group = BlockGroup::create(
-        conn,
-        collection_name,
-        Some(&intermediate_sample_name),
-        new_sample_name,
-    );
-
-    let library_block_group_chunks = create_library(
-        conn,
-        intermediate_block_group.id,
-        new_sample_name,
-        parts_list,
-        true,
-    )?;
-
-    let mut block_groups_to_stitch = vec![];
-    let mut block_group_chunks = vec![];
-    if start_coordinate > 0 {
-        block_groups_to_stitch.push(&derived_block_groups[0]);
-        //	block_group_chunks.push(&derived_block_group_chunks[0]);
-    }
-
-    block_groups_to_stitch.push(&intermediate_block_group);
-    block_group_chunks.push(library_block_group_chunks);
-
-    if end_coordinate < parent_path.length(conn) {
-        block_groups_to_stitch.push(&derived_block_groups[2]);
-        //	block_group_chunks.push(&derived_block_group_chunks[2]);
-    }
-
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
-
     let child_block_group = BlockGroup::create(
         conn,
         collection_name,
@@ -141,28 +95,44 @@ pub fn update_with_library(
         new_sample_name,
     );
 
-    for block_group in &block_groups_to_stitch {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+    let derived_block_group_chunks = derive_chunks(
+        context,
+        collection_name,
+        parent_sample_name,
+        &intermediate_sample_name,
+        region_name,
+        None,
+        chunk_ranges,
+        Some(child_block_group.id),
+        false,
+    )?;
 
-        let nonterminal_edges: Vec<_> = edges
-            .iter()
-            .filter(|edge| !edge.edge.is_start_edge() && !edge.edge.is_end_edge())
-            .collect();
-        let bg_edges = nonterminal_edges
-            .iter()
-            .map(|edge| BlockGroupEdgeData {
-                block_group_id: child_block_group.id,
-                edge_id: edge.edge.id,
-                chromosome_index: edge.chromosome_index,
-                phased: edge.phased,
-            })
-            .collect::<Vec<_>>();
-        BlockGroupEdge::bulk_create(conn, &bg_edges);
+    let parts_list = parse_library(parts_file_path, library_file_path)?;
+
+    let library_block_group_chunk = create_library(
+        conn,
+        child_block_group.id,
+        new_sample_name,
+        parts_list,
+        false,
+    )?;
+
+    let mut block_group_chunks = vec![];
+
+    if start_coordinate > 0 {
+        block_group_chunks.push(derived_block_group_chunks[0].clone());
     }
+
+    block_group_chunks.push(library_block_group_chunk);
+
+    if end_coordinate < parent_path.length(conn) {
+        block_group_chunks.push(derived_block_group_chunks[2].clone());
+    }
+
+    let _new_sample = Sample::get_or_create(conn, new_sample_name);
 
     make_stitch_from_block_groups(
         context,
-        &block_groups_to_stitch,
         &block_group_chunks,
         child_block_group.id,
         new_sample_name,

@@ -1,12 +1,11 @@
-use std::collections::HashMap;
-
 use gen_core::{HashId, Strand};
 use gen_models::{
     block_group::BlockGroup,
-    block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{Edge, EdgeData},
     path_edge::PathEdge,
+    traits::Query,
 };
 
 pub mod combinatorial_library;
@@ -14,28 +13,26 @@ pub mod operators;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NodePoint {
-    id: HashId,
-    coordinate: i64,
-    strand: Strand,
+    pub id: HashId,
+    pub coordinate: i64,
+    pub strand: Strand,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BlockGroupChunk {
-    entry_node_points: Vec<NodePoint>,
-    exit_node_points: Vec<NodePoint>,
-    //    path_edges: Vec<AugmentedEdge>,
+    pub entry_node_points: Vec<NodePoint>,
+    pub exit_node_points: Vec<NodePoint>,
+    pub path_edges: Vec<Edge>,
+    pub path_start_point: Option<NodePoint>,
+    pub path_end_point: Option<NodePoint>,
 }
 
 pub fn get_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> BlockGroupChunk {
     let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
 
-    let start_edges = edges
-        .iter()
-        .filter(|edge| edge.edge.is_start_edge())
-        .collect::<Vec<_>>();
+    let start_edges = edges.iter().filter(|edge| edge.edge.is_start_edge());
 
     let entry_node_points = start_edges
-        .iter()
         .map(|start_edge| NodePoint {
             id: start_edge.edge.target_node_id,
             coordinate: start_edge.edge.target_coordinate,
@@ -44,6 +41,7 @@ pub fn get_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> 
         .collect();
 
     let end_edges = edges.iter().filter(|edge| edge.edge.is_end_edge());
+
     let exit_node_points = end_edges
         .map(|edge| NodePoint {
             id: edge.edge.source_node_id,
@@ -54,20 +52,29 @@ pub fn get_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> 
 
     let path = BlockGroup::get_current_path(conn, &block_group_id);
     let path_edges = PathEdge::edges_for_path(conn, &path.id);
-    let edges_by_id = edges
-        .iter()
-        .map(|edge| (edge.edge.id, edge.clone()))
-        .collect::<HashMap<HashId, AugmentedEdge>>();
-    let mut chunk_path_edges = vec![];
 
-    for path_edge in &path_edges {
-        let augmented_edge = edges_by_id.get(&path_edge.id).unwrap();
-        chunk_path_edges.push(augmented_edge);
-    }
+    let start_edge = path_edges[0].clone();
+    let path_start_point = Some(NodePoint {
+        id: start_edge.target_node_id,
+        coordinate: start_edge.target_coordinate,
+        strand: start_edge.target_strand,
+    });
+
+    let end_edge = path_edges[path_edges.len() - 1].clone();
+    let path_end_point = Some(NodePoint {
+        id: end_edge.source_node_id,
+        coordinate: end_edge.source_coordinate,
+        strand: end_edge.source_strand,
+    });
+
+    let path_edges = path_edges[1..path_edges.len() - 1].to_vec();
 
     BlockGroupChunk {
         entry_node_points,
         exit_node_points,
+        path_edges,
+        path_start_point,
+        path_end_point,
     }
 }
 
@@ -75,11 +82,14 @@ pub fn get_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> 
 /// group edges for the given block group ID.  Returns a vector of the created edge IDs.
 pub fn stitch(
     conn: &GraphConnection,
-    source_node_points: &Vec<NodePoint>,
-    target_node_points: &Vec<NodePoint>,
+    source_block_group_chunk: &BlockGroupChunk,
+    target_block_group_chunk: &BlockGroupChunk,
     block_group_id: HashId,
-) -> Vec<HashId> {
+) -> BlockGroupChunk {
     let mut edges = vec![];
+
+    let source_node_points = &source_block_group_chunk.exit_node_points;
+    let target_node_points = &target_block_group_chunk.entry_node_points;
 
     // Create edges between source nodes and target nodes
     for source_point in source_node_points {
@@ -110,5 +120,39 @@ pub fn stitch(
 
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-    edge_ids
+    let source_path_edges = source_block_group_chunk.path_edges.clone();
+    let target_path_edges = target_block_group_chunk.path_edges.clone();
+
+    let mut path_edges = vec![];
+    if let Some(edge_start_point) = &source_block_group_chunk.path_end_point
+        && let Some(edge_end_point) = &target_block_group_chunk.path_start_point
+    {
+        path_edges.extend(source_path_edges.clone());
+
+        let created_edges = Edge::query_by_ids(conn, &edge_ids);
+        let stitch_edge = created_edges.iter().find(|edge| {
+            edge.source_node_id == edge_start_point.id
+                && edge.source_coordinate == edge_start_point.coordinate
+                && edge.source_strand == edge_start_point.strand
+                && edge.target_node_id == edge_end_point.id
+                && edge.target_coordinate == edge_end_point.coordinate
+                && edge.target_strand == edge_end_point.strand
+        });
+        if let Some(stitch_edge) = stitch_edge {
+            path_edges.push(stitch_edge.clone());
+        } else {
+            // TODO: Return error
+            panic!("Couldn't find stitch edge in edges that were just created!");
+        }
+
+        path_edges.extend(target_path_edges);
+    }
+
+    BlockGroupChunk {
+        entry_node_points: source_block_group_chunk.entry_node_points.clone(),
+        exit_node_points: target_block_group_chunk.exit_node_points.clone(),
+        path_edges,
+        path_start_point: source_block_group_chunk.path_start_point.clone(),
+        path_end_point: target_block_group_chunk.path_end_point.clone(),
+    }
 }
