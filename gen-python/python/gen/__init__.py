@@ -14,11 +14,9 @@ try:
     # Directly from Rust
     from .gen import (
         DbContext,
-        PyBaseLayout,
         PyBlockGroup,
         PyHashId,
         PyNodeKey,
-        PyScaledLayout,
         Repository,
         derive_chunks,
         derive_subgraph,
@@ -50,8 +48,6 @@ try:
         "Repository",
         "PyBlockGroup",
         "PyHashId",
-        "PyBaseLayout",
-        "PyScaledLayout",
         "PyNodeKey",
         "derive_chunks",
         "derive_subgraph",
