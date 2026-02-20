@@ -5,7 +5,6 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-anyhow = "1.0"
 gen-core = { path = "../gen-core" }
 gen-graph = { path = "../gen-graph" }
 gen-models = { path = "../gen-models" }
