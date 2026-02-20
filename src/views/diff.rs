@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, time::Duration};
+use std::{collections::HashMap, io, time::Instant};
 
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -9,21 +9,24 @@ use gen_diff::{
     graph::{DiffGenGraph, DiffGenGraphRef, DiffGraphNode},
     operations::{BlockGroupDiff, OperationDiff},
 };
-use gen_models::{db::GraphConnection, traits::Query};
-use petgraph::graphmap::DiGraphMap;
+use gen_models::db::GraphConnection;
+use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::Text,
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
 use crate::{
-    core::HashId,
-    models::node::Node,
-    views::block_group_viewer::{PlotParameters, Viewer},
+    config::get_theme_color,
+    views::{
+        gen_graph_widget::{
+            GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
+        },
+        helpers::{install_tui_panic_hook, style_text},
+    },
 };
 
 struct DiffComponent {
@@ -33,8 +36,8 @@ struct DiffComponent {
     block_group: String,
     part_label: Option<String>,
     graph: gen_graph::GenGraph,
-    highlight_graph: DiGraphMap<gen_graph::GraphNode, ()>,
-    highlight_nodes: std::collections::HashSet<gen_graph::GraphNode>,
+    highlight_nodes: Vec<gen_graph::GraphNode>,
+    highlight_edges: Vec<(gen_graph::GraphNode, gen_graph::GraphNode)>,
     highlight_color: Color,
     change_label: &'static str,
 }
@@ -44,6 +47,26 @@ struct ListEntry {
     component_index: Option<usize>,
     db_path: String,
     is_header: bool,
+}
+
+/// Apply diff highlights (nodes and edges) to a graph controller.
+///
+/// This is the only direct GraphController mutation beyond setup — it configures
+/// per-node and per-edge highlights for disconnected diff regions that can't use
+/// set_path_highlight.
+fn apply_diff_highlights(
+    controller: &mut GraphController<&gen_graph::GenGraph, GenGraphNodeSizer>,
+    component: &DiffComponent,
+) {
+    let style = PathStyle::new(component.highlight_color)
+        .with_line_style(LineStyle::Bold)
+        .with_merge_glyphs(true);
+    for &node in &component.highlight_nodes {
+        controller.set_node_highlight(node, style);
+    }
+    for &(src, tgt) in &component.highlight_edges {
+        controller.set_edge_highlight((src, tgt), style);
+    }
 }
 
 /// This splits a graph into its connected components. It's needed because a change may happen in the middle of a graph where no
@@ -90,40 +113,6 @@ fn split_connected_components(graph: &DiffGenGraph) -> Vec<DiffGenGraph> {
     }
 
     components
-}
-
-/// This positions the viewer on either the start node if it exists, or the first node it can find otherwise.
-fn choose_origin(conn: &GraphConnection, graph: &gen_graph::GenGraph) -> (Node, i64) {
-    if let Some(start_block) = graph
-        .nodes()
-        .find(|n| n.node_id == gen_core::PATH_START_NODE_ID)
-    {
-        return (Node::get_start_node(), start_block.sequence_start);
-    }
-
-    if let Some(first) = graph.nodes().next() {
-        let node = Node::get(
-            conn,
-            "select * from nodes where id = ?1",
-            rusqlite::params![first.node_id],
-        )
-        .unwrap_or(Node {
-            id: first.node_id,
-            sequence_hash: HashId::pad_str(0),
-        });
-        return (node, first.sequence_start);
-    }
-
-    (Node::get_start_node(), 0)
-}
-
-fn make_viewer<'a>(
-    conn: &'a GraphConnection,
-    graph: &'a gen_graph::GenGraph,
-    params: PlotParameters,
-) -> Viewer<'a> {
-    let origin = choose_origin(conn, graph);
-    Viewer::with_origin(graph, conn, params, origin)
 }
 
 fn block_group_label(diff: &BlockGroupDiff) -> String {
@@ -173,6 +162,8 @@ pub fn view_diff(
         return Ok(());
     }
 
+    install_tui_panic_hook();
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -181,21 +172,26 @@ pub fn view_diff(
 
     let mut selected = 0usize;
     let mut expanded_db = db_order.first().cloned();
-    let mut graph_focus = false;
     let mut current_component = 0usize;
-    let mut viewer = make_viewer(
-        conn,
-        &components[current_component].graph,
-        PlotParameters::default(),
-    );
-    viewer.set_highlights(vec![(
-        components[current_component].highlight_color,
-        components[current_component].highlight_graph.clone(),
-    )]);
-    viewer.set_node_highlights(vec![(
-        components[current_component].highlight_color,
-        components[current_component].highlight_nodes.clone(),
-    )]);
+
+    // Panel focus: two-mode system matching operations view
+    let mut panel_focus = "diff_list"; // "diff_list" or "graph_view"
+    let mut panel_activated = true; // Start with diff list activated
+
+    // Three-state border styles matching operations view
+    let focused_style = Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::BOLD);
+    let selected_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let unfocused_style = Style::default().fg(Color::Gray);
+
+    // Setup: create controller and apply highlights for initial component
+    let mut graph_controller = create_gen_graph_controller(&components[current_component].graph);
+    apply_diff_highlights(&mut graph_controller, &components[current_component]);
+
+    let mut last_frame_time = Instant::now();
 
     let result = (|| -> Result<(), io::Error> {
         loop {
@@ -215,20 +211,16 @@ pub fn view_diff(
             .unwrap_or(0);
             if desired_component != current_component {
                 current_component = desired_component;
-                viewer = make_viewer(
-                    conn,
-                    &components[current_component].graph,
-                    PlotParameters::default(),
-                );
-                viewer.set_highlights(vec![(
-                    components[current_component].highlight_color,
-                    components[current_component].highlight_graph.clone(),
-                )]);
-                viewer.set_node_highlights(vec![(
-                    components[current_component].highlight_color,
-                    components[current_component].highlight_nodes.clone(),
-                )]);
+                // Setup: create new controller and apply highlights on component switch
+                graph_controller =
+                    create_gen_graph_controller(&components[current_component].graph);
+                apply_diff_highlights(&mut graph_controller, &components[current_component]);
             }
+
+            // Calculate frame delta for smooth animations
+            let now = Instant::now();
+            let frame_delta = now.duration_since(last_frame_time);
+            last_frame_time = now;
 
             terminal.draw(|f| {
                 let outer = Layout::default()
@@ -241,6 +233,7 @@ pub fn view_diff(
                     .constraints([Constraint::Length(45), Constraint::Min(1)])
                     .split(outer[0]);
 
+                // Left panel: diff list
                 let list_items: Vec<ListItem> = entries
                     .iter()
                     .enumerate()
@@ -256,75 +249,149 @@ pub fn view_diff(
                     })
                     .collect();
 
+                let list_title = if !panel_activated && panel_focus == "diff_list" {
+                    "[Diff Parts]"
+                } else {
+                    "Diff Parts"
+                };
+
+                let list_border_style = if panel_activated && panel_focus == "diff_list" {
+                    focused_style
+                } else if !panel_activated && panel_focus == "diff_list" {
+                    selected_style
+                } else {
+                    unfocused_style
+                };
+
                 let list = List::new(list_items).block(
                     Block::default()
-                        .title("Diff Parts")
+                        .title(list_title)
                         .borders(Borders::ALL)
-                        .border_style(if graph_focus {
-                            Style::default()
-                        } else {
-                            Style::default().fg(Color::Blue)
-                        }),
+                        .border_style(list_border_style),
                 );
                 f.render_widget(list, main[0]);
 
-                viewer.set_block(
-                    Block::default()
-                        .title(format!(
-                            "{} ({}/{})",
-                            components[current_component].title,
-                            current_component + 1,
-                            components.len()
-                        ))
-                        .borders(Borders::ALL)
-                        .border_style(if graph_focus {
-                            Style::default().fg(Color::Blue)
-                        } else {
-                            Style::default()
-                        }),
+                // Right panel: graph via widget
+                let graph_title_text = format!(
+                    "{} ({}/{})",
+                    components[current_component].title,
+                    current_component + 1,
+                    components.len()
                 );
-                viewer.has_focus = graph_focus;
-                viewer.draw(f, main[1]);
+                let graph_title = if !panel_activated && panel_focus == "graph_view" {
+                    format!("[{}]", graph_title_text)
+                } else {
+                    graph_title_text
+                };
 
-                let status = Paragraph::new(Text::styled(
-                    format!(
-                        "↑/↓ select | tab toggle focus | graph: {} | q to exit",
-                        Viewer::get_status_line()
-                    ),
-                    Style::default().bg(Color::DarkGray).fg(Color::White),
-                ));
-                f.render_widget(status, outer[1]);
+                let graph_border_style = if panel_activated && panel_focus == "graph_view" {
+                    focused_style
+                } else if !panel_activated && panel_focus == "graph_view" {
+                    selected_style
+                } else {
+                    unfocused_style
+                };
+
+                let graph_block = Block::default()
+                    .title(graph_title)
+                    .borders(Borders::ALL)
+                    .border_style(graph_border_style);
+                let inner_canvas = graph_block.inner(main[1]);
+
+                // Pre-render animation tick
+                graph_controller.viewport_state.focus();
+                graph_controller.viewport_state.viewport_bounds = inner_canvas;
+                graph_controller.update_animations(frame_delta);
+
+                f.render_widget(graph_block, main[1]);
+
+                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+                let widget = create_gen_graph_widget(conn)
+                    .detail_level(graph_controller.get_detail_level())
+                    .style(canvas_style)
+                    .cursor();
+                f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+
+                // Status bar with themed styling
+                let status_bar_area = outer[1];
+                let panel_messages = if !panel_activated {
+                    "*tab* toggle focus | *enter* activate | *q* quit"
+                } else if panel_focus == "diff_list" {
+                    "*↑↓* select | *tab* toggle focus | *esc* leave panel | *q* quit"
+                } else {
+                    "*←→↑↓* pan | *+/-* zoom | *tab* toggle focus | *esc* leave panel | *q* quit"
+                };
+
+                let status_bar_contents = format!(
+                    "{panel_messages:^width$}",
+                    width = status_bar_area.width as usize
+                );
+                let status_line = style_text(
+                    &status_bar_contents,
+                    Style::default().fg(get_theme_color("text_muted").unwrap()),
+                    Style::default().fg(get_theme_color("highlight").unwrap()),
+                );
+                let status_bar = Paragraph::new(status_line)
+                    .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
+                f.render_widget(status_bar, status_bar_area);
             })?;
 
-            if event::poll(Duration::from_millis(100))?
+            if event::poll(std::time::Duration::from_millis(100))?
                 && let Event::Key(key) = event::read()?
             {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => break,
-                    KeyCode::Tab => {
-                        graph_focus = !graph_focus;
-                        viewer.has_focus = graph_focus;
+                if !panel_activated {
+                    // NAVIGATION MODE: Tab to toggle focus, Enter to activate, q to quit
+                    match key.code {
+                        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                            panel_focus = if panel_focus == "diff_list" {
+                                "graph_view"
+                            } else {
+                                "diff_list"
+                            };
+                        }
+                        KeyCode::Enter => {
+                            panel_activated = true;
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') => break,
+                        _ => {}
                     }
-                    KeyCode::Up if !graph_focus => {
-                        if selected > 0 {
-                            selected -= 1;
-                            if let Some(entry) = entries.get(selected) {
-                                expanded_db = Some(entry.db_path.clone());
+                } else {
+                    // ACTIVE MODE: Esc to deactivate; panel-specific controls
+                    if key.code == KeyCode::Esc {
+                        panel_activated = false;
+                    } else if key.code == KeyCode::Tab {
+                        // Toggle focus between panels while staying activated
+                        panel_focus = if panel_focus == "diff_list" {
+                            "graph_view"
+                        } else {
+                            "diff_list"
+                        };
+                    } else if key.code == KeyCode::Char('q') {
+                        break;
+                    } else if panel_focus == "diff_list" {
+                        // List panel: Up/Down to select
+                        match key.code {
+                            KeyCode::Up => {
+                                if selected > 0 {
+                                    selected -= 1;
+                                    if let Some(entry) = entries.get(selected) {
+                                        expanded_db = Some(entry.db_path.clone());
+                                    }
+                                }
                             }
-                        }
-                    }
-                    KeyCode::Down if !graph_focus => {
-                        if selected + 1 < entries.len() {
-                            selected += 1;
-                            if let Some(entry) = entries.get(selected) {
-                                expanded_db = Some(entry.db_path.clone());
+                            KeyCode::Down => {
+                                if selected + 1 < entries.len() {
+                                    selected += 1;
+                                    if let Some(entry) = entries.get(selected) {
+                                        expanded_db = Some(entry.db_path.clone());
+                                    }
+                                }
                             }
+                            _ => {}
                         }
-                    }
-                    _ => {
-                        if graph_focus {
-                            viewer.handle_input(key);
-                        }
+                    } else {
+                        // Graph panel: delegate to controller
+                        let _ = graph_controller.handle_key_event(key);
                     }
                 }
             }
@@ -409,8 +476,8 @@ fn build_component(
     part_label: Option<String>,
 ) -> DiffComponent {
     let graph: gen_graph::GenGraph = DiffGenGraphRef(diff_graph).into();
-    let highlight_graph = build_edge_highlight_graph(diff_graph);
-    let highlight_nodes = build_node_highlights(diff_graph);
+    let highlight_edges = collect_highlight_edges(diff_graph);
+    let highlight_nodes = collect_highlight_nodes(diff_graph);
     DiffComponent {
         title: format!("{change_label} {title}"),
         collection,
@@ -418,31 +485,30 @@ fn build_component(
         block_group,
         part_label,
         graph,
-        highlight_graph,
         highlight_nodes,
+        highlight_edges,
         highlight_color,
         change_label,
     }
 }
 
-/// This function looks a little odd because it goes into the existing `highlights` of block_group_viewer, where nodes are defined
-/// by HashId, start, end. So we are not actually losing our edges here because the nodes contain the sequence start/end and have been
-/// split up into their own nodes by this point.
-fn build_edge_highlight_graph(diff_graph: &DiffGenGraph) -> DiGraphMap<gen_graph::GraphNode, ()> {
-    let mut highlight_graph = DiGraphMap::new();
-    for (src, dest, edges) in diff_graph.all_edges() {
-        if edges.iter().any(|edge| edge.is_new) {
-            highlight_graph.add_node(src.node);
-            highlight_graph.add_node(dest.node);
-            highlight_graph.add_edge(src.node, dest.node, ());
+/// Collect edges that are new in the diff graph, returning them as a flat
+/// vector of (source, target) pairs suitable for set_edge_highlight.
+fn collect_highlight_edges(
+    diff_graph: &DiffGenGraph,
+) -> Vec<(gen_graph::GraphNode, gen_graph::GraphNode)> {
+    let mut edges = Vec::new();
+    for (src, dest, edge_data) in diff_graph.all_edges() {
+        if edge_data.iter().any(|edge| edge.is_new) {
+            edges.push((src.node, dest.node));
         }
     }
-    highlight_graph
+    edges
 }
 
-fn build_node_highlights(
-    diff_graph: &DiffGenGraph,
-) -> std::collections::HashSet<gen_graph::GraphNode> {
+/// Collect nodes that are new in the diff graph, returning them as a flat
+/// vector suitable for set_node_highlight.
+fn collect_highlight_nodes(diff_graph: &DiffGenGraph) -> Vec<gen_graph::GraphNode> {
     diff_graph
         .nodes()
         .filter_map(|node| node.is_new.then_some(node.node))
