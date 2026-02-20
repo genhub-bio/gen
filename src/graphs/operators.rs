@@ -175,7 +175,6 @@ pub fn derive_chunks(
         // map returned by derive_subgraph to find the edges in the child graph that correspond to
         // path edges in the parent graph, and create a new path from the child edges.
         let mut new_path_edge_ids = vec![];
-        let mut new_internal_path_edge_ids = vec![];
 
         let new_start_target_node_id = new_node_ids_by_old.get(&start_block.node_id).unwrap();
 
@@ -214,7 +213,6 @@ pub fn derive_chunks(
                 let child_edge_id = child_edge_ids_by_key.get(key);
                 if let Some(child_edge_id) = child_edge_id {
                     new_path_edge_ids.push(*child_edge_id);
-                    new_internal_path_edge_ids.push(*child_edge_id);
                 }
             }
         }

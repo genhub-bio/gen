@@ -122,11 +122,6 @@ impl Path {
             .map(|augmented_edge| augmented_edge.edge.id)
             .collect::<HashSet<_>>();
 
-        for edge_id in &edge_id_set {
-            if !bg_edge_ids.contains(edge_id) {
-                println!("edge ID {} not in bg edges", edge_id);
-            }
-        }
         assert!(
             edge_id_set.is_subset(&bg_edge_ids),
             "Not all edges are in the block group ({block_group_id})"
