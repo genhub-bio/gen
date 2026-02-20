@@ -9,7 +9,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
-use gen_graph::{GenGraph, GraphNode, connect_all_boundary_edges};
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
@@ -247,8 +247,6 @@ pub fn view_block_group(
     } else {
         block_graph = get_empty_graph();
     }
-
-    connect_all_boundary_edges(&mut block_graph);
 
     bar.finish();
 
@@ -744,7 +742,6 @@ pub fn view_block_group(
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
-            connect_all_boundary_edges(&mut block_graph);
             // Update the graph controller
             graph_controller = create_gen_graph_controller(&block_graph);
             current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
