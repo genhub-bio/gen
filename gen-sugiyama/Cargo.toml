@@ -1,0 +1,13 @@
+[package]
+name = "gen-sugiyama"
+description = "Sugiyama algorithm implementation for graph layout"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+petgraph = "0.6.5"
+log = "0.4.26"
+
+[dev-dependencies]
+more-asserts = "0.3.1"

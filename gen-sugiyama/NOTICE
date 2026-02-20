@@ -1,0 +1,10 @@
+gen-sugiyama
+
+This crate includes a vendored and modified copy of code from rust-sugiyama:
+https://github.com/paddison/rust-sugiyama
+
+The vendored code is licensed under the MIT License.
+See LICENSE in this directory for the full license text.
+
+Upstream attribution:
+Copyright (c) 2024 paddison
