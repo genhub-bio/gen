@@ -71,13 +71,12 @@ impl CroppedGraph {
         G::EdgeId: Clone,
     {
         debug!(
-            "[DEBUG_TRACE_LAYOUT] new: viewport=BigRect{{min={{x={}, y={}}}, max={{x={}, y={}}}}}, detail_level={:?}",
-            viewport.min.x, viewport.min.y, viewport.max.x, viewport.max.y, detail_level
-        );
-
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] new: coverage=ViewportCoverage{{covered_partitions_count={}, covered_partitions={:?}}}",
-            active_partitions.len(),
+            "[DEBUG_TRACE_LAYOUT] new CroppedGraph: viewport=BigRect{{min={{x={}, y={}}}, max={{x={}, y={}}}}}, detail_level={:?}, covered_partitions={:?}",
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            detail_level,
             active_partitions
         );
 
@@ -126,16 +125,6 @@ impl CroppedGraph {
                             let world_pos =
                                 partition_table.local_to_world(node_data.pos, detail_level);
 
-                            // Debug output for data nodes
-                            if let NodeRole::Data(domain_idx) = &node_data.role {
-                                trace!("  Data Node:");
-                                trace!("    Domain Index: {:?}", domain_idx);
-                                trace!("    LocalPos: {:?}", node_data.pos);
-                                trace!("    World Pos: {:?}", world_pos);
-                                trace!("    Size: {:?}", node_data.size);
-                                trace!("    Layer: {:?}", node_data.layer);
-                            }
-
                             this.merge_node(world_pos, node_data.clone()).unwrap();
                             this.included_nodes.insert((partition_idx, node_idx));
                         }
@@ -171,7 +160,6 @@ impl CroppedGraph {
                                 .ok_or_else(|| "Target node not found".to_string())
                                 .unwrap();
 
-                            // Convert local positions to world positions
                             let source_world =
                                 partition_table.local_to_world(source_data.pos, detail_level);
                             let target_world =
@@ -180,12 +168,9 @@ impl CroppedGraph {
                             this.merge_node(source_world, source_data.clone()).unwrap();
                             this.merge_node(target_world, target_data.clone()).unwrap();
 
-                            // Only add edge if both endpoints are non-stitch nodes
-                            // Stitch nodes are partition boundary artifacts that shouldn't appear in ViewportGraph
-                            // Also skip edges with empty bundles (terminal edges from stitch to source/sink nodes)
+                            // Don't add edges to stitch nodes
                             if !matches!(source_data.role, NodeRole::Stitch(_))
                                 && !matches!(target_data.role, NodeRole::Stitch(_))
-                                && !edge_data.bundle.is_empty()
                             {
                                 this.merge_edge(
                                     source_world,
@@ -204,15 +189,6 @@ impl CroppedGraph {
         // Divide the graph up in logical layers by grouping Data nodes by x-coordinate
         this.build_layers_from_coordinates();
 
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] new: -> result=ViewportGraph{{graph_nodes={}, nodes_count={}, domain_to_world_count={}, layers_count={}, included_nodes_count={}}}",
-            this.graph.node_count(),
-            this.node_data_by_pos.len(),
-            this.node_positions.len(),
-            this.layers.len(),
-            this.included_nodes.len()
-        );
-
         this
     }
 
@@ -220,11 +196,6 @@ impl CroppedGraph {
     /// All nodes with the same x-coordinate belong to the same layer.
     /// Nodes are sorted first by x, then by y within each layer.
     fn build_layers_from_coordinates(&mut self) {
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] build_layers_from_coordinates: starting with {} nodes",
-            self.node_data_by_pos.len()
-        );
-
         // Collect all Data nodes with their world positions
         let mut data_nodes: Vec<(WorldPos, NodeIndex)> = Vec::new();
 
@@ -381,17 +352,7 @@ impl CroppedGraph {
 
     /// Get nodes at a specific layer
     pub fn get_layer(&self, layer: usize) -> Option<&Vec<NodeIndex>> {
-        let result = self.layers.get(layer);
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] get_layer: layer={} -> result={:?}",
-            layer,
-            result.map(|nodes| format!(
-                "Some(Vec<NodeIndex> with {} nodes: {:?})",
-                nodes.len(),
-                nodes
-            ))
-        );
-        result
+        self.layers.get(layer)
     }
 
     /// Get the number of layers in the graph
@@ -406,136 +367,7 @@ impl CroppedGraph {
             .position(|layer| layer.contains(&domain_idx))
     }
 
-    #[allow(dead_code)]
-    /// Find all adjacent Data nodes by traversing the graph through Routing nodes.
-    /// Returns each adjacent Data node along with the path taken to reach it.
-    ///
-    /// # Parameters
-    /// - `domain_node`: Starting domain node index
-    ///
-    /// # Returns
-    /// Vector of tuples containing:
-    /// - The adjacent Data node's world position
-    /// - The LayoutNode reference
-    /// - The path taken (including source and target positions)
-    pub fn find_adjacent_data_nodes(
-        &self,
-        domain_node: NodeIndex,
-    ) -> Vec<(WorldPos, &LayoutNode, Vec<WorldPos>)> {
-        let mut results = Vec::new();
-
-        // Find the world position for this domain node, or return early
-        let Some(&from_pos) = self.node_positions.get(&domain_node) else {
-            return results;
-        };
-
-        // Make sure we have the LayoutNode too
-        if !self.node_data_by_pos.contains_key(&from_pos) {
-            return results;
-        }
-
-        // Use BFS to find all adjacent Data nodes, tracking paths
-        let mut visited = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-
-        // Queue entries: (current_pos, path_to_current)
-        visited.insert(from_pos);
-
-        // Start with immediate neighbors, each gets the source in its path
-        for neighbor_pos in self.graph.neighbors(from_pos) {
-            if !visited.contains(&neighbor_pos) {
-                queue.push_back((neighbor_pos, vec![from_pos]));
-                visited.insert(neighbor_pos);
-            }
-        }
-
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: starting BFS traversal, queue_size={}",
-            queue.len()
-        );
-
-        // Traverse the graph to find all adjacent Data nodes
-        while let Some((current_pos, mut path)) = queue.pop_front() {
-            // Add current position to path
-            path.push(current_pos);
-
-            debug!(
-                "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: visiting current_pos={{x={}, y={}}}, path_length={}, path={:?}",
-                current_pos.x,
-                current_pos.y,
-                path.len(),
-                path
-            );
-
-            if let Some(node) = self.node_data_by_pos.get(&current_pos) {
-                debug!(
-                    "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: found node={{role={:?}, layer={:?}}}",
-                    node.role, node.layer
-                );
-
-                // Check if this is a Data node
-                if let NodeRole::Data(domain_idx) = &node.role {
-                    debug!(
-                        "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: found adjacent Data node domain_idx={:?}, path={:?}",
-                        domain_idx, path
-                    );
-                    // Found an adjacent Data node - record it with its path
-                    results.push((current_pos, node, path));
-                    // Don't traverse beyond Data nodes
-                    continue;
-                }
-
-                // If it's a Routing node, continue traversing
-                if matches!(node.role, NodeRole::Routing) {
-                    let neighbors: Vec<_> = self.graph.neighbors(current_pos).collect();
-                    debug!(
-                        "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: routing node, neighbors_count={}, neighbors={:?}",
-                        neighbors.len(),
-                        neighbors
-                    );
-
-                    for next_pos in neighbors {
-                        if !visited.contains(&next_pos) {
-                            debug!(
-                                "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: adding unvisited neighbor {{x={}, y={}}} to queue",
-                                next_pos.x, next_pos.y
-                            );
-                            visited.insert(next_pos);
-                            // Clone the path for this branch of exploration
-                            queue.push_back((next_pos, path.clone()));
-                        }
-                    }
-                }
-            } else {
-                debug!(
-                    "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: no node found at current_pos={{x={}, y={}}}",
-                    current_pos.x, current_pos.y
-                );
-            }
-        }
-
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes: -> result=Vec with {} adjacent data nodes",
-            results.len()
-        );
-        for (i, (pos, node, path)) in results.iter().enumerate() {
-            if let NodeRole::Data(domain_idx) = &node.role {
-                debug!(
-                    "[DEBUG_TRACE_LAYOUT] find_adjacent_data_nodes:   result[{}]: pos={{x={}, y={}}}, domain_idx={:?}, path_length={}, path={:?}",
-                    i,
-                    pos.x,
-                    pos.y,
-                    domain_idx,
-                    path.len(),
-                    path
-                );
-            }
-        }
-
-        results
-    }
-
-    /// Create a new CroppedGraph from a list of visual edges.
+    /// Create a new CroppedGraph from a list of visual (rectilinear) edges.
     /// This is useful for creating temporary graphs for highlighting.
     pub fn from_visual_edges(edges: &[((WorldPos, WorldPos), crate::plotter::PathStyle)]) -> Self {
         let mut new_graph = Self::empty();
@@ -552,46 +384,17 @@ impl CroppedGraph {
     pub fn invert_edge_bundles(
         &self,
     ) -> HashMap<(NodeIndex, NodeIndex), Vec<(WorldPos, WorldPos)>> {
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] invert_edge_bundles: starting with {} edges",
-            self.edge_count()
-        );
         let mut domain_to_visual = HashMap::new();
 
         // Iterate through all edges in the viewport graph
         for (source_pos, target_pos, bundle) in self.edges() {
-            debug!(
-                "[DEBUG_TRACE_LAYOUT] invert_edge_bundles: processing edge source={{x={}, y={}}} -> target={{x={}, y={}}}, bundle_count={}",
-                source_pos.x,
-                source_pos.y,
-                target_pos.x,
-                target_pos.y,
-                bundle.len()
-            );
-
             // For each domain edge in this visual segment's bundle
             for &domain_edge in bundle {
-                debug!(
-                    "[DEBUG_TRACE_LAYOUT] invert_edge_bundles: mapping domain_edge={:?} -> visual_segment={{source={{x={}, y={}}}, target={{x={}, y={}}}}}",
-                    domain_edge, source_pos.x, source_pos.y, target_pos.x, target_pos.y
-                );
                 domain_to_visual
                     .entry(domain_edge)
                     .or_insert_with(Vec::new)
                     .push((source_pos, target_pos));
             }
-        }
-
-        debug!(
-            "[DEBUG_TRACE_LAYOUT] invert_edge_bundles: -> result=HashMap with {} domain edges",
-            domain_to_visual.len()
-        );
-        for (domain_edge, visual_segments) in &domain_to_visual {
-            debug!(
-                "[DEBUG_TRACE_LAYOUT] invert_edge_bundles:   domain_edge={:?} -> {} visual segments",
-                domain_edge,
-                visual_segments.len()
-            );
         }
 
         domain_to_visual

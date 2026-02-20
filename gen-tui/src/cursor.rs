@@ -37,7 +37,8 @@ pub struct Cursor {
 
     /// Fractional position within the node rectangle (0.0 to 1.0)
     /// Relative to bottom-left corner: (0.0, 0.0) = bottom-left, (1.0, 1.0) = top-right
-    /// TODO: Replace with UQ0.64 fixed-point for precision on very large nodes
+    /// Technically floating point isn't ideal for this since we can't recreate every i64
+    /// integer from the part after the decimal (unlike UQ0.64 for example), but that's overkill
     fractional_pos: (f64, f64),
 
     /// Whether cursor should be rendered (does not affect cursor functionality)
@@ -605,10 +606,7 @@ mod tests {
 
         // Set viewport bounds
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
-
-        // Set detail level and ensure coverage
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         // Rebuild viewport graph
         let _ = controller.rebuild_viewport_graph();
@@ -825,7 +823,6 @@ mod tests {
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 200, 100);
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         let _ = controller.rebuild_viewport_graph();
 
@@ -919,7 +916,6 @@ mod tests {
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         let _ = controller.rebuild_viewport_graph();
 
@@ -1096,7 +1092,6 @@ mod tests {
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         let _ = controller.rebuild_viewport_graph();
 
