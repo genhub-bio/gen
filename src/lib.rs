@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     str,
 };
+pub mod base16;
 pub mod commands;
 pub mod config;
 pub mod diffs;
