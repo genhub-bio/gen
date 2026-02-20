@@ -13,8 +13,6 @@ pub mod errors;
 pub mod exports;
 pub mod fasta;
 pub mod genbank;
-// needed for cross-schema imports
-use gen_models::gen_models_capnp;
 #[allow(clippy::all)]
 pub mod generated;
 pub use generated::gen_schema_capnp;

@@ -3,7 +3,7 @@
 # Cap'n Proto schema for Gen main crate
 # This schema defines structures specific to the main gen crate
 
-using GenModels = import "/gen-models/gen-models.capnp";
+using GenModels = import "gen-models.capnp";
 
 # Operation patch structure for serializing and deserializing patches
 struct OperationPatch {

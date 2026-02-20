@@ -9,8 +9,6 @@ pub mod edge;
 pub mod errors;
 pub mod file_types;
 pub mod files;
-// this allows cross-schema imports in gen_models_capnp;
-use gen_core::gen_core_capnp;
 #[allow(clippy::all)]
 pub mod generated;
 pub use generated::gen_models_capnp;

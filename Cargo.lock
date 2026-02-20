@@ -1566,7 +1566,6 @@ dependencies = [
  "anyhow",
  "base64",
  "capnp",
- "capnpc",
  "cargo-deny",
  "cargo-llvm-cov",
  "clap",
@@ -1581,6 +1580,7 @@ dependencies = [
  "flate2",
  "gb-io",
  "gen-annotations",
+ "gen-capnp-schemas",
  "gen-core",
  "gen-diff",
  "gen-graph",
@@ -1635,11 +1635,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "gen-core"
+name = "gen-capnp-schemas"
 version = "0.1.22"
 dependencies = [
  "capnp",
  "capnpc",
+]
+
+[[package]]
+name = "gen-core"
+version = "0.1.22"
+dependencies = [
+ "capnp",
+ "gen-capnp-schemas",
  "hex",
  "itertools 0.14.0",
  "noodles",
@@ -1687,9 +1695,9 @@ dependencies = [
  "anyhow",
  "cached",
  "capnp",
- "capnpc",
  "chrono",
  "fallible-streaming-iterator",
+ "gen-capnp-schemas",
  "gen-core",
  "gen-graph",
  "include_dir",

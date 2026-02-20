@@ -1,3 +1,1 @@
-pub mod gen_models_capnp {
-    include!(concat!(env!("OUT_DIR"), "/gen_models_capnp.rs"));
-}
+pub use gen_capnp_schemas::gen_models_capnp;
