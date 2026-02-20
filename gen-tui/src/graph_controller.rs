@@ -16,7 +16,7 @@ use ratatui::style::Color;
 pub use crate::viewport_state::{ViewportState, WorldBuffer};
 use crate::{
     cursor::Cursor,
-    geometry::{BigRect, ViewportPos, WorldPos, WorldRect},
+    geometry::{BigRect, ViewportPos, WorldPos},
     layout::{NodeRole, PartitionLayout, VisualDetail},
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
@@ -203,7 +203,7 @@ where
     }
 
     // TODO: maintain one cache keyed on partition idx and detail level (renamed to layoutkey
-    // for example
+    // for example)
     pub fn set_detail_level(&mut self, detail_level: VisualDetail) {
         // Only proceed if detail level is actually changing
         if detail_level == self.detail_level {
@@ -219,7 +219,6 @@ where
         self.detail_level = detail_level;
         self.partition_controller.set_detail_level(detail_level);
         self.rebuild_needed = true;
-        trace!("set_detail_level: complete");
     }
 
     /// Get the current level of detail
@@ -387,19 +386,10 @@ where
 
     /// Load partitions to cover the camera's current view
     /// Returns a sorted list of partition indices that cover the camera view
+    /// (used only as a helper in tests currently)
     pub fn ensure_camera_coverage(&mut self) -> Result<Vec<usize>, String> {
-        log::trace!("ensure_camera_coverage: called");
         let buffer_factor = 2.0;
         let camera_rect = self.viewport_state.camera_rect().resize(buffer_factor);
-        log::trace!(
-            "ensure_camera_coverage: loading partitions for rect of {}x{} (coord x: {} - {}, y: {} - {})",
-            camera_rect.width(),
-            camera_rect.height(),
-            camera_rect.left(),
-            camera_rect.right(),
-            camera_rect.bottom(),
-            camera_rect.top(),
-        );
         self.partition_controller
             .load_partitions_for_rect(camera_rect)
     }
@@ -407,12 +397,10 @@ where
     /// Find a domain node's world position in the new layout system after layout changes
     /// This searches the partition layouts directly to find the node's current world position
     pub fn find_domain_node_world_position(&self, domain_idx: NodeIndex) -> Option<WorldPos> {
-        // Search through all loaded partitions for this domain node
         let loaded_partitions = self.partition_controller.get_loaded_partitions_info();
         let detail_level = self.get_detail_level();
 
         for (partition_idx, _, _, _) in loaded_partitions {
-            // Get the layout for this partition
             if let Some(layout) = self
                 .partition_controller
                 .partition_table
@@ -424,7 +412,6 @@ where
                         && let NodeRole::Data(layout_domain_idx) = &layout_node.role
                         && *layout_domain_idx == domain_idx
                     {
-                        // Found the node! Convert its local position to world coordinates
                         return Some(
                             self.partition_controller
                                 .partition_table
@@ -510,7 +497,7 @@ where
         self.partition_controller.get_vertex_spacing()
     }
 
-    /// Place cursor at soft_zone + 1 from left edge, vertically centered.
+    /// Place cursor near left edge, vertically centered.
     /// This positions the cursor in a comfortable viewing position within the viewport.
     /// Should be called when viewport bounds are first established (transition from 0x0).
     pub fn place_cursor(&mut self) {
@@ -523,7 +510,7 @@ where
         trace!("Cursor placed: viewport={:?}", desired_viewport_pos);
     }
 
-    /// Associate cursor with default node (node closest to origin).
+    /// Associate cursor with node closest to origin.
     /// Call this only if no node has been explicitly set.
     pub fn associate_cursor(&mut self) {
         // Find the node closest to partition origin (0, 0) and associate cursor with it
@@ -690,10 +677,6 @@ where
             viewport_bounds_snapshot.width == 0 || viewport_bounds_snapshot.height == 0;
 
         if viewport_was_uninitialized {
-            // First rebuild with valid viewport bounds - establish cursor viewport position
-            trace!(
-                "rebuild_viewport_graph: first rebuild with valid viewport bounds (was 0x0), placing cursor"
-            );
             self.place_cursor();
 
             // If cursor also lacks a node (wasn't set before first render), find one
@@ -723,11 +706,6 @@ where
             trace!("rebuild_viewport_graph: no cursor node, using anchor");
             self.partition_controller.get_anchor_partition()
         };
-
-        trace!(
-            "rebuild_viewport_graph: cursor partition = {}",
-            cursor_partition
-        );
 
         // Step 3: Inactivate any running animations and set cursor partition as anchor
         self.viewport_state.camera_anim = None;
@@ -787,80 +765,36 @@ where
             return Err("Cursor has no node association".to_string());
         };
 
-        trace!(
-            "rebuild_viewport_graph: cursor_world = ({}, {})",
-            cursor_world.x, cursor_world.y
-        );
-
-        // Step 5: Get cursor viewport position and viewport center
+        // Step 5: Get cursor and camera positions in viewport coordinates
         let cursor_viewport = self.cursor.viewport_pos();
         let half_width = (viewport_bounds_snapshot.width as i64 - 1) / 2;
         let half_height = (viewport_bounds_snapshot.height as i64 - 1) / 2;
-        let viewport_center = ViewportPos::new(half_width as u16, half_height as u16);
 
-        trace!(
-            "rebuild_viewport_graph: viewport dimensions width={}, height={}, half_width={}, half_height={}",
-            viewport_bounds_snapshot.width,
-            viewport_bounds_snapshot.height,
-            half_width,
-            half_height
-        );
-
-        trace!(
-            "rebuild_viewport_graph: cursor_viewport = ({}, {}), viewport_center = ({}, {})",
-            cursor_viewport.x, cursor_viewport.y, viewport_center.x, viewport_center.y
-        );
-
-        // Step 6: Camera positioning formula
+        // Step 6: Position the camera so that the cursor stays in the same position on the screen
+        // even if its world position is completely different.
+        //
+        // # Coordinate System
+        // - Camera represents the CENTER of the viewport in world coordinates
+        // - Viewport origin (top-left) = camera - (width/2, height/2)
+        // - Transformation: viewport_pos = world_pos - camera + (width/2, height/2)
+        // - Inverse: camera = world_pos - viewport_pos + (width/2, height/2)
         let camera = WorldPos::new(
             cursor_world.x - cursor_viewport.x as i64 + half_width,
             cursor_world.y - cursor_viewport.y as i64 + half_height,
         );
 
-        trace!(
-            "rebuild_viewport_graph: camera formula: cursor_world.y={} - cursor_viewport.y={} + half_height={} = camera.y={}",
-            cursor_world.y, cursor_viewport.y, half_height, camera.y
-        );
-
         self.viewport_state.camera_current = camera;
         self.viewport_state.camera_target = camera;
-
-        let camera_rect = WorldRect::from_center_and_size(
-            camera,
-            (
-                viewport_bounds_snapshot.width as u64,
-                viewport_bounds_snapshot.height as u64,
-            ),
-        );
-        trace!(
-            "rebuild_viewport_graph: camera_rect from_center_and_size: center.y={}, height={}, rect.min.y={}, rect.max.y={}",
-            camera.y, viewport_bounds_snapshot.height, camera_rect.min.y, camera_rect.max.y
-        );
-
-        trace!(
-            "rebuild_viewport_graph: camera positioned at ({}, {})",
-            camera.x, camera.y
-        );
 
         // Step 7: Compute camera rect with buffer (2x) and load partitions
         let camera_rect = self.viewport_state.camera_rect();
         let covered_rect = camera_rect.resize(2.0);
 
-        trace!(
-            "rebuild_viewport_graph: loading partitions for covered rect x:{}-{}, y:{}-{}",
-            covered_rect.min.x, covered_rect.max.x, covered_rect.min.y, covered_rect.max.y
-        );
-
         let active_partitions = self
             .partition_controller
             .load_partitions_for_rect(covered_rect)?;
 
-        trace!(
-            "rebuild_viewport_graph: active partitions = {:?}",
-            active_partitions
-        );
-
-        // Step 8: Build viewport graph with those partitions
+        // Step 8: Build a cropped graph with those partitions
         self.viewport_graph = CroppedGraph::new(
             covered_rect,
             &self.partition_controller.partition_table,
@@ -903,10 +837,6 @@ where
         self.last_rebuild_camera_center = self.viewport_state.camera_current;
         self.rebuild_needed = false;
 
-        // Note: We don't update cursor viewport position here because cursor-anchored rebuilding
-        // relies on preserving the cursor's viewport position to calculate the camera
-        // self.cursor.update(&self.viewport_graph, camera_rect)?;
-
         trace!(
             "rebuild_viewport_graph: complete - {} nodes, {} edges, cursor viewport ({}, {})",
             self.viewport_graph.node_count(),
@@ -945,11 +875,6 @@ where
         self.viewport_state.camera_current = WorldPos::new(camera_x, camera_y);
         self.viewport_state.camera_target = WorldPos::new(camera_x, camera_y);
         self.viewport_state.camera_anim = None;
-
-        trace!(
-            "update_camera: focal_world={:?}, focal_viewport=({}, {}), camera={:?}",
-            focal_world, focal_viewport.x, focal_viewport.y, self.viewport_state.camera_current
-        );
     }
 
     /// Update animations (camera and cursor) for the given frame delta.
