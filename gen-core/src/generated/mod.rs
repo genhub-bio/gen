@@ -1,3 +1,3 @@
 pub mod gen_core_capnp {
-    include!("gen_core_capnp.rs");
+    include!(concat!(env!("OUT_DIR"), "/gen_core_capnp.rs"));
 }

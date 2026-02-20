@@ -1,7 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=gen-core.capnp");
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let output_dir = std::path::Path::new(&manifest_dir).join("src/generated");
+    let output_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     println!(
         "cargo:warning=gen-core capnp output: {}",
         output_dir.display()

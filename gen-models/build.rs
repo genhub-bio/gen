@@ -5,7 +5,7 @@ fn main() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let output_dir = std::path::Path::new(&manifest_dir).join("src/generated");
+    let output_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     println!(
         "cargo:warning=gen-models capnp output: {}",
         output_dir.display()
