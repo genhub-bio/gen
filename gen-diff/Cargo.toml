@@ -6,12 +6,11 @@ edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
-publish = false
 
 [dependencies]
-gen-core = { path = "../gen-core" }
-gen-graph = { path = "../gen-graph" }
-gen-models = { path = "../gen-models" }
+gen-core = { path = "../gen-core", version = "0.1.22" }
+gen-graph = { path = "../gen-graph", version = "0.1.22" }
+gen-models = { path = "../gen-models", version = "0.1.22" }
 itertools = "0.14.0"
 petgraph = "0.6.5"
 rusqlite = { version = "0.32.1" }

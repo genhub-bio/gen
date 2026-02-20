@@ -6,9 +6,9 @@ edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
-publish = false
 
 [features]
+default = []
 python-bindings = ["pyo3", "pyo3-macros"]
 
 [dependencies]

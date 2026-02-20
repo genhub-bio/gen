@@ -1,15 +1,17 @@
 [package]
 name = "gen-tui"
 description = "Graph visualization widget system for Gen"
-version = "0.1.0"
+version = "0.1.22"
 edition = "2024"
+repository = "https://github.com/genhub-bio/gen"
+homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [dependencies]
-gen-core = { path = "../gen-core" }
-gen-models = { path = "../gen-models" }
-gen-graph = { path = "../gen-graph" }
-gen-sugiyama = { path = "../gen-sugiyama" }
+gen-core = { path = "../gen-core", version = "0.1.22" }
+gen-models = { path = "../gen-models", version = "0.1.22" }
+gen-graph = { path = "../gen-graph", version = "0.1.22" }
+gen-sugiyama = { path = "../gen-sugiyama", version = "0.1.22" }
 itertools = "0.14.0"
 petgraph = { version = "0.6.5", features = ["serde-1"] }
 serde = { version = "1.0.219", features = ["derive"] }
@@ -41,4 +43,3 @@ serial_test = "3.2.0"
 tempfile = "3.14.0"
 env_logger = "0.10.0"
 more-asserts = "0.3.1"
-

@@ -2,8 +2,8 @@ use include_dir::{Dir, include_dir};
 use rusqlite::Connection;
 use rusqlite_migration::Migrations;
 
-static MIGRATION_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../migrations/core");
-static OPERATIONS_MIGRATION_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../migrations/operations");
+static MIGRATION_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations/core");
+static OPERATIONS_MIGRATION_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations/operations");
 
 pub fn run_migrations(conn: &mut Connection) {
     let migrations = Migrations::from_directory(&MIGRATION_DIR).unwrap();

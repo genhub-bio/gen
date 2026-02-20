@@ -6,7 +6,7 @@ edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
-include = ["/src", "LICENSE", "migrations"]
+include = ["/src", "LICENSE", "build.rs", "gen-schema.capnp"]
 
 [lib]
 name = "gen"
@@ -29,12 +29,12 @@ models = []
 cli = []
 
 [dependencies]
-gen-core = { path = "gen-core" }
-gen-diff = { path = "gen-diff" }
-gen-models = { path = "gen-models" }
-gen-graph = { path = "gen-graph" }
-gen-tui = { path = "gen-tui" }
-gen-annotations = { path = "gen-annotations" }
+gen-core = { path = "gen-core", version = "0.1.22" }
+gen-diff = { path = "gen-diff", version = "0.1.22" }
+gen-models = { path = "gen-models", version = "0.1.22" }
+gen-graph = { path = "gen-graph", version = "0.1.22" }
+gen-tui = { path = "gen-tui", version = "0.1.22" }
+gen-annotations = { path = "gen-annotations", version = "0.1.22" }
 clap = { version = "4.5.32", features = ["derive"] }
 clap-nested-commands = "0.0.6"
 convert_case = "0.8.0"
