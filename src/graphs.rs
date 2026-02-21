@@ -11,6 +11,8 @@ use gen_models::{
 pub mod combinatorial_library;
 pub mod operators;
 
+// A NodePoint is grouping of the fields that an edge has as a source or a
+// target.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NodePoint {
     pub id: HashId,
@@ -18,6 +20,15 @@ pub struct NodePoint {
     pub strand: Strand,
 }
 
+// A BlockGroupChunk is basically an in-memory BlockGroup but with the start and
+// end nodes deleted.  This makes it possible to stitch two BlockGroupChunks
+// together fairly easily.  The entry node points are what edges from the start
+// node pointed to, and the exit node points are the sources of edges that point
+// to the end node.  For paths it's a bit more complicated.  If the block group
+// has a path, the path is defined by a start node point (instead of an edge
+// from the start node to a node point), followed by a set of "internal" edges
+// that form the path, and then an end node point instead of an edge to the end
+// node.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BlockGroupChunk {
     pub entry_node_points: Vec<NodePoint>,
@@ -27,7 +38,7 @@ pub struct BlockGroupChunk {
     pub path_end_point: Option<NodePoint>,
 }
 
-pub fn get_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> BlockGroupChunk {
+pub fn load_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> BlockGroupChunk {
     let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
 
     let start_edges = edges.iter().filter(|edge| edge.edge.is_start_edge());
@@ -78,8 +89,11 @@ pub fn get_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> 
     }
 }
 
-/// Creates edges between source nodes and target nodes, and also creates block
-/// group edges for the given block group ID.  Returns a vector of the created edge IDs.
+/// Stitches two block group chunks together.  Creates edges between exit node
+/// points from one chunk and entry node points of the target chunk.  For those
+/// edges, also creates block group edges for the given block group ID.
+/// Finally, if both chunks have paths, stitches those together.  Returns the
+/// resulting block group chunk.
 pub fn stitch(
     conn: &GraphConnection,
     source_block_group_chunk: &BlockGroupChunk,

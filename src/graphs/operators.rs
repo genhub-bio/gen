@@ -15,7 +15,7 @@ use gen_models::{
 };
 use thiserror::Error;
 
-use crate::graphs::{BlockGroupChunk, NodePoint, get_block_group_chunk, stitch};
+use crate::graphs::{BlockGroupChunk, NodePoint, load_block_group_chunk, stitch};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum GraphOperationError {
@@ -312,7 +312,7 @@ pub fn make_stitch(
 
     for region_name in region_names {
         if let Some(block_group) = block_groups_by_name.get(region_name) {
-            let chunk = get_block_group_chunk(conn, block_group.id);
+            let chunk = load_block_group_chunk(conn, block_group.id);
             block_group_chunks.push(chunk.clone());
 
             let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);

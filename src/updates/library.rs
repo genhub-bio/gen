@@ -11,6 +11,7 @@ use gen_models::{
 use thiserror::Error;
 
 use crate::graphs::{
+    BlockGroupChunk,
     combinatorial_library::{
         CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
         parse_library,
@@ -118,18 +119,50 @@ pub fn update_with_library(
     )?;
 
     let mut block_group_chunks = vec![];
+    let mut reference_block_group_chunks = vec![];
+    let mut chunk_index = 0;
 
     if start_coordinate > 0 {
-        block_group_chunks.push(derived_block_group_chunks[0].clone());
+        let start_chunk = derived_block_group_chunks[0].clone();
+        reference_block_group_chunks.push(start_chunk.clone());
+        let pathless_start_chunk = BlockGroupChunk {
+            entry_node_points: start_chunk.entry_node_points.clone(),
+            exit_node_points: start_chunk.exit_node_points.clone(),
+            path_edges: vec![],
+            path_start_point: None,
+            path_end_point: None,
+        };
+        block_group_chunks.push(pathless_start_chunk);
+
+        chunk_index += 1;
     }
 
+    reference_block_group_chunks.push(derived_block_group_chunks[chunk_index].clone());
     block_group_chunks.push(library_block_group_chunk);
 
+    chunk_index += 1;
+
     if end_coordinate < parent_path.length(conn) {
-        block_group_chunks.push(derived_block_group_chunks[2].clone());
+        let end_chunk = derived_block_group_chunks[chunk_index].clone();
+        reference_block_group_chunks.push(end_chunk.clone());
+        let pathless_end_chunk = BlockGroupChunk {
+            entry_node_points: end_chunk.entry_node_points.clone(),
+            exit_node_points: end_chunk.exit_node_points.clone(),
+            path_edges: vec![],
+            path_start_point: None,
+            path_end_point: None,
+        };
+        block_group_chunks.push(pathless_end_chunk);
     }
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
+
+    make_stitch_from_block_groups(
+        context,
+        &reference_block_group_chunks,
+        child_block_group.id,
+        new_sample_name,
+    )?;
 
     make_stitch_from_block_groups(
         context,
@@ -210,6 +243,7 @@ mod tests {
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCAAAAATGATAAGGAACACACAGAGA".to_string(),
                 "ATCGATCAAAAATGTTAAGGAACACACAGAGA".to_string(),
                 "ATCGATCAAAAATGCTAAGGAACACACAGAGA".to_string(),
@@ -265,10 +299,17 @@ mod tests {
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCAAAAGGAACACACAGAGA".to_string(),
                 "ATCGATCTAATGGAACACACAGAGA".to_string(),
                 "ATCGATCCAACGGAACACACAGAGA".to_string(),
             ])
+        );
+
+        let path = BlockGroup::get_current_path(conn, &block_group.id);
+        assert_eq!(
+            path.sequence(conn),
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
 
@@ -310,7 +351,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
         let block_group = &block_groups[0];
 
-        let mut expected_sequences = vec![];
+        let mut expected_sequences = vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()];
         for part1 in ["AAAA", "TAAT", "CAAC"].iter() {
             for part2 in ["AAAA", "TAAT", "CAAC"].iter() {
                 let seq = "ATCGATC".to_owned() + part1 + part2 + "GGAACACACAGAGA";
@@ -369,6 +410,7 @@ mod tests {
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "AAAA".to_string(),
                 "TAAT".to_string(),
                 "CAAC".to_string(),
@@ -414,7 +456,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
         let block_group = &block_groups[0];
 
-        let mut expected_sequences = vec![];
+        let mut expected_sequences = vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()];
         for part1 in ["AAAA", "TAAT", "CAAC"].iter() {
             for part2 in ["AAAA", "TAAT", "CAAC"].iter() {
                 let seq = part1.to_owned().to_owned() + part2;
