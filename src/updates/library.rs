@@ -157,6 +157,8 @@ pub fn update_with_library(
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
 
+    // Create (re-create) the reference sequence/path out of the derived chunks,
+    // in the child block group
     make_stitch_from_block_groups(
         context,
         &reference_block_group_chunks,
@@ -164,6 +166,7 @@ pub fn update_with_library(
         new_sample_name,
     )?;
 
+    // Stitch the library in between the first and last reference chunks
     make_stitch_from_block_groups(
         context,
         &block_group_chunks,
