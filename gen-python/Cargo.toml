@@ -1,7 +1,7 @@
 [package]
 name = "gen-python"
 description = "Python API for the gen sequence graph and version control system."
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
@@ -18,10 +18,10 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 flate2 = "1.1.5"
-gen = { path = ".." }
-gen-core = { path = "../gen-core", features = ["python-bindings"] }
-gen-graph = { path = "../gen-graph" }
-gen-models = { path = "../gen-models" }
+gen = { path = "..", version = "0.1.23" }
+gen-core = { path = "../gen-core", version = "0.1.23", features = ["python-bindings"] }
+gen-graph = { path = "../gen-graph", version = "0.1.23" }
+gen-models = { path = "../gen-models", version = "0.1.23" }
 log = "0.4.26"
 rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }
 

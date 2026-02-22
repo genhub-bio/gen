@@ -1,0 +1,15 @@
+[package]
+name = "gen-capnp-schemas"
+description = "Shared Cap'n Proto schemas and generated Rust modules for Gen crates."
+version = "0.1.23"
+edition = "2024"
+repository = "https://github.com/genhub-bio/gen"
+homepage = "https://genhub.bio"
+license = "Apache-2.0"
+include = ["src", "build.rs", "gen-core.capnp", "gen-models.capnp", "gen-schema.capnp"]
+
+[dependencies]
+capnp = "0.24"
+
+[build-dependencies]
+capnpc = "0.24"

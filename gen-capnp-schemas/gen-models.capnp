@@ -3,7 +3,7 @@
 # Cap'n Proto schema for Gen genetic sequence version control system models
 # This schema maps all the models defined in gen-models to Cap'n Proto format
 
-using Core = import "/gen-core/gen-core.capnp";
+using Core = import "gen-core.capnp";
 
 # Core enums and types
 

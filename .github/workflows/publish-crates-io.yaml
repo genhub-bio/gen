@@ -42,4 +42,4 @@ jobs:
           fi
 
       - name: Cargo publish
-        run: cargo publish --package gen --locked
+        run: cargo publish --workspace --locked

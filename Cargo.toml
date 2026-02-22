@@ -1,12 +1,15 @@
 [package]
 name = "gen"
 description = "A sequence graph and version control system."
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
-include = ["/src", "LICENSE", "migrations"]
+include = [
+  "/src",
+  "/LICENSE",
+]
 
 [lib]
 name = "gen"
@@ -17,8 +20,8 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations"]
-default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff"]
+members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
+default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas"]
 exclude = ["gen-python"]
 
 [features]
@@ -29,12 +32,13 @@ models = []
 cli = []
 
 [dependencies]
-gen-core = { path = "gen-core" }
-gen-diff = { path = "gen-diff" }
-gen-models = { path = "gen-models" }
-gen-graph = { path = "gen-graph" }
-gen-tui = { path = "gen-tui" }
-gen-annotations = { path = "gen-annotations" }
+gen-core = { path = "gen-core", version = "0.1.23" }
+gen-diff = { path = "gen-diff", version = "0.1.23" }
+gen-models = { path = "gen-models", version = "0.1.23" }
+gen-graph = { path = "gen-graph", version = "0.1.23" }
+gen-tui = { path = "gen-tui", version = "0.1.23" }
+gen-annotations = { path = "gen-annotations", version = "0.1.23" }
+gen-capnp-schemas = { path = "gen-capnp-schemas", version = "0.1.23" }
 clap = { version = "4.5.32", features = ["derive"] }
 clap-nested-commands = "0.0.6"
 convert_case = "0.8.0"
@@ -81,9 +85,6 @@ httparse = "1.10.1"
 capnp = "0.24"
 indexmap = "2.11.3"
 anyhow = { version = "1.0.100", features = ["backtrace"] }
-
-[build-dependencies]
-capnpc = "0.24"
 
 [dev-dependencies]
 cargo-llvm-cov = "0.6.16"

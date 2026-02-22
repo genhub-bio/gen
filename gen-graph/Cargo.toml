@@ -1,15 +1,14 @@
 [package]
 name = "gen-graph"
 description = "Graph algorithms and operations for the gen sequence graph and version control system."
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
-publish = false
 
 [dependencies]
-gen-core = { path = "../gen-core" }
+gen-core = { path = "../gen-core", version = "0.1.23" }
 interavl = "0.3.0"
 intervaltree = "0.2.7"
 petgraph = "0.6.5"

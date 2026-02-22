@@ -1,3 +1,1 @@
-pub mod gen_models_capnp {
-    include!("gen_models_capnp.rs");
-}
+pub use gen_capnp_schemas::gen_models_capnp;
