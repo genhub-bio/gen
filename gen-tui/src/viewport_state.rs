@@ -105,15 +105,16 @@ impl ViewportState {
     pub fn world_to_viewport(&self, world: WorldPos) -> Option<ViewportPos> {
         // Use camera_rect().min as origin for correct calculation
         let origin = self.camera_rect().min;
-        let relative = world - origin;
+        let relative_x = world.x - origin.x;
+        let relative_y = world.y - origin.y;
 
-        // Check if position is within viewport bounds
-        if relative.x >= 0 && relative.y >= 0 {
-            let screen_x = relative.x as u16;
-            let screen_y = relative.y as u16;
-            if screen_x < self.viewport_bounds.width && screen_y < self.viewport_bounds.height {
-                return Some(ViewportPos::new(screen_x, screen_y));
-            }
+        // Check against viewport dimensions before casting to avoid u16 wraparound.
+        if relative_x >= 0
+            && relative_y >= 0
+            && relative_x < self.viewport_bounds.width as i64
+            && relative_y < self.viewport_bounds.height as i64
+        {
+            return Some(ViewportPos::new(relative_x as u16, relative_y as u16));
         }
         None
     }
@@ -134,20 +135,25 @@ impl ViewportState {
             return None;
         }
 
-        // First convert to viewport coordinates
-        if let Some(viewport_pos) = self.world_to_viewport(world_pos) {
-            // Check bounds
-            if viewport_pos.x < self.viewport_bounds.width
-                && viewport_pos.y < self.viewport_bounds.height
-            {
-                // Convert to terminal coordinates with viewport offset and Y-axis flip
-                let terminal_x = self.viewport_bounds.x + viewport_pos.x;
-                let terminal_y =
-                    self.viewport_bounds.y + (self.viewport_bounds.height - 1 - viewport_pos.y);
-                Some((terminal_x, terminal_y))
-            } else {
-                None
-            }
+        let origin = self.camera_rect().min;
+        let relative_x = world_pos.x - origin.x;
+        let relative_y = world_pos.y - origin.y;
+
+        if relative_x >= 0
+            && relative_y >= 0
+            && relative_x < self.viewport_bounds.width as i64
+            && relative_y < self.viewport_bounds.height as i64
+        {
+            let viewport_x = relative_x as u16;
+            let viewport_y = relative_y as u16;
+            let terminal_x = self.viewport_bounds.x + viewport_x;
+            let terminal_y = self.viewport_bounds.y
+                + self
+                    .viewport_bounds
+                    .height
+                    .saturating_sub(1)
+                    .saturating_sub(viewport_y);
+            Some((terminal_x, terminal_y))
         } else {
             None
         }
@@ -169,8 +175,11 @@ impl ViewportState {
         {
             // Convert to viewport coordinates (remove offset and flip Y-axis)
             let viewport_x = terminal_x - self.viewport_bounds.x;
-            let viewport_y =
-                (self.viewport_bounds.height - 1) - (terminal_y - self.viewport_bounds.y);
+            let viewport_y = self
+                .viewport_bounds
+                .height
+                .saturating_sub(1)
+                .saturating_sub(terminal_y - self.viewport_bounds.y);
 
             // Convert to world coordinates
             let viewport_pos = ViewportPos::new(viewport_x, viewport_y);
@@ -246,6 +255,16 @@ impl<'a> WorldBuffer<'a> {
     /// Get the viewport area from the state
     pub fn viewport_area(&self) -> Rect {
         self.viewport_state.viewport_bounds
+    }
+
+    /// Get the currently visible world rectangle.
+    pub fn visible_world_area(&self) -> WorldRect {
+        self.viewport_state.camera_rect()
+    }
+
+    /// Intersect a world-space region with the current visible viewport area.
+    pub fn calculate_visible_area(&self, world_area: WorldRect) -> Option<WorldRect> {
+        self.visible_world_area().intersection(&world_area)
     }
 
     /// Convert a world position to a viewport position
@@ -428,6 +447,26 @@ mod tests {
             let back_to_world = state.viewport_to_world(screen);
             assert_eq!(back_to_world, original);
         }
+    }
+
+    #[test]
+    fn test_world_to_viewport_does_not_wrap_large_coordinates() {
+        let mut state = ViewportState::new();
+        state.viewport_bounds = Rect::new(0, 0, 80, 20);
+        state.camera_current = WorldPos::new(40_000, 0);
+        state.camera_target = state.camera_current;
+
+        // This point is far outside the visible range but would wrap into range with a u16 cast.
+        // With viewport width 80 and camera origin ~39961, adding 131_082 makes relative_x = 131_121,
+        // which wraps to 49 if cast to u16.
+        let wrapped_candidate = WorldPos::new(171_082, 0);
+        assert_eq!(state.world_to_viewport(wrapped_candidate), None);
+        assert_eq!(state.world_to_terminal(wrapped_candidate), None);
+
+        // Visible points still convert correctly.
+        let visible = state.camera_current;
+        assert!(state.world_to_viewport(visible).is_some());
+        assert!(state.world_to_terminal(visible).is_some());
     }
 
     #[test]

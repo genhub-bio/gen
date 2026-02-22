@@ -4,7 +4,7 @@ use gen_core::{is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::GraphConnection, node::Node};
 use gen_tui::{
-    geometry::WorldRect,
+    geometry::{WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
@@ -103,27 +103,36 @@ impl NodeRenderer<&GenGraph> for GenGraphNodeRenderer<'_> {
         node_id: &GraphNode,
         detail_level: VisualDetail,
     ) {
+        let Some(visible_area) = buffer.calculate_visible_area(area) else {
+            return;
+        };
+
         let background_style = Style::default().bg(get_theme_color("node").unwrap_or_default());
         let text_style = Style::default()
             .bg(get_theme_color("node").unwrap_or(ratatui::style::Color::Blue))
             .fg(get_theme_color("text").unwrap_or(ratatui::style::Color::White));
 
-        buffer.fill_rect(area, ' ');
-        buffer.set_char_styled(area.left_center(), ' ', background_style);
+        buffer.fill_rect_styled(visible_area, ' ', background_style);
 
         // Handle special start/end nodes (always show full label)
         if is_start_node(node_id.node_id) {
             let edge_style = Style::default()
                 .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
                 .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
-            buffer.set_string_styled(area.left_center(), label::START, edge_style);
+            let label_pos = area.left_center();
+            if visible_area.contains(label_pos) {
+                buffer.set_string_styled(label_pos, label::START, edge_style);
+            }
             return;
         }
         if is_end_node(node_id.node_id) {
             let edge_style = Style::default()
                 .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
                 .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
-            buffer.set_string_styled(area.left_center(), label::END, edge_style);
+            let label_pos = area.left_center();
+            if visible_area.contains(label_pos) {
+                buffer.set_string_styled(label_pos, label::END, edge_style);
+            }
             return;
         }
 
@@ -133,19 +142,38 @@ impl NodeRenderer<&GenGraph> for GenGraphNodeRenderer<'_> {
                 let text_style = Style::default()
                     .fg(get_theme_color("text").unwrap_or(ratatui::style::Color::White))
                     .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue));
-                buffer.set_string_styled(area.left_center(), &NODE_GLYPH.to_string(), text_style);
+                let glyph_pos = area.left_center();
+                if visible_area.contains(glyph_pos) {
+                    buffer.set_string_styled(glyph_pos, &NODE_GLYPH.to_string(), text_style);
+                }
             }
             VisualDetail::Truncated => {
                 // Truncated scale: Show sequence with truncation to max 12 chars
                 let sequence = self.get_sequence(node_id);
                 let max_width = 12u32;
                 let truncated = inner_truncation(&sequence, max_width);
-                buffer.set_string_styled(area.left_center(), &truncated, text_style);
+                let text_pos = area.left_center();
+                if visible_area.contains(text_pos) {
+                    buffer.set_string_styled(text_pos, &truncated, text_style);
+                }
             }
             VisualDetail::Full => {
-                // Full scale: Show complete sequence (truncated only by area width)
+                // Render only the visible sequence span to keep full-detail drawing bounded.
                 let sequence = self.get_sequence(node_id);
-                buffer.set_string_styled(area.left_center(), &sequence, text_style);
+                let start_offset = visible_area.min.x.saturating_sub(area.min.x) as usize;
+                let visible_width = visible_area
+                    .max
+                    .x
+                    .saturating_sub(visible_area.min.x)
+                    .saturating_add(1) as usize;
+                if start_offset < sequence.len() {
+                    let end_offset = (start_offset + visible_width).min(sequence.len());
+                    let visible_sequence = &sequence[start_offset..end_offset];
+                    if !visible_sequence.is_empty() {
+                        let render_pos = WorldPos::new(visible_area.min.x, area.left_center().y);
+                        buffer.set_string_styled(render_pos, visible_sequence, text_style);
+                    }
+                }
             }
         }
     }
@@ -222,7 +250,39 @@ pub fn create_gen_graph_controller(
 
 #[cfg(test)]
 mod tests {
+    use gen_tui::viewport_state::ViewportState;
+    use ratatui::backend::TestBackend;
+
     use super::*;
+
+    #[test]
+    fn test_coordinate_overflow_with_large_genomic_sequences() {
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 20);
+
+        let camera_center = WorldPos::new(40_000, 0);
+        viewport_state.camera_current = camera_center;
+        viewport_state.camera_target = camera_center;
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut buffer = terminal.current_buffer_mut().clone();
+        let world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+
+        // This value is outside the viewport and specifically chosen to trigger u16 wraparound
+        // in the old implementation.
+        let large_genomic_pos = WorldPos::new(171_082, 0);
+        assert!(
+            world_buffer.world_to_viewport(large_genomic_pos).is_none(),
+            "Coordinates outside viewport should not wrap into visible range"
+        );
+
+        let normal_pos = WorldPos::new(camera_center.x, camera_center.y);
+        assert!(
+            world_buffer.world_to_viewport(normal_pos).is_some(),
+            "Visible coordinates should still convert"
+        );
+    }
 
     #[test]
     fn test_inner_truncation_no_truncation_needed() {
