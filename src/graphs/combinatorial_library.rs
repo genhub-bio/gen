@@ -11,7 +11,7 @@ use gen_models::{db::GraphConnection, node::Node, path::Path, sequence::Sequence
 use noodles::fasta;
 use thiserror::Error;
 
-use crate::graphs::{BlockGroupChunk, NodePoint, stitch};
+use crate::graphs::{BlockGroupChunk, GraphError, NodePoint, stitch};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SequencePart {
@@ -32,6 +32,8 @@ pub enum CombinatorialLibraryParseError {
 pub enum CombinatorialLibraryCreationError {
     #[error("Failed to create library")]
     CreationFailed(String),
+    #[error("Graph error: {0}")]
+    GraphError(#[from] GraphError),
 }
 
 pub fn parse_library(
@@ -244,7 +246,7 @@ pub fn create_library(
             &result_block_group_chunk,
             &target_chunk,
             block_group_id,
-        );
+        )?;
     }
 
     if create_block_group {

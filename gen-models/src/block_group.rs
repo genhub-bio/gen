@@ -5,9 +5,9 @@ use std::{
 };
 
 use gen_core::{
-    HashId, NO_CHROMOSOME_INDEX, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, calculate_hash, is_end_node,
-    is_start_node, is_terminal, traits::Capnp,
+    HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
+    PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
+    calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp,
 };
 use gen_graph::{
     GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
@@ -368,6 +368,9 @@ impl BlockGroup {
             for (source_node, target_node, edge_weights) in graph.edges(node) {
                 for edge_weight in edge_weights {
                     if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX {
+                        continue;
+                    }
+                    if edge_weight.chromosome_index == INDETERMINATE_CHROMOSOME_INDEX {
                         continue;
                     }
                     if edge_weight.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {

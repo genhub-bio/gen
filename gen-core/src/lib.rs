@@ -22,6 +22,7 @@ pub use strand::Strand;
 
 pub static NO_CHROMOSOME_INDEX: i64 = -1;
 pub static PRESERVE_EDIT_SITE_CHROMOSOME_INDEX: i64 = -2;
+pub static INDETERMINATE_CHROMOSOME_INDEX: i64 = -3;
 
 // these are just the written out hex from the inserted values from sql migrations
 pub const PATH_START_NODE_ID: HashId = HashId([

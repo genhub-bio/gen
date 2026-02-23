@@ -15,7 +15,7 @@ use gen_models::{
 };
 use thiserror::Error;
 
-use crate::graphs::{BlockGroupChunk, NodePoint, load_block_group_chunk, stitch};
+use crate::graphs::{BlockGroupChunk, GraphError, NodePoint, load_block_group_chunk, stitch};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum GraphOperationError {
@@ -27,6 +27,8 @@ pub enum GraphOperationError {
     RegionNotFound(String),
     #[error("Path not found: {0}")]
     PathNotFound(String),
+    #[error("Graph error: {0}")]
+    GraphError(#[from] GraphError),
 }
 
 pub fn get_path(
@@ -369,7 +371,7 @@ pub fn make_stitch_from_block_groups(
 
     for chunk in block_group_chunks {
         result_block_group_chunk =
-            stitch(conn, &result_block_group_chunk, chunk, child_block_group_id);
+            stitch(conn, &result_block_group_chunk, chunk, child_block_group_id)?;
     }
 
     let end_node_point = NodePoint {
@@ -390,7 +392,7 @@ pub fn make_stitch_from_block_groups(
         &result_block_group_chunk,
         &end_chunk,
         child_block_group_id,
-    );
+    )?;
 
     if !result_block_group_chunk.path_edges.is_empty() {
         let new_path_edge_ids = result_block_group_chunk

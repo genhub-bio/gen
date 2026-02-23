@@ -1,4 +1,4 @@
-use gen_core::{HashId, Strand};
+use gen_core::{HashId, INDETERMINATE_CHROMOSOME_INDEX, Strand};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -7,6 +7,7 @@ use gen_models::{
     path_edge::PathEdge,
     traits::Query,
 };
+use thiserror::Error;
 
 pub mod combinatorial_library;
 pub mod operators;
@@ -36,6 +37,12 @@ pub struct BlockGroupChunk {
     pub path_edges: Vec<Edge>,
     pub path_start_point: Option<NodePoint>,
     pub path_end_point: Option<NodePoint>,
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum GraphError {
+    #[error("Edge error: {0}")]
+    StitchEdgeNotFound(String),
 }
 
 pub fn load_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> BlockGroupChunk {
@@ -99,7 +106,7 @@ pub fn stitch(
     source_block_group_chunk: &BlockGroupChunk,
     target_block_group_chunk: &BlockGroupChunk,
     block_group_id: HashId,
-) -> BlockGroupChunk {
+) -> Result<BlockGroupChunk, GraphError> {
     let mut edges = vec![];
 
     let source_node_points = &source_block_group_chunk.exit_node_points;
@@ -121,13 +128,12 @@ pub fn stitch(
 
     let edge_ids: Vec<HashId> = Edge::bulk_create(conn, &edges);
 
-    // TODO: Set chromosome index correctly
     let block_group_edges = edge_ids
         .iter()
         .map(|edge_id| BlockGroupEdgeData {
             block_group_id,
             edge_id: *edge_id,
-            chromosome_index: edge_id.extract_digits(), // TODO: This is a hack, clean it up with phase layers
+            chromosome_index: INDETERMINATE_CHROMOSOME_INDEX,
             phased: 0,
         })
         .collect::<Vec<BlockGroupEdgeData>>();
@@ -155,18 +161,19 @@ pub fn stitch(
         if let Some(stitch_edge) = stitch_edge {
             path_edges.push(stitch_edge.clone());
         } else {
-            // TODO: Return error
-            panic!("Couldn't find stitch edge in edges that were just created!");
+            return Err(GraphError::StitchEdgeNotFound(
+                "Couldn't find stitch edge in edges that were just created!".to_string(),
+            ));
         }
 
         path_edges.extend(target_path_edges);
     }
 
-    BlockGroupChunk {
+    Ok(BlockGroupChunk {
         entry_node_points: source_block_group_chunk.entry_node_points.clone(),
         exit_node_points: target_block_group_chunk.exit_node_points.clone(),
         path_edges,
         path_start_point: source_block_group_chunk.path_start_point.clone(),
         path_end_point: target_block_group_chunk.path_end_point.clone(),
-    }
+    })
 }
