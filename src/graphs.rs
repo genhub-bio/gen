@@ -29,7 +29,14 @@ pub struct NodePoint {
 // has a path, the path is defined by a start node point (instead of an edge
 // from the start node to a node point), followed by a set of "internal" edges
 // that form the path, and then an end node point instead of an edge to the end
-// node.
+// node.  The path start point must be in the entry node points, and the path
+// end point must be in the exit node points.
+//
+// So to stitch chunk A (upstream) to chunk B (downstream), we create edges
+// between all the exit node points of A and all the entry node points of B.
+// The new path is defined by the path start point of A, then all the path edges
+// of A, then the new edge from the path end point of A to the path start point
+// of B, then the path edges of B, then the path end point of B.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BlockGroupChunk {
     pub entry_node_points: Vec<NodePoint>,
