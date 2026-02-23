@@ -65,6 +65,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
+	  gh auth login
           gh release upload "${TAG}" gen-python/target/wheels/*.whl
       - name: Upload wheels to releases (Windows)
         if: runner.os == 'Windows'
