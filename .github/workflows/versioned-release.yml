@@ -19,8 +19,6 @@ jobs:
     permissions:
       actions: write
       contents: write
-    env:
-      GIT_TAG_PUSH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
 
     steps:
       - name: Checkout
@@ -43,14 +41,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Configure push authentication
-        run: |
-          if [ -z "$GIT_TAG_PUSH_TOKEN" ]; then
-            echo "GIT_TAG_PUSH_TOKEN secret is required to push tags and trigger downstream workflows." >&2
-            exit 1
-          fi
-          git remote set-url origin "https://x-access-token:${GIT_TAG_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Bump Versions
         env:
