@@ -1,16 +1,16 @@
 [package]
 name = "gen-annotations"
 description = "Annotation models and graph operations for Gen."
-version = "0.1.28"
+version = "0.1.29"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [dependencies]
-gen-core = { path = "../gen-core", version = "0.1.28" }
-gen-graph = { path = "../gen-graph", version = "0.1.28" }
-gen-models = { path = "../gen-models", version = "0.1.28" }
+gen-core = { path = "../gen-core", version = "0.1.29" }
+gen-graph = { path = "../gen-graph", version = "0.1.29" }
+gen-models = { path = "../gen-models", version = "0.1.29" }
 interavl = "0.3.0"
 noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }
 

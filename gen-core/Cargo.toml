@@ -1,7 +1,7 @@
 [package]
 name = "gen-core"
 description = "Core structs and representations for the gen sequence graph and version control system."
-version = "0.1.28"
+version = "0.1.29"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
@@ -12,7 +12,7 @@ default = []
 python-bindings = ["pyo3", "pyo3-macros"]
 
 [dependencies]
-gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.1.28" }
+gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.1.29" }
 itertools = "0.14.0"
 capnp = { version = "0.24" }
 noodles = { version = "0.101.0", features = ["gff"] }
