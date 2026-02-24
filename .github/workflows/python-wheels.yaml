@@ -59,13 +59,17 @@ jobs:
           command: build
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           working-directory: .
+      - name: Debug gh auth
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+        run: gh auth status -h github.com || true
       - name: Upload wheels to releases
         if: runner.os != 'Windows'
         env:
           GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh auth login && gh release upload "${TAG}" gen-python/target/wheels/*.whl
+          gh release upload "${TAG}" gen-python/target/wheels/*.whl
       - name: Upload wheels to releases (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
