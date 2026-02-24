@@ -17,6 +17,7 @@ jobs:
   versioned-release:
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     env:
       GIT_TAG_PUSH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}

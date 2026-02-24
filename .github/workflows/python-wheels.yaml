@@ -6,6 +6,8 @@ on:
 jobs:
   build-wheels:
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +66,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          GH_TOKEN: $${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -79,6 +81,9 @@ jobs:
     needs: build-wheels
     runs-on: ubuntu-latest
     if: ${{ needs.build-wheels.result == 'success' }}
+    permissions:
+      actions: write
+      contents: read
     env:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
