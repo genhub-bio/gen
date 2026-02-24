@@ -1,12 +1,6 @@
 name: Python API Wheels
 
 on:
-  push:
-    tags:
-      - v**
-  create:
-    tags:
-      - v**
   workflow_dispatch:
 
 jobs:
@@ -59,10 +53,6 @@ jobs:
           command: build
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           working-directory: .
-      - name: Debug gh auth
-        env:
-          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
-        run: gh auth status -h github.com || true
       - name: Upload wheels to releases
         if: runner.os != 'Windows'
         env:
