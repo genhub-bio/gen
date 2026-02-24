@@ -29,6 +29,9 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      - name: Install capnp
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto
+
       - name: Verify tag matches crate version
         run: |
           version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
