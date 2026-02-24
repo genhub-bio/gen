@@ -46,10 +46,11 @@ binary.
 
 ## Python library
 
-Currently, you can install gen's python package from wheel files on the [Release
-page](https://github.com/genhub-bio/gen/releases).  For instance, for Mac OS X you can install it with
+Gen is available as a package on [pypi.org](https://pypi.org/), so you can install it with
 
-pip install https://github.com/genhub-bio/gen/releases/download/v0.1.22/gen-0.1.22-cp313-cp313-macosx_11_0_arm64.whl
+```
+pip install gen
+```
 
 ## Installing from Source
 Make sure you have a Rust compiler installed on your system. You can install the Rust toolset using the [rustup
