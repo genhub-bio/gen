@@ -1,7 +1,7 @@
 [package]
 name = "gen"
 description = "A sequence graph and version control system."
-version = "0.1.29"
+version = "0.1.30"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
@@ -32,13 +32,13 @@ models = []
 cli = []
 
 [dependencies]
-gen-core = { path = "gen-core", version = "0.1.29" }
-gen-diff = { path = "gen-diff", version = "0.1.29" }
-gen-models = { path = "gen-models", version = "0.1.29" }
-gen-graph = { path = "gen-graph", version = "0.1.29" }
-gen-tui = { path = "gen-tui", version = "0.1.29" }
-gen-annotations = { path = "gen-annotations", version = "0.1.29" }
-gen-capnp-schemas = { path = "gen-capnp-schemas", version = "0.1.29" }
+gen-core = { path = "gen-core", version = "0.1.30" }
+gen-diff = { path = "gen-diff", version = "0.1.30" }
+gen-models = { path = "gen-models", version = "0.1.30" }
+gen-graph = { path = "gen-graph", version = "0.1.30" }
+gen-tui = { path = "gen-tui", version = "0.1.30" }
+gen-annotations = { path = "gen-annotations", version = "0.1.30" }
+gen-capnp-schemas = { path = "gen-capnp-schemas", version = "0.1.30" }
 clap = { version = "4.5.32", features = ["derive"] }
 clap-nested-commands = "0.0.6"
 convert_case = "0.8.0"
