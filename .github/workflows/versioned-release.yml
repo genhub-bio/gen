@@ -78,27 +78,27 @@ jobs:
       - name: Generate Release
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "v${VERSION}" --title "v${VERSION}" --notes "gen ${VERSION}"
 
       - name: Upload binaries to releases
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh workflow run release.yml --ref "v${VERSION}"
 
       - name: Trigger python wheels workflow on the tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh workflow run python-wheels.yaml --ref "v${VERSION}"
 
       - name: Trigger crates.io publish
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GIT_TAG_PUSH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh workflow run publish-crates-io.yaml --ref "v${VERSION}" -f tag="v$VERSION"
