@@ -7,6 +7,9 @@ use crate::{
     viewport_graph::CroppedGraph,
 };
 
+const NO_NEXT_LAYER_ERR: &str = "No next layer";
+const NO_PREVIOUS_LAYER_ERR: &str = "No previous layer";
+
 /// New cursor implementation using viewport coordinates as primary representation.
 ///
 /// This design eliminates the need to "restore" cursor position after viewport rebuilds
@@ -37,7 +40,8 @@ pub struct Cursor {
 
     /// Fractional position within the node rectangle (0.0 to 1.0)
     /// Relative to bottom-left corner: (0.0, 0.0) = bottom-left, (1.0, 1.0) = top-right
-    /// TODO: Replace with UQ0.64 fixed-point for precision on very large nodes
+    /// Technically floating point isn't ideal for this since we can't recreate every i64
+    /// integer from the part after the decimal (unlike UQ0.64 for example), but that's overkill
     fractional_pos: (f64, f64),
 
     /// Whether cursor should be rendered (does not affect cursor functionality)
@@ -345,7 +349,23 @@ impl Cursor {
             Ok(())
         } else {
             // At boundary - jump to adjacent node in different layer
-            self.jump_to_adjacent_layer(direction, viewport_graph)
+            match self.jump_to_adjacent_layer(direction, viewport_graph) {
+                Ok(()) => Ok(()),
+                Err(msg) => {
+                    // In coarse mode, let users escape graph boundaries by moving to the
+                    // current node edge instead of hard-failing on missing layers.
+                    if self.coarse_mode
+                        && (msg == NO_NEXT_LAYER_ERR || msg == NO_PREVIOUS_LAYER_ERR)
+                    {
+                        let target_frac_x = if direction > 0 { 1.0 } else { 0.0 };
+                        let current_frac_y = self.fractional_pos.1;
+                        self.fractional_pos = (target_frac_x, current_frac_y);
+                        Ok(())
+                    } else {
+                        Err(msg)
+                    }
+                }
+            }
         }
     }
 
@@ -424,12 +444,12 @@ impl Cursor {
             if current_layer + 1 < viewport_graph.layer_count() {
                 current_layer + 1
             } else {
-                return Err("No next layer".to_string());
+                return Err(NO_NEXT_LAYER_ERR.to_string());
             }
         } else {
             // Moving left: previous layer
             if current_layer == 0 {
-                return Err("No previous layer".to_string());
+                return Err(NO_PREVIOUS_LAYER_ERR.to_string());
             }
             current_layer - 1
         };
@@ -582,10 +602,7 @@ mod tests {
 
         // Set viewport bounds
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
-
-        // Set detail level and ensure coverage
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         // Rebuild viewport graph
         let _ = controller.rebuild_viewport_graph();
@@ -802,7 +819,6 @@ mod tests {
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 200, 100);
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         let _ = controller.rebuild_viewport_graph();
 
@@ -896,7 +912,6 @@ mod tests {
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         let _ = controller.rebuild_viewport_graph();
 
@@ -938,6 +953,40 @@ mod tests {
     }
 
     #[test]
+    fn test_coarse_mode_boundary_navigation_falls_back_to_node_edges() {
+        let mut domain_graph = MockDomainGraph::new();
+        let n0 = domain_graph.add_node(());
+        let n1 = domain_graph.add_node(());
+        let n2 = domain_graph.add_node(());
+        domain_graph.add_edge(n0, n1, ());
+        domain_graph.add_edge(n1, n2, ());
+
+        let node_sizer = TestNodeSizers::fixed_5x3();
+        let mut config = GraphConfig::default();
+        config.partition.layer_count = usize::MAX;
+        config.partition.node_count = usize::MAX;
+
+        let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+        controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
+        controller.rebuild_viewport_graph().unwrap();
+        let viewport_graph = controller.get_viewport_graph();
+
+        // Left boundary in coarse mode should clamp to left edge and stay on node.
+        let mut left_cursor = Cursor::new();
+        left_cursor.set_node(n0, (0.5, 0.5));
+        left_cursor.move_horizontal(-1000, viewport_graph).unwrap();
+        assert_eq!(left_cursor.node_idx(), Some(n0));
+        assert_eq!(left_cursor.fractional_pos(), (0.0, 0.5));
+
+        // Right boundary in coarse mode should clamp to right edge and stay on node.
+        let mut right_cursor = Cursor::new();
+        right_cursor.set_node(n2, (0.5, 0.5));
+        right_cursor.move_horizontal(1000, viewport_graph).unwrap();
+        assert_eq!(right_cursor.node_idx(), Some(n2));
+        assert_eq!(right_cursor.fractional_pos(), (1.0, 0.5));
+    }
+
+    #[test]
     fn test_move_vertical_intra_node() {
         let (viewport_graph, known_nodes) = create_mock_viewport_graph();
         assert!(!known_nodes.is_empty(), "Need nodes for navigation test");
@@ -972,7 +1021,6 @@ mod tests {
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);
-        let _ = controller.ensure_camera_coverage();
 
         let _ = controller.rebuild_viewport_graph();
 

@@ -222,7 +222,58 @@ pub fn create_gen_graph_controller(
 
 #[cfg(test)]
 mod tests {
+    use gen_tui::{
+        geometry::WorldPos,
+        viewport_state::{ViewportState, WorldBuffer},
+    };
+    use ratatui::backend::TestBackend;
+
     use super::*;
+
+    /// Test coordinate handling for very large genomic sequences
+    ///
+    /// Genomic sequences can span hundreds of thousands of base pairs, creating
+    /// world coordinates that exceed u16::MAX (65,535) when rendered. This test
+    /// verifies that the coordinate conversion system handles such large values
+    /// correctly without integer overflow or wraparound artifacts.
+    #[test]
+    fn test_coordinate_overflow_with_large_genomic_sequences() {
+        // Set up a viewport for rendering genomic data
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 20);
+
+        // Position camera to simulate viewing a region of a large genome
+        // where sequence coordinates naturally reach high values
+        let camera_center = WorldPos::new(40000, 0);
+        viewport_state.camera_current = camera_center;
+        viewport_state.camera_target = camera_center;
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut buffer = terminal.current_buffer_mut().clone();
+        let world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+
+        // Test a coordinate representing the end of a 100K base pair genomic sequence
+        // Such large sequences are common in genomics (genes, regulatory regions, etc.)
+        let large_genomic_pos = WorldPos::new(camera_center.x + 70000, 0); // ~110K coordinate
+
+        // The coordinate conversion should handle large values gracefully:
+        // - Return None if outside viewport (correct behavior)
+        // - Never wrap around due to u16 overflow (incorrect behavior)
+        let result = world_buffer.world_to_viewport(large_genomic_pos);
+
+        assert!(
+            result.is_none(),
+            "Large genomic coordinates outside viewport should return None, not wrap around"
+        );
+
+        // Verify that normal-sized coordinates still work correctly
+        let normal_pos = WorldPos::new(camera_center.x, camera_center.y);
+        assert!(
+            world_buffer.world_to_viewport(normal_pos).is_some(),
+            "Coordinates within normal range should convert successfully"
+        );
+    }
 
     #[test]
     fn test_inner_truncation_no_truncation_needed() {

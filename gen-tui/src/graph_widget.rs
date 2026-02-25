@@ -220,8 +220,11 @@ where
         // Update viewport bounds in state
         controller.viewport_state.viewport_bounds = inner_area;
 
-        // Force a rebuild if bounds changed or if we still don't have nowieence view v
-        if bounds_changed || controller.viewport_graph.graph.node_count() == 0 {
+        // Force a rebuild if on sufficient movement, change in window size or it's still empty
+        if controller.detect_motion()
+            || bounds_changed
+            || controller.viewport_graph.graph.node_count() == 0
+        {
             controller.trigger_rebuild();
         }
 
