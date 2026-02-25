@@ -1569,54 +1569,6 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_partition_deletion() {
-    //     // 1 -> 2 ---|
-    //     //      |    |
-    //     //      v    v
-    //     //      4 -> 5 -> 6
-    //     let edges = vec![(1, 2), (2, 5), (2, 4), (4, 5), (5, 6)];
-    //     let graph = make_test_graph(edges, None);
-    //     let table = PartitionTable::new(&graph, 3, 10);
-    //     assert_eq!(table.partitions.len(), 2);
-    //     // Count only GraphNodes (not stitching nodes)
-    //     let partition_0_graph_nodes: Vec<_> = table.partitions[0]
-    //         .graph
-    //         .node_weights()
-    //         .filter_map(|n| match n.role {
-    //             NodeRole::Graph(gn) => Some(gn.block_id),
-    //             _ => None,
-    //         })
-    //         .collect();
-    //     let partition_1_graph_nodes: Vec<_> = table.partitions[1]
-    //         .graph
-    //         .node_weights()
-    //         .filter_map(|n| match n.role {
-    //             NodeRole::Graph(gn) => Some(gn.block_id),
-    //             _ => None,
-    //         })
-    //         .collect();
-
-    //     assert_eq!(
-    //         partition_0_graph_nodes.len(),
-    //         3,
-    //         "Partition 0 has graph nodes: {:?}",
-    //         partition_0_graph_nodes
-    //     );
-    //     assert_eq!(
-    //         partition_1_graph_nodes.len(),
-    //         2,
-    //         "Partition 1 has graph nodes: {:?}",
-    //         partition_1_graph_nodes
-    //     );
-
-    //     // Partition 0 should have a right stitching node (since it's not the last partition)
-    //     // Partition 1 should have a left stitching node (since it's not the first partition)
-    //     assert_eq!(table.partitions[0].graph.node_count(), 4); // 3 graph nodes + 1 right stitch
-    //     assert_eq!(table.partitions[1].graph.node_count(), 3); // 2 graph nodes + 1 left stitch
-    //     assert_eq!(table.inter_partition_edges.len(), 1);
-    // }
-
     #[test]
     fn test_partition_new_small() {
         // 1 -> 2 -> 3
@@ -1632,6 +1584,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    //TODO: get better tests and documentation for the partition closing rules
     fn test_partition_new_force_close() {
         // 1 -> 2 -> 3
         //      |    |
@@ -1789,9 +1742,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_coordinate_system_flow() {
-        // Create a simple 3-partition graph: 1->2->3->4->5->6
+        // Create a simple graph: 1->2->3->4->5->6
+        // If you break the graph every 2 layers, this creates 6 partitions (alternating real sections and bridges)
         let edges = vec![(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)];
         let graph = make_test_graph(edges, None);
         let mut table = PartitionTable::new_with_config(&graph, 2, usize::MAX);
@@ -1806,7 +1759,6 @@ mod tests {
         let detail_level = VisualDetail::Minimal;
 
         // Test 1: Default reference partition (0)
-        // Partition 0: [0, 100), Partition 1: [100, 200), Partition 2: [200, 300)
 
         // Test local → world conversion for partition 0 (reference)
         let local_pos_0 = LocalPos::new_xy(0, 50, 25); // Middle of partition 0
@@ -1997,91 +1949,5 @@ mod tests {
 
         assert_eq!(first_width, third_width);
         assert_eq!(first_rise, third_rise);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_coordinate_conversion_detailed() {
-        // This test traces coordinate conversions to find the (1,1) offset bug
-        let edges = vec![(1, 2), (2, 3), (3, 4)];
-        let graph = make_test_graph(edges, None);
-        let mut table = PartitionTable::new_with_config(&graph, 2, usize::MAX); // 2 partitions
-
-        let detail_level = VisualDetail::Minimal;
-
-        struct DebugSizer;
-        impl NodeSizer<&GenGraph> for DebugSizer {
-            fn get_node_size(&self, _node: &GraphNode, _detail_level: VisualDetail) -> (u64, u64) {
-                (5, 3)
-            }
-
-            fn get_dummy_size(&self) -> (u64, u64) {
-                (2, 2)
-            }
-        }
-        let sizer = DebugSizer;
-
-        // Load both partitions
-        table
-            .compute_partition_layouts(0, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
-            .unwrap();
-        table
-            .compute_partition_layouts(1, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
-            .unwrap();
-
-        // Check Fenwick tree values for validation
-        let _partition_0_width = table.metrics[detail_level.as_index()]
-            .widths
-            .prefix_sum(1, 0)
-            - table.metrics[detail_level.as_index()]
-                .widths
-                .prefix_sum(0, 0);
-        let _partition_1_width = table.metrics[detail_level.as_index()]
-            .widths
-            .prefix_sum(2, 0)
-            - table.metrics[detail_level.as_index()]
-                .widths
-                .prefix_sum(1, 0);
-        let _partition_0_rise = table.metrics[detail_level.as_index()].rise.prefix_sum(1, 0)
-            - table.metrics[detail_level.as_index()].rise.prefix_sum(0, 0);
-        let _partition_1_rise = table.metrics[detail_level.as_index()].rise.prefix_sum(2, 0)
-            - table.metrics[detail_level.as_index()].rise.prefix_sum(1, 0);
-
-        // Test coordinate conversion for both partitions
-        for partition_idx in 0..2 {
-            // Test point at local origin (0, 0)
-            let local_origin = LocalPos::new_xy(partition_idx, 0, 0);
-            let world_origin = table.local_to_world(local_origin, detail_level);
-
-            // Test point at local (5, 3)
-            let local_point = LocalPos::new_xy(partition_idx, 5, 3);
-            let world_point = table.local_to_world(local_point, detail_level);
-
-            // Test reverse conversion
-            let recovered_origin = table.world_to_local(world_origin, detail_level).unwrap();
-            let recovered_point = table.world_to_local(world_point, detail_level).unwrap();
-
-            // Check if there are any off-by-one errors
-            assert_eq!(
-                recovered_origin.x, 0,
-                "Origin round trip failed for partition {}",
-                partition_idx
-            );
-            assert_eq!(
-                recovered_origin.y, 0,
-                "Origin round trip failed for partition {}",
-                partition_idx
-            );
-            assert_eq!(
-                recovered_point.x, 5,
-                "Point round trip failed for partition {}",
-                partition_idx
-            );
-            assert_eq!(
-                recovered_point.y, 3,
-                "Point round trip failed for partition {}",
-                partition_idx
-            );
-        }
     }
 }
