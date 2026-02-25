@@ -32,6 +32,8 @@ pub enum CombinatorialLibraryParseError {
 pub enum CombinatorialLibraryCreationError {
     #[error("Failed to create library")]
     CreationFailed(String),
+    #[error("Failed to create library: No parts provided")]
+    NoParts(String),
     #[error("Graph error: {0}")]
     GraphError(#[from] GraphError),
 }
@@ -113,6 +115,12 @@ pub fn create_library(
     parts_list: Vec<Vec<SequencePart>>,
     create_block_group: bool,
 ) -> Result<BlockGroupChunk, CombinatorialLibraryCreationError> {
+    if parts_list.is_empty() {
+        return Err(CombinatorialLibraryCreationError::NoParts(
+            "No parts provided for library creation.".to_string(),
+        ));
+    }
+
     let mut parts_set = HashSet::new();
     for parts in &parts_list {
         parts_set.extend(parts);
@@ -266,4 +274,36 @@ pub fn create_library(
     }
 
     Ok(result_block_group_chunk)
+}
+
+#[cfg(test)]
+mod tests {
+    use gen_models::{block_group::BlockGroup, sample::Sample};
+
+    use super::*;
+    use crate::{test_helpers::setup_gen, track_database};
+
+    #[test]
+    fn no_parts_in_list() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        let collection = "test";
+        let sample_name = "test-sample";
+        let _sample = Sample::get_or_create(conn, sample_name);
+        let block_group =
+            BlockGroup::create(conn, collection, Some(sample_name), "test-block-group");
+
+        match create_library(conn, block_group.id, "library", vec![], false) {
+            Ok(_) => {
+                panic!("expected Err(CombinatorialLibraryCreationError::CreationFailed), got Ok")
+            }
+            Err(CombinatorialLibraryCreationError::NoParts(_)) => (),
+            Err(_) => panic!(
+                "expected Err(CombinatorialLibraryCreationError::CreationFailed), got Err(_)"
+            ),
+        }
+    }
 }
