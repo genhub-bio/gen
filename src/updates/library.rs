@@ -64,8 +64,6 @@ pub fn update_with_library(
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
-    let intermediate_sample_name = format!("{}-components", new_sample_name);
-    let _intermediate_sample = Sample::create(conn, &intermediate_sample_name);
     let _new_sample = Sample::create(conn, new_sample_name);
 
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
@@ -100,7 +98,7 @@ pub fn update_with_library(
         context,
         collection_name,
         parent_sample_name,
-        &intermediate_sample_name,
+        new_sample_name,
         region_name,
         None,
         chunk_ranges,
