@@ -8,7 +8,7 @@ provided by NEB) from chloramphenicol resistance to kanamycin resistance." We wi
 from the Tn5 transposon (GenBank: U00004.1). First, we download our assets:
 
 ```console
-wget "https://github.com/ginkgobioworks/gen/blob/7814933b99515fc2c7749b7df3014cf438a4ddf9/examples/externally_edited_files/pBeloBAC11.gb?raw=true" -O pBeloBAC11.gb
+wget "https://github.com/genhub-bio/gen/blob/7814933b99515fc2c7749b7df3014cf438a4ddf9/examples/externally_edited_files/pBeloBAC11.gb?raw=true" -O pBeloBAC11.gb
 wget "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&rettype=gb&id=U00004.1" -O Tn5.gb
 ```
 

@@ -37,18 +37,30 @@ collection is flexible, and for example could refer to the type of data (genomic
 
 ## Prebuilt binaries
 
-Prebuilt binaries exist for various platforms and architectures on the [Release page](https://github.com/ginkgobioworks/gen/releases). The latest version can be found
-[here](https://github.com/ginkgobioworks/gen/releases/tag/nightly).
+For a download link, visit our [Installation page](https://www.genhub.bio/docs/installation).
+
+Prebuilt binaries exist for Mac OS X and Linux on the [Release
+page](https://github.com/genhub-bio/gen/releases). The latest version can be found
+[here](https://github.com/genhub-bio/gen/releases/tag/nightly).  We do not currently support a Windows native
+binary.
+
+## Python library
+
+Gen is available as a package on [pypi.org](https://pypi.org/), so you can install it with
+
+```
+pip install gen
+```
 
 ## Installing from Source
 Make sure you have a Rust compiler installed on your system. You can install the Rust toolset using the [rustup
 installer](https://rustup.rs/).
 
 
-1. Clone the [source](https://github.com/ginkgobioworks/gen) with `git`:
+1. Clone the [source](https://github.com/genhub-bio/gen) with `git`:
 
    ```sh
-   git clone https://github.com/ginkgobioworks/gen.git
+   git clone https://github.com/genhub-bio/gen.git
    cd rust
    ```
 
