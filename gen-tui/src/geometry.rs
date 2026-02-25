@@ -416,13 +416,9 @@ impl LayoutObject {
         layout_idx: NodeIndex<u32>,
         domain_idx: NodeIndex<u32>,
     ) -> Self {
-        let (width, height) = size;
-        let min_x = center.x - (width as i64 - 1) / 2;
-        let max_x = min_x + width as i64 - 1;
-        let min_y = center.y - (height as i64 - 1) / 2;
-        let max_y = min_y + height as i64 - 1;
+        let rect = BigRect::from_center_and_size(center, size);
         Self {
-            rect: BigRect::from_coords(min_x, min_y, max_x, max_y),
+            rect,
             object_type: SpatialObjectType::DataNode(domain_idx),
             primary_node: LayoutNodeIndex::data(domain_idx, layout_idx),
             secondary_node: None,

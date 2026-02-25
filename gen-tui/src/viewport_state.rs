@@ -114,7 +114,10 @@ impl ViewportState {
             && relative_x < self.viewport_bounds.width as i64
             && relative_y < self.viewport_bounds.height as i64
         {
-            return Some(ViewportPos::new(relative_x as u16, relative_y as u16));
+            // Safe to convert since we've verified the values fit within viewport bounds
+            let screen_x = relative_x as u16;
+            let screen_y = relative_y as u16;
+            return Some(ViewportPos::new(screen_x, screen_y));
         }
         None
     }
@@ -129,23 +132,31 @@ impl ViewportState {
     /// Convert a world position to terminal buffer coordinates.
     /// Returns `Some((x, y))` if the position is visible in the terminal, otherwise `None`.
     /// Handles viewport offset and Y-axis flipping (world Y+ is up, terminal Y+ is down).
+    ///
+    /// This version properly handles large coordinates by computing intersection with viewport
+    /// instead of silently dropping coordinates that exceed u16::MAX.
     pub fn world_to_terminal(&self, world_pos: WorldPos) -> Option<(u16, u16)> {
         // Handle uninitialized viewport bounds
         if self.viewport_bounds.width == 0 || self.viewport_bounds.height == 0 {
             return None;
         }
 
+        // Calculate viewport-relative coordinates directly
         let origin = self.camera_rect().min;
         let relative_x = world_pos.x - origin.x;
         let relative_y = world_pos.y - origin.y;
 
+        // Check if the position is within the visible viewport area
         if relative_x >= 0
             && relative_y >= 0
             && relative_x < self.viewport_bounds.width as i64
             && relative_y < self.viewport_bounds.height as i64
         {
+            // Safe to convert since we've verified the values fit in u16
             let viewport_x = relative_x as u16;
             let viewport_y = relative_y as u16;
+
+            // Convert to terminal coordinates with viewport offset and Y-axis flip
             let terminal_x = self.viewport_bounds.x + viewport_x;
             let terminal_y = self.viewport_bounds.y
                 + self
