@@ -6,19 +6,15 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use gen_core::PATH_START_NODE_ID;
-use gen_diff::{
-    graph::{DiffGenGraph, DiffGenGraphRef, DiffGraphNode},
-    operations::{BlockGroupDiff, collect_operation_diff},
-};
+use gen_diff::operations::{BlockGroupDiff, collect_operation_diff};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     db::DbContext,
     operations::{Operation, OperationSummary},
     traits::Query,
 };
-use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
+use gen_tui::graph_controller::GraphController;
 use itertools::Itertools;
-use petgraph::Direction as EdgeDirection;
 use rat_text::{
     HasScreenCursor,
     text_area::{TextArea, TextAreaState},
@@ -29,13 +25,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::{Color, StatefulWidget, Style},
     style::Modifier,
-    widgets::{Block, Borders, Paragraph, Row, Table},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table},
 };
 use rusqlite::{params, types::Value};
 
 use crate::{
     config::get_theme_color,
     views::{
+        diff_graph::{
+            DiffGraphComponent, apply_diff_highlights, block_group_label,
+            build_diff_graph_component, highlight_color_for_change_label,
+            split_connected_components,
+        },
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
@@ -57,128 +58,14 @@ struct OperationRow<'a> {
     summary: OperationSummary,
 }
 
-#[derive(Clone)]
-struct OperationDiffComponent {
-    title: String,
-    graph: GenGraph,
-    highlight_nodes: Vec<GraphNode>,
-    highlight_edges: Vec<(GraphNode, GraphNode)>,
-    highlight_color: Color,
-}
-
-fn apply_diff_highlights(
-    controller: &mut GraphController<&GenGraph, GenGraphNodeSizer>,
-    component: &OperationDiffComponent,
-) {
-    let style = PathStyle::new(component.highlight_color)
-        .with_line_style(LineStyle::Bold)
-        .with_merge_glyphs(true);
-    for &node in &component.highlight_nodes {
-        controller.set_node_highlight(node, style);
-    }
-    for &(src, target) in &component.highlight_edges {
-        controller.set_edge_highlight((src, target), style);
-    }
-}
-
-fn split_connected_components(graph: &DiffGenGraph) -> Vec<DiffGenGraph> {
-    use std::collections::HashSet;
-
-    let mut visited: HashSet<DiffGraphNode> = HashSet::new();
-    let mut components = Vec::new();
-
-    for node in graph.nodes() {
-        if visited.contains(&node) {
-            continue;
-        }
-
-        let mut stack = vec![node];
-        let mut component_nodes: HashSet<DiffGraphNode> = HashSet::new();
-        while let Some(current) = stack.pop() {
-            if !visited.insert(current) {
-                continue;
-            }
-            component_nodes.insert(current);
-            for neighbor in graph
-                .neighbors_directed(current, EdgeDirection::Outgoing)
-                .chain(graph.neighbors_directed(current, EdgeDirection::Incoming))
-            {
-                if !visited.contains(&neighbor) {
-                    stack.push(neighbor);
-                }
-            }
-        }
-
-        let mut subgraph = DiffGenGraph::new();
-        for graph_node in &component_nodes {
-            subgraph.add_node(*graph_node);
-        }
-        for (src, dest, edges) in graph.all_edges() {
-            if component_nodes.contains(&src) && component_nodes.contains(&dest) {
-                subgraph.add_edge(src, dest, edges.clone());
-            }
-        }
-        components.push(subgraph);
-    }
-
-    components
-}
-
-fn block_group_label(diff: &BlockGroupDiff) -> String {
-    if let Some(bg) = &diff.block_group {
-        format!(
-            "{collection} {sample} {name}",
-            collection = bg.collection_name,
-            sample = bg
-                .sample_name
-                .clone()
-                .unwrap_or_else(|| "Reference".to_string()),
-            name = bg.name,
-        )
-    } else {
-        format!("BlockGroup {}", diff.id)
-    }
-}
-
-fn build_diff_component(
-    diff_graph: &DiffGenGraph,
-    title: String,
-    highlight_color: Color,
-) -> OperationDiffComponent {
-    let graph: GenGraph = DiffGenGraphRef(diff_graph).into();
-    let highlight_edges = diff_graph
-        .all_edges()
-        .filter_map(|(src, target, edge_data)| {
-            edge_data
-                .iter()
-                .any(|edge| edge.is_new)
-                .then_some((src.node, target.node))
-        })
-        .collect();
-    let highlight_nodes = diff_graph
-        .nodes()
-        .filter_map(|node| node.is_new.then_some(node.node))
-        .collect();
-
-    OperationDiffComponent {
-        title,
-        graph,
-        highlight_nodes,
-        highlight_edges,
-        highlight_color,
-    }
-}
+type OperationDiffComponent = DiffGraphComponent;
 
 fn collect_diff_components(
     db_path: &str,
     graph_diffs: &[BlockGroupDiff],
     change_label: &'static str,
 ) -> Vec<OperationDiffComponent> {
-    let highlight_color = match change_label {
-        "Add" => Color::Green,
-        "Remove" => Color::Red,
-        _ => Color::White,
-    };
+    let highlight_color = highlight_color_for_change_label(change_label);
     let mut components = Vec::new();
 
     for graph_diff in graph_diffs {
@@ -188,7 +75,7 @@ fn collect_diff_components(
         );
         let parts = split_connected_components(&graph_diff.graph);
         if parts.len() <= 1 {
-            components.push(build_diff_component(
+            components.push(build_diff_graph_component(
                 &graph_diff.graph,
                 base_title,
                 highlight_color,
@@ -198,7 +85,7 @@ fn collect_diff_components(
 
         let total = parts.len();
         for (index, diff_graph) in parts.into_iter().enumerate() {
-            components.push(build_diff_component(
+            components.push(build_diff_graph_component(
                 &diff_graph,
                 format!("{base_title} (part {}/{total})", index + 1),
                 highlight_color,
@@ -313,6 +200,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
     let mut view_message_panel = false;
     let mut view_graph = false;
+    let mut graph_view_focus = "diff_list"; // "diff_list" or "graph_canvas"
     let mut panel_focus = "operations";
     let mut focus_rotation = vec!["operations"];
     let mut focus_index: usize = 0;
@@ -411,8 +299,11 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 } else if panel_focus == "message_editor" {
                     "*ctrl+s* save | *esc* leave panel".to_string()
                 } else if panel_focus == "graph_view" {
-                    "*tab* cycle diff parts | *←→↑↓* pan | *+/-* zoom | *esc* leave panel"
-                        .to_string()
+                    if graph_view_focus == "diff_list" {
+                        "*↑↓* select diff part | *tab* graph | *esc* leave panel".to_string()
+                    } else {
+                        "*←→↑↓* pan | *+/-* zoom | *tab* diff list | *esc* leave panel".to_string()
+                    }
                 } else {
                     "*esc* leave panel".to_string()
                 }
@@ -479,20 +370,12 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
             // Render the graph widget if a canvas area is available
             if let Some(canvas_area) = canvas_area {
-                let graph_title = if diff_components.is_empty() {
+                let graph_panel_title = if !panel_activated && panel_focus == "graph_view" {
+                    "[Operation Diff]".to_string()
+                } else {
                     "Operation Diff".to_string()
-                } else {
-                    format!(
-                        "Operation Diff {name}",
-                        name = diff_components[selected_diff_component].title
-                    )
                 };
-                let graph_title = if !panel_activated && panel_focus == "graph_view" {
-                    format!("[{}]", graph_title)
-                } else {
-                    graph_title
-                };
-                let graph_border_style = if panel_activated && panel_focus == "graph_view" {
+                let graph_panel_border_style = if panel_activated && panel_focus == "graph_view" {
                     focused_style
                 } else if !panel_activated && panel_focus == "graph_view" {
                     selected_style
@@ -500,18 +383,76 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     unfocused_style
                 };
 
+                let graph_panel = Block::default()
+                    .title(graph_panel_title)
+                    .borders(Borders::ALL)
+                    .border_style(graph_panel_border_style);
+                let panel_inner = graph_panel.inner(canvas_area);
+                f.render_widget(graph_panel, canvas_area);
+
+                let graph_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(45), Constraint::Min(1)])
+                    .split(panel_inner);
+
+                let list_items: Vec<ListItem> = diff_components
+                    .iter()
+                    .enumerate()
+                    .map(|(index, component)| {
+                        let item_style = if index == selected_diff_component {
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(component.title.clone()).style(item_style)
+                    })
+                    .collect();
+
+                let list_border_style = if panel_activated
+                    && panel_focus == "graph_view"
+                    && graph_view_focus == "diff_list"
+                {
+                    focused_style
+                } else if !panel_activated && panel_focus == "graph_view" {
+                    selected_style
+                } else {
+                    unfocused_style
+                };
+                let list = List::new(list_items).block(
+                    Block::default()
+                        .title("Diff Parts")
+                        .borders(Borders::ALL)
+                        .border_style(list_border_style),
+                );
+                f.render_widget(list, graph_chunks[0]);
+
+                let graph_title = if diff_components.is_empty() {
+                    "No Diff Parts".to_string()
+                } else {
+                    diff_components[selected_diff_component].title.clone()
+                };
+                let graph_border_style = if panel_activated
+                    && panel_focus == "graph_view"
+                    && graph_view_focus == "graph_canvas"
+                {
+                    focused_style
+                } else if !panel_activated && panel_focus == "graph_view" {
+                    selected_style
+                } else {
+                    unfocused_style
+                };
                 let graph_block = Block::default()
                     .title(graph_title)
                     .borders(Borders::ALL)
                     .border_style(graph_border_style);
-                let inner_canvas = graph_block.inner(canvas_area);
+                let inner_canvas = graph_block.inner(graph_chunks[1]);
+                f.render_widget(graph_block, graph_chunks[1]);
 
-                // Update viewport with exact inner bounds before animations
                 graph_controller.viewport_state.focus();
                 graph_controller.viewport_state.viewport_bounds = inner_canvas;
                 graph_controller.update_animations(frame_delta);
-
-                f.render_widget(graph_block, canvas_area);
 
                 let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
                 let widget = create_gen_graph_widget(conn)
@@ -716,6 +657,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 KeyCode::Char('v') => {
                                     // Open graph view
                                     view_graph = true;
+                                    graph_view_focus = "diff_list";
                                     // Add to focus_rotation if not present
                                     focus_index = if let Some((i, _)) =
                                         focus_rotation.iter().find_position(|s| **s == "graph_view")
@@ -764,25 +706,34 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         }
                         "graph_view" => {
                             if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-                                // Cycle diff components
-                                if !diff_components.is_empty() {
-                                    if key.code == KeyCode::BackTab {
-                                        if selected_diff_component == 0 {
-                                            selected_diff_component = diff_components.len() - 1;
-                                        } else {
+                                graph_view_focus = if graph_view_focus == "diff_list" {
+                                    "graph_canvas"
+                                } else {
+                                    "diff_list"
+                                };
+                            } else if graph_view_focus == "diff_list" {
+                                match key.code {
+                                    KeyCode::Up => {
+                                        if selected_diff_component > 0 {
                                             selected_diff_component -= 1;
-                                        }
-                                    } else {
-                                        selected_diff_component += 1;
-                                        if selected_diff_component >= diff_components.len() {
-                                            selected_diff_component = 0;
+                                            graph_controller = build_graph_controller(
+                                                &diff_components,
+                                                selected_diff_component,
+                                                &empty_graph,
+                                            );
                                         }
                                     }
-                                    graph_controller = build_graph_controller(
-                                        &diff_components,
-                                        selected_diff_component,
-                                        &empty_graph,
-                                    );
+                                    KeyCode::Down => {
+                                        if selected_diff_component + 1 < diff_components.len() {
+                                            selected_diff_component += 1;
+                                            graph_controller = build_graph_controller(
+                                                &diff_components,
+                                                selected_diff_component,
+                                                &empty_graph,
+                                            );
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             } else {
                                 let _ = graph_controller.handle_key_event(key);
