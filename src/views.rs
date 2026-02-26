@@ -11,7 +11,9 @@ pub mod gen_graph_widget;
 pub mod helpers;
 pub mod messages;
 pub mod operations;
+pub mod panels;
 pub mod patch;
+pub mod tui_runtime;
 
 #[cfg(test)]
 pub mod testing;
