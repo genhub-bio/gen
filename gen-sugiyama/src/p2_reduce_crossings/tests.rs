@@ -652,3 +652,91 @@ mod order {
         assert_eq!(graph[e_d3e].input_node_idx_pair, Some((g_node, e)));
     }
 }
+
+#[cfg(test)]
+mod find_chain_paths {
+    use petgraph::stable_graph::StableDiGraph;
+
+    use crate::{Edge, Vertex, p2_reduce_crossings::find_chain_paths};
+
+    fn vertex(rank: i32) -> Vertex {
+        Vertex {
+            rank,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn simple_chain() {
+        let mut graph = StableDiGraph::<Vertex, Edge>::new();
+        let a = graph.add_node(vertex(0));
+        let b = graph.add_node(vertex(1));
+        let c = graph.add_node(vertex(2));
+        let d = graph.add_node(vertex(3));
+
+        graph.add_edge(a, b, Edge::default());
+        graph.add_edge(b, c, Edge::default());
+        graph.add_edge(c, d, Edge::default());
+
+        let paths = find_chain_paths(&graph);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], vec![a, b, c, d]);
+    }
+
+    #[test]
+    fn chain_with_branches_at_start() {
+        let mut graph = StableDiGraph::<Vertex, Edge>::new();
+        let start = graph.add_node(vertex(0));
+        let b = graph.add_node(vertex(1));
+        let c = graph.add_node(vertex(2));
+        let d = graph.add_node(vertex(3));
+        let branch = graph.add_node(vertex(1));
+
+        graph.add_edge(start, b, Edge::default());
+        graph.add_edge(b, c, Edge::default());
+        graph.add_edge(c, d, Edge::default());
+        graph.add_edge(start, branch, Edge::default());
+
+        let paths = find_chain_paths(&graph);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], vec![b, c, d]);
+    }
+
+    #[test]
+    fn chain_with_branches_at_end() {
+        let mut graph = StableDiGraph::<Vertex, Edge>::new();
+        let a = graph.add_node(vertex(0));
+        let b = graph.add_node(vertex(1));
+        let c = graph.add_node(vertex(2));
+        let end = graph.add_node(vertex(3));
+        let branch = graph.add_node(vertex(3));
+
+        graph.add_edge(a, b, Edge::default());
+        graph.add_edge(b, c, Edge::default());
+        graph.add_edge(c, end, Edge::default());
+        graph.add_edge(c, branch, Edge::default());
+
+        let paths = find_chain_paths(&graph);
+        assert_eq!(paths.len(), 1);
+        let path = &paths[0];
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0], a);
+        assert_eq!(path[1], b);
+        assert_eq!(path[2], c);
+    }
+
+    #[test]
+    fn chain_with_parallel_bypass() {
+        let mut graph = petgraph::stable_graph::StableDiGraph::<Vertex, Edge>::new();
+        let nodes: Vec<_> = (0..7).map(|r| graph.add_node(vertex(r))).collect();
+
+        for i in 0..6 {
+            graph.add_edge(nodes[i], nodes[i + 1], Edge::default());
+        }
+        graph.add_edge(nodes[0], nodes[6], Edge::default());
+
+        let paths = find_chain_paths(&graph);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], nodes[1..6]);
+    }
+}

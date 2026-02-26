@@ -254,7 +254,7 @@ pub(super) fn insert_dummy_vertices(
     removed_edges
 }
 
-pub(super) fn redistribute_dummy_vertices(graph: &mut StableDiGraph<Vertex, Edge>) {
+pub(super) fn find_chain_paths(graph: &StableDiGraph<Vertex, Edge>) -> Vec<Vec<NodeIndex>> {
     let mut visited_interior = HashSet::new();
     let mut paths = Vec::new();
 
@@ -275,6 +275,7 @@ pub(super) fn redistribute_dummy_vertices(graph: &mut StableDiGraph<Vertex, Edge
                     break;
                 }
             }
+
             // Go forwards to find the end of the interior chain
             let mut curr = n;
             while let Some(next) = graph.neighbors_directed(curr, Outgoing).next() {
@@ -348,6 +349,12 @@ pub(super) fn redistribute_dummy_vertices(graph: &mut StableDiGraph<Vertex, Edge
             }
         }
     }
+
+    paths
+}
+
+pub(super) fn redistribute_dummy_vertices(graph: &mut StableDiGraph<Vertex, Edge>) {
+    let paths = find_chain_paths(graph);
 
     for path in paths {
         let n_nodes: Vec<_> = path
@@ -431,6 +438,7 @@ pub(super) fn redistribute_dummy_vertices(graph: &mut StableDiGraph<Vertex, Edge
             let e = graph.add_edge(new_sequence[i], new_sequence[i + 1], internal_edge_data[i]);
             added_edges.push(e);
         }
+
         // Reconnect external edges to the new endpoints.
         for (src, data) in in_edges {
             let e = graph.add_edge(src, new_sequence[0], data);
