@@ -122,6 +122,10 @@ struct GraphBuilder {
 impl GraphBuilder {
     fn new_from_edges_with_ranking(edges: &[(u32, u32)], ranks: &[(u32, u32)]) -> Self {
         let mut graph = StableDiGraph::<Vertex, Edge>::from_edges(edges);
+        let nodes: Vec<_> = graph.node_indices().collect();
+        for v in nodes {
+            graph[v].input_node_idx = Some(v);
+        }
         for (v, rank) in ranks {
             graph[NodeIndex::from(*v)].rank = *rank as i32;
         }
@@ -244,8 +248,9 @@ mod init_order {
 // TODO: Add new tests for Order crosscount
 #[cfg(test)]
 mod order {
-    use petgraph::stable_graph::StableDiGraph;
+    use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 
+    use super::GraphBuilder;
     use crate::{Edge, Vertex, p2::order_layer, p2_reduce_crossings::Order};
 
     /// Shorthand for creating a default vertex with a specified rank.
@@ -563,5 +568,87 @@ mod order {
         let result = order_layer(&graph, true, &order, crate::p2_reduce_crossings::barycenter);
 
         assert_eq!(result._inner[1], vec![l1_c, l1_a, l1_b]);
+    }
+
+    #[test]
+    fn test_redistribute_dummy_vertices() {
+        use crate::p2_reduce_crossings::{insert_dummy_vertices, redistribute_dummy_vertices};
+        // A -> F -> G -> E
+        // A -> B -> C -> D -> H -> I -> E (longer path to force ranks)
+        let edges = [
+            (0, 1),  // A -> F
+            (1, 2),  // F -> G
+            (2, 5),  // G -> E
+            (0, 6),  // A -> B
+            (6, 7),  // B -> C
+            (7, 8),  // C -> D
+            (8, 9),  // D -> H
+            (9, 10), // H -> I
+            (10, 5), // I -> E
+        ];
+        let ranks = [
+            (0, 0),  // A
+            (1, 1),  // F
+            (2, 2),  // G
+            (5, 6),  // E
+            (6, 1),  // B
+            (7, 2),  // C
+            (8, 3),  // D
+            (9, 4),  // H
+            (10, 5), // I
+        ];
+        let (mut graph, minimum_length) =
+            GraphBuilder::new_from_edges_with_ranking(&edges, &ranks).build();
+
+        // After insert_dummy_vertices:
+        // G -> E (rank 2 to 6) gets 3 dummies: d1(3), d2(4), d3(5)
+        insert_dummy_vertices(&mut graph, minimum_length, 0.0);
+
+        // Path of interest: [F, G, d1, d2, d3] (ranks 1, 2, 3, 4, 5)
+        // N = 2 (F, G), M = 3 (d1, d2, d3).
+        // start_dummies = 3 / 2 = 1.
+        // end_dummies = 3 - 1 = 2.
+        // New sequence: [d1, F, G, d2, d3]
+        // Ranks: d1:1, F:2, G:3, d2:4, d3:5
+
+        let f = NodeIndex::from(1);
+        let g_node = NodeIndex::from(2);
+
+        redistribute_dummy_vertices(&mut graph);
+
+        let mut dummies: Vec<_> = graph
+            .node_indices()
+            .filter(|&n| graph[n].is_dummy)
+            .collect();
+        dummies.sort_by_key(|&n| graph[n].rank);
+        assert_eq!(dummies.len(), 3);
+        let d1 = dummies[0];
+        let d2 = dummies[1];
+        let d3 = dummies[2];
+
+        // Check Ranks
+        assert_eq!(graph[d1].rank, 1);
+        assert_eq!(graph[f].rank, 2);
+        assert_eq!(graph[g_node].rank, 3);
+        assert_eq!(graph[d2].rank, 4);
+        assert_eq!(graph[d3].rank, 5);
+
+        // Check labels
+        let a = NodeIndex::from(0);
+        let e = NodeIndex::from(5);
+
+        let e_ad1 = graph.find_edge(a, d1).unwrap();
+        let e_d1f = graph.find_edge(d1, f).unwrap();
+        let e_fg = graph.find_edge(f, g_node).unwrap();
+        let e_gd2 = graph.find_edge(g_node, d2).unwrap();
+        let e_d2d3 = graph.find_edge(d2, d3).unwrap();
+        let e_d3e = graph.find_edge(d3, e).unwrap();
+
+        assert_eq!(graph[e_ad1].input_node_idx_pair, Some((a, f)));
+        assert_eq!(graph[e_d1f].input_node_idx_pair, Some((a, f)));
+        assert_eq!(graph[e_fg].input_node_idx_pair, Some((f, g_node)));
+        assert_eq!(graph[e_gd2].input_node_idx_pair, Some((g_node, e)));
+        assert_eq!(graph[e_d2d3].input_node_idx_pair, Some((g_node, e)));
+        assert_eq!(graph[e_d3e].input_node_idx_pair, Some((g_node, e)));
     }
 }

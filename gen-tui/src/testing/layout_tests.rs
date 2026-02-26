@@ -1438,6 +1438,135 @@ fn test_double_chain() {
     insta::assert_snapshot!("double_chain", snapshot);
 }
 
+#[test]
+fn test_asymmetric_diamond() {
+    let _ = env_logger::try_init();
+
+    // Create an asymmetric diamond graph:
+    //   A-B-C-D-E
+    //    \     /
+    //     --F--
+    //
+    // Edges:
+    // A -> B, B -> C, C -> D, D -> E (main chain)
+    // A -> F, F -> E (bypass through single intermediate node)
+
+    let mut domain_graph = MockDomainGraph::new();
+    let n_a = domain_graph.add_node(());
+    let n_b = domain_graph.add_node(());
+    let n_c = domain_graph.add_node(());
+    let n_d = domain_graph.add_node(());
+    let n_e = domain_graph.add_node(());
+    let n_f = domain_graph.add_node(());
+
+    // Main chain: A -> B -> C -> D -> E
+    domain_graph.add_edge(n_a, n_b, ());
+    domain_graph.add_edge(n_b, n_c, ());
+    domain_graph.add_edge(n_c, n_d, ());
+    domain_graph.add_edge(n_d, n_e, ());
+
+    // Bypass: A -> F -> E
+    domain_graph.add_edge(n_a, n_f, ());
+    domain_graph.add_edge(n_f, n_e, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond_4_1() {
+    let _ = env_logger::try_init();
+
+    // Longer leg: 4 intermediate nodes (6 total), shorter leg: 1 intermediate (2 total)
+    // A -> B -> C -> D -> E -> F
+    // A -> G -> E
+
+    let mut domain_graph = MockDomainGraph::new();
+    let n_a = domain_graph.add_node(());
+    let n_b = domain_graph.add_node(());
+    let n_c = domain_graph.add_node(());
+    let n_d = domain_graph.add_node(());
+    let n_e = domain_graph.add_node(());
+    let n_f = domain_graph.add_node(());
+    let n_g = domain_graph.add_node(());
+
+    domain_graph.add_edge(n_a, n_b, ());
+    domain_graph.add_edge(n_b, n_c, ());
+    domain_graph.add_edge(n_c, n_d, ());
+    domain_graph.add_edge(n_d, n_e, ());
+    domain_graph.add_edge(n_e, n_f, ());
+
+    domain_graph.add_edge(n_a, n_g, ());
+    domain_graph.add_edge(n_g, n_f, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond_4_1", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond_3_2() {
+    let _ = env_logger::try_init();
+
+    // A -> B -> C -> D -> E
+    // A -> F1 -> F2 -> E
+
+    let mut domain_graph = MockDomainGraph::new();
+    let n_a = domain_graph.add_node(());
+    let n_b = domain_graph.add_node(());
+    let n_c = domain_graph.add_node(());
+    let n_d = domain_graph.add_node(());
+    let n_e = domain_graph.add_node(());
+    let n_f1 = domain_graph.add_node(());
+    let n_f2 = domain_graph.add_node(());
+
+    domain_graph.add_edge(n_a, n_b, ());
+    domain_graph.add_edge(n_b, n_c, ());
+    domain_graph.add_edge(n_c, n_d, ());
+    domain_graph.add_edge(n_d, n_e, ());
+
+    domain_graph.add_edge(n_a, n_f1, ());
+    domain_graph.add_edge(n_f1, n_f2, ());
+    domain_graph.add_edge(n_f2, n_e, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond_3_2", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond_4_2() {
+    let _ = env_logger::try_init();
+
+    // A -> B -> C -> D -> E -> F
+    // A -> X -> Y -> F
+
+    let mut domain_graph = MockDomainGraph::new();
+    let n_a = domain_graph.add_node(());
+    let n_b = domain_graph.add_node(());
+    let n_c = domain_graph.add_node(());
+    let n_d = domain_graph.add_node(());
+    let n_e = domain_graph.add_node(());
+    let n_f = domain_graph.add_node(());
+    let n_x = domain_graph.add_node(());
+    let n_y = domain_graph.add_node(());
+
+    domain_graph.add_edge(n_a, n_b, ());
+    domain_graph.add_edge(n_b, n_c, ());
+    domain_graph.add_edge(n_c, n_d, ());
+    domain_graph.add_edge(n_d, n_e, ());
+    domain_graph.add_edge(n_e, n_f, ());
+
+    domain_graph.add_edge(n_a, n_x, ());
+    domain_graph.add_edge(n_x, n_y, ());
+    domain_graph.add_edge(n_y, n_f, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond_4_2", snapshot);
+}
+
 /// Test rendering and positioning of very large nodes during zoom operations.
 ///
 /// This test verifies that nodes with extreme widths (1000+ characters) are rendered

@@ -217,6 +217,8 @@ pub fn run_sugiyama_algorithm(
         config.dummy_size,
     );
 
+    p2::redistribute_dummy_vertices(vertex_graph);
+
     let mut layers = p2::ordering(vertex_graph, config.c_minimization, config.transpose);
     if !config.dummy_vertices {
         p2::remove_dummy_vertices(vertex_graph, &mut layers);

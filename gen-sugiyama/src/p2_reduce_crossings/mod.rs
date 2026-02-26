@@ -11,6 +11,7 @@ use petgraph::{
     Direction::{Incoming, Outgoing},
     algo::toposort,
     stable_graph::{NodeIndex, StableDiGraph},
+    visit::EdgeRef,
 };
 
 use super::{
@@ -251,6 +252,229 @@ pub(super) fn insert_dummy_vertices(
         }
     }
     removed_edges
+}
+
+pub(super) fn redistribute_dummy_vertices(graph: &mut StableDiGraph<Vertex, Edge>) {
+    let mut visited_interior = HashSet::new();
+    let mut paths = Vec::new();
+
+    let node_indices: Vec<_> = graph.node_indices().collect();
+    for &n in &node_indices {
+        if is_interior(graph, n) && !visited_interior.contains(&n) {
+            let mut chain = vec![n];
+            visited_interior.insert(n);
+
+            // Go backwards to find the start of the interior chain
+            let mut curr = n;
+            while let Some(prev) = graph.neighbors_directed(curr, Incoming).next() {
+                if is_interior(graph, prev) && !visited_interior.contains(&prev) {
+                    chain.insert(0, prev);
+                    visited_interior.insert(prev);
+                    curr = prev;
+                } else {
+                    break;
+                }
+            }
+            // Go forwards to find the end of the interior chain
+            let mut curr = n;
+            while let Some(next) = graph.neighbors_directed(curr, Outgoing).next() {
+                if is_interior(graph, next) && !visited_interior.contains(&next) {
+                    chain.push(next);
+                    visited_interior.insert(next);
+                    curr = next;
+                } else {
+                    break;
+                }
+            }
+
+            // Maximal chain of interior nodes c1...cm
+            let c1 = chain[0];
+            let cm = *chain.last().unwrap();
+            let x = graph.neighbors_directed(c1, Incoming).next();
+            let y = graph.neighbors_directed(cm, Outgoing).next();
+
+            // A node L is a left endpoint if out_degree == 1 and its neighbor is interior.
+            // A node R is a right endpoint if in_degree == 1 and its neighbor is interior.
+            // We search for the maximal such L and R around our chain.
+            let l = if let Some(x_node) = x {
+                if graph.neighbors_directed(x_node, Outgoing).count() == 1 {
+                    Some(x_node)
+                } else if chain.len() >= 2 {
+                    // If x_node has out_degree > 1, c1 itself is the maximal left endpoint
+                    // (if it has an interior neighbor, which it does: c2).
+                    Some(c1)
+                } else {
+                    None
+                }
+            } else if chain.len() >= 2 {
+                Some(c1)
+            } else {
+                None
+            };
+
+            let r = if let Some(y_node) = y {
+                if graph.neighbors_directed(y_node, Incoming).count() == 1 {
+                    Some(y_node)
+                } else if chain.len() >= 2 {
+                    // If y_node has in_degree > 1, cm itself is the maximal right endpoint.
+                    Some(cm)
+                } else {
+                    None
+                }
+            } else if chain.len() >= 2 {
+                Some(cm)
+            } else {
+                None
+            };
+
+            if let (Some(l_node), Some(r_node)) = (l, r) {
+                let mut full_chain = Vec::new();
+                if let Some(x_node) = x {
+                    full_chain.push(x_node);
+                }
+                full_chain.extend(chain);
+                if let Some(y_node) = y {
+                    full_chain.push(y_node);
+                }
+
+                let l_idx = full_chain.iter().position(|&n| n == l_node).unwrap();
+                let r_idx = full_chain.iter().position(|&n| n == r_node).unwrap();
+                let path = full_chain[l_idx..=r_idx].to_vec();
+
+                // Paths shorter than 3 vertices (no interior) are ignored.
+                if path.len() >= 3 {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+
+    for path in paths {
+        let n_nodes: Vec<_> = path
+            .iter()
+            .filter(|&&n| !graph[n].is_dummy)
+            .cloned()
+            .collect();
+        let d_nodes: Vec<_> = path
+            .iter()
+            .filter(|&&n| graph[n].is_dummy)
+            .cloned()
+            .collect();
+
+        // Skip if no dummies or no non-dummies to interleave.
+        if n_nodes.is_empty() || d_nodes.is_empty() {
+            continue;
+        }
+
+        let m = d_nodes.len();
+        let start_dummies = m / 2;
+        let end_dummies = m - start_dummies;
+
+        let mut new_sequence = Vec::new();
+        let mut d_iter = d_nodes.into_iter();
+        for _ in 0..start_dummies {
+            new_sequence.push(d_iter.next().unwrap());
+        }
+        new_sequence.extend(n_nodes);
+        for _ in 0..end_dummies {
+            new_sequence.push(d_iter.next().unwrap());
+        }
+
+        let first_node = path[0];
+        let last_node = *path.last().unwrap();
+        let start_rank = graph[first_node].rank;
+        let path_set: HashSet<_> = path.iter().cloned().collect();
+
+        // Collect external edges and internal edge data before modifying the graph.
+        let in_edges: Vec<_> = graph
+            .edges_directed(first_node, Incoming)
+            .filter(|e| !path_set.contains(&e.source()))
+            .map(|e| (e.source(), *e.weight()))
+            .collect();
+        let out_edges: Vec<_> = graph
+            .edges_directed(last_node, Outgoing)
+            .filter(|e| !path_set.contains(&e.target()))
+            .map(|e| (e.target(), *e.weight()))
+            .collect();
+
+        let mut internal_edge_data = Vec::new();
+        for i in 0..path.len() - 1 {
+            let edge = graph.find_edge(path[i], path[i + 1]).unwrap();
+            internal_edge_data.push(*graph.edge_weight(edge).unwrap());
+        }
+
+        // Remove old edges from the path.
+        for i in 0..path.len() - 1 {
+            if let Some(e) = graph.find_edge(path[i], path[i + 1]) {
+                graph.remove_edge(e);
+            }
+        }
+        for (src, _) in &in_edges {
+            if let Some(e) = graph.find_edge(*src, first_node) {
+                graph.remove_edge(e);
+            }
+        }
+        for (target, _) in &out_edges {
+            if let Some(e) = graph.find_edge(last_node, *target) {
+                graph.remove_edge(e);
+            }
+        }
+
+        // Re-assign ranks based on the new interleaved sequence.
+        for (i, &node) in new_sequence.iter().enumerate() {
+            graph[node].rank = start_rank + i as i32;
+        }
+
+        // Reconnect edges in the new sequence.
+        let mut added_edges = Vec::new();
+        for i in 0..new_sequence.len() - 1 {
+            let e = graph.add_edge(new_sequence[i], new_sequence[i + 1], internal_edge_data[i]);
+            added_edges.push(e);
+        }
+        // Reconnect external edges to the new endpoints.
+        for (src, data) in in_edges {
+            let e = graph.add_edge(src, new_sequence[0], data);
+            added_edges.push(e);
+        }
+        for (target, data) in out_edges {
+            let e = graph.add_edge(*new_sequence.last().unwrap(), target, data);
+            added_edges.push(e);
+        }
+
+        // Update labels for all touched edges based on new non-dummy neighbors.
+        for e_idx in added_edges {
+            let (u, v) = graph.edge_endpoints(e_idx).unwrap();
+            let s_node = find_nearest_non_dummy(graph, u, Incoming);
+            let t_node = find_nearest_non_dummy(graph, v, Outgoing);
+
+            if let (Some(s_orig), Some(t_orig)) =
+                (graph[s_node].input_node_idx, graph[t_node].input_node_idx)
+            {
+                graph.edge_weight_mut(e_idx).unwrap().input_node_idx_pair = Some((s_orig, t_orig));
+            }
+        }
+    }
+}
+
+fn find_nearest_non_dummy(
+    graph: &StableDiGraph<Vertex, Edge>,
+    start: NodeIndex,
+    dir: petgraph::Direction,
+) -> NodeIndex {
+    let mut curr = start;
+    while graph[curr].is_dummy {
+        if let Some(next) = graph.neighbors_directed(curr, dir).next() {
+            curr = next;
+        } else {
+            break;
+        }
+    }
+    curr
+}
+
+fn is_interior(graph: &StableDiGraph<Vertex, Edge>, n: NodeIndex) -> bool {
+    graph.neighbors_directed(n, Incoming).count() == 1
+        && graph.neighbors_directed(n, Outgoing).count() == 1
 }
 
 pub(super) fn remove_dummy_vertices(
