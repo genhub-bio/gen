@@ -121,6 +121,7 @@ impl Path {
             .iter()
             .map(|augmented_edge| augmented_edge.edge.id)
             .collect::<HashSet<_>>();
+
         assert!(
             edge_id_set.is_subset(&bg_edge_ids),
             "Not all edges are in the block group ({block_group_id})"
@@ -159,17 +160,6 @@ impl Path {
                 "Strand mismatch between consecutive edges {} and {}",
                 edge1.id,
                 edge2.id,
-            );
-        }
-
-        // An edge shouldn't start and end at the same coordinate on the same node
-        for edge_id in edge_ids {
-            let edge = edges_by_id.get(edge_id).unwrap();
-            assert!(
-                edge.source_node_id != edge.target_node_id
-                    || edge.source_coordinate != edge.target_coordinate,
-                "Edge {} goes into and out of the same node at the same coordinate",
-                edge.id
             );
         }
     }
@@ -3609,39 +3599,6 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids);
-    }
-
-    #[test]
-    #[should_panic]
-    // Panic message is something like: "Edge 1 goes into and out of the same node at the same coordinate"
-    fn test_edge_does_not_start_and_end_on_same_bp() {
-        let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
-        let sequence1 = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("ATCGATCG")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let edge1 = Edge::create(
-            conn,
-            node1_id,
-            2,
-            Strand::Forward,
-            node1_id,
-            2,
-            Strand::Forward,
-        );
-
-        let block_group_edges = vec![BlockGroupEdgeData {
-            block_group_id: block_group.id,
-            edge_id: edge1.id,
-            chromosome_index: 0,
-            phased: 0,
-        }];
-        BlockGroupEdge::bulk_create(conn, &block_group_edges);
-
-        let _path = Path::create(conn, "chr1", &block_group.id, &[edge1.id]);
     }
 
     #[test]
