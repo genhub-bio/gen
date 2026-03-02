@@ -1,10 +1,6 @@
 use std::{collections::HashMap, io, rc::Rc, time::Instant};
 
-use crossterm::{
-    event::{self, KeyCode, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, KeyCode, KeyModifiers};
 use gen_core::PATH_START_NODE_ID;
 use gen_diff::operations::{BlockGroupDiff, collect_operation_diff};
 use gen_graph::{GenGraph, GraphNode};
@@ -14,18 +10,15 @@ use gen_models::{
     traits::Query,
 };
 use gen_tui::graph_controller::GraphController;
-use itertools::Itertools;
 use rat_text::{
     HasScreenCursor,
     text_area::{TextArea, TextAreaState},
 };
 use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    prelude::{Color, StatefulWidget, Style},
+    prelude::{StatefulWidget, Style},
     style::Modifier,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table},
+    widgets::{Block, List, ListItem, Row, Table},
 };
 use rusqlite::{params, types::Value};
 
@@ -40,7 +33,8 @@ use crate::{
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
-        helpers::{install_tui_panic_hook, style_text},
+        panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
+        tui_runtime::TuiSession,
     },
 };
 
@@ -59,6 +53,38 @@ struct OperationRow<'a> {
 }
 
 type OperationDiffComponent = DiffGraphComponent;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationPanel {
+    Operations,
+    MessageEditor,
+    GraphView,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphViewFocus {
+    DiffList,
+    GraphCanvas,
+}
+
+fn graph_subpanel_border_style(
+    panel_focus: &PanelFocus<OperationPanel>,
+    active_subpanel: GraphViewFocus,
+    subpanel: GraphViewFocus,
+    panel_styles: PanelStyles,
+) -> Style {
+    if panel_focus.is_active_panel(OperationPanel::GraphView) {
+        if active_subpanel == subpanel {
+            panel_styles.focused
+        } else {
+            panel_styles.unfocused
+        }
+    } else if panel_focus.is_navigation_selected(OperationPanel::GraphView) {
+        panel_styles.selected
+    } else {
+        panel_styles.unfocused
+    }
+}
 
 fn collect_diff_components(
     db_path: &str,
@@ -152,7 +178,6 @@ fn build_graph_controller<'a>(
 pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<(), io::Error> {
     let conn = context.graph().conn();
     let op_conn = context.operations().conn();
-    install_tui_panic_hook();
 
     let operation_by_hash: HashMap<_, &Operation> = HashMap::from_iter(
         operations
@@ -178,11 +203,8 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
         })
         .collect::<Vec<_>>();
 
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut session = TuiSession::enter()?;
+    let terminal = session.terminal_mut();
 
     let mut textarea = TextAreaState::new();
     let mut empty_graph: GenGraph = GenGraph::new();
@@ -200,18 +222,9 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
 
     let mut view_message_panel = false;
     let mut view_graph = false;
-    let mut graph_view_focus = "diff_list"; // "diff_list" or "graph_canvas"
-    let mut panel_focus = "operations";
-    let mut focus_rotation = vec!["operations"];
-    let mut focus_index: usize = 0;
-    let mut panel_activated = true; // Start with operations panel activated
-    let focused_style = Style::default()
-        .fg(Color::Blue)
-        .add_modifier(Modifier::BOLD);
-    let selected_style = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
-    let unfocused_style = Style::default().fg(Color::Gray);
+    let mut graph_view_focus = GraphViewFocus::DiffList;
+    let mut panel_focus = PanelFocus::new(OperationPanel::Operations);
+    let panel_styles = PanelStyles::default();
     let status_bar_height: u16 = 1;
 
     let mut selected = 0;
@@ -242,12 +255,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 })
                 .collect();
 
-            let ops_title = if !panel_activated && panel_focus == "operations" {
-                "[Operations]" // Selected in nav mode
-            } else {
-                "Operations"
-            };
-
             let table = Table::new(
                 rows,
                 [
@@ -260,18 +267,12 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 Row::new(vec!["Operation Hash", "Change Type", "Summary"])
                     .style(Style::default().add_modifier(Modifier::UNDERLINED)),
             )
-            .block(
-                Block::default()
-                    .title(ops_title)
-                    .borders(Borders::ALL)
-                    .border_style(if panel_activated && panel_focus == "operations" {
-                        focused_style // Blue bold when active
-                    } else if !panel_activated && panel_focus == "operations" {
-                        selected_style // Cyan bold when selected but not active
-                    } else {
-                        unfocused_style // Gray when not selected
-                    }),
-            );
+            .block(panel_block(
+                "Operations",
+                &panel_focus,
+                OperationPanel::Operations,
+                panel_styles,
+            ));
 
             let outer_layout = Layout::default()
                 .direction(Direction::Vertical)
@@ -284,49 +285,43 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
             let main_area = outer_layout[0];
             let status_bar_area = outer_layout[1];
 
-            let panel_messages = if !panel_activated {
-                // NAVIGATION MODE - show cycling and panel management controls
+            let panel_messages = if panel_focus.is_navigation() {
                 let mut msg = "*tab/arrows* navigate | *enter* activate panel".to_string();
-                if panel_focus == "message_editor" || panel_focus == "graph_view" {
+                if matches!(
+                    panel_focus.current(),
+                    OperationPanel::MessageEditor | OperationPanel::GraphView
+                ) {
                     msg.push_str(" | *x* close panel");
                 }
                 msg.push_str(" | *q* quit");
                 msg
             } else {
-                // ACTIVE MODE - show panel-specific controls
-                if panel_focus == "operations" {
-                    "*↑↓* select | *e* edit msg | *v* view graph | *esc* leave panel".to_string()
-                } else if panel_focus == "message_editor" {
-                    "*ctrl+s* save | *esc* leave panel".to_string()
-                } else if panel_focus == "graph_view" {
-                    if graph_view_focus == "diff_list" {
-                        "*↑↓* select diff part | *tab* graph | *esc* leave panel".to_string()
-                    } else {
-                        "*←→↑↓* pan | *+/-* zoom | *tab* diff list | *esc* leave panel".to_string()
+                match panel_focus.current() {
+                    OperationPanel::Operations => {
+                        "*↑↓* select | *e* edit msg | *v* view graph | *esc* leave panel"
+                            .to_string()
                     }
-                } else {
-                    "*esc* leave panel".to_string()
+                    OperationPanel::MessageEditor => {
+                        "*ctrl+s* save | *esc* leave panel".to_string()
+                    }
+                    OperationPanel::GraphView => {
+                        if graph_view_focus == GraphViewFocus::DiffList {
+                            "*↑↓* select diff part | *tab* graph | *esc* leave panel".to_string()
+                        } else {
+                            "*←→↑↓* pan | *+/-* zoom | *tab* diff list | *esc* leave panel"
+                                .to_string()
+                        }
+                    }
                 }
             };
 
-            let msg_editor_title = if !panel_activated && panel_focus == "message_editor" {
-                "[Operation Summary]" // Selected in nav mode
-            } else {
-                "Operation Summary"
-            };
+            let msg_editor_block = panel_block(
+                "Operation Summary",
+                &panel_focus,
+                OperationPanel::MessageEditor,
+                panel_styles,
+            );
 
-            let msg_editor_block = Block::default()
-                .title(msg_editor_title)
-                .borders(Borders::ALL)
-                .border_style(if panel_activated && panel_focus == "message_editor" {
-                    focused_style // Blue bold when active
-                } else if !panel_activated && panel_focus == "message_editor" {
-                    selected_style // Cyan bold when selected but not active
-                } else {
-                    unfocused_style // Gray when not selected
-                });
-
-            // Determine the canvas area for the graph and render all panels
             let canvas_area = if view_message_panel {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
@@ -368,25 +363,13 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 None
             };
 
-            // Render the graph widget if a canvas area is available
             if let Some(canvas_area) = canvas_area {
-                let graph_panel_title = if !panel_activated && panel_focus == "graph_view" {
-                    "[Operation Diff]".to_string()
-                } else {
-                    "Operation Diff".to_string()
-                };
-                let graph_panel_border_style = if panel_activated && panel_focus == "graph_view" {
-                    focused_style
-                } else if !panel_activated && panel_focus == "graph_view" {
-                    selected_style
-                } else {
-                    unfocused_style
-                };
-
-                let graph_panel = Block::default()
-                    .title(graph_panel_title)
-                    .borders(Borders::ALL)
-                    .border_style(graph_panel_border_style);
+                let graph_panel = panel_block(
+                    "Operation Diff",
+                    &panel_focus,
+                    OperationPanel::GraphView,
+                    panel_styles,
+                );
                 let panel_inner = graph_panel.inner(canvas_area);
                 f.render_widget(graph_panel, canvas_area);
 
@@ -401,7 +384,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     .map(|(index, component)| {
                         let item_style = if index == selected_diff_component {
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(ratatui::style::Color::Cyan)
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
@@ -410,20 +393,16 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     })
                     .collect();
 
-                let list_border_style = if panel_activated
-                    && panel_focus == "graph_view"
-                    && graph_view_focus == "diff_list"
-                {
-                    focused_style
-                } else if !panel_activated && panel_focus == "graph_view" {
-                    selected_style
-                } else {
-                    unfocused_style
-                };
+                let list_border_style = graph_subpanel_border_style(
+                    &panel_focus,
+                    graph_view_focus,
+                    GraphViewFocus::DiffList,
+                    panel_styles,
+                );
                 let list = List::new(list_items).block(
                     Block::default()
                         .title("Diff Parts")
-                        .borders(Borders::ALL)
+                        .borders(ratatui::widgets::Borders::ALL)
                         .border_style(list_border_style),
                 );
                 f.render_widget(list, graph_chunks[0]);
@@ -433,19 +412,15 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 } else {
                     diff_components[selected_diff_component].title.clone()
                 };
-                let graph_border_style = if panel_activated
-                    && panel_focus == "graph_view"
-                    && graph_view_focus == "graph_canvas"
-                {
-                    focused_style
-                } else if !panel_activated && panel_focus == "graph_view" {
-                    selected_style
-                } else {
-                    unfocused_style
-                };
+                let graph_border_style = graph_subpanel_border_style(
+                    &panel_focus,
+                    graph_view_focus,
+                    GraphViewFocus::GraphCanvas,
+                    panel_styles,
+                );
                 let graph_block = Block::default()
                     .title(graph_title)
-                    .borders(Borders::ALL)
+                    .borders(ratatui::widgets::Borders::ALL)
                     .border_style(graph_border_style);
                 let inner_canvas = graph_block.inner(graph_chunks[1]);
                 f.render_widget(graph_block, graph_chunks[1]);
@@ -461,23 +436,11 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     .cursor();
                 f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
             }
-            let status_bar_contents = format!(
-                "{panel_messages:^width$}",
-                width = status_bar_area.width as usize
-            );
-            let status_line = style_text(
-                &status_bar_contents,
-                Style::default().fg(get_theme_color("text_muted").unwrap()),
-                Style::default().fg(get_theme_color("highlight").unwrap()),
-            );
-            let status_bar = Paragraph::new(status_line)
-                .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
-            f.render_widget(status_bar, status_bar_area);
 
-            // Set cursor position for the message editor when focused
+            render_status_bar(f, status_bar_area, &panel_messages);
+
             if view_message_panel
-                && panel_activated
-                && panel_focus == "message_editor"
+                && panel_focus.is_active_panel(OperationPanel::MessageEditor)
                 && let Some((cursor_x, cursor_y)) = textarea.screen_cursor()
             {
                 f.set_cursor_position((cursor_x, cursor_y));
@@ -487,130 +450,170 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
         if event::poll(std::time::Duration::from_millis(100))?
             && let event::Event::Key(key) = event::read()?
         {
-            if !panel_activated {
-                // NAVIGATION MODE - handle Tab/Shift+Tab, Enter, x, q
+            if panel_focus.is_navigation() {
                 match key.code {
                     KeyCode::Tab => {
-                        focus_index += 1;
-                        if focus_index >= focus_rotation.len() {
-                            focus_index = 0;
-                        }
-                        panel_focus = focus_rotation[focus_index];
+                        panel_focus.cycle_next();
                     }
                     KeyCode::BackTab => {
-                        if focus_index > 0 {
-                            focus_index -= 1;
-                        } else {
-                            focus_index = focus_rotation.len() - 1;
-                        }
-                        panel_focus = focus_rotation[focus_index];
+                        panel_focus.cycle_prev();
                     }
-                    // *   Down from "Operations" moves to the first available bottom panel ("Message Editor" or "Graph View").
-                    //     *   Up from any bottom panel returns to "Operations".
-                    //     *   Right moves from "Message Editor" to "Graph View" (if visible).
-                    //     *   Left moves from "Graph View" to "Message Editor" (if visible).
                     KeyCode::Up => {
-                        if panel_focus != "operations" {
-                            panel_focus = "operations";
-                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
-                            {
-                                focus_index = idx;
-                            }
-                        }
+                        panel_focus.focus(OperationPanel::Operations);
                     }
                     KeyCode::Down => {
-                        if panel_focus == "operations" {
+                        if panel_focus.current() == OperationPanel::Operations {
                             if view_message_panel {
-                                panel_focus = "message_editor";
+                                panel_focus.focus(OperationPanel::MessageEditor);
                             } else if view_graph {
-                                panel_focus = "graph_view";
-                            }
-                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
-                            {
-                                focus_index = idx;
+                                panel_focus.focus(OperationPanel::GraphView);
                             }
                         }
                     }
                     KeyCode::Left => {
-                        if panel_focus == "graph_view" && view_message_panel {
-                            panel_focus = "message_editor";
-                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
-                            {
-                                focus_index = idx;
-                            }
+                        if panel_focus.current() == OperationPanel::GraphView && view_message_panel
+                        {
+                            panel_focus.focus(OperationPanel::MessageEditor);
                         }
                     }
                     KeyCode::Right => {
-                        if panel_focus == "message_editor" && view_graph {
-                            panel_focus = "graph_view";
-                            if let Some(idx) = focus_rotation.iter().position(|&s| s == panel_focus)
-                            {
-                                focus_index = idx;
-                            }
+                        if panel_focus.current() == OperationPanel::MessageEditor && view_graph {
+                            panel_focus.focus(OperationPanel::GraphView);
                         }
                     }
                     KeyCode::Enter => {
-                        // Activate the currently selected panel
-                        panel_activated = true;
+                        panel_focus.activate();
                     }
-                    KeyCode::Char('x') => {
-                        // Close the currently selected panel
-                        if panel_focus == "message_editor" {
+                    KeyCode::Char('x') => match panel_focus.current() {
+                        OperationPanel::MessageEditor => {
                             view_message_panel = false;
-                            // Remove from focus_rotation
-                            if let Some((p, _)) = focus_rotation
-                                .iter()
-                                .find_position(|s| **s == "message_editor")
-                            {
-                                focus_rotation.remove(p);
-                            }
-                            // Adjust focus_index and cycle to next panel
-                            if focus_index >= focus_rotation.len() {
-                                focus_index = 0;
-                            }
-                            panel_focus = focus_rotation[focus_index];
-                        } else if panel_focus == "graph_view" {
-                            view_graph = false;
-                            // Remove from focus_rotation
-                            if let Some((p, _)) =
-                                focus_rotation.iter().find_position(|s| **s == "graph_view")
-                            {
-                                focus_rotation.remove(p);
-                            }
-                            // Adjust focus_index and cycle to next panel
-                            if focus_index >= focus_rotation.len() {
-                                focus_index = 0;
-                            }
-                            panel_focus = focus_rotation[focus_index];
+                            panel_focus.remove_panel(OperationPanel::MessageEditor);
                         }
-                        // Operations panel cannot be closed
-                    }
+                        OperationPanel::GraphView => {
+                            view_graph = false;
+                            panel_focus.remove_panel(OperationPanel::GraphView);
+                        }
+                        OperationPanel::Operations => {}
+                    },
                     KeyCode::Char('q') => {
-                        // Exit application
                         break;
                     }
                     _ => {}
                 }
+            } else if key.code == KeyCode::Esc {
+                panel_focus.deactivate();
             } else {
-                // ACTIVE MODE - delegate to active panel, Esc leaves (doesn't close)
-                if key.code == KeyCode::Esc {
-                    panel_activated = false;
-                } else {
-                    match panel_focus {
-                        "operations" => {
-                            // Operations table in active mode handles: e, v, up/down
+                match panel_focus.current() {
+                    OperationPanel::Operations => match key.code {
+                        KeyCode::Up => {
+                            if operation_summaries.is_empty() {
+                                continue;
+                            }
+                            let previous_selected = selected;
+                            if selected > 0 {
+                                selected = selected.saturating_sub(1);
+                            }
+                            if view_graph && selected != previous_selected {
+                                diff_components = load_diff_components_for_operation(
+                                    context,
+                                    operation_summaries[selected].operation,
+                                );
+                                selected_diff_component = 0;
+                                graph_controller = build_graph_controller(
+                                    &diff_components,
+                                    selected_diff_component,
+                                    &empty_graph,
+                                );
+                            }
+                        }
+                        KeyCode::Down => {
+                            if operation_summaries.is_empty() {
+                                continue;
+                            }
+                            let previous_selected = selected;
+                            if selected + 1 < operation_summaries.len() {
+                                selected += 1;
+                            }
+                            if view_graph && selected != previous_selected {
+                                diff_components = load_diff_components_for_operation(
+                                    context,
+                                    operation_summaries[selected].operation,
+                                );
+                                selected_diff_component = 0;
+                                graph_controller = build_graph_controller(
+                                    &diff_components,
+                                    selected_diff_component,
+                                    &empty_graph,
+                                );
+                            }
+                        }
+                        KeyCode::Char('e') => {
+                            if operation_summaries.is_empty() {
+                                continue;
+                            }
+                            textarea.set_text(&operation_summaries[selected].summary.summary);
+                            view_message_panel = true;
+                            panel_focus.include_panel(OperationPanel::MessageEditor);
+                            panel_focus.focus(OperationPanel::MessageEditor);
+                            panel_focus.activate();
+                        }
+                        KeyCode::Char('v') => {
+                            if operation_summaries.is_empty() {
+                                continue;
+                            }
+                            view_graph = true;
+                            graph_view_focus = GraphViewFocus::DiffList;
+                            panel_focus.include_panel(OperationPanel::GraphView);
+                            panel_focus.focus(OperationPanel::GraphView);
+                            panel_focus.activate();
+
+                            diff_components = load_diff_components_for_operation(
+                                context,
+                                operation_summaries[selected].operation,
+                            );
+                            selected_diff_component = 0;
+                            graph_controller = build_graph_controller(
+                                &diff_components,
+                                selected_diff_component,
+                                &empty_graph,
+                            );
+                        }
+                        _ => {}
+                    },
+                    OperationPanel::MessageEditor => {
+                        if key.code == KeyCode::Char('s')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            if operation_summaries.is_empty() {
+                                continue;
+                            }
+                            let new_summary = textarea.text();
+                            let _ = OperationSummary::set_message(
+                                op_conn,
+                                operation_summaries[selected].summary.id,
+                                &new_summary,
+                            );
+                            operation_summaries[selected].summary.summary = new_summary;
+                        } else {
+                            let _outcome = rat_text::text_area::handle_events(
+                                &mut textarea,
+                                true,
+                                &crossterm::event::Event::Key(key),
+                            );
+                        }
+                    }
+                    OperationPanel::GraphView => {
+                        if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+                            graph_view_focus = if graph_view_focus == GraphViewFocus::DiffList {
+                                GraphViewFocus::GraphCanvas
+                            } else {
+                                GraphViewFocus::DiffList
+                            };
+                        } else if graph_view_focus == GraphViewFocus::DiffList {
                             match key.code {
                                 KeyCode::Up => {
-                                    let previous_selected = selected;
-                                    if selected > 0 {
-                                        selected = selected.saturating_sub(1);
-                                    }
-                                    if view_graph && selected != previous_selected {
-                                        diff_components = load_diff_components_for_operation(
-                                            context,
-                                            operation_summaries[selected].operation,
-                                        );
-                                        selected_diff_component = 0;
+                                    if selected_diff_component > 0 {
+                                        selected_diff_component -= 1;
                                         graph_controller = build_graph_controller(
                                             &diff_components,
                                             selected_diff_component,
@@ -619,16 +622,8 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                     }
                                 }
                                 KeyCode::Down => {
-                                    let previous_selected = selected;
-                                    if selected < operations.len() - 1 {
-                                        selected += 1;
-                                    }
-                                    if view_graph && selected != previous_selected {
-                                        diff_components = load_diff_components_for_operation(
-                                            context,
-                                            operation_summaries[selected].operation,
-                                        );
-                                        selected_diff_component = 0;
+                                    if selected_diff_component + 1 < diff_components.len() {
+                                        selected_diff_component += 1;
                                         graph_controller = build_graph_controller(
                                             &diff_components,
                                             selected_diff_component,
@@ -636,117 +631,16 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                         );
                                     }
                                 }
-                                KeyCode::Char('e') => {
-                                    // Open message editor
-                                    textarea
-                                        .set_text(&operation_summaries[selected].summary.summary);
-                                    view_message_panel = true;
-                                    // Add to focus_rotation if not present
-                                    focus_index = if let Some((i, _)) = focus_rotation
-                                        .iter()
-                                        .find_position(|s| **s == "message_editor")
-                                    {
-                                        i
-                                    } else {
-                                        focus_rotation.push("message_editor");
-                                        focus_rotation.len() - 1
-                                    };
-                                    panel_focus = focus_rotation[focus_index];
-                                    // panel_activated remains true (auto-activate new panel)
-                                }
-                                KeyCode::Char('v') => {
-                                    // Open graph view
-                                    view_graph = true;
-                                    graph_view_focus = "diff_list";
-                                    // Add to focus_rotation if not present
-                                    focus_index = if let Some((i, _)) =
-                                        focus_rotation.iter().find_position(|s| **s == "graph_view")
-                                    {
-                                        i
-                                    } else {
-                                        focus_rotation.push("graph_view");
-                                        focus_rotation.len() - 1
-                                    };
-                                    panel_focus = focus_rotation[focus_index];
-                                    diff_components = load_diff_components_for_operation(
-                                        context,
-                                        operation_summaries[selected].operation,
-                                    );
-                                    selected_diff_component = 0;
-                                    graph_controller = build_graph_controller(
-                                        &diff_components,
-                                        selected_diff_component,
-                                        &empty_graph,
-                                    );
-                                    // panel_activated remains true (auto-activate new panel)
-                                }
                                 _ => {}
                             }
+                        } else {
+                            let _ = graph_controller.handle_key_event(key);
                         }
-                        "message_editor" => {
-                            if key.code == KeyCode::Char('s')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                // Save message
-                                let new_summary = textarea.text();
-                                let _ = OperationSummary::set_message(
-                                    op_conn,
-                                    operation_summaries[selected].summary.id,
-                                    &new_summary,
-                                );
-                                operation_summaries[selected].summary.summary = new_summary;
-                            } else {
-                                // Convert crossterm KeyEvent to rat-text event
-                                let _outcome = rat_text::text_area::handle_events(
-                                    &mut textarea,
-                                    true, // focused
-                                    &crossterm::event::Event::Key(key),
-                                );
-                            }
-                        }
-                        "graph_view" => {
-                            if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-                                graph_view_focus = if graph_view_focus == "diff_list" {
-                                    "graph_canvas"
-                                } else {
-                                    "diff_list"
-                                };
-                            } else if graph_view_focus == "diff_list" {
-                                match key.code {
-                                    KeyCode::Up => {
-                                        if selected_diff_component > 0 {
-                                            selected_diff_component -= 1;
-                                            graph_controller = build_graph_controller(
-                                                &diff_components,
-                                                selected_diff_component,
-                                                &empty_graph,
-                                            );
-                                        }
-                                    }
-                                    KeyCode::Down => {
-                                        if selected_diff_component + 1 < diff_components.len() {
-                                            selected_diff_component += 1;
-                                            graph_controller = build_graph_controller(
-                                                &diff_components,
-                                                selected_diff_component,
-                                                &empty_graph,
-                                            );
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                let _ = graph_controller.handle_key_event(key);
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
         }
     }
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
 }

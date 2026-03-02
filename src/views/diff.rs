@@ -1,21 +1,15 @@
 use std::{collections::HashMap, io, time::Instant};
 
-use crossterm::{
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode};
 use gen_diff::{
     graph::DiffGenGraph,
     operations::{BlockGroupDiff, OperationDiff},
 };
 use gen_models::db::GraphConnection;
 use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{List, ListItem},
 };
 
 use crate::{
@@ -27,7 +21,8 @@ use crate::{
             split_connected_components,
         },
         gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
-        helpers::{install_tui_panic_hook, style_text},
+        panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
+        tui_runtime::TuiSession,
     },
 };
 
@@ -45,6 +40,12 @@ struct ListEntry {
     component_index: Option<usize>,
     db_path: String,
     is_header: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffPanel {
+    List,
+    Graph,
 }
 
 pub fn view_diff(
@@ -78,247 +79,159 @@ pub fn view_diff(
         return Ok(());
     }
 
-    install_tui_panic_hook();
-
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut session = TuiSession::enter()?;
+    let terminal = session.terminal_mut();
 
     let mut selected = 0usize;
     let mut expanded_db = db_order.first().cloned();
     let mut current_component = 0usize;
 
-    // Panel focus: two-mode system matching operations view
-    let mut panel_focus = "diff_list"; // "diff_list" or "graph_view"
-    let mut panel_activated = true; // Start with diff list activated
+    let mut panel_focus = PanelFocus::new(DiffPanel::List);
+    panel_focus.include_panel(DiffPanel::Graph);
+    let panel_styles = PanelStyles::default();
 
-    // Three-state border styles matching operations view
-    let focused_style = Style::default()
-        .fg(Color::Blue)
-        .add_modifier(Modifier::BOLD);
-    let selected_style = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
-    let unfocused_style = Style::default().fg(Color::Gray);
-
-    // Setup: create controller and apply highlights for initial component
     let mut graph_controller =
         create_gen_graph_controller(&components[current_component].render.graph);
     apply_diff_highlights(&mut graph_controller, &components[current_component].render);
 
     let mut last_frame_time = Instant::now();
 
-    let result = (|| -> Result<(), io::Error> {
-        loop {
-            let entries = build_entries(&db_order, &components, &components_by_db, &expanded_db);
-            if entries.is_empty() {
-                break;
-            }
-            if selected >= entries.len() {
-                selected = 0;
-            }
-            let desired_component = resolve_selected_component(
-                &entries,
-                selected,
-                &components_by_db,
-                expanded_db.as_ref(),
-            )
-            .unwrap_or(0);
-            if desired_component != current_component {
-                current_component = desired_component;
-                // Setup: create new controller and apply highlights on component switch
-                graph_controller =
-                    create_gen_graph_controller(&components[current_component].render.graph);
-                apply_diff_highlights(&mut graph_controller, &components[current_component].render);
-            }
+    loop {
+        let entries = build_entries(&db_order, &components, &components_by_db, &expanded_db);
+        if entries.is_empty() {
+            break;
+        }
+        if selected >= entries.len() {
+            selected = 0;
+        }
+        let desired_component =
+            resolve_selected_component(&entries, selected, &components_by_db, expanded_db.as_ref())
+                .unwrap_or(0);
+        if desired_component != current_component {
+            current_component = desired_component;
+            graph_controller =
+                create_gen_graph_controller(&components[current_component].render.graph);
+            apply_diff_highlights(&mut graph_controller, &components[current_component].render);
+        }
 
-            // Calculate frame delta for smooth animations
-            let now = Instant::now();
-            let frame_delta = now.duration_since(last_frame_time);
-            last_frame_time = now;
+        let now = Instant::now();
+        let frame_delta = now.duration_since(last_frame_time);
+        last_frame_time = now;
 
-            terminal.draw(|f| {
-                let outer = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(1), Constraint::Length(1)])
-                    .split(f.area());
+        terminal.draw(|f| {
+            let outer = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(f.area());
 
-                let main = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(45), Constraint::Min(1)])
-                    .split(outer[0]);
+            let main = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(45), Constraint::Min(1)])
+                .split(outer[0]);
 
-                // Left panel: diff list
-                let list_items: Vec<ListItem> = entries
-                    .iter()
-                    .enumerate()
-                    .map(|(i, entry)| {
-                        let style = if i == selected {
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        };
-                        ListItem::new(entry.label.clone()).style(style)
-                    })
-                    .collect();
-
-                let list_title = if !panel_activated && panel_focus == "diff_list" {
-                    "[Diff Parts]"
-                } else {
-                    "Diff Parts"
-                };
-
-                let list_border_style = if panel_activated && panel_focus == "diff_list" {
-                    focused_style
-                } else if !panel_activated && panel_focus == "diff_list" {
-                    selected_style
-                } else {
-                    unfocused_style
-                };
-
-                let list = List::new(list_items).block(
-                    Block::default()
-                        .title(list_title)
-                        .borders(Borders::ALL)
-                        .border_style(list_border_style),
-                );
-                f.render_widget(list, main[0]);
-
-                // Right panel: graph via widget
-                let graph_title_text = format!(
-                    "{} ({}/{})",
-                    components[current_component].render.title,
-                    current_component + 1,
-                    components.len()
-                );
-                let graph_title = if !panel_activated && panel_focus == "graph_view" {
-                    format!("[{}]", graph_title_text)
-                } else {
-                    graph_title_text
-                };
-
-                let graph_border_style = if panel_activated && panel_focus == "graph_view" {
-                    focused_style
-                } else if !panel_activated && panel_focus == "graph_view" {
-                    selected_style
-                } else {
-                    unfocused_style
-                };
-
-                let graph_block = Block::default()
-                    .title(graph_title)
-                    .borders(Borders::ALL)
-                    .border_style(graph_border_style);
-                let inner_canvas = graph_block.inner(main[1]);
-
-                // Pre-render animation tick
-                graph_controller.viewport_state.focus();
-                graph_controller.viewport_state.viewport_bounds = inner_canvas;
-                graph_controller.update_animations(frame_delta);
-
-                f.render_widget(graph_block, main[1]);
-
-                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
-                let widget = create_gen_graph_widget(conn)
-                    .detail_level(graph_controller.get_detail_level())
-                    .style(canvas_style)
-                    .cursor();
-                f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
-
-                // Status bar with themed styling
-                let status_bar_area = outer[1];
-                let panel_messages = if !panel_activated {
-                    "*tab* toggle focus | *enter* activate | *q* quit"
-                } else if panel_focus == "diff_list" {
-                    "*↑↓* select | *tab* toggle focus | *esc* leave panel | *q* quit"
-                } else {
-                    "*←→↑↓* pan | *+/-* zoom | *tab* toggle focus | *esc* leave panel | *q* quit"
-                };
-
-                let status_bar_contents = format!(
-                    "{panel_messages:^width$}",
-                    width = status_bar_area.width as usize
-                );
-                let status_line = style_text(
-                    &status_bar_contents,
-                    Style::default().fg(get_theme_color("text_muted").unwrap()),
-                    Style::default().fg(get_theme_color("highlight").unwrap()),
-                );
-                let status_bar = Paragraph::new(status_line)
-                    .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
-                f.render_widget(status_bar, status_bar_area);
-            })?;
-
-            if event::poll(std::time::Duration::from_millis(100))?
-                && let Event::Key(key) = event::read()?
-            {
-                if !panel_activated {
-                    // NAVIGATION MODE: Tab to toggle focus, Enter to activate, q to quit
-                    match key.code {
-                        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-                            panel_focus = if panel_focus == "diff_list" {
-                                "graph_view"
-                            } else {
-                                "diff_list"
-                            };
-                        }
-                        KeyCode::Enter => {
-                            panel_activated = true;
-                        }
-                        KeyCode::Esc | KeyCode::Char('q') => break,
-                        _ => {}
-                    }
-                } else {
-                    // ACTIVE MODE: Esc to deactivate; panel-specific controls
-                    if key.code == KeyCode::Esc {
-                        panel_activated = false;
-                    } else if key.code == KeyCode::Tab {
-                        // Toggle focus between panels while staying activated
-                        panel_focus = if panel_focus == "diff_list" {
-                            "graph_view"
-                        } else {
-                            "diff_list"
-                        };
-                    } else if key.code == KeyCode::Char('q') {
-                        break;
-                    } else if panel_focus == "diff_list" {
-                        // List panel: Up/Down to select
-                        match key.code {
-                            KeyCode::Up => {
-                                if selected > 0 {
-                                    selected -= 1;
-                                    if let Some(entry) = entries.get(selected) {
-                                        expanded_db = Some(entry.db_path.clone());
-                                    }
-                                }
-                            }
-                            KeyCode::Down => {
-                                if selected + 1 < entries.len() {
-                                    selected += 1;
-                                    if let Some(entry) = entries.get(selected) {
-                                        expanded_db = Some(entry.db_path.clone());
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+            let list_items: Vec<ListItem> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let style = if i == selected {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        // Graph panel: delegate to controller
-                        let _ = graph_controller.handle_key_event(key);
+                        Style::default()
+                    };
+                    ListItem::new(entry.label.clone()).style(style)
+                })
+                .collect();
+
+            let list = List::new(list_items).block(panel_block(
+                "Diff Parts",
+                &panel_focus,
+                DiffPanel::List,
+                panel_styles,
+            ));
+            f.render_widget(list, main[0]);
+
+            let graph_title = format!(
+                "{} ({}/{})",
+                components[current_component].render.title,
+                current_component + 1,
+                components.len()
+            );
+            let graph_block =
+                panel_block(graph_title, &panel_focus, DiffPanel::Graph, panel_styles);
+            let inner_canvas = graph_block.inner(main[1]);
+
+            graph_controller.viewport_state.focus();
+            graph_controller.viewport_state.viewport_bounds = inner_canvas;
+            graph_controller.update_animations(frame_delta);
+
+            f.render_widget(graph_block, main[1]);
+
+            let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+            let widget = create_gen_graph_widget(conn)
+                .detail_level(graph_controller.get_detail_level())
+                .style(canvas_style)
+                .cursor();
+            f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+
+            let panel_messages = if panel_focus.is_navigation() {
+                "*tab* toggle focus | *enter* activate | *q* quit"
+            } else if panel_focus.current() == DiffPanel::List {
+                "*↑↓* select | *tab* toggle focus | *esc* leave panel | *q* quit"
+            } else {
+                "*←→↑↓* pan | *+/-* zoom | *tab* toggle focus | *esc* leave panel | *q* quit"
+            };
+            render_status_bar(f, outer[1], panel_messages);
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if panel_focus.is_navigation() {
+                match key.code {
+                    KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                        panel_focus.cycle_next();
                     }
+                    KeyCode::Enter => {
+                        panel_focus.activate();
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => break,
+                    _ => {}
                 }
+            } else if key.code == KeyCode::Esc {
+                panel_focus.deactivate();
+            } else if key.code == KeyCode::Tab {
+                panel_focus.cycle_next();
+            } else if key.code == KeyCode::Char('q') {
+                break;
+            } else if panel_focus.current() == DiffPanel::List {
+                match key.code {
+                    KeyCode::Up => {
+                        if selected > 0 {
+                            selected -= 1;
+                            if let Some(entry) = entries.get(selected) {
+                                expanded_db = Some(entry.db_path.clone());
+                            }
+                        }
+                    }
+                    KeyCode::Down => {
+                        if selected + 1 < entries.len() {
+                            selected += 1;
+                            if let Some(entry) = entries.get(selected) {
+                                expanded_db = Some(entry.db_path.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                let _ = graph_controller.handle_key_event(key);
             }
         }
-        Ok(())
-    })();
+    }
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    result
+    Ok(())
 }
 
 fn collect_components(graphs: &[BlockGroupDiff], change_label: &'static str) -> Vec<DiffComponent> {
