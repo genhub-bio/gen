@@ -18,7 +18,7 @@ pub mod generated;
 pub use generated::gen_schema_capnp;
 pub mod gfa;
 pub mod gfa_reader;
-pub mod graph_operators;
+pub mod graphs;
 pub mod imports;
 
 pub mod operation_management;

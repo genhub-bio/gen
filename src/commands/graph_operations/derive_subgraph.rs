@@ -10,7 +10,7 @@ use gen_models::{
 use noodles::core::Region;
 use thiserror::Error;
 
-use crate::{commands::get_default_collection, graph_operators::derive_chunks};
+use crate::{commands::get_default_collection, graphs::operators::derive_chunks};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum DeriveSubgraphOperationError {
@@ -78,6 +78,8 @@ pub fn derive_subgraph_operation(
             start: start_coordinate,
             end: end_coordinate,
         }],
+        None,
+        true,
     ) {
         graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
         operation_conn.execute("ROLLBACK TRANSACTION;", [])?;

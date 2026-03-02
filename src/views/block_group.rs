@@ -3,11 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::{
-    event::{self, KeyCode, KeyEventKind},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, KeyCode, KeyEventKind};
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
@@ -17,7 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, HorizontalAlignment, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Clear, Padding, Paragraph, Wrap},
+    widgets::{Block, Padding, Paragraph, Wrap},
 };
 use rusqlite::params;
 
@@ -33,7 +29,8 @@ use crate::{
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
-        helpers::{install_tui_panic_hook, style_text},
+        panels::{render_status_bar, render_with_optional_clear},
+        tui_runtime::TuiSession,
     },
 };
 
@@ -275,12 +272,8 @@ pub fn view_block_group(
     bar.finish();
 
     // Setup terminal
-    install_tui_panic_hook();
-
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let mut terminal = ratatui::init();
+    let mut session = TuiSession::enter()?;
+    let terminal = session.terminal_mut();
 
     // Basic event loop
     let tick_rate = Duration::from_millis(100);
@@ -536,23 +529,7 @@ pub fn view_block_group(
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
             status_message.push_str(" | *q* quit"); // Universal controls
-
-            let status_bar_contents = format!(
-                "{status_message:^width$}",
-                width = status_bar_area.width as usize
-            );
-
-            // Style the status bar text
-            let status_line = style_text(
-                &status_bar_contents,
-                Style::default().fg(get_theme_color("text_muted").unwrap()), // default color
-                Style::default().fg(get_theme_color("highlight").unwrap()),  // highlight color
-            );
-
-            let status_bar = Paragraph::new(status_line)
-                .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
-
-            frame.render_widget(status_bar, status_bar_area);
+            render_status_bar(frame, status_bar_area, &status_message);
 
             // Canvas area
             if is_loading {
@@ -576,8 +553,7 @@ pub fn view_block_group(
                     ])
                     .split(canvas_area)[1];
 
-                frame.render_widget(Clear, canvas_area); // Clear the canvas area first
-                frame.render_widget(loading_para, loading_area);
+                render_with_optional_clear(frame, canvas_area, loading_area, true, loading_para);
             } else if explorer_state.selected_block_group_id.is_none() {
                 // Render splash screen
                 let splashscreen_lines = [
@@ -614,8 +590,7 @@ pub fn view_block_group(
                     ])
                     .split(canvas_area)[1];
 
-                frame.render_widget(Clear, canvas_area);
-                frame.render_widget(splash_para, splash_area);
+                render_with_optional_clear(frame, canvas_area, splash_area, true, splash_para);
             } else {
                 graph_controller.viewport_state.focus();
                 let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
@@ -727,11 +702,13 @@ pub fn view_block_group(
                     .alignment(HorizontalAlignment::Left)
                     .block(panel_block);
 
-                // Clear the panel area if we just changed the layout
-                if tui_layout_change {
-                    frame.render_widget(Clear, panel_area);
-                }
-                frame.render_widget(panel_content, panel_area);
+                render_with_optional_clear(
+                    frame,
+                    panel_area,
+                    panel_area,
+                    tui_layout_change,
+                    panel_content,
+                );
 
                 // Reset the layout change flag
                 tui_layout_change = false;
@@ -1038,9 +1015,5 @@ pub fn view_block_group(
         }
     }
 
-    // Clean up terminal
-    disable_raw_mode()?;
-    let stdout = terminal.backend_mut();
-    execute!(stdout, LeaveAlternateScreen)?;
     Ok(())
 }

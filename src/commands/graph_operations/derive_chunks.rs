@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     commands::get_default_collection,
-    graph_operators::{derive_chunks, get_path},
+    graphs::operators::{derive_chunks, get_path},
 };
 
 #[derive(Debug, Error, PartialEq)]
@@ -134,6 +134,8 @@ pub fn derive_chunks_operation(
         &region_name.to_string(),
         backbone.as_deref(),
         chunk_ranges,
+        None,
+        true,
     ) {
         graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
         operation_conn.execute("ROLLBACK TRANSACTION;", [])?;

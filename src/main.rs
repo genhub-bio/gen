@@ -5,7 +5,6 @@ use std::{
     io,
     io::{BufReader, Write},
     ops::Deref,
-    panic,
     path::{Path, PathBuf},
     str,
 };
@@ -32,10 +31,11 @@ use r#gen::{
     views::{
         block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
         diff::view_diff, operations::view_operations, patch::view_patches,
+        tui_runtime::install_global_panic_hook,
     },
 };
 use gen_annotations::translate;
-use gen_core::config::Workspace;
+use gen_core::{config::Workspace, range::Range};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     annotations::{add_annotation, add_annotation_file},
@@ -785,13 +785,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    panic::set_hook(Box::new(|info| {
-        eprintln!("❗ The application has encountered an unexpected error and must exit.");
-        eprintln!("Message: {}", info);
-        eprintln!();
-        eprintln!("👉 Please file an issue at: https://github.com/genhub-bio/gen/issues");
-        eprintln!("   Include the full output above, what you were doing, and system info.");
-    }));
+    install_global_panic_hook();
 
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();
