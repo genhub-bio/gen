@@ -2,11 +2,10 @@ use std::{collections::HashMap, io, time::Instant};
 
 use crossterm::event::{self, Event, KeyCode};
 use gen_diff::{
-    graph::{DiffGenGraph, DiffGenGraphRef, DiffGraphNode},
+    graph::DiffGenGraph,
     operations::{BlockGroupDiff, OperationDiff},
 };
 use gen_models::db::GraphConnection;
-use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -16,24 +15,23 @@ use ratatui::{
 use crate::{
     config::get_theme_color,
     views::{
-        gen_graph_widget::{
-            GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
+        diff_graph::{
+            DiffGraphComponent, apply_diff_highlights, block_group_label,
+            build_diff_graph_component, highlight_color_for_change_label,
+            split_connected_components,
         },
+        gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
         panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
         tui_runtime::TuiSession,
     },
 };
 
 struct DiffComponent {
-    title: String,
+    render: DiffGraphComponent,
     collection: String,
     sample: String,
     block_group: String,
     part_label: Option<String>,
-    graph: gen_graph::GenGraph,
-    highlight_nodes: Vec<gen_graph::GraphNode>,
-    highlight_edges: Vec<(gen_graph::GraphNode, gen_graph::GraphNode)>,
-    highlight_color: Color,
     change_label: &'static str,
 }
 
@@ -48,88 +46,6 @@ struct ListEntry {
 enum DiffPanel {
     List,
     Graph,
-}
-
-/// Apply diff highlights (nodes and edges) to a graph controller.
-///
-/// This is the only direct GraphController mutation beyond setup — it configures
-/// per-node and per-edge highlights for disconnected diff regions that can't use
-/// set_path_highlight.
-fn apply_diff_highlights(
-    controller: &mut GraphController<&gen_graph::GenGraph, GenGraphNodeSizer>,
-    component: &DiffComponent,
-) {
-    let style = PathStyle::new(component.highlight_color)
-        .with_line_style(LineStyle::Bold)
-        .with_merge_glyphs(true);
-    for &node in &component.highlight_nodes {
-        controller.set_node_highlight(node, style);
-    }
-    for &(src, tgt) in &component.highlight_edges {
-        controller.set_edge_highlight((src, tgt), style);
-    }
-}
-
-/// This splits a graph into its connected components. It's needed because a change may happen in the middle of a graph where no
-/// start/end nodes are present and the viewer crashes without splitting it.
-fn split_connected_components(graph: &DiffGenGraph) -> Vec<DiffGenGraph> {
-    use std::collections::HashSet;
-
-    use petgraph::Direction;
-
-    let mut visited: HashSet<DiffGraphNode> = HashSet::new();
-    let mut components = vec![];
-
-    for node in graph.nodes() {
-        if visited.contains(&node) {
-            continue;
-        }
-        let mut stack = vec![node];
-        let mut component_nodes: HashSet<DiffGraphNode> = HashSet::new();
-        while let Some(current) = stack.pop() {
-            if !visited.insert(current) {
-                continue;
-            }
-            component_nodes.insert(current);
-            for neighbor in graph
-                .neighbors_directed(current, Direction::Outgoing)
-                .chain(graph.neighbors_directed(current, Direction::Incoming))
-            {
-                if !visited.contains(&neighbor) {
-                    stack.push(neighbor);
-                }
-            }
-        }
-
-        let mut subgraph = DiffGenGraph::new();
-        for n in &component_nodes {
-            subgraph.add_node(*n);
-        }
-        for (src, dest, edges) in graph.all_edges() {
-            if component_nodes.contains(&src) && component_nodes.contains(&dest) {
-                subgraph.add_edge(src, dest, edges.clone());
-            }
-        }
-        components.push(subgraph);
-    }
-
-    components
-}
-
-fn block_group_label(diff: &BlockGroupDiff) -> String {
-    if let Some(bg) = &diff.block_group {
-        format!(
-            "{collection} {sample} {name}",
-            collection = bg.collection_name,
-            sample = bg
-                .sample_name
-                .clone()
-                .unwrap_or_else(|| "Reference".to_string()),
-            name = bg.name
-        )
-    } else {
-        format!("BlockGroup {}", diff.id)
-    }
 }
 
 pub fn view_diff(
@@ -174,9 +90,9 @@ pub fn view_diff(
     panel_focus.include_panel(DiffPanel::Graph);
     let panel_styles = PanelStyles::default();
 
-    // Setup: create controller and apply highlights for initial component
-    let mut graph_controller = create_gen_graph_controller(&components[current_component].graph);
-    apply_diff_highlights(&mut graph_controller, &components[current_component]);
+    let mut graph_controller =
+        create_gen_graph_controller(&components[current_component].render.graph);
+    apply_diff_highlights(&mut graph_controller, &components[current_component].render);
 
     let mut last_frame_time = Instant::now();
 
@@ -193,8 +109,9 @@ pub fn view_diff(
                 .unwrap_or(0);
         if desired_component != current_component {
             current_component = desired_component;
-            graph_controller = create_gen_graph_controller(&components[current_component].graph);
-            apply_diff_highlights(&mut graph_controller, &components[current_component]);
+            graph_controller =
+                create_gen_graph_controller(&components[current_component].render.graph);
+            apply_diff_highlights(&mut graph_controller, &components[current_component].render);
         }
 
         let now = Instant::now();
@@ -237,7 +154,7 @@ pub fn view_diff(
 
             let graph_title = format!(
                 "{} ({}/{})",
-                components[current_component].title,
+                components[current_component].render.title,
                 current_component + 1,
                 components.len()
             );
@@ -313,16 +230,13 @@ pub fn view_diff(
             }
         }
     }
+
     Ok(())
 }
 
 fn collect_components(graphs: &[BlockGroupDiff], change_label: &'static str) -> Vec<DiffComponent> {
     let mut components = Vec::new();
-    let highlight_color = match change_label {
-        "Add" => Color::Green,
-        "Remove" => Color::Red,
-        _ => Color::White,
-    };
+    let highlight_color = highlight_color_for_change_label(change_label);
     for graph_diff in graphs {
         let parts = split_connected_components(&graph_diff.graph);
         let (collection, sample, block_group) = if let Some(bg) = &graph_diff.block_group {
@@ -341,9 +255,8 @@ fn collect_components(graphs: &[BlockGroupDiff], change_label: &'static str) -> 
             )
         };
         if parts.len() <= 1 {
-            let diff_graph = graph_diff.graph.clone();
             components.push(build_component(
-                &diff_graph,
+                &graph_diff.graph,
                 change_label,
                 highlight_color,
                 &block_group_label(graph_diff),
@@ -387,44 +300,18 @@ fn build_component(
     block_group: String,
     part_label: Option<String>,
 ) -> DiffComponent {
-    let graph: gen_graph::GenGraph = DiffGenGraphRef(diff_graph).into();
-    let highlight_edges = collect_highlight_edges(diff_graph);
-    let highlight_nodes = collect_highlight_nodes(diff_graph);
     DiffComponent {
-        title: format!("{change_label} {title}"),
+        render: build_diff_graph_component(
+            diff_graph,
+            format!("{change_label} {title}"),
+            highlight_color,
+        ),
         collection,
         sample,
         block_group,
         part_label,
-        graph,
-        highlight_nodes,
-        highlight_edges,
-        highlight_color,
         change_label,
     }
-}
-
-/// Collect edges that are new in the diff graph, returning them as a flat
-/// vector of (source, target) pairs suitable for set_edge_highlight.
-fn collect_highlight_edges(
-    diff_graph: &DiffGenGraph,
-) -> Vec<(gen_graph::GraphNode, gen_graph::GraphNode)> {
-    let mut edges = Vec::new();
-    for (src, dest, edge_data) in diff_graph.all_edges() {
-        if edge_data.iter().any(|edge| edge.is_new) {
-            edges.push((src.node, dest.node));
-        }
-    }
-    edges
-}
-
-/// Collect nodes that are new in the diff graph, returning them as a flat
-/// vector suitable for set_node_highlight.
-fn collect_highlight_nodes(diff_graph: &DiffGenGraph) -> Vec<gen_graph::GraphNode> {
-    diff_graph
-        .nodes()
-        .filter_map(|node| node.is_new.then_some(node.node))
-        .collect()
 }
 
 fn build_entries(
