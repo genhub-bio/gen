@@ -672,9 +672,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             let (parsed_graph_name, start_coordinate, mut end_coordinate) =
                 if let Some(region) = region {
-                    let parsed_region = Region::parse(&region)
-                        .ok_or_else(|| format!("Couldn't parse interval: {region}"))?;
-                    (parsed_region.name, parsed_region.start, parsed_region.end)
+                    let parsed_region = Region::parse(&region);
+                    match parsed_region {
+                        Ok(parsed_region) => {
+                            (parsed_region.name, parsed_region.start, parsed_region.end)
+                        }
+                        Err(parse_error) => {
+                            return Err(Box::new(parse_error));
+                        }
+                    }
                 } else {
                     (
                         graph.clone().ok_or("Graph name required")?,
