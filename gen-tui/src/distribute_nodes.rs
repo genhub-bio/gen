@@ -296,6 +296,7 @@ fn optimize_chain_edge_gaps(
     widths: &[i64],
     orig_x: &[i64],
     forbidden: &[Interval],
+    min_gap: i64,
 ) -> ChainOptResult {
     let n = widths.len();
     if n < 2 || orig_x.len() != n {
@@ -321,7 +322,7 @@ fn optimize_chain_edge_gaps(
 
     // Binary search for maximum minimum gap
     let m = (n - 1) as i64;
-    let mut lo = 0i64;
+    let mut lo = min_gap; // Start from minimum configured gap
     let mut hi = g_total / m;
 
     let mut best_x: Option<Vec<i64>> = None;
@@ -516,14 +517,19 @@ fn find_closest_layer(x_to_layer: &[(i64, i32)], target_x: i64) -> Option<i32> {
 
 /// Redistribute nodes along horizontal chains in the layout graph.
 /// This should be called after make_rectilinear and before building the spatial index.
+///
+/// The `vertex_spacing` parameter defines the minimum gap that should be maintained
+/// between nodes, matching the spacing used elsewhere in the layout.
 pub fn redistribute_horizontal_chains(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    vertex_spacing: f64,
 ) {
     // Build x-to-layer mapping before any redistribution
     // This preserves the original Sugiyama layer assignments for cursor navigation
     let x_to_layer = build_x_to_layer_mapping(graph);
 
     let chains = identify_chains(graph);
+    let min_gap = vertex_spacing.round() as i64;
 
     for chain in chains {
         if chain.nodes.len() < 2 {
@@ -545,7 +551,7 @@ pub fn redistribute_horizontal_chains(
         let obstacles = find_obstacles(graph, chain.y, &chain.nodes);
 
         // Optimize the chain
-        match optimize_chain_edge_gaps(&widths, &orig_x, &obstacles) {
+        match optimize_chain_edge_gaps(&widths, &orig_x, &obstacles, min_gap) {
             ChainOptResult::Optimized { new_x } => {
                 // Update positions in graph
                 for (i, &node_idx) in chain.nodes.iter().enumerate() {
@@ -664,8 +670,9 @@ mod tests {
         let widths = vec![8, 8, 8];
         let orig_x = vec![0, 10, 20];
         let forbidden = vec![];
+        let min_gap = 0; // No minimum gap for this test
 
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden) {
+        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
             ChainOptResult::Optimized { new_x } => {
                 assert_eq!(new_x.len(), 3);
                 assert_eq!(new_x[0], 0); // first endpoint fixed
@@ -686,8 +693,9 @@ mod tests {
         let orig_x = vec![0, 20, 40];
         // Obstacle at x=18-22
         let forbidden = vec![Interval { l: 18, r: 22 }];
+        let min_gap = 0; // No minimum gap for this test
 
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden) {
+        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
             ChainOptResult::Optimized { new_x } => {
                 assert_eq!(new_x.len(), 3);
                 assert_eq!(new_x[0], 0); // first endpoint fixed
@@ -719,8 +727,9 @@ mod tests {
         let widths = vec![20, 20, 20];
         let orig_x = vec![0, 10, 20]; // Not enough space
         let forbidden = vec![];
+        let min_gap = 0; // No minimum gap for this test
 
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden) {
+        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
             ChainOptResult::RevertToOriginal => {
                 // Expected - not enough space
             }
@@ -817,6 +826,59 @@ mod tests {
         assert_eq!(obstacles.len(), 1, "Should find exactly one obstacle");
         assert_eq!(obstacles[0].l, 14, "Obstacle should protect x-1");
         assert_eq!(obstacles[0].r, 16, "Obstacle should protect x+1");
+    }
+
+    #[test]
+    fn test_minimum_gap_enforcement() {
+        // Test that the minimum gap constraint is respected
+        let widths = vec![8, 8, 8];
+        let orig_x = vec![0, 12, 40]; // Plenty of space
+        let forbidden = vec![];
+        let min_gap = 5; // Require at least 5 units between nodes
+
+        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
+            ChainOptResult::Optimized { new_x } => {
+                assert_eq!(new_x.len(), 3);
+                assert_eq!(new_x[0], 0); // first endpoint fixed
+                assert_eq!(new_x[2], 40); // last endpoint fixed
+
+                // Verify all gaps are at least min_gap
+                for i in 0..(widths.len() - 1) {
+                    let base = base_step(widths[i], widths[i + 1]);
+                    let actual_gap = new_x[i + 1] - new_x[i] - base;
+                    assert!(
+                        actual_gap >= min_gap,
+                        "Gap {} between nodes {} and {} is {} but should be at least {}",
+                        i,
+                        i,
+                        i + 1,
+                        actual_gap,
+                        min_gap
+                    );
+                }
+            }
+            ChainOptResult::RevertToOriginal => {
+                panic!("Optimization should succeed with sufficient space");
+            }
+        }
+    }
+
+    #[test]
+    fn test_minimum_gap_impossible() {
+        // Test that optimization fails when minimum gap cannot be satisfied
+        let widths = vec![8, 8, 8];
+        let orig_x = vec![0, 10, 20]; // Not enough space for large min_gap
+        let forbidden = vec![];
+        let min_gap = 10; // Require 10 units between nodes (impossible)
+
+        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
+            ChainOptResult::RevertToOriginal => {
+                // Expected - cannot satisfy minimum gap
+            }
+            ChainOptResult::Optimized { .. } => {
+                panic!("Should revert to original when minimum gap is impossible");
+            }
+        }
     }
 
     #[test]

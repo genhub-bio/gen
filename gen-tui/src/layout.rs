@@ -252,7 +252,7 @@ impl PartitionLayout {
         }
 
         // Redistribute nodes along horizontal chains after edge routing
-        redistribute_horizontal_chains(&mut layout_graph);
+        redistribute_horizontal_chains(&mut layout_graph, vertex_spacing);
 
         let (dx, dy) = align_partition_to_origin(&mut layout_graph);
 
