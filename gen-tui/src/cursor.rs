@@ -433,57 +433,51 @@ impl Cursor {
     ) -> Result<(), String> {
         let node_idx = self.node_idx.ok_or("No node tracked")?;
 
-        // Get current layer
-        let current_layer = viewport_graph
-            .find_domain_node_layer(node_idx)
-            .ok_or("Node not found in any layer")?;
-
-        // Determine target layer
-        let target_layer = if direction > 0 {
-            // Moving right: next layer
-            if current_layer + 1 < viewport_graph.layer_count() {
-                current_layer + 1
-            } else {
-                return Err(NO_NEXT_LAYER_ERR.to_string());
-            }
-        } else {
-            // Moving left: previous layer
-            if current_layer == 0 {
-                return Err(NO_PREVIOUS_LAYER_ERR.to_string());
-            }
-            current_layer - 1
-        };
-        // Get nodes in target layer
-        let target_layer_nodes = viewport_graph
-            .get_layer(target_layer)
-            .ok_or("Target layer not found")?;
-
         let current_world_pos = *viewport_graph
             .node_positions
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
-        let candidates: Vec<(WorldPos, &LayoutNode)> = target_layer_nodes
+        // Get current node's Sugiyama layer from LayoutNode.layer field
+        let current_node_data = viewport_graph
+            .node_data_by_pos
+            .get(&current_world_pos)
+            .ok_or("Current node data not found")?;
+        let current_sugiyama_layer = current_node_data.layer.ok_or("Current node has no layer")?;
+
+        // Determine target layer
+        let target_sugiyama_layer = if direction > 0 {
+            current_sugiyama_layer + 1
+        } else {
+            if current_sugiyama_layer == 0 {
+                return Err(NO_PREVIOUS_LAYER_ERR.to_string());
+            }
+            current_sugiyama_layer - 1
+        };
+
+        // Find all data nodes in the target Sugiyama layer
+        let candidates: Vec<(WorldPos, &LayoutNode)> = viewport_graph
+            .node_positions
             .iter()
-            .map(|idx| {
-                viewport_graph
-                    .node_positions
-                    .get(idx)
-                    .expect("Every node in the layers field should be in the graph too")
-            })
-            .map(|pos| {
-                (
-                    *pos,
-                    viewport_graph
-                        .get_node(pos)
-                        .expect("Every node in the layers field should be in the graph too"),
-                )
+            .filter_map(|(_, &world_pos)| {
+                let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
+
+                // Only consider nodes in the target Sugiyama layer
+                if node_data.layer == Some(target_sugiyama_layer) {
+                    Some((world_pos, node_data))
+                } else {
+                    None
+                }
             })
             .sorted_by_key(|(pos, _)| {
                 let dy = (pos.y - current_world_pos.y).abs();
                 (dy, -pos.y)
             })
             .collect();
+
+        if candidates.is_empty() {
+            return Err(NO_NEXT_LAYER_ERR.to_string());
+        }
 
         // Take the closest candidate
         if let Some((_target_pos, target_node)) = candidates.first() {
@@ -521,28 +515,30 @@ impl Cursor {
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
-        // Get current layer
-        let current_layer = viewport_graph
-            .find_domain_node_layer(node_idx)
-            .ok_or("Node not found in any layer")?;
+        // Get current node's Sugiyama layer from LayoutNode.layer field
+        let current_node_data = viewport_graph
+            .node_data_by_pos
+            .get(&current_world_pos)
+            .ok_or("Current node data not found")?;
+        let current_sugiyama_layer = current_node_data.layer.ok_or("Current node has no layer")?;
 
-        // Get all nodes in the same layer
-        let layer_nodes = viewport_graph
-            .get_layer(current_layer)
-            .ok_or("Current layer not found")?;
-
-        // Find candidates in the same layer
-        let mut candidates: Vec<(WorldPos, &crate::layout::LayoutNode)> = layer_nodes
+        // Find all data nodes in the same Sugiyama layer
+        let mut candidates: Vec<(WorldPos, &crate::layout::LayoutNode)> = viewport_graph
+            .node_positions
             .iter()
-            .filter_map(|&domain_idx| {
+            .filter_map(|(&domain_idx, &world_pos)| {
                 // Skip current node
                 if domain_idx == node_idx {
                     return None;
                 }
 
-                // Get world position
-                let world_pos = *viewport_graph.node_positions.get(&domain_idx)?;
+                // Get node data
                 let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
+
+                // Only consider nodes in the same Sugiyama layer
+                if node_data.layer != Some(current_sugiyama_layer) {
+                    return None;
+                }
 
                 // Filter by direction
                 let dy = world_pos.y - current_world_pos.y;

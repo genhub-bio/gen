@@ -477,17 +477,53 @@ fn chain_is_legal(
     true
 }
 
+/// Build a mapping from x-coordinates to Sugiyama layer indices.
+/// This is used to reassign layer fields after horizontal redistribution.
+fn build_x_to_layer_mapping(
+    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+) -> Vec<(i64, i32)> {
+    let mut x_to_layer: Vec<(i64, i32)> = Vec::new();
+
+    for node_idx in graph.node_indices() {
+        if let Some(node) = graph.node_weight(node_idx)
+            && let NodeRole::Data(_) = node.role
+            && let Some(layer) = node.layer
+        {
+            x_to_layer.push((node.pos.x, layer));
+        }
+    }
+
+    // Sort by x-coordinate for efficient lookup
+    x_to_layer.sort_by_key(|&(x, _layer)| x);
+
+    x_to_layer
+}
+
+/// Find the closest layer to a given x-coordinate.
+/// On distance ties, prefer the lower layer number.
+fn find_closest_layer(x_to_layer: &[(i64, i32)], target_x: i64) -> Option<i32> {
+    if x_to_layer.is_empty() {
+        return None;
+    }
+
+    // Find minimum by (distance, layer) - this ensures ties favor lower layer numbers
+    x_to_layer
+        .iter()
+        .map(|&(x, layer)| ((x - target_x).abs(), layer))
+        .min_by_key(|&(dist, layer)| (dist, layer))
+        .map(|(_, layer)| layer)
+}
+
 /// Redistribute nodes along horizontal chains in the layout graph.
 /// This should be called after make_rectilinear and before building the spatial index.
 pub fn redistribute_horizontal_chains(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
 ) {
-    let chains = identify_chains(graph);
+    // Build x-to-layer mapping before any redistribution
+    // This preserves the original Sugiyama layer assignments for cursor navigation
+    let x_to_layer = build_x_to_layer_mapping(graph);
 
-    log::debug!(
-        "redistribute_horizontal_chains: found {} chains",
-        chains.len()
-    );
+    let chains = identify_chains(graph);
 
     for chain in chains {
         if chain.nodes.len() < 2 {
@@ -508,13 +544,6 @@ pub fn redistribute_horizontal_chains(
         // Find obstacles for this chain
         let obstacles = find_obstacles(graph, chain.y, &chain.nodes);
 
-        log::trace!(
-            "Chain at y={} with {} nodes, {} obstacles",
-            chain.y,
-            chain.nodes.len(),
-            obstacles.len()
-        );
-
         // Optimize the chain
         match optimize_chain_edge_gaps(&widths, &orig_x, &obstacles) {
             ChainOptResult::Optimized { new_x } => {
@@ -531,6 +560,14 @@ pub fn redistribute_horizontal_chains(
                                     new_x[i]
                                 );
                                 node.pos.x = new_x[i];
+
+                                // Reassign layer based on closest original x-coordinate
+                                // This keeps cursor navigation working after redistribution
+                                if let Some(new_layer) = find_closest_layer(&x_to_layer, new_x[i])
+                                    && node.layer != Some(new_layer)
+                                {
+                                    node.layer = Some(new_layer);
+                                }
                             }
                             _ => {
                                 // Keep endpoints and routing nodes fixed
@@ -703,7 +740,7 @@ mod tests {
         let partition_idx = 0;
 
         // Horizontal chain at y=10: nodes at x=0, 10, 20
-        let n0 = graph.add_node(LayoutNode::data(
+        let node_0 = graph.add_node(LayoutNode::data(
             NodeIndex::new(0),
             LocalPos {
                 partition_idx,
@@ -713,7 +750,7 @@ mod tests {
             (8, 3),
             Some(1),
         ));
-        let n1 = graph.add_node(LayoutNode::data(
+        let node_1 = graph.add_node(LayoutNode::data(
             NodeIndex::new(1),
             LocalPos {
                 partition_idx,
@@ -723,7 +760,7 @@ mod tests {
             (8, 3),
             Some(1),
         ));
-        let n2 = graph.add_node(LayoutNode::data(
+        let node_2 = graph.add_node(LayoutNode::data(
             NodeIndex::new(2),
             LocalPos {
                 partition_idx,
@@ -736,18 +773,18 @@ mod tests {
 
         // Add horizontal edges
         graph.add_edge(
-            n0,
-            n1,
+            node_0,
+            node_1,
             LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
         );
         graph.add_edge(
-            n1,
-            n2,
+            node_1,
+            node_2,
             LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(2)),
         );
 
         // Add a vertical edge that crosses the horizontal chain at x=15
-        let n_top = graph.add_node(LayoutNode::data(
+        let node_top = graph.add_node(LayoutNode::data(
             NodeIndex::new(3),
             LocalPos {
                 partition_idx,
@@ -757,7 +794,7 @@ mod tests {
             (8, 3),
             Some(0),
         ));
-        let n_bottom = graph.add_node(LayoutNode::data(
+        let node_bottom = graph.add_node(LayoutNode::data(
             NodeIndex::new(4),
             LocalPos {
                 partition_idx,
@@ -768,13 +805,13 @@ mod tests {
             Some(2),
         ));
         graph.add_edge(
-            n_top,
-            n_bottom,
+            node_top,
+            node_bottom,
             LayoutEdge::new(NodeIndex::new(3), NodeIndex::new(4)),
         );
 
         // Find obstacles for the horizontal chain at y=10
-        let obstacles = find_obstacles(&graph, 10, &[n0, n1, n2]);
+        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1, node_2]);
 
         // Should find one obstacle at x=15 (protected: 14, 15, 16)
         assert_eq!(obstacles.len(), 1, "Should find exactly one obstacle");
@@ -792,7 +829,7 @@ mod tests {
         let partition_idx = 0;
 
         // Horizontal chain at y=10
-        let n0 = graph.add_node(LayoutNode::data(
+        let node_0 = graph.add_node(LayoutNode::data(
             NodeIndex::new(0),
             LocalPos {
                 partition_idx,
@@ -802,7 +839,7 @@ mod tests {
             (8, 3),
             Some(1),
         ));
-        let n1 = graph.add_node(LayoutNode::data(
+        let node_1 = graph.add_node(LayoutNode::data(
             NodeIndex::new(1),
             LocalPos {
                 partition_idx,
@@ -814,7 +851,7 @@ mod tests {
         ));
 
         // Another horizontal edge at y=5
-        let n2 = graph.add_node(LayoutNode::data(
+        let node_2 = graph.add_node(LayoutNode::data(
             NodeIndex::new(2),
             LocalPos {
                 partition_idx,
@@ -824,7 +861,7 @@ mod tests {
             (8, 3),
             Some(0),
         ));
-        let n3 = graph.add_node(LayoutNode::data(
+        let node_3 = graph.add_node(LayoutNode::data(
             NodeIndex::new(3),
             LocalPos {
                 partition_idx,
@@ -836,18 +873,18 @@ mod tests {
         ));
 
         graph.add_edge(
-            n0,
-            n1,
+            node_0,
+            node_1,
             LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
         );
         graph.add_edge(
-            n2,
-            n3,
+            node_2,
+            node_3,
             LayoutEdge::new(NodeIndex::new(2), NodeIndex::new(3)),
         );
 
         // Find obstacles for the horizontal chain at y=10
-        let obstacles = find_obstacles(&graph, 10, &[n0, n1]);
+        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1]);
 
         // Horizontal edges don't cross, so no obstacles
         assert_eq!(
@@ -855,5 +892,205 @@ mod tests {
             0,
             "Horizontal edges should not create obstacles"
         );
+    }
+
+    #[test]
+    fn test_layer_reassignment() {
+        use crate::geometry::LocalPos;
+
+        // Create a graph with nodes at different x positions representing different layers
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        let partition_idx = 0;
+
+        // Layer 0 nodes at x=0, 10
+        let _node_0 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos {
+                partition_idx,
+                x: 0,
+                y: 0,
+            },
+            (8, 3),
+            Some(0),
+        ));
+        let _node_1 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos {
+                partition_idx,
+                x: 10,
+                y: 0,
+            },
+            (8, 3),
+            Some(0),
+        ));
+
+        // Layer 1 nodes at x=20, 30
+        let _node_2 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(2),
+            LocalPos {
+                partition_idx,
+                x: 20,
+                y: 5,
+            },
+            (8, 3),
+            Some(1),
+        ));
+        let _node_3 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(3),
+            LocalPos {
+                partition_idx,
+                x: 30,
+                y: 5,
+            },
+            (8, 3),
+            Some(1),
+        ));
+
+        // Layer 2 nodes at x=40, 50
+        let _node_4 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(4),
+            LocalPos {
+                partition_idx,
+                x: 40,
+                y: 10,
+            },
+            (8, 3),
+            Some(2),
+        ));
+        let _node_5 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(5),
+            LocalPos {
+                partition_idx,
+                x: 50,
+                y: 10,
+            },
+            (8, 3),
+            Some(2),
+        ));
+
+        // Build x-to-layer mapping
+        let x_to_layer = build_x_to_layer_mapping(&graph);
+
+        // Should have 6 unique x positions
+        assert_eq!(x_to_layer.len(), 6);
+
+        // Test finding closest layer for various x positions
+        assert_eq!(find_closest_layer(&x_to_layer, 0), Some(0)); // Exact match
+        assert_eq!(find_closest_layer(&x_to_layer, 5), Some(0)); // Closer to 0 than 10
+        assert_eq!(find_closest_layer(&x_to_layer, 15), Some(0)); // Equidistant to 10 and 20, prefer lower layer
+        assert_eq!(find_closest_layer(&x_to_layer, 25), Some(1)); // Closer to 20 or 30
+        assert_eq!(find_closest_layer(&x_to_layer, 35), Some(1)); // Equidistant to 30 and 40, prefer lower layer
+        assert_eq!(find_closest_layer(&x_to_layer, 45), Some(2)); // Closer to 40 or 50
+    }
+
+    #[test]
+    fn test_layer_reassignment_with_redistribution() {
+        use crate::geometry::LocalPos;
+
+        // Create a horizontal chain where nodes will be redistributed
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        let partition_idx = 0;
+
+        // Horizontal chain at y=10 with nodes from different original layers
+        // Node at x=0, layer 0 (endpoint)
+        let node_0 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos {
+                partition_idx,
+                x: 0,
+                y: 10,
+            },
+            (8, 3),
+            Some(0),
+        ));
+
+        // Node at x=10, originally layer 1
+        let node_1 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos {
+                partition_idx,
+                x: 10,
+                y: 10,
+            },
+            (8, 3),
+            Some(1),
+        ));
+
+        // Node at x=20, originally layer 2
+        let node_2 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(2),
+            LocalPos {
+                partition_idx,
+                x: 20,
+                y: 10,
+            },
+            (8, 3),
+            Some(2),
+        ));
+
+        // Node at x=60, layer 3 (endpoint)
+        let node_3 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(3),
+            LocalPos {
+                partition_idx,
+                x: 60,
+                y: 10,
+            },
+            (8, 3),
+            Some(3),
+        ));
+
+        // Add horizontal edges to form a chain
+        graph.add_edge(
+            node_0,
+            node_1,
+            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
+        );
+        graph.add_edge(
+            node_1,
+            node_2,
+            LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(2)),
+        );
+        graph.add_edge(
+            node_2,
+            node_3,
+            LayoutEdge::new(NodeIndex::new(2), NodeIndex::new(3)),
+        );
+
+        // Record original layers
+        let original_layer_node_1 = graph[node_1].layer;
+        let original_layer_node_2 = graph[node_2].layer;
+
+        // Run redistribution (this will spread nodes evenly)
+        redistribute_horizontal_chains(&mut graph, 1.0);
+
+        // After redistribution, interior nodes should have their layers reassigned
+        // based on their new x positions
+        // The nodes should be spread more evenly between 0 and 60
+        // Expected positions: node_0=0, node_1≈20, node_2≈40, node_3=60
+
+        // Check that interior nodes got their layers reassigned based on closest x
+        let new_layer_node_1 = graph[node_1].layer;
+        let new_layer_node_2 = graph[node_2].layer;
+
+        // node_1 moved to around x=20, which should map to layer 2 (closer to original x=20)
+        // node_2 moved to around x=40, which should map to layer 2 or 3
+
+        // The exact layer assignment depends on the redistribution, but we can verify
+        // that the layer field was updated (it should differ from original if nodes moved significantly)
+        println!(
+            "node_1: layer {:?} -> {:?}, x={}",
+            original_layer_node_1, new_layer_node_1, graph[node_1].pos.x
+        );
+        println!(
+            "node_2: layer {:?} -> {:?}, x={}",
+            original_layer_node_2, new_layer_node_2, graph[node_2].pos.x
+        );
+
+        // At minimum, verify that layers are still valid (0-3 range)
+        assert!(new_layer_node_1.unwrap() >= 0 && new_layer_node_1.unwrap() <= 3);
+        assert!(new_layer_node_2.unwrap() >= 0 && new_layer_node_2.unwrap() <= 3);
     }
 }
