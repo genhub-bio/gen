@@ -26,7 +26,7 @@ pub enum RegionParseError {
 }
 
 impl Region {
-    pub fn parse(region_string: &str) -> Result<Self, RegionParseError> {
+    pub fn parse(region_string: &str, zero_based: bool) -> Result<Self, RegionParseError> {
         // Example input: "chr1:100-200"
         let mut parts = region_string.split(':');
         let name = parts.next().ok_or(RegionParseError::NoName)?.to_string();
@@ -46,7 +46,13 @@ impl Region {
             return Err(RegionParseError::InvalidRange);
         }
 
-        Ok(Self { name, start, end })
+        let increment = if zero_based { 0 } else { 1 };
+
+        Ok(Self {
+            name,
+            start: start + increment,
+            end: end + increment,
+        })
     }
 }
 
@@ -56,7 +62,7 @@ mod tests {
 
     #[test]
     fn test_parse_valid_region() {
-        let region = Region::parse("chr1:100-200");
+        let region = Region::parse("chr1:100-200", true);
         assert_eq!(
             region,
             Ok(Region {
@@ -69,20 +75,20 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_format() {
-        let region = Region::parse("chr1-100-200");
+        let region = Region::parse("chr1-100-200", true);
         assert_eq!(region, Err(RegionParseError::NoCoordinates));
     }
 
     #[test]
     fn test_parse_start_greater_than_end() {
-        let region = Region::parse("chr1:300-200");
+        let region = Region::parse("chr1:300-200", true);
         assert_eq!(region, Err(RegionParseError::InvalidRange));
     }
 
     #[test]
     fn test_region_applies_to_array_slice() {
         let string = "foobarbaz";
-        let region = Region::parse("chr1:3-5").unwrap();
+        let region = Region::parse("chr1:3-5", true).unwrap();
         let slice = &string[region.start as usize..region.end as usize];
         assert_eq!(slice, "ba");
     }

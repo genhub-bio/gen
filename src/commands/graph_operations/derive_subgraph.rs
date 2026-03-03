@@ -47,7 +47,7 @@ pub fn derive_subgraph_operation(
     let sample_name = sample.clone();
     let new_sample_name = new_sample.clone();
 
-    let parsed_region = if let Ok(region) = Region::parse(&region) {
+    let parsed_region = if let Ok(region) = Region::parse(&region, true) {
         region
     } else {
         return Err(Error::msg(format!(
