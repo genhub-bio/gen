@@ -13,6 +13,7 @@ use rstar::{AABB, RTree};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    distribute_nodes::redistribute_horizontal_chains,
     edge_router::route_graph::make_rectilinear,
     geometry::{BigRect, LayoutObject, LayoutPos, LocalPos, PartitionIndex},
     partition::{PartitionEdge, PartitionNode, StitchSide},
@@ -249,6 +250,9 @@ impl PartitionLayout {
         if let Err(e) = make_rectilinear(&mut layout_graph, vertex_spacing) {
             log::warn!("Edge routing failed: {:?}", e);
         }
+
+        // Redistribute nodes along horizontal chains after edge routing
+        redistribute_horizontal_chains(&mut layout_graph);
 
         let (dx, dy) = align_partition_to_origin(&mut layout_graph);
 

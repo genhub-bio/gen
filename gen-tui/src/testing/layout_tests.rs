@@ -9,83 +9,6 @@ use crate::testing::create_test_terminal;
 #[cfg(test)]
 use crate::testing::mocks::{FixedNodeSizer, MockDomainGraph, TestRenderers};
 
-/// Helper function to create a diamond graph with variable node widths for bridge testing
-#[cfg(test)]
-#[allow(dead_code)]
-fn create_variable_width_diamond_snapshot(
-    viewport_width: u16,
-    viewport_height: u16,
-    layer_count: usize,
-    node_count: usize,
-) -> String {
-    use crate::{
-        layout::VisualDetail,
-        plotter::NodeSizer,
-        testing::mocks::{MockDomainGraph, TestGraphs, TestRenderers},
-    };
-
-    // Use the standard diamond graph from TestGraphs
-    let domain_graph = TestGraphs::domain_diamond();
-
-    // Custom node sizer with dramatically different widths for middle layer
-    #[derive(Debug, Clone)]
-    struct VariableWidthSizer;
-
-    impl NodeSizer<MockDomainGraph> for VariableWidthSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            _scale: VisualDetail,
-        ) -> (u64, u64) {
-            match node.index() {
-                0 => (4, 1),  // Start node: medium width
-                1 => (15, 2), // Left middle node: very wide
-                2 => (2, 1),  // Right middle node: very narrow
-                3 => (5, 1),  // End node: medium width
-                _ => (3, 1),  // Default
-            }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
-    // Also implement for reference type
-    impl NodeSizer<&MockDomainGraph> for VariableWidthSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            _scale: VisualDetail,
-        ) -> (u64, u64) {
-            match node.index() {
-                0 => (4, 1),  // Start node: medium width
-                1 => (15, 2), // Left middle node: very wide
-                2 => (2, 1),  // Right middle node: very narrow
-                3 => (5, 1),  // End node: medium width
-                _ => (3, 1),  // Default
-            }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
-    let node_sizer = VariableWidthSizer;
-    let renderer = TestRenderers::debug();
-
-    make_snapshot_custom(
-        domain_graph,
-        viewport_width,
-        viewport_height,
-        layer_count,
-        node_count,
-        node_sizer,
-        renderer,
-    )
-}
-
 /// Helper function to create viewport-based visual snapshots using GraphController
 #[cfg(test)]
 fn make_snapshot_custom<NS, R>(
@@ -1785,4 +1708,76 @@ fn test_large_node_rendering_with_zoom() {
         "Cursor viewport position should remain stable during zoom operations. Initial: {:?}, Final: {:?}",
         initial_cursor_viewport_pos, final_cursor_viewport_pos
     );
+}
+
+/// Test diamond graph with variable width nodes on parallel branches.
+/// This tests the horizontal chain redistribution with nodes of different sizes.
+#[test]
+fn test_diamond_variable_width_parallel_nodes() {
+    let _ = env_logger::try_init();
+
+    use crate::plotter::NodeSizer;
+
+    // Create diamond: A -> {B, C} -> D
+    let mut domain_graph = MockDomainGraph::new();
+    let node_a = domain_graph.add_node(());
+    let node_b = domain_graph.add_node(());
+    let node_c = domain_graph.add_node(());
+    let node_d = domain_graph.add_node(());
+
+    domain_graph.add_edge(node_a, node_b, ());
+    domain_graph.add_edge(node_a, node_c, ());
+    domain_graph.add_edge(node_b, node_d, ());
+    domain_graph.add_edge(node_c, node_d, ());
+
+    // Custom NodeSizer: B=3 wide, C=2 wide, others=5 wide
+    #[derive(Debug, Clone)]
+    struct VariableWidthSizer;
+
+    impl NodeSizer<MockDomainGraph> for VariableWidthSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) -> (u64, u64) {
+            match node.index() {
+                1 => (15, 3), // B - 3 units wide (15 chars = 3 * 5-char units)
+                2 => (10, 3), // C - 2 units wide (10 chars = 2 * 5-char units)
+                _ => (5, 3),  // A and D - 1 unit wide (5 chars)
+            }
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    impl NodeSizer<&MockDomainGraph> for VariableWidthSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            scale: VisualDetail,
+        ) -> (u64, u64) {
+            <Self as NodeSizer<MockDomainGraph>>::get_node_size(self, node, scale)
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    let renderer = TestRenderers::debug();
+    let node_sizer = VariableWidthSizer;
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        80,
+        25,
+        usize::MAX,
+        usize::MAX,
+        node_sizer,
+        renderer,
+    );
+
+    insta::assert_snapshot!("diamond_variable_width_parallel", snapshot);
 }
