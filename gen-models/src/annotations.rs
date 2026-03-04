@@ -430,7 +430,7 @@ pub fn add_annotation(
 ) -> Result<Operation, Box<dyn std::error::Error>> {
     let graph_conn = context.graph().conn();
     let operation_conn = context.operations().conn();
-    let parsed_region = Region::parse(region, false)?;
+    let parsed_region = Region::parse(region)?;
     let start = parsed_region.start;
     let end = parsed_region.end;
 
