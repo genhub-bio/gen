@@ -15,11 +15,13 @@ use petgraph::{
 
 use crate::layout::{LayoutEdge, LayoutNode, NodeRole};
 
-/// Asymmetric half-widths for a node (left half is larger for odd widths).
+/// Asymmetric halves for a node dimension (lo half is larger for odd sizes).
+/// - `lo`: extent in the lower/negative direction from center
+/// - `hi`: extent in the higher/positive direction from center
 #[derive(Clone, Copy, Debug)]
 pub struct Halves {
-    pub left: i64,
-    pub right: i64,
+    pub lo: i64, // lower/negative direction (left for x, down for y)
+    pub hi: i64, // higher/positive direction (right for x, up for y)
 }
 
 /// An inclusive interval [l, r] representing occupied cells.
@@ -46,13 +48,18 @@ struct HorizontalChain {
     y: i64,
 }
 
-/// Calculate asymmetric half-widths for a given width.
-/// For odd widths, the left half is larger.
-/// Example: width=9 -> left=5, right=4
-pub fn halves(width: i64) -> Halves {
+/// Calculate asymmetric halves for a given dimension size.
+/// For odd sizes, the lower half (lo) is larger.
+/// Works for both width (x-axis) and height (y-axis).
+///
+/// Examples:
+/// - size=9 -> lo=5, hi=4
+/// - size=8 -> lo=4, hi=4
+/// - size=1 -> lo=1, hi=0
+pub fn halves(size: i64) -> Halves {
     Halves {
-        left: (width + 1) / 2,
-        right: width / 2,
+        lo: (size + 1) / 2,
+        hi: size / 2,
     }
 }
 
@@ -61,7 +68,7 @@ pub fn halves(width: i64) -> Halves {
 pub fn base_step(width_i: i64, width_j: i64) -> i64 {
     let hi = halves(width_i);
     let hj = halves(width_j);
-    hi.right + hj.left
+    hi.hi + hj.lo
 }
 
 /// Check if two intervals overlap.
@@ -73,8 +80,8 @@ fn overlaps(a: Interval, b: Interval) -> bool {
 fn occ_interval(center_x: i64, width: i64) -> Interval {
     let h = halves(width);
     Interval {
-        l: center_x - h.left,
-        r: center_x + h.right,
+        l: center_x - h.lo,
+        r: center_x + h.hi,
     }
 }
 
@@ -82,7 +89,7 @@ fn occ_interval(center_x: i64, width: i64) -> Interval {
 /// past a forbidden interval.
 fn shift_right_to_avoid(protected: Interval, center_x: i64, width: i64) -> i64 {
     let h = halves(width);
-    let min_center = protected.r + 1 + h.left;
+    let min_center = protected.r + 1 + h.lo;
     (min_center - center_x).max(0)
 }
 
@@ -225,17 +232,50 @@ fn split_chain_at_routing_nodes(
 }
 
 /// Find all obstacles (forbidden intervals) for a given horizontal chain.
-/// Obstacles come from edges that cross the horizontal line at y.
-/// For each crossing, we protect the crossing cell and its immediate neighbors.
 ///
-/// Since all edges are rectilinear (either vertical or horizontal), we only need
-/// to check vertical edges that span across the chain's y-coordinate.
+/// Obstacles come from two sources:
+/// 1. Vertical edges that cross the horizontal line at y
+/// 2. Nodes whose bounding boxes intersect with the chain's envelope
+///
+/// The chain envelope is defined as the smallest rectangle spanning:
+/// - x: from leftmost to rightmost chain node
+/// - y: the chain's y-coordinate ± node_separation (to account for node heights)
+///
+/// For each obstacle, we protect the area with margins based on node_separation.
 fn find_obstacles(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     chain_y: i64,
-    _chain_nodes: &[NodeIndex],
+    chain_nodes: &[NodeIndex],
+    node_separation: i64,
 ) -> Vec<Interval> {
     let mut obstacles = Vec::new();
+
+    // Build set of chain node indices for quick lookup
+    let chain_node_set: HashSet<NodeIndex> = chain_nodes.iter().copied().collect();
+
+    // Calculate the chain envelope (exact bounding box of chain nodes)
+    let (chain_x_min, chain_x_max, envelope_y_min, envelope_y_max) = {
+        let mut x_min = i64::MAX;
+        let mut x_max = i64::MIN;
+        let mut max_half_down = 0i64; // Maximum downward extent from center
+        let mut max_half_up = 0i64; // Maximum upward extent from center
+
+        for &node_idx in chain_nodes {
+            if let Some(node) = graph.node_weight(node_idx) {
+                x_min = x_min.min(node.pos.x);
+                x_max = x_max.max(node.pos.x);
+
+                // Calculate how far this node extends above/below its center
+                let h = halves(node.size.1 as i64);
+                max_half_down = max_half_down.max(h.lo); // downward in y
+                max_half_up = max_half_up.max(h.hi); // upward in y
+            }
+        }
+
+        // Envelope is just the actual extent of chain nodes
+        // node_separation is applied later when creating exclusion zones
+        (x_min, x_max, chain_y - max_half_down, chain_y + max_half_up)
+    };
 
     // Find all vertical edges that cross this y-level
     for edge in graph.edge_references() {
@@ -266,6 +306,37 @@ fn find_obstacles(
             }
             // Horizontal edges (y1 == y2) don't cross other horizontal lines
             // Diagonal edges shouldn't exist in rectilinear layout
+        }
+    }
+
+    // Find all nodes (not in the chain) whose bounding boxes intersect the chain envelope
+    for node_idx in graph.node_indices() {
+        // Skip nodes that are part of the chain
+        if chain_node_set.contains(&node_idx) {
+            continue;
+        }
+
+        if let Some(node) = graph.node_weight(node_idx) {
+            // Calculate node's bounding box using halves for both dimensions
+            let node_h_width = halves(node.size.0 as i64);
+            let node_x_min = node.pos.x - node_h_width.lo;
+            let node_x_max = node.pos.x + node_h_width.hi;
+
+            let node_h_height = halves(node.size.1 as i64);
+            let node_y_min = node.pos.y - node_h_height.lo; // downward in y
+            let node_y_max = node.pos.y + node_h_height.hi; // upward in y
+
+            // Check if node's bounding box intersects the chain envelope
+            let x_intersects = node_x_max >= chain_x_min && node_x_min <= chain_x_max;
+            let y_intersects = node_y_max >= envelope_y_min && node_y_min <= envelope_y_max;
+
+            if x_intersects && y_intersects {
+                // Block the entire column at this node's x position ± node_separation
+                obstacles.push(Interval {
+                    l: node.pos.x - node_separation,
+                    r: node.pos.x + node_separation,
+                });
+            }
         }
     }
 
@@ -548,7 +619,7 @@ pub fn redistribute_horizontal_chains(
         }
 
         // Find obstacles for this chain
-        let obstacles = find_obstacles(graph, chain.y, &chain.nodes);
+        let obstacles = find_obstacles(graph, chain.y, &chain.nodes, min_gap);
 
         // Optimize the chain
         match optimize_chain_edge_gaps(&widths, &orig_x, &obstacles, min_gap) {
@@ -599,28 +670,28 @@ mod tests {
     #[test]
     fn test_halves() {
         let h = halves(9);
-        assert_eq!(h.left, 5);
-        assert_eq!(h.right, 4);
+        assert_eq!(h.lo, 5);
+        assert_eq!(h.hi, 4);
 
         let h = halves(8);
-        assert_eq!(h.left, 4);
-        assert_eq!(h.right, 4);
+        assert_eq!(h.lo, 4);
+        assert_eq!(h.hi, 4);
 
         let h = halves(1);
-        assert_eq!(h.left, 1);
-        assert_eq!(h.right, 0);
+        assert_eq!(h.lo, 1);
+        assert_eq!(h.hi, 0);
     }
 
     #[test]
     fn test_base_step() {
         let step = base_step(9, 9);
-        assert_eq!(step, 9); // 4 + 5
+        assert_eq!(step, 9); // hi + lo = 4 + 5
 
         let step = base_step(8, 8);
-        assert_eq!(step, 8); // 4 + 4
+        assert_eq!(step, 8); // hi + lo = 4 + 4
 
         let step = base_step(9, 7);
-        assert_eq!(step, 8); // 4 + 4
+        assert_eq!(step, 8); // hi(9) + lo(7) = 4 + 4
     }
 
     #[test]
@@ -641,21 +712,21 @@ mod tests {
     #[test]
     fn test_occ_interval() {
         let occ = occ_interval(10, 9);
-        assert_eq!(occ.l, 5); // 10 - 5
-        assert_eq!(occ.r, 14); // 10 + 4
+        assert_eq!(occ.l, 5); // 10 - lo(9) = 10 - 5
+        assert_eq!(occ.r, 14); // 10 + hi(9) = 10 + 4
 
         let occ = occ_interval(10, 8);
-        assert_eq!(occ.l, 6); // 10 - 4
-        assert_eq!(occ.r, 14); // 10 + 4
+        assert_eq!(occ.l, 6); // 10 - lo(8) = 10 - 4
+        assert_eq!(occ.r, 14); // 10 + hi(8) = 10 + 4
     }
 
     #[test]
     fn test_shift_right_to_avoid() {
         let protected = Interval { l: 5, r: 10 };
         let shift = shift_right_to_avoid(protected, 8, 9);
-        // Node at 8 with width 9 has halves (5, 4)
-        // Occupies [3, 12]
-        // Must move to at least 10 + 1 + 5 = 16
+        // Node at 8 with width 9 has halves(9) = {lo: 5, hi: 4}
+        // Occupies [8-5, 8+4] = [3, 12]
+        // Must move to at least 10 + 1 + lo(9) = 10 + 1 + 5 = 16
         // Shift = 16 - 8 = 8
         assert_eq!(shift, 8);
 
@@ -820,7 +891,8 @@ mod tests {
         );
 
         // Find obstacles for the horizontal chain at y=10
-        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1, node_2]);
+        let node_separation = 1;
+        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1, node_2], node_separation);
 
         // Should find one obstacle at x=15 (protected: 14, 15, 16)
         assert_eq!(obstacles.len(), 1, "Should find exactly one obstacle");
@@ -885,7 +957,8 @@ mod tests {
     fn test_horizontal_edges_not_obstacles() {
         use crate::geometry::LocalPos;
 
-        // Horizontal edges at different y-levels should not create obstacles
+        // Nodes far from the chain should not create obstacles
+        // (no vertical edge crossings, no envelope intersection)
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
 
         let partition_idx = 0;
@@ -912,13 +985,15 @@ mod tests {
             Some(1),
         ));
 
-        // Another horizontal edge at y=5
+        // Another horizontal edge at y=0 (far enough to not intersect envelope)
+        // Chain at y=10 with height=3 and node_separation=1 creates envelope [10-3, 10+3] = [7, 13]
+        // Nodes at y=0 with height=3 span [-1, 1], which does not intersect [7, 13]
         let node_2 = graph.add_node(LayoutNode::data(
             NodeIndex::new(2),
             LocalPos {
                 partition_idx,
                 x: 5,
-                y: 5,
+                y: 0,
             },
             (8, 3),
             Some(0),
@@ -928,7 +1003,7 @@ mod tests {
             LocalPos {
                 partition_idx,
                 x: 15,
-                y: 5,
+                y: 0,
             },
             (8, 3),
             Some(0),
@@ -946,7 +1021,8 @@ mod tests {
         );
 
         // Find obstacles for the horizontal chain at y=10
-        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1]);
+        let node_separation = 1;
+        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1], node_separation);
 
         // Horizontal edges don't cross, so no obstacles
         assert_eq!(
@@ -1154,5 +1230,116 @@ mod tests {
         // At minimum, verify that layers are still valid (0-3 range)
         assert!(new_layer_node_1.unwrap() >= 0 && new_layer_node_1.unwrap() <= 3);
         assert!(new_layer_node_2.unwrap() >= 0 && new_layer_node_2.unwrap() <= 3);
+    }
+
+    #[test]
+    fn test_node_intersection_creates_exclusion_zone() {
+        use crate::geometry::LocalPos;
+
+        // Test that nodes whose bounding boxes intersect with the chain envelope
+        // create exclusion zones, preventing chain nodes from being placed there
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        let partition_idx = 0;
+
+        // Horizontal chain at y=10: nodes at x=0, 30, 60
+        let node_0 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos {
+                partition_idx,
+                x: 0,
+                y: 10,
+            },
+            (8, 3),
+            Some(0),
+        ));
+        let node_1 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos {
+                partition_idx,
+                x: 30,
+                y: 10,
+            },
+            (8, 3),
+            Some(1),
+        ));
+        let node_2 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(2),
+            LocalPos {
+                partition_idx,
+                x: 60,
+                y: 10,
+            },
+            (8, 3),
+            Some(2),
+        ));
+
+        // Add horizontal edges
+        graph.add_edge(
+            node_0,
+            node_1,
+            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
+        );
+        graph.add_edge(
+            node_1,
+            node_2,
+            LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(2)),
+        );
+
+        // Add a node above the chain that intersects the envelope
+        // Chain is at y=10, chain nodes have height=3
+        // halves(3) = {lo: 2, hi: 1}, so envelope spans [10-2, 10+1] = [8, 11]
+        // This node at y=9 with height=3: halves(3) = {lo: 2, hi: 1}
+        // Node spans [9-2, 9+1] = [7, 10], which intersects envelope [8, 11]
+        let _blocking_node = graph.add_node(LayoutNode::data(
+            NodeIndex::new(3),
+            LocalPos {
+                partition_idx,
+                x: 20, // Between chain nodes 0 and 1
+                y: 9,  // Above but overlapping with the chain
+            },
+            (6, 3), // Width=6, Height=3
+            Some(0),
+        ));
+
+        // Add another node below the chain
+        // This node at y=11 with height=3 spans [11-2, 11+1] = [9, 12]
+        // Intersects envelope [8, 11]
+        let _blocking_node_2 = graph.add_node(LayoutNode::data(
+            NodeIndex::new(4),
+            LocalPos {
+                partition_idx,
+                x: 40, // Between chain nodes 1 and 2
+                y: 11, // Below but overlapping with the chain
+            },
+            (6, 3),
+            Some(2),
+        ));
+
+        // Find obstacles with node_separation=3
+        let node_separation = 3;
+        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1, node_2], node_separation);
+
+        // Should find two obstacles - one for each blocking node
+        assert!(
+            obstacles.len() >= 2,
+            "Should find at least 2 obstacles from intersecting nodes, found {}",
+            obstacles.len()
+        );
+
+        // Verify that the blocking nodes created exclusion zones
+        // blocking_node at x=20 should create zone [20-3, 20+3] = [17, 23]
+        // blocking_node_2 at x=40 should create zone [40-3, 40+3] = [37, 43]
+        let has_obstacle_at_20 = obstacles.iter().any(|obs| obs.l <= 20 && 20 <= obs.r);
+        let has_obstacle_at_40 = obstacles.iter().any(|obs| obs.l <= 40 && 40 <= obs.r);
+
+        assert!(
+            has_obstacle_at_20,
+            "Should have exclusion zone around x=20 for blocking_node"
+        );
+        assert!(
+            has_obstacle_at_40,
+            "Should have exclusion zone around x=40 for blocking_node_2"
+        );
     }
 }
