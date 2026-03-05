@@ -6,8 +6,7 @@ use std::{
 };
 
 use anyhow::anyhow;
-use gen_core::{HashId, calculate_hash, config::Workspace, traits::Capnp};
-use noodles::core::Region;
+use gen_core::{HashId, calculate_hash, config::Workspace, region::Region, traits::Capnp};
 use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -431,30 +430,20 @@ pub fn add_annotation(
 ) -> Result<Operation, Box<dyn std::error::Error>> {
     let graph_conn = context.graph().conn();
     let operation_conn = context.operations().conn();
-    let parsed_region = region.parse::<Region>()?;
-    let interval = parsed_region.interval();
-    let start = interval
-        .start()
-        .ok_or_else(|| anyhow!("Region missing start"))?
-        .get() as i64;
-    let end = interval
-        .end()
-        .ok_or_else(|| anyhow!("Region missing end"))?
-        .get() as i64;
+    let parsed_region = Region::parse(region)?;
+    let start = parsed_region.start;
+    let end = parsed_region.end;
 
     let block_groups = Sample::get_block_groups(graph_conn, collection, sample);
     let block_group = block_groups
         .iter()
-        .find(|bg| bg.name == parsed_region.name())
+        .find(|bg| bg.name == parsed_region.name)
         .ok_or_else(|| {
             let sample_label = match sample {
                 Some(name) => format!("sample {name}"),
                 None => "default sample".to_string(),
             };
-            anyhow!(
-                "Graph {} not found for {sample_label}",
-                parsed_region.name()
-            )
+            anyhow!("Graph {} not found for {sample_label}", parsed_region.name)
         })?;
     let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
     let path_length = path.length(graph_conn);

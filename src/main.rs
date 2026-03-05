@@ -35,7 +35,7 @@ use r#gen::{
     },
 };
 use gen_annotations::translate;
-use gen_core::{config::Workspace, range::Range};
+use gen_core::{config::Workspace, range::Range, region::Region};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     annotations::{add_annotation, add_annotation_file},
@@ -50,7 +50,7 @@ use gen_models::{
     sample::Sample,
     traits::Query,
 };
-use noodles::core::Region;
+use itertools::Itertools;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
@@ -672,13 +672,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             let (parsed_graph_name, start_coordinate, mut end_coordinate) =
                 if let Some(region) = region {
-                    let parsed_region = region.parse::<Region>()?;
-                    let interval = parsed_region.interval();
-                    (
-                        parsed_region.name().to_string(),
-                        interval.start().ok_or("Region missing start")?.get() as i64,
-                        interval.end().ok_or("Region missing end")?.get() as i64,
-                    )
+                    let parsed_region = Region::parse(&region);
+                    match parsed_region {
+                        Ok(parsed_region) => {
+                            (parsed_region.name, parsed_region.start, parsed_region.end)
+                        }
+                        Err(parse_error) => {
+                            return Err(Box::new(parse_error));
+                        }
+                    }
                 } else {
                     (
                         graph.clone().ok_or("Graph name required")?,

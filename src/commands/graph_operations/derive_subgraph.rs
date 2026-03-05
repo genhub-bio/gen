@@ -1,13 +1,13 @@
 use core::ops::Range;
 
 use anyhow::{Error, Result};
+use gen_core::region::Region;
 use gen_models::{
     db::DbContext,
     errors::OperationError,
     operations::OperationInfo,
     session_operations::{end_operation, start_operation},
 };
-use noodles::core::Region;
 use thiserror::Error;
 
 use crate::{commands::get_default_collection, graphs::operators::derive_chunks};
@@ -47,32 +47,24 @@ pub fn derive_subgraph_operation(
     let sample_name = sample.clone();
     let new_sample_name = new_sample.clone();
 
-    let parsed_region = region.parse::<Region>()?;
-    let interval = parsed_region.interval();
-
-    let start_coordinate = if let Some(start_coordinate) = interval.start() {
-        start_coordinate.get() as i64
+    let parsed_region = if let Ok(region) = Region::parse(&region) {
+        region
     } else {
-        return Err(DeriveSubgraphOperationError::RegionBoundary(
-            "Region missing start".to_string(),
-        )
-        .into());
+        return Err(Error::msg(format!(
+            "Failed to parse region string: {}",
+            region
+        )));
     };
 
-    let end_coordinate = if let Some(end_coordinate) = interval.end() {
-        end_coordinate.get() as i64
-    } else {
-        return Err(
-            DeriveSubgraphOperationError::RegionBoundary("Region missing end".to_string()).into(),
-        );
-    };
+    let start_coordinate = parsed_region.start;
+    let end_coordinate = parsed_region.end;
 
     if let Err(err) = derive_chunks(
         db_context,
         collection_name,
         sample_name.as_deref(),
         &new_sample_name,
-        &parsed_region.name().to_string(),
+        &parsed_region.name.to_string(),
         backbone.as_deref(),
         vec![Range {
             start: start_coordinate,
