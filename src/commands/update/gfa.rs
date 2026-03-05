@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Update with a GFA file
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// GFA file path
     #[clap(index = 1)]

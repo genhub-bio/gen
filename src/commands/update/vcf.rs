@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Update with a VCF file
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// VCF file path
     #[clap(index = 1)]

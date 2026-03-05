@@ -1,6 +1,5 @@
 use anyhow;
 use clap::{Args, Subcommand};
-use clap_nested_commands::generate_sync_commands;
 
 use crate::commands::cli_context::CliContext;
 
@@ -8,11 +7,27 @@ mod fasta;
 mod genbank;
 mod gfa;
 
-/// Export commands
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     #[command(subcommand)]
     pub command: Commands,
 }
 
-generate_sync_commands!(return_type = Result<(), anyhow::Error>; fasta, genbank, gfa);
+/// Export commands
+#[derive(Clone, Debug, Subcommand)]
+pub enum Commands {
+    /// Export fasta
+    Fasta(fasta::Command),
+    /// Export genbank
+    Genbank(genbank::Command),
+    /// Export gfa
+    Gfa(gfa::Command),
+}
+
+pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
+    match command.command {
+        Commands::Fasta(cmd) => crate::commands::export::fasta::execute(ctx, cmd),
+        Commands::Genbank(cmd) => crate::commands::export::genbank::execute(ctx, cmd),
+        Commands::Gfa(cmd) => crate::commands::export::gfa::execute(ctx, cmd),
+    }
+}

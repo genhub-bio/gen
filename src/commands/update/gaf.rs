@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Update with a GAF file
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// GAF file path
     #[clap(index = 1)]
