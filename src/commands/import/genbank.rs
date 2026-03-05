@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Import a Genbank file
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// Genbank file path
     #[clap(index = 1)]

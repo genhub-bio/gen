@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Update with a fasta file
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// Sequence to use
     #[clap(index = 1)]

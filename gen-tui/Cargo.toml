@@ -23,7 +23,7 @@ crossterm = "0.29.0"
 rstar = { version = "0.12.2", features = ["serde"] }
 ftree = "1.2.0"
 rand = { version = "0.9.1", features = ["std"] }
-tachyonfx = "0.15.0"
+tachyonfx = "0.23.0"
 tokio = { version = "1.45.0", features = [
   "rt",
   "rt-multi-thread",

@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Update with library files
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// The name of the collection to update
     #[arg(short, long)]

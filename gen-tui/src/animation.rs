@@ -11,7 +11,7 @@ use crate::{
     viewport_graph::CroppedGraph,
 };
 
-impl Interpolatable<WorldPos> for WorldPos {
+impl Interpolatable for WorldPos {
     fn lerp(&self, target: &WorldPos, alpha: f32) -> WorldPos {
         let x = self.x as f64 + ((target.x as f64 - self.x as f64) * alpha as f64);
         let y = self.y as f64 + ((target.y as f64 - self.y as f64) * alpha as f64);

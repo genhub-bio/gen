@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Export a FASTA file
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// FASTA file path
     #[clap(index = 1)]

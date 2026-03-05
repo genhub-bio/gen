@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Import Library files
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct Command {
     /// The name of the library
     #[clap(index = 1)]
