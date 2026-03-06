@@ -438,36 +438,38 @@ impl Cursor {
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
-        // Get current node's Sugiyama layer from LayoutNode.layer field
-        let current_node_data = viewport_graph
-            .node_data_by_pos
-            .get(&current_world_pos)
-            .ok_or("Current node data not found")?;
-        let current_sugiyama_layer = current_node_data.layer.ok_or("Current node has no layer")?;
+        // Use CroppedGraph's x-coordinate-based layer index.
+        // This is globally consistent across partition boundaries, unlike LayoutNode.layer
+        // which is a per-partition Sugiyama rank that resets to 0 at each partition.
+        let current_layer_idx = viewport_graph
+            .find_domain_node_layer(node_idx)
+            .ok_or("Current node has no layer")?;
 
-        // Determine target layer
-        let target_sugiyama_layer = if direction > 0 {
-            current_sugiyama_layer + 1
+        // Determine target layer index
+        let target_layer_idx = if direction > 0 {
+            current_layer_idx + 1
         } else {
-            if current_sugiyama_layer == 0 {
+            if current_layer_idx == 0 {
                 return Err(NO_PREVIOUS_LAYER_ERR.to_string());
             }
-            current_sugiyama_layer - 1
+            current_layer_idx - 1
         };
 
-        // Find all data nodes in the target Sugiyama layer
-        let candidates: Vec<(WorldPos, &LayoutNode)> = viewport_graph
-            .node_positions
-            .iter()
-            .filter_map(|(_, &world_pos)| {
-                let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
+        // Get all nodes in the target layer
+        let target_layer_nodes = viewport_graph.get_layer(target_layer_idx).ok_or_else(|| {
+            if direction > 0 {
+                NO_NEXT_LAYER_ERR.to_string()
+            } else {
+                NO_PREVIOUS_LAYER_ERR.to_string()
+            }
+        })?;
 
-                // Only consider nodes in the target Sugiyama layer
-                if node_data.layer == Some(target_sugiyama_layer) {
-                    Some((world_pos, node_data))
-                } else {
-                    None
-                }
+        let candidates: Vec<(WorldPos, &LayoutNode)> = target_layer_nodes
+            .iter()
+            .filter_map(|&domain_idx| {
+                let &world_pos = viewport_graph.node_positions.get(&domain_idx)?;
+                let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
+                Some((world_pos, node_data))
             })
             .sorted_by_key(|(pos, _)| {
                 let dy = (pos.y - current_world_pos.y).abs();
@@ -476,22 +478,22 @@ impl Cursor {
             .collect();
 
         if candidates.is_empty() {
-            return Err(NO_NEXT_LAYER_ERR.to_string());
+            return Err(if direction > 0 {
+                NO_NEXT_LAYER_ERR.to_string()
+            } else {
+                NO_PREVIOUS_LAYER_ERR.to_string()
+            });
         }
 
         // Take the closest candidate
         if let Some((_target_pos, target_node)) = candidates.first() {
-            // Position cursor at appropriate edge based on direction
             let target_frac_x = if direction > 0 {
                 0.0 // Moving right: position at left edge
             } else {
                 1.0 // Moving left: position at right edge
             };
-
-            // Maintain Y fractional position
             let target_frac_y = self.fractional_pos.1;
 
-            // Update cursor to new node
             if let crate::layout::NodeRole::Data(domain_idx) = target_node.role {
                 self.set_node(domain_idx, (target_frac_x, target_frac_y));
                 Ok(())
@@ -515,32 +517,25 @@ impl Cursor {
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
-        // Get current node's Sugiyama layer from LayoutNode.layer field
-        let current_node_data = viewport_graph
-            .node_data_by_pos
-            .get(&current_world_pos)
-            .ok_or("Current node data not found")?;
-        let current_sugiyama_layer = current_node_data.layer.ok_or("Current node has no layer")?;
+        // Use CroppedGraph's x-coordinate-based layer index (globally consistent across partitions)
+        let current_layer_idx = viewport_graph
+            .find_domain_node_layer(node_idx)
+            .ok_or("Current node has no layer")?;
 
-        // Find all data nodes in the same Sugiyama layer
-        let mut candidates: Vec<(WorldPos, &crate::layout::LayoutNode)> = viewport_graph
-            .node_positions
+        let same_layer_nodes = viewport_graph
+            .get_layer(current_layer_idx)
+            .ok_or("Current layer not found")?;
+
+        // Find all data nodes in the same layer, filtered by direction
+        let mut candidates: Vec<(WorldPos, &crate::layout::LayoutNode)> = same_layer_nodes
             .iter()
-            .filter_map(|(&domain_idx, &world_pos)| {
-                // Skip current node
+            .filter_map(|&domain_idx| {
                 if domain_idx == node_idx {
                     return None;
                 }
-
-                // Get node data
+                let &world_pos = viewport_graph.node_positions.get(&domain_idx)?;
                 let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
 
-                // Only consider nodes in the same Sugiyama layer
-                if node_data.layer != Some(current_sugiyama_layer) {
-                    return None;
-                }
-
-                // Filter by direction
                 let dy = world_pos.y - current_world_pos.y;
                 if (direction > 0 && dy > 0) || (direction < 0 && dy < 0) {
                     Some((world_pos, node_data))
