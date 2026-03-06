@@ -142,6 +142,7 @@ pub fn import_genbank(
             }],
             description: "GenBank Import".to_string(),
         },
+        r#gen::imports::genbank::GenBankImportOptions::default(),
     ) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();

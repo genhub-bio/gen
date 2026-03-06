@@ -313,7 +313,11 @@ mod tests {
         use gen_models::{operations::OperationFile, sample::Sample};
 
         use super::*;
-        use crate::{imports::genbank::import_genbank, test_helpers::setup_gen, track_database};
+        use crate::{
+            imports::genbank::{GenBankImportOptions, import_genbank},
+            test_helpers::setup_gen,
+            track_database,
+        };
 
         #[test]
         fn test_incorporates_updates() {
@@ -339,6 +343,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -396,6 +401,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -465,6 +471,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

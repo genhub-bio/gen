@@ -3,14 +3,14 @@ use std::{
     str::{self, FromStr},
 };
 
-use gb_io::seq::{Location, Seq};
-use gen_models::errors::OperationError;
+use gb_io::seq::{Feature, Location, Seq};
+use gen_models::{annotations::AnnotationError, errors::OperationError};
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
 
 use crate::normalize_string;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum GenBankError {
     #[error("Feature Location Error: {0}")]
     LocationError(&'static str),
@@ -20,8 +20,31 @@ pub enum GenBankError {
     LookupError(String),
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
+    #[error("Annotation Error: {0}")]
+    AnnotationError(#[from] AnnotationError),
+    #[error("Database Error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
     #[error("Regex Error: {0}")]
     Regex(#[from] RegexError),
+}
+
+impl PartialEq for GenBankError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (GenBankError::LocationError(a), GenBankError::LocationError(b)) => a == b,
+            (GenBankError::ParseError(a), GenBankError::ParseError(b)) => a == b,
+            (GenBankError::LookupError(a), GenBankError::LookupError(b)) => a == b,
+            (GenBankError::OperationError(a), GenBankError::OperationError(b)) => a == b,
+            (GenBankError::AnnotationError(a), GenBankError::AnnotationError(b)) => {
+                a.to_string() == b.to_string()
+            }
+            (GenBankError::DatabaseError(a), GenBankError::DatabaseError(b)) => {
+                a.to_string() == b.to_string()
+            }
+            (GenBankError::Regex(a), GenBankError::Regex(b)) => a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -66,11 +89,24 @@ pub struct GenBankEdit {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct GenBankAnnotationSegment {
+    pub start: i64,
+    pub end: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenBankAnnotation {
+    pub name: String,
+    pub segments: Vec<GenBankAnnotationSegment>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct GenBankLocus {
     pub name: String,
     pub molecule_type: Option<String>,
     pub sequence: String,
     pub changes: Vec<GenBankEdit>,
+    pub annotations: Vec<GenBankAnnotation>,
 }
 
 impl GenBankLocus {
@@ -118,6 +154,84 @@ impl GenBankLocus {
     }
 }
 
+fn feature_qualifier_value(feature: &Feature, key: &str) -> Option<String> {
+    feature
+        .qualifiers
+        .iter()
+        .find_map(|(qualifier_key, value)| {
+            let qualifier_name: &str = qualifier_key.as_ref();
+            qualifier_name
+                .eq_ignore_ascii_case(key)
+                .then(|| value.as_deref().map(str::trim).map(str::to_string))
+                .flatten()
+        })
+}
+
+fn merge_annotation_segments(
+    segments: Vec<GenBankAnnotationSegment>,
+) -> Vec<GenBankAnnotationSegment> {
+    let mut merged: Vec<GenBankAnnotationSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if segment.end <= segment.start {
+            continue;
+        }
+        if let Some(last) = merged.last_mut()
+            && segment.start >= last.start
+            && segment.start <= last.end
+        {
+            last.end = last.end.max(segment.end);
+            continue;
+        }
+        merged.push(segment);
+    }
+    merged
+}
+
+fn annotation_segments_for_location(location: &Location) -> Vec<GenBankAnnotationSegment> {
+    match location {
+        Location::Range((start, _), (end, _)) => vec![GenBankAnnotationSegment {
+            start: *start,
+            end: *end,
+        }],
+        Location::Between(start, end) => vec![GenBankAnnotationSegment {
+            start: *start,
+            end: end + 1,
+        }],
+        Location::Complement(inner) => annotation_segments_for_location(inner),
+        Location::Join(locations)
+        | Location::Order(locations)
+        | Location::Bond(locations)
+        | Location::OneOf(locations) => merge_annotation_segments(
+            locations
+                .iter()
+                .flat_map(annotation_segments_for_location)
+                .collect(),
+        ),
+        Location::External(_, maybe_location) => maybe_location
+            .as_deref()
+            .map(annotation_segments_for_location)
+            .unwrap_or_default(),
+        Location::Gap(_) => vec![],
+    }
+}
+
+fn annotation_for_feature(feature: &Feature) -> Option<GenBankAnnotation> {
+    let segments = annotation_segments_for_location(&feature.location);
+    if segments.is_empty() {
+        return None;
+    }
+
+    let name = feature_qualifier_value(feature, "label")
+        .or_else(|| feature_qualifier_value(feature, "gene"))
+        .or_else(|| feature_qualifier_value(feature, "product"))
+        .or_else(|| feature_qualifier_value(feature, "note"))
+        .or_else(|| feature_qualifier_value(feature, "bound_moiety"))
+        .or_else(|| feature_qualifier_value(feature, "organism"))
+        .unwrap_or_else(|| feature.kind.as_ref().to_string());
+
+    Some(GenBankAnnotation { name, segments })
+}
+
 pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
     let final_sequence = if let Ok(sequence) = str::from_utf8(&seq.seq) {
         sequence.to_string()
@@ -131,63 +245,60 @@ pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
         sequence: final_sequence.clone(),
         molecule_type: seq.molecule_type,
         changes: vec![],
+        annotations: vec![],
     };
 
     for feature in seq.features.iter() {
-        for (key, value) in feature.qualifiers.iter() {
-            if key == "note"
-                && let Some(v) = value
-            {
-                let geneious_mod = geneious_edit.captures(v);
-                if let Some(edit) = geneious_mod {
-                    let (mut start, mut end) = feature
-                        .location
-                        .find_bounds()
-                        .map_err(|_| GenBankError::LocationError("Ambiguous Bounds"))?;
-                    match &edit["edit_type"] {
-                        "Insertion" => {
-                            // If there is an insertion, it means that the WT is missing
-                            // this sequence, so we actually treat it as a deletion
-                            locus.changes.push(GenBankEdit {
-                                start,
-                                end,
-                                old_sequence: "".to_string(),
-                                new_sequence: final_sequence[start as usize..end as usize]
-                                    .to_string(),
-                                edit_type: EditType::Insertion,
-                            });
-                        }
-                        "Deletion" | "Replacement" => {
-                            // If there is a deletion, it means that found sequence is missing
-                            // this sequence, so we treat it as an insertion
-                            let deleted_seq = normalize_string(
-                                &feature
-                                    .qualifiers
-                                    .iter()
-                                    .filter(|(k, _v)| k == "Original_Bases")
-                                    .map(|(_k, v)| v.clone())
-                                    .collect::<Option<String>>()
-                                    .expect("Deleted sequence is not annotated."),
-                            );
-                            if matches!(feature.location, Location::Between(_, _)) {
-                                start += 1;
-                                end -= 1;
-                            }
-                            locus.changes.push(GenBankEdit {
-                                start,
-                                end,
-                                old_sequence: deleted_seq,
-                                new_sequence: final_sequence[start as usize..end as usize]
-                                    .to_string(),
-                                edit_type: EditType::from_str(&edit["edit_type"])?,
-                            });
-                        }
-                        t => {
-                            println!("Unknown edit type {t}.")
-                        }
+        let edit_note = feature_qualifier_value(feature, "note").and_then(|note| {
+            geneious_edit
+                .captures(&note)
+                .map(|captures| captures["edit_type"].to_string())
+        });
+        if let Some(edit_type) = edit_note {
+            let (mut start, mut end) = feature
+                .location
+                .find_bounds()
+                .map_err(|_| GenBankError::LocationError("Ambiguous Bounds"))?;
+            match edit_type.as_str() {
+                "Insertion" => {
+                    // If there is an insertion, it means that the WT is missing
+                    // this sequence, so we actually treat it as a deletion
+                    locus.changes.push(GenBankEdit {
+                        start,
+                        end,
+                        old_sequence: "".to_string(),
+                        new_sequence: final_sequence[start as usize..end as usize].to_string(),
+                        edit_type: EditType::Insertion,
+                    });
+                }
+                "Deletion" | "Replacement" => {
+                    // If there is a deletion, it means that found sequence is missing
+                    // this sequence, so we treat it as an insertion
+                    let deleted_seq = normalize_string(
+                        &feature_qualifier_value(feature, "Original_Bases")
+                            .expect("Deleted sequence is not annotated."),
+                    );
+                    if matches!(feature.location, Location::Between(_, _)) {
+                        start += 1;
+                        end -= 1;
                     }
+                    locus.changes.push(GenBankEdit {
+                        start,
+                        end,
+                        old_sequence: deleted_seq,
+                        new_sequence: final_sequence[start as usize..end as usize].to_string(),
+                        edit_type: EditType::from_str(&edit_type)?,
+                    });
+                }
+                t => {
+                    println!("Unknown edit type {t}.")
                 }
             }
+            continue;
+        }
+
+        if let Some(annotation) = annotation_for_feature(feature) {
+            locus.annotations.push(annotation);
         }
     }
 
