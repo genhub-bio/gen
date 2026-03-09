@@ -11,6 +11,7 @@ use petgraph::{
 
 use super::{
     LayoutError,
+    center_doglegs::center_doglegs,
     layout_graph_process::{compress_graph, simplify_graph},
     route_layer::layout_layer,
 };
@@ -300,6 +301,7 @@ pub fn make_rectilinear(
                 vertex_spacing.round() as i64, // minimum_spacing from layout configuration
                 true,                          // account_for_node_dimensions
             )?;
+            center_doglegs(&mut layer_graph)?;
 
             // Measure the space required for the rectilinear edge routing
             let (min_x, max_x) = layer_graph
