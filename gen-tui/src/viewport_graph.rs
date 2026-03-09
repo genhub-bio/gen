@@ -192,62 +192,46 @@ impl CroppedGraph {
         this
     }
 
-    /// Build layers by grouping Data nodes by x-coordinate.
-    /// All nodes with the same x-coordinate belong to the same layer.
-    /// Nodes are sorted first by x, then by y within each layer.
+    /// Build layers by grouping Data nodes by their Sugiyama rank within each partition.
+    ///
+    /// Nodes in the same (partition_idx, layer) belong to the same logical rank and should
+    /// navigate together vertically — even when redistribution has given them different
+    /// visual x-coordinates. Groups are ordered left-to-right by their minimum world x,
+    /// giving a globally consistent layer index across partition boundaries.
     fn build_layers_from_coordinates(&mut self) {
-        // Collect all Data nodes with their world positions
-        let mut data_nodes: Vec<(WorldPos, NodeIndex)> = Vec::new();
+        // (partition_idx, sugiyama_layer) -> Vec<(world_y, domain_idx)>
+        let mut groups: HashMap<(PartitionIndex, i32), Vec<(i64, NodeIndex)>> = HashMap::new();
+        // Minimum world x seen for each group — used for left-to-right sort order.
+        let mut group_rep_x: HashMap<(PartitionIndex, i32), i64> = HashMap::new();
 
         for (world_pos, layout_node) in &self.node_data_by_pos {
-            if let crate::layout::NodeRole::Data(domain_idx) = &layout_node.role {
-                data_nodes.push((*world_pos, *domain_idx));
+            if let crate::layout::NodeRole::Data(domain_idx) = &layout_node.role
+                && let Some(layer) = layout_node.layer
+            {
+                let key = (layout_node.pos.partition_idx, layer);
+                groups
+                    .entry(key)
+                    .or_default()
+                    .push((world_pos.y, *domain_idx));
+                group_rep_x
+                    .entry(key)
+                    .and_modify(|x| *x = (*x).min(world_pos.x))
+                    .or_insert(world_pos.x);
             }
         }
 
-        // Sort nodes first by x-coordinate, then by y-coordinate
-        data_nodes.sort_by(|a, b| {
-            let x_cmp = a.0.x.cmp(&b.0.x);
-            if x_cmp == std::cmp::Ordering::Equal {
-                a.0.y.cmp(&b.0.y)
-            } else {
-                x_cmp
-            }
-        });
+        // Sort groups left-to-right by representative x for a globally consistent ordering.
+        let mut sorted_groups: Vec<_> = groups.into_iter().collect();
+        sorted_groups.sort_by_key(|(key, _)| group_rep_x[key]);
 
-        // Group nodes by x-coordinate into layers
-        let mut layers: Vec<Vec<NodeIndex>> = Vec::new();
-        let mut current_layer: Vec<NodeIndex> = Vec::new();
-        let mut current_x: Option<i64> = None;
-
-        for (world_pos, domain_idx) in data_nodes {
-            match current_x {
-                None => {
-                    // First node
-                    current_x = Some(world_pos.x);
-                    current_layer.push(domain_idx);
-                }
-                Some(x) if x == world_pos.x => {
-                    // Same x-coordinate, add to current layer
-                    current_layer.push(domain_idx);
-                }
-                Some(_) => {
-                    // Different x-coordinate, start new layer
-                    if !current_layer.is_empty() {
-                        layers.push(current_layer);
-                    }
-                    current_layer = vec![domain_idx];
-                    current_x = Some(world_pos.x);
-                }
-            }
-        }
-
-        // Add the last layer
-        if !current_layer.is_empty() {
-            layers.push(current_layer);
-        }
-
-        self.layers = layers;
+        // Within each group sort by y (top-to-bottom), then collect domain indices.
+        self.layers = sorted_groups
+            .into_iter()
+            .map(|(_, mut nodes)| {
+                nodes.sort_by_key(|(y, _)| *y);
+                nodes.into_iter().map(|(_, idx)| idx).collect()
+            })
+            .collect();
     }
 
     /// Add node to the viewport graph.

@@ -433,51 +433,43 @@ impl Cursor {
     ) -> Result<(), String> {
         let node_idx = self.node_idx.ok_or("No node tracked")?;
 
-        // Get current layer
-        let current_layer = viewport_graph
-            .find_domain_node_layer(node_idx)
-            .ok_or("Node not found in any layer")?;
-
-        // Determine target layer
-        let target_layer = if direction > 0 {
-            // Moving right: next layer
-            if current_layer + 1 < viewport_graph.layer_count() {
-                current_layer + 1
-            } else {
-                return Err(NO_NEXT_LAYER_ERR.to_string());
-            }
-        } else {
-            // Moving left: previous layer
-            if current_layer == 0 {
-                return Err(NO_PREVIOUS_LAYER_ERR.to_string());
-            }
-            current_layer - 1
-        };
-        // Get nodes in target layer
-        let target_layer_nodes = viewport_graph
-            .get_layer(target_layer)
-            .ok_or("Target layer not found")?;
-
         let current_world_pos = *viewport_graph
             .node_positions
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
+        // Use CroppedGraph's x-coordinate-based layer index.
+        // This is globally consistent across partition boundaries, unlike LayoutNode.layer
+        // which is a per-partition Sugiyama rank that resets to 0 at each partition.
+        let current_layer_idx = viewport_graph
+            .find_domain_node_layer(node_idx)
+            .ok_or("Current node has no layer")?;
+
+        // Determine target layer index
+        let target_layer_idx = if direction > 0 {
+            current_layer_idx + 1
+        } else {
+            if current_layer_idx == 0 {
+                return Err(NO_PREVIOUS_LAYER_ERR.to_string());
+            }
+            current_layer_idx - 1
+        };
+
+        // Get all nodes in the target layer
+        let target_layer_nodes = viewport_graph.get_layer(target_layer_idx).ok_or_else(|| {
+            if direction > 0 {
+                NO_NEXT_LAYER_ERR.to_string()
+            } else {
+                NO_PREVIOUS_LAYER_ERR.to_string()
+            }
+        })?;
+
         let candidates: Vec<(WorldPos, &LayoutNode)> = target_layer_nodes
             .iter()
-            .map(|idx| {
-                viewport_graph
-                    .node_positions
-                    .get(idx)
-                    .expect("Every node in the layers field should be in the graph too")
-            })
-            .map(|pos| {
-                (
-                    *pos,
-                    viewport_graph
-                        .get_node(pos)
-                        .expect("Every node in the layers field should be in the graph too"),
-                )
+            .filter_map(|&domain_idx| {
+                let &world_pos = viewport_graph.node_positions.get(&domain_idx)?;
+                let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
+                Some((world_pos, node_data))
             })
             .sorted_by_key(|(pos, _)| {
                 let dy = (pos.y - current_world_pos.y).abs();
@@ -485,19 +477,23 @@ impl Cursor {
             })
             .collect();
 
+        if candidates.is_empty() {
+            return Err(if direction > 0 {
+                NO_NEXT_LAYER_ERR.to_string()
+            } else {
+                NO_PREVIOUS_LAYER_ERR.to_string()
+            });
+        }
+
         // Take the closest candidate
         if let Some((_target_pos, target_node)) = candidates.first() {
-            // Position cursor at appropriate edge based on direction
             let target_frac_x = if direction > 0 {
                 0.0 // Moving right: position at left edge
             } else {
                 1.0 // Moving left: position at right edge
             };
-
-            // Maintain Y fractional position
             let target_frac_y = self.fractional_pos.1;
 
-            // Update cursor to new node
             if let crate::layout::NodeRole::Data(domain_idx) = target_node.role {
                 self.set_node(domain_idx, (target_frac_x, target_frac_y));
                 Ok(())
@@ -521,30 +517,25 @@ impl Cursor {
             .get(&node_idx)
             .ok_or("Node world position not found")?;
 
-        // Get current layer
-        let current_layer = viewport_graph
+        // Use CroppedGraph's x-coordinate-based layer index (globally consistent across partitions)
+        let current_layer_idx = viewport_graph
             .find_domain_node_layer(node_idx)
-            .ok_or("Node not found in any layer")?;
+            .ok_or("Current node has no layer")?;
 
-        // Get all nodes in the same layer
-        let layer_nodes = viewport_graph
-            .get_layer(current_layer)
+        let same_layer_nodes = viewport_graph
+            .get_layer(current_layer_idx)
             .ok_or("Current layer not found")?;
 
-        // Find candidates in the same layer
-        let mut candidates: Vec<(WorldPos, &crate::layout::LayoutNode)> = layer_nodes
+        // Find all data nodes in the same layer, filtered by direction
+        let mut candidates: Vec<(WorldPos, &crate::layout::LayoutNode)> = same_layer_nodes
             .iter()
             .filter_map(|&domain_idx| {
-                // Skip current node
                 if domain_idx == node_idx {
                     return None;
                 }
-
-                // Get world position
-                let world_pos = *viewport_graph.node_positions.get(&domain_idx)?;
+                let &world_pos = viewport_graph.node_positions.get(&domain_idx)?;
                 let node_data = viewport_graph.node_data_by_pos.get(&world_pos)?;
 
-                // Filter by direction
                 let dy = world_pos.y - current_world_pos.y;
                 if (direction > 0 && dy > 0) || (direction < 0 && dy < 0) {
                     Some((world_pos, node_data))

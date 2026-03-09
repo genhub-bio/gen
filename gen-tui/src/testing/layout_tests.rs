@@ -9,83 +9,6 @@ use crate::testing::create_test_terminal;
 #[cfg(test)]
 use crate::testing::mocks::{FixedNodeSizer, MockDomainGraph, TestRenderers};
 
-/// Helper function to create a diamond graph with variable node widths for bridge testing
-#[cfg(test)]
-#[allow(dead_code)]
-fn create_variable_width_diamond_snapshot(
-    viewport_width: u16,
-    viewport_height: u16,
-    layer_count: usize,
-    node_count: usize,
-) -> String {
-    use crate::{
-        layout::VisualDetail,
-        plotter::NodeSizer,
-        testing::mocks::{MockDomainGraph, TestGraphs, TestRenderers},
-    };
-
-    // Use the standard diamond graph from TestGraphs
-    let domain_graph = TestGraphs::domain_diamond();
-
-    // Custom node sizer with dramatically different widths for middle layer
-    #[derive(Debug, Clone)]
-    struct VariableWidthSizer;
-
-    impl NodeSizer<MockDomainGraph> for VariableWidthSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            _scale: VisualDetail,
-        ) -> (u64, u64) {
-            match node.index() {
-                0 => (4, 1),  // Start node: medium width
-                1 => (15, 2), // Left middle node: very wide
-                2 => (2, 1),  // Right middle node: very narrow
-                3 => (5, 1),  // End node: medium width
-                _ => (3, 1),  // Default
-            }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
-    // Also implement for reference type
-    impl NodeSizer<&MockDomainGraph> for VariableWidthSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            _scale: VisualDetail,
-        ) -> (u64, u64) {
-            match node.index() {
-                0 => (4, 1),  // Start node: medium width
-                1 => (15, 2), // Left middle node: very wide
-                2 => (2, 1),  // Right middle node: very narrow
-                3 => (5, 1),  // End node: medium width
-                _ => (3, 1),  // Default
-            }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
-    let node_sizer = VariableWidthSizer;
-    let renderer = TestRenderers::debug();
-
-    make_snapshot_custom(
-        domain_graph,
-        viewport_width,
-        viewport_height,
-        layer_count,
-        node_count,
-        node_sizer,
-        renderer,
-    )
-}
-
 /// Helper function to create viewport-based visual snapshots using GraphController
 #[cfg(test)]
 fn make_snapshot_custom<NS, R>(
@@ -200,11 +123,11 @@ fn viewport_visual_regression_simple_chain() {
     let _ = env_logger::try_init();
     // Create a simple chain domain graph: 0 -> 1 -> 2
     let mut domain_graph = MockDomainGraph::new();
-    let n0 = domain_graph.add_node(());
-    let n1 = domain_graph.add_node(());
-    let n2 = domain_graph.add_node(());
-    domain_graph.add_edge(n0, n1, ());
-    domain_graph.add_edge(n1, n2, ());
+    let node_0 = domain_graph.add_node(());
+    let node_1 = domain_graph.add_node(());
+    let node_2 = domain_graph.add_node(());
+    domain_graph.add_edge(node_0, node_1, ());
+    domain_graph.add_edge(node_1, node_2, ());
 
     let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
     insta::assert_snapshot!("simple_chain", snapshot);
@@ -215,14 +138,14 @@ fn viewport_visual_regression_diamond() {
     let _ = env_logger::try_init();
     // Create a diamond domain graph: 0 -> {1, 2} -> 3
     let mut domain_graph = MockDomainGraph::new();
-    let n0 = domain_graph.add_node(());
-    let n1 = domain_graph.add_node(());
-    let n2 = domain_graph.add_node(());
-    let n3 = domain_graph.add_node(());
-    domain_graph.add_edge(n0, n1, ());
-    domain_graph.add_edge(n0, n2, ());
-    domain_graph.add_edge(n1, n3, ());
-    domain_graph.add_edge(n2, n3, ());
+    let node_0 = domain_graph.add_node(());
+    let node_1 = domain_graph.add_node(());
+    let node_2 = domain_graph.add_node(());
+    let node_3 = domain_graph.add_node(());
+    domain_graph.add_edge(node_0, node_1, ());
+    domain_graph.add_edge(node_0, node_2, ());
+    domain_graph.add_edge(node_1, node_3, ());
+    domain_graph.add_edge(node_2, node_3, ());
 
     let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
     insta::assert_snapshot!("diamond", snapshot);
@@ -926,14 +849,14 @@ fn viewport_even_width_node_spacing() {
 
     // Create a simple diamond graph
     let mut domain_graph = MockDomainGraph::new();
-    let n0 = domain_graph.add_node(());
-    let n1 = domain_graph.add_node(());
-    let n2 = domain_graph.add_node(());
-    let n3 = domain_graph.add_node(());
-    domain_graph.add_edge(n0, n1, ());
-    domain_graph.add_edge(n0, n2, ());
-    domain_graph.add_edge(n1, n3, ());
-    domain_graph.add_edge(n2, n3, ());
+    let node_0 = domain_graph.add_node(());
+    let node_1 = domain_graph.add_node(());
+    let node_2 = domain_graph.add_node(());
+    let node_3 = domain_graph.add_node(());
+    domain_graph.add_edge(node_0, node_1, ());
+    domain_graph.add_edge(node_0, node_2, ());
+    domain_graph.add_edge(node_1, node_3, ());
+    domain_graph.add_edge(node_2, node_3, ());
 
     // Custom node sizer to test asymmetric extent handling
     #[derive(Debug, Clone)]
@@ -1347,39 +1270,39 @@ fn test_layout_determinism_across_edge_insertion_order_symmetric_fan() {
     let _ = env_logger::try_init();
 
     // Graph:
-    //   n0 -> {n1,n2,n3} -> n4
+    //   node_0 -> {node_1, node_2, node_3} -> node_4
     // The three middle nodes are perfectly symmetric, so their barycenters tie.
     // Without a deterministic tiebreaker, the middle layer can preserve the DFS visit order.
 
-    let mut g1 = MockDomainGraph::new();
-    let n0 = g1.add_node(());
-    let n1 = g1.add_node(());
-    let n2 = g1.add_node(());
-    let n3 = g1.add_node(());
-    let n4 = g1.add_node(());
-    g1.add_edge(n0, n1, ());
-    g1.add_edge(n0, n2, ());
-    g1.add_edge(n0, n3, ());
-    g1.add_edge(n1, n4, ());
-    g1.add_edge(n2, n4, ());
-    g1.add_edge(n3, n4, ());
+    let mut graph_1 = MockDomainGraph::new();
+    let node_0 = graph_1.add_node(());
+    let node_1 = graph_1.add_node(());
+    let node_2 = graph_1.add_node(());
+    let node_3 = graph_1.add_node(());
+    let node_4 = graph_1.add_node(());
+    graph_1.add_edge(node_0, node_1, ());
+    graph_1.add_edge(node_0, node_2, ());
+    graph_1.add_edge(node_0, node_3, ());
+    graph_1.add_edge(node_1, node_4, ());
+    graph_1.add_edge(node_2, node_4, ());
+    graph_1.add_edge(node_3, node_4, ());
 
-    let mut g2 = MockDomainGraph::new();
-    let n0 = g2.add_node(());
-    let n1 = g2.add_node(());
-    let n2 = g2.add_node(());
-    let n3 = g2.add_node(());
-    let n4 = g2.add_node(());
+    let mut graph_2 = MockDomainGraph::new();
+    let node_0 = graph_2.add_node(());
+    let node_1 = graph_2.add_node(());
+    let node_2 = graph_2.add_node(());
+    let node_3 = graph_2.add_node(());
+    let node_4 = graph_2.add_node(());
     // Same edges, different insertion order.
-    g2.add_edge(n0, n3, ());
-    g2.add_edge(n0, n1, ());
-    g2.add_edge(n0, n2, ());
-    g2.add_edge(n3, n4, ());
-    g2.add_edge(n1, n4, ());
-    g2.add_edge(n2, n4, ());
+    graph_2.add_edge(node_0, node_3, ());
+    graph_2.add_edge(node_0, node_1, ());
+    graph_2.add_edge(node_0, node_2, ());
+    graph_2.add_edge(node_3, node_4, ());
+    graph_2.add_edge(node_1, node_4, ());
+    graph_2.add_edge(node_2, node_4, ());
 
-    let snapshot1 = make_snapshot(g1, 80, 25, usize::MAX, usize::MAX);
-    let snapshot2 = make_snapshot(g2, 80, 25, usize::MAX, usize::MAX);
+    let snapshot1 = make_snapshot(graph_1, 80, 25, usize::MAX, usize::MAX);
+    let snapshot2 = make_snapshot(graph_2, 80, 25, usize::MAX, usize::MAX);
 
     assert_eq!(
         snapshot1, snapshot2,
@@ -1392,41 +1315,41 @@ fn test_double_chain() {
     let _ = env_logger::try_init();
 
     // Create a graph with 18 nodes arranged in two chains with a common start and stop node.
-    // Chain 1: n1 -> n2 -> n3 -> n4 -> n5 -> n6 -> n7 -> n8 -> n9 -> n10 (10 nodes)
-    // Chain 2: n1 -> n12 -> n13 -> n14 -> n15 -> n16 -> n17 -> n18 -> n19 -> n10 (10 nodes)
-    // Shared nodes: n1 (start), n10 (stop)
+    // Chain 1: node_1 -> node_2 -> node_3 -> node_4 -> node_5 -> node_6 -> node_7 -> node_8 -> node_9 -> node_10 (10 nodes)
+    // Chain 2: node_1 -> node_12 -> node_13 -> node_14 -> node_15 -> node_16 -> node_17 -> node_18 -> node_19 -> node_10 (10 nodes)
+    // Shared nodes: node_1 (start), node_10 (stop)
     // Total unique nodes: 18
 
     let mut domain_graph = MockDomainGraph::new();
 
-    // Add all nodes (indices 0-17 correspond to n1-n10 and n12-n19)
+    // Add all nodes (indices 0-17 correspond to node_1-node_10 and node_12-node_19)
     // Using index mapping:
-    // 0 -> n1 (shared start)
-    // 1 -> n2
-    // 2 -> n3
-    // 3 -> n4
-    // 4 -> n5
-    // 5 -> n6
-    // 6 -> n7
-    // 7 -> n8
-    // 8 -> n9
-    // 9 -> n10 (shared stop)
-    // 10 -> n12
-    // 11 -> n13
-    // 12 -> n14
-    // 13 -> n15
-    // 14 -> n16
-    // 15 -> n17
-    // 16 -> n18
-    // 17 -> n19
+    // 0 -> node_1 (shared start)
+    // 1 -> node_2
+    // 2 -> node_3
+    // 3 -> node_4
+    // 4 -> node_5
+    // 5 -> node_6
+    // 6 -> node_7
+    // 7 -> node_8
+    // 8 -> node_9
+    // 9 -> node_10 (shared stop)
+    // 10 -> node_12
+    // 11 -> node_13
+    // 12 -> node_14
+    // 13 -> node_15
+    // 14 -> node_16
+    // 15 -> node_17
+    // 16 -> node_18
+    // 17 -> node_19
     let nodes: Vec<_> = (0..18).map(|_| domain_graph.add_node(())).collect();
 
-    // Chain 1: n1(0) -> n2(1) -> n3(2) -> n4(3) -> n5(4) -> n6(5) -> n7(6) -> n8(7) -> n9(8) -> n10(9)
+    // Chain 1: node_1(0) -> node_2(1) -> node_3(2) -> node_4(3) -> node_5(4) -> node_6(5) -> node_7(6) -> node_8(7) -> node_9(8) -> node_10(9)
     for i in 0..9 {
         domain_graph.add_edge(nodes[i], nodes[i + 1], ());
     }
 
-    // Chain 2: n1(0) -> n12(10) -> n13(11) -> n14(12) -> n15(13) -> n16(14) -> n17(15) -> n18(16) -> n19(17) -> n10(9)
+    // Chain 2: node_1(0) -> node_12(10) -> node_13(11) -> node_14(12) -> node_15(13) -> node_16(14) -> node_17(15) -> node_18(16) -> node_19(17) -> node_10(9)
     domain_graph.add_edge(nodes[0], nodes[10], ());
     for i in 10..17 {
         domain_graph.add_edge(nodes[i], nodes[i + 1], ());
@@ -1436,6 +1359,158 @@ fn test_double_chain() {
     let snapshot = make_snapshot(domain_graph, 120, 40, 5, 20);
 
     insta::assert_snapshot!("double_chain", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond() {
+    let _ = env_logger::try_init();
+
+    // Create an asymmetric diamond graph:
+    //   A-B-C-D-E
+    //    \     /
+    //     --F--
+    //
+    // Edges:
+    // A -> B, B -> C, C -> D, D -> E (main chain)
+    // A -> F, F -> E (bypass through single intermediate node)
+
+    let mut domain_graph = MockDomainGraph::new();
+    let node_a = domain_graph.add_node(());
+    let node_b = domain_graph.add_node(());
+    let node_c = domain_graph.add_node(());
+    let node_d = domain_graph.add_node(());
+    let node_e = domain_graph.add_node(());
+    let node_f = domain_graph.add_node(());
+
+    // Main chain: A -> B -> C -> D -> E
+    domain_graph.add_edge(node_a, node_b, ());
+    domain_graph.add_edge(node_b, node_c, ());
+    domain_graph.add_edge(node_c, node_d, ());
+    domain_graph.add_edge(node_d, node_e, ());
+
+    // Bypass: A -> F -> E
+    domain_graph.add_edge(node_a, node_f, ());
+    domain_graph.add_edge(node_f, node_e, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond_2_1() {
+    let _ = env_logger::try_init();
+
+    let mut domain_graph = MockDomainGraph::new();
+    let node_a = domain_graph.add_node(());
+    let node_b = domain_graph.add_node(());
+    let node_c = domain_graph.add_node(());
+    let node_d = domain_graph.add_node(());
+    let node_e = domain_graph.add_node(());
+
+    domain_graph.add_edge(node_a, node_b, ());
+    domain_graph.add_edge(node_b, node_c, ());
+    domain_graph.add_edge(node_c, node_d, ());
+
+    domain_graph.add_edge(node_a, node_e, ());
+    domain_graph.add_edge(node_e, node_d, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond_2_1", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond_4_1() {
+    let _ = env_logger::try_init();
+
+    // Longer leg: 4 intermediate nodes (6 total), shorter leg: 1 intermediate (2 total)
+    // A -> B -> C -> D -> E -> F
+    // A -> G -> E
+
+    let mut domain_graph = MockDomainGraph::new();
+    let node_a = domain_graph.add_node(());
+    let node_b = domain_graph.add_node(());
+    let node_c = domain_graph.add_node(());
+    let node_d = domain_graph.add_node(());
+    let node_e = domain_graph.add_node(());
+    let node_f = domain_graph.add_node(());
+    let node_g = domain_graph.add_node(());
+
+    domain_graph.add_edge(node_a, node_b, ());
+    domain_graph.add_edge(node_b, node_c, ());
+    domain_graph.add_edge(node_c, node_d, ());
+    domain_graph.add_edge(node_d, node_e, ());
+    domain_graph.add_edge(node_e, node_f, ());
+
+    domain_graph.add_edge(node_a, node_g, ());
+    domain_graph.add_edge(node_g, node_f, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond_4_1", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond_3_2() {
+    let _ = env_logger::try_init();
+
+    // A -> B -> C -> D -> E
+    // A -> F1 -> F2 -> E
+
+    let mut domain_graph = MockDomainGraph::new();
+    let node_a = domain_graph.add_node(());
+    let node_b = domain_graph.add_node(());
+    let node_c = domain_graph.add_node(());
+    let node_d = domain_graph.add_node(());
+    let node_e = domain_graph.add_node(());
+    let node_f1 = domain_graph.add_node(());
+    let node_f2 = domain_graph.add_node(());
+
+    domain_graph.add_edge(node_a, node_b, ());
+    domain_graph.add_edge(node_b, node_c, ());
+    domain_graph.add_edge(node_c, node_d, ());
+    domain_graph.add_edge(node_d, node_e, ());
+
+    domain_graph.add_edge(node_a, node_f1, ());
+    domain_graph.add_edge(node_f1, node_f2, ());
+    domain_graph.add_edge(node_f2, node_e, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond_3_2", snapshot);
+}
+
+#[test]
+fn test_asymmetric_diamond_4_2() {
+    let _ = env_logger::try_init();
+
+    // A -> B -> C -> D -> E -> F
+    // A -> X -> Y -> F
+
+    let mut domain_graph = MockDomainGraph::new();
+    let node_a = domain_graph.add_node(());
+    let node_b = domain_graph.add_node(());
+    let node_c = domain_graph.add_node(());
+    let node_d = domain_graph.add_node(());
+    let node_e = domain_graph.add_node(());
+    let node_f = domain_graph.add_node(());
+    let node_x = domain_graph.add_node(());
+    let node_y = domain_graph.add_node(());
+
+    domain_graph.add_edge(node_a, node_b, ());
+    domain_graph.add_edge(node_b, node_c, ());
+    domain_graph.add_edge(node_c, node_d, ());
+    domain_graph.add_edge(node_d, node_e, ());
+    domain_graph.add_edge(node_e, node_f, ());
+
+    domain_graph.add_edge(node_a, node_x, ());
+    domain_graph.add_edge(node_x, node_y, ());
+    domain_graph.add_edge(node_y, node_f, ());
+
+    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("asymmetric_diamond_4_2", snapshot);
 }
 
 /// Test rendering and positioning of very large nodes during zoom operations.
@@ -1463,11 +1538,11 @@ fn test_large_node_rendering_with_zoom() {
 
     // 1. Create a 3-node chain graph: 0 -> 1 -> 2
     let mut domain_graph = MockDomainGraph::new();
-    let n0 = domain_graph.add_node(());
-    let n1 = domain_graph.add_node(());
-    let n2 = domain_graph.add_node(());
-    domain_graph.add_edge(n0, n1, ());
-    domain_graph.add_edge(n1, n2, ());
+    let node_0 = domain_graph.add_node(());
+    let node_1 = domain_graph.add_node(());
+    let node_2 = domain_graph.add_node(());
+    domain_graph.add_edge(node_0, node_1, ());
+    domain_graph.add_edge(node_1, node_2, ());
 
     // 2. Custom NodeSizer with adjustable node length
     #[derive(Debug, Clone)]
@@ -1568,7 +1643,7 @@ fn test_large_node_rendering_with_zoom() {
     // 5. Cursor setup (not visible in the snapshots though)
     controller.show_cursor();
     controller.initialize_cursor();
-    controller.cursor.set_node(n0, (0.0, 0.0));
+    controller.cursor.set_node(node_0, (0.0, 0.0));
 
     // Set cursor to the center of the viewport
     let vp_center_x = viewport_width / 2;
@@ -1633,8 +1708,8 @@ fn test_large_node_rendering_with_zoom() {
 
     let viewport_graph = controller.get_viewport_graph();
 
-    let pos0 = viewport_graph.node_positions.get(&n0).unwrap();
-    let pos1 = viewport_graph.node_positions.get(&n1).unwrap();
+    let pos0 = viewport_graph.node_positions.get(&node_0).unwrap();
+    let pos1 = viewport_graph.node_positions.get(&node_1).unwrap();
 
     let node0 = viewport_graph.get_node(pos0).unwrap();
     let node1 = viewport_graph.get_node(pos1).unwrap();
@@ -1656,4 +1731,76 @@ fn test_large_node_rendering_with_zoom() {
         "Cursor viewport position should remain stable during zoom operations. Initial: {:?}, Final: {:?}",
         initial_cursor_viewport_pos, final_cursor_viewport_pos
     );
+}
+
+/// Test diamond graph with variable width nodes on parallel branches.
+/// This tests the horizontal chain redistribution with nodes of different sizes.
+#[test]
+fn test_diamond_variable_width_parallel_nodes() {
+    let _ = env_logger::try_init();
+
+    use crate::plotter::NodeSizer;
+
+    // Create diamond: A -> {B, C} -> D
+    let mut domain_graph = MockDomainGraph::new();
+    let node_a = domain_graph.add_node(());
+    let node_b = domain_graph.add_node(());
+    let node_c = domain_graph.add_node(());
+    let node_d = domain_graph.add_node(());
+
+    domain_graph.add_edge(node_a, node_b, ());
+    domain_graph.add_edge(node_a, node_c, ());
+    domain_graph.add_edge(node_b, node_d, ());
+    domain_graph.add_edge(node_c, node_d, ());
+
+    // Custom NodeSizer: B=3 wide, C=2 wide, others=5 wide
+    #[derive(Debug, Clone)]
+    struct VariableWidthSizer;
+
+    impl NodeSizer<MockDomainGraph> for VariableWidthSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) -> (u64, u64) {
+            match node.index() {
+                1 => (15, 3), // B - 3 units wide (15 chars = 3 * 5-char units)
+                2 => (10, 3), // C - 2 units wide (10 chars = 2 * 5-char units)
+                _ => (5, 3),  // A and D - 1 unit wide (5 chars)
+            }
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    impl NodeSizer<&MockDomainGraph> for VariableWidthSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            scale: VisualDetail,
+        ) -> (u64, u64) {
+            <Self as NodeSizer<MockDomainGraph>>::get_node_size(self, node, scale)
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    let renderer = TestRenderers::debug();
+    let node_sizer = VariableWidthSizer;
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        80,
+        25,
+        usize::MAX,
+        usize::MAX,
+        node_sizer,
+        renderer,
+    );
+
+    insta::assert_snapshot!("diamond_variable_width_parallel", snapshot);
 }

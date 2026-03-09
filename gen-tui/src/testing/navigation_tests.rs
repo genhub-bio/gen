@@ -4,7 +4,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use crate::{
-        graph_controller::GraphController,
+        graph_controller::{GraphConfig, GraphController},
         layout::VisualDetail,
         plotter::NodeSizer,
         testing::mocks::{MockDomainGraph, TestNodeSizers},
@@ -172,5 +172,34 @@ mod tests {
                 return;
             }
         }
+    }
+
+    #[test]
+    fn test_cursor_navigates_across_partition_boundary() {
+        // Cursor navigation should work across partition boundaries.
+        // A linear chain with a small layer_count forces splits mid-chain.
+        let mut domain_graph = MockDomainGraph::new();
+        let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
+        for i in 0..4 {
+            domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+        }
+
+        let node_sizer = TestNodeSizers::fixed_1x1();
+        let mut config = GraphConfig::default();
+        config.partition.layer_count = 2;
+
+        let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 200, 50);
+        controller.set_detail_level(VisualDetail::Full);
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph");
+
+        let vg = controller.get_viewport_graph().clone();
+        controller.cursor.set_coarse_mode(false);
+        controller.cursor.set_node(nodes[1], (1.0, 0.5));
+        controller.cursor.move_horizontal(1, &vg).unwrap();
+
+        assert_eq!(controller.cursor.node_idx(), Some(nodes[2]));
     }
 }
