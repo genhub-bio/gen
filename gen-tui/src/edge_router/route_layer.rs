@@ -526,11 +526,177 @@ pub fn layout_layer(
     edges: &[(NodeIndex, NodeIndex)],
     edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
 ) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
+    // Try normal routing first
+    let result_normal =
+        layout_layer_internal(left_positions, right_positions, edges, edge_bundles, false)?;
+
+    // Check if there's backtracking by analyzing connected components
+    let has_backtracking = detect_backtracking(&result_normal);
+
+    if has_backtracking {
+        log::debug!("Detected backtracking in normal routing, trying reversed order");
+
+        // Try with reversed vertical order
+        let result_reversed =
+            layout_layer_internal(left_positions, right_positions, edges, edge_bundles, true)?;
+        let has_backtracking_reversed = detect_backtracking(&result_reversed);
+
+        if !has_backtracking_reversed || result_reversed.node_count() < result_normal.node_count() {
+            log::debug!("Chose reversed routing (less or no backtracking)");
+            Ok(result_reversed)
+        } else {
+            log::debug!("Reversed routing also has backtracking, keeping normal");
+            Ok(result_normal)
+        }
+    } else {
+        log::debug!("No backtracking detected, using normal routing");
+        Ok(result_normal)
+    }
+}
+
+/// Detect if routing has backtracking by checking if the component's Y range
+/// exceeds the envelope defined by its leftmost and rightmost nodes
+fn detect_backtracking(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> bool {
+    use std::collections::HashSet as StdHashSet;
+
+    use petgraph::visit::Dfs;
+
+    let mut visited = StdHashSet::new();
+
+    // For each connected component
+    for start_node in graph.node_indices() {
+        if visited.contains(&start_node) {
+            continue;
+        }
+
+        // Find all nodes in this connected component
+        let mut dfs = Dfs::new(&graph, start_node);
+        let mut component_nodes = Vec::new();
+        while let Some(node_idx) = dfs.next(&graph) {
+            visited.insert(node_idx);
+            component_nodes.push(node_idx);
+        }
+
+        if component_nodes.is_empty() {
+            continue;
+        }
+
+        // Get positions for all nodes in component
+        let positions: Vec<(i64, i64)> = component_nodes
+            .iter()
+            .filter_map(|&idx| {
+                let node = graph.node_weight(idx)?;
+                Some((node.pos.x, node.pos.y))
+            })
+            .collect();
+
+        if positions.is_empty() {
+            continue;
+        }
+
+        // Find leftmost and rightmost X positions
+        let min_x = positions.iter().map(|(x, _)| x).min().unwrap();
+        let max_x = positions.iter().map(|(x, _)| x).max().unwrap();
+
+        // Get Y range of leftmost nodes
+        let left_y_positions: Vec<i64> = positions
+            .iter()
+            .filter(|(x, _)| x == min_x)
+            .map(|(_, y)| *y)
+            .collect();
+
+        // Get Y range of rightmost nodes
+        let right_y_positions: Vec<i64> = positions
+            .iter()
+            .filter(|(x, _)| x == max_x)
+            .map(|(_, y)| *y)
+            .collect();
+
+        if left_y_positions.is_empty() || right_y_positions.is_empty() {
+            continue;
+        }
+
+        // Envelope is defined by the Y range of leftmost and rightmost nodes
+        let envelope_min_y = left_y_positions
+            .iter()
+            .min()
+            .unwrap()
+            .min(right_y_positions.iter().min().unwrap());
+        let envelope_max_y = left_y_positions
+            .iter()
+            .max()
+            .unwrap()
+            .max(right_y_positions.iter().max().unwrap());
+
+        // Get the overall Y range of the entire component
+        let component_min_y = positions.iter().map(|(_, y)| y).min().unwrap();
+        let component_max_y = positions.iter().map(|(_, y)| y).max().unwrap();
+
+        // If component extends beyond the envelope, we have backtracking
+        if component_min_y < envelope_min_y || component_max_y > envelope_max_y {
+            log::debug!(
+                "Backtracking detected: component Y range [{}, {}] exceeds envelope [{}, {}]",
+                component_min_y,
+                component_max_y,
+                envelope_min_y,
+                envelope_max_y
+            );
+            return true;
+        }
+    }
+
+    false
+}
+
+fn layout_layer_internal(
+    left_positions: &[LayoutNode],
+    right_positions: &[LayoutNode],
+    edges: &[(NodeIndex, NodeIndex)],
+    edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
+    reverse_order: bool,
+) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
     // Generate timestamp at the start of test for consistent filenames
     let _test_timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
+    // If reverse_order is true, flip the vertical positions of nodes within each layer.
+    // This mirrors the layer across a horizontal axis (top becomes bottom).
+    // After routing, we'll flip the result back.
+    let (left_positions_flipped, right_positions_flipped) = if reverse_order {
+        // Find the vertical extent of each layer
+        let left_min_y = left_positions.iter().map(|n| n.pos.y).min().unwrap_or(0);
+        let left_max_y = left_positions.iter().map(|n| n.pos.y).max().unwrap_or(0);
+        let right_min_y = right_positions.iter().map(|n| n.pos.y).min().unwrap_or(0);
+        let right_max_y = right_positions.iter().map(|n| n.pos.y).max().unwrap_or(0);
+
+        // Flip y-coordinates: y_new = max_y - (y_old - min_y) + min_y = max_y + min_y - y_old
+        let left_flipped: Vec<LayoutNode> = left_positions
+            .iter()
+            .map(|node| {
+                let mut flipped = node.clone();
+                flipped.pos.y = left_max_y + left_min_y - node.pos.y;
+                flipped
+            })
+            .collect();
+
+        let right_flipped: Vec<LayoutNode> = right_positions
+            .iter()
+            .map(|node| {
+                let mut flipped = node.clone();
+                flipped.pos.y = right_max_y + right_min_y - node.pos.y;
+                flipped
+            })
+            .collect();
+
+        (left_flipped, right_flipped)
+    } else {
+        (left_positions.to_vec(), right_positions.to_vec())
+    };
+
+    let left_positions = &left_positions_flipped;
+    let right_positions = &right_positions_flipped;
 
     // Build a rectilinear routing between two layers of the graph.
     // A layer is defined as the bipartite subgraph between two sets of nodes that have
@@ -940,6 +1106,30 @@ pub fn layout_layer(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // If we flipped the positions for routing, flip the result back
+    if reverse_order {
+        // Find the vertical extent of the routed layer graph
+        let all_y: Vec<i64> = layer_graph
+            .node_indices()
+            .map(|idx| layer_graph.node_weight(idx).unwrap().pos.y)
+            .collect();
+
+        if !all_y.is_empty() {
+            let min_y = *all_y.iter().min().unwrap();
+            let max_y = *all_y.iter().max().unwrap();
+
+            // Collect node indices first to avoid borrow checker issues
+            let node_indices: Vec<_> = layer_graph.node_indices().collect();
+
+            // Flip all node positions back: y_new = max_y + min_y - y_old
+            for node_idx in node_indices {
+                if let Some(node) = layer_graph.node_weight_mut(node_idx) {
+                    node.pos.y = max_y + min_y - node.pos.y;
                 }
             }
         }
