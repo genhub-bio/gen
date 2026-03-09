@@ -148,7 +148,7 @@ impl<'a> InlineGenGraphState<'a> {
 
     /// Add a path to the widget, starting from a Path object
     pub fn add_path(&mut self, path: &Path, conn: &'a GraphConnection) -> Result<()> {
-        let path_nodes = get_path_nodes(conn, path, self.controller.graph)?;
+        let path_nodes = get_path_nodes(conn, path, self.controller.graph())?;
         self.paths.push(path_nodes);
         Ok(())
     }

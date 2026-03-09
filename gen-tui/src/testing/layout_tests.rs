@@ -80,7 +80,7 @@ where
             viewport_graph,
             &mut buffer,
             &mut renderer,
-            &controller.graph,
+            controller.graph(),
             detail_level,
             &controller.theme,
         );
@@ -1803,4 +1803,325 @@ fn test_diamond_variable_width_parallel_nodes() {
     );
 
     insta::assert_snapshot!("diamond_variable_width_parallel", snapshot);
+}
+
+#[test]
+fn viewport_visual_regression_simple_cycle() {
+    let _ = env_logger::try_init();
+    // Create a simple cycle: A -> B -> C -> A
+    let mut domain_graph = MockDomainGraph::new();
+    let n0 = domain_graph.add_node(());
+    let n1 = domain_graph.add_node(());
+    let n2 = domain_graph.add_node(());
+    domain_graph.add_edge(n0, n1, ());
+    domain_graph.add_edge(n1, n2, ());
+    domain_graph.add_edge(n2, n0, ()); // Cycle edge
+
+    let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
+    insta::assert_snapshot!("simple_cycle", snapshot);
+}
+
+#[test]
+fn pinned_source_cycle() {
+    let _ = env_logger::try_init();
+    use petgraph::graph::NodeIndex;
+
+    use crate::{
+        graph_controller::{GraphConfig, GraphController, WorldBuffer},
+        testing::mocks::TestRenderers,
+    };
+
+    // Create a 12-node cycle
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..12).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..12 {
+        domain_graph.add_edge(nodes[i], nodes[(i + 1) % 12], ());
+    }
+
+    // Pin node 6 as the source (should appear at leftmost position)
+    let pinned_node = nodes[6];
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut renderer = TestRenderers::debug();
+
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = usize::MAX;
+    config.partition.node_count = usize::MAX;
+
+    config.partition.pin_source = Some(NodeIndex::new(pinned_node.index()));
+
+    let mut terminal = create_test_terminal(80, 25);
+    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 25);
+    controller.set_detail_level(VisualDetail::Full);
+
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+        let _loaded_partitions = controller.ensure_camera_coverage().unwrap_or_default();
+
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for snapshot generation");
+        let viewport_graph = controller.get_viewport_graph();
+        let detail_level = controller.get_detail_level();
+
+        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
+        plot_viewport_graph(
+            viewport_graph,
+            &mut buffer,
+            &mut renderer,
+            controller.graph(),
+            detail_level,
+            &controller.theme,
+        );
+    });
+
+    let snapshot = format!("{}", terminal.backend());
+
+    insta::assert_snapshot!("pinned_source_cycle", snapshot);
+}
+
+#[test]
+fn pinned_source_cycle_partitioned() {
+    let _ = env_logger::try_init();
+    use petgraph::graph::NodeIndex;
+
+    use crate::{
+        graph_controller::{GraphConfig, GraphController, WorldBuffer},
+        testing::mocks::TestRenderers,
+    };
+
+    // Create a 12-node cycle
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..12).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..12 {
+        domain_graph.add_edge(nodes[i], nodes[(i + 1) % 12], ());
+    }
+
+    // Pin node 6 as the source (should appear at leftmost position)
+    let pinned_node = nodes[6];
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut renderer = TestRenderers::debug();
+
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = 2;
+    config.partition.node_count = 8;
+
+    config.partition.pin_source = Some(NodeIndex::new(pinned_node.index()));
+
+    let mut terminal = create_test_terminal(80, 25);
+    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 25);
+    controller.set_detail_level(VisualDetail::Full);
+
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+        let _loaded_partitions = controller.ensure_camera_coverage().unwrap_or_default();
+
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for snapshot generation");
+        let viewport_graph = controller.get_viewport_graph();
+        let detail_level = controller.get_detail_level();
+
+        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
+        // Export viewport graph to dot if RUST_LOG=debug is active
+        if std::env::var("RUST_LOG")
+            .map(|v| v.contains("debug"))
+            .unwrap_or(false)
+        {
+            // Generate a filename based on the current test name
+            let current_thread = std::thread::current();
+            let test_name = current_thread.name().unwrap_or("unknown_test");
+            let filename = format!("{}_viewport.dot", test_name);
+            if let Err(e) = crate::dot_export::export_to_dot(viewport_graph, &filename) {
+                eprintln!("Failed to export dot file {}: {}", filename, e);
+            }
+        }
+
+        plot_viewport_graph(
+            viewport_graph,
+            &mut buffer,
+            &mut renderer,
+            controller.graph(),
+            detail_level,
+            &controller.theme,
+        );
+    });
+
+    let snapshot = format!("{}", terminal.backend());
+
+    insta::assert_snapshot!("pinned_source_cycle_partitioned", snapshot);
+}
+
+#[test]
+fn cycle_with_chord() {
+    let _ = env_logger::try_init();
+
+    use crate::{
+        graph_controller::{GraphConfig, GraphController, WorldBuffer},
+        testing::mocks::TestRenderers,
+    };
+
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..12).map(|_| domain_graph.add_node(())).collect();
+    // Arrange nodes in a closed circle that we'll open at 0
+    for i in 0..12 {
+        domain_graph.add_edge(nodes[i], nodes[(i + 1) % 12], ());
+    }
+    //let pinned_node = nodes[0];
+    // Extra cycle
+    domain_graph.add_edge(nodes[6], nodes[3], ());
+
+    let snapshot = make_snapshot(domain_graph, 60, 20, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("cycle_with_chord", snapshot);
+}
+
+#[test]
+fn cycle_with_chords() {
+    let _ = env_logger::try_init();
+
+    use crate::{
+        graph_controller::{GraphConfig, GraphController, WorldBuffer},
+        testing::mocks::TestRenderers,
+    };
+
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..12).map(|_| domain_graph.add_node(())).collect();
+    // Arrange nodes in a closed circle that we'll open at 0
+    for i in 0..12 {
+        domain_graph.add_edge(nodes[i], nodes[(i + 1) % 12], ());
+    }
+    // Extra cycle
+    domain_graph.add_edge(nodes[6], nodes[3], ());
+    domain_graph.add_edge(nodes[4], nodes[0], ());
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut renderer = TestRenderers::debug();
+
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = usize::MAX;
+    config.partition.node_count = usize::MAX;
+
+    config.partition.pin_source = None;
+
+    let mut terminal = create_test_terminal(80, 25);
+    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 25);
+    controller.set_detail_level(VisualDetail::Full);
+
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+        let _loaded_partitions = controller.ensure_camera_coverage().unwrap_or_default();
+
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for snapshot generation");
+        let viewport_graph = controller.get_viewport_graph();
+        let detail_level = controller.get_detail_level();
+
+        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
+        plot_viewport_graph(
+            viewport_graph,
+            &mut buffer,
+            &mut renderer,
+            controller.graph(),
+            detail_level,
+            &controller.theme,
+        );
+    });
+
+    let snapshot = format!("{}", terminal.backend());
+
+    insta::assert_snapshot!("cycle_with_chord", snapshot);
+}
+
+#[test]
+fn pinned_source_cycle_with_chord() {
+    let _ = env_logger::try_init();
+    use petgraph::graph::NodeIndex;
+
+    use crate::{
+        graph_controller::{GraphConfig, GraphController, WorldBuffer},
+        testing::mocks::TestRenderers,
+    };
+
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..12).map(|_| domain_graph.add_node(())).collect();
+    // Arrange nodes in a closed circle that we'll open at 0
+    for i in 0..12 {
+        domain_graph.add_edge(nodes[i], nodes[(i + 1) % 12], ());
+    }
+    let pinned_node = nodes[0];
+    // Extra cycle
+    domain_graph.add_edge(nodes[6], nodes[3], ());
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut renderer = TestRenderers::debug();
+
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = usize::MAX;
+    config.partition.node_count = usize::MAX;
+
+    config.partition.pin_source = Some(NodeIndex::new(pinned_node.index()));
+
+    let mut terminal = create_test_terminal(80, 25);
+    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 25);
+    controller.set_detail_level(VisualDetail::Full);
+
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+        let _loaded_partitions = controller.ensure_camera_coverage().unwrap_or_default();
+
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for snapshot generation");
+        let viewport_graph = controller.get_viewport_graph();
+        let detail_level = controller.get_detail_level();
+
+        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
+        plot_viewport_graph(
+            viewport_graph,
+            &mut buffer,
+            &mut renderer,
+            controller.graph(),
+            detail_level,
+            &controller.theme,
+        );
+    });
+
+    let snapshot = format!("{}", terminal.backend());
+
+    insta::assert_snapshot!("pinned_source_cycle_with_chord", snapshot);
+}
+
+#[test]
+fn viewport_visual_regression_self_loop() {
+    let _ = env_logger::try_init();
+    // Create a self-loop: A -> A
+    let mut domain_graph = MockDomainGraph::new();
+    let n0 = domain_graph.add_node(());
+    domain_graph.add_edge(n0, n0, ()); // Self-loop
+
+    let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
+    insta::assert_snapshot!("self_loop", snapshot);
 }

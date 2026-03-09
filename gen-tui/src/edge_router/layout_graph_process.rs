@@ -50,7 +50,6 @@ pub fn assign_ports(
 
 /// Simplifies a graph by identifying and contracting segments with collinear edges.
 /// Preserves LayoutEdge bundle information from the edges being contracted.
-/// Asserts that all edges in a straight segment have identical bundles.
 pub fn simplify_graph(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>,
 ) -> Result<(), LayoutError> {
@@ -145,14 +144,14 @@ pub fn simplify_graph(
                             neighbors_of_current[1]
                         };
 
-                        // Verify that bundle is identical along the segment
+                        // If bundles diverge, two logical edges share routing nodes here;
+                        // treat this node as a segment boundary. You see this when plotting
+                        // a cycle.
                         if let Some(edge_id) = graph.find_edge(current_id, next_node_id) {
                             let next_bundle = &graph.edge_weight(edge_id).unwrap().bundle;
-                            assert_eq!(
-                                &segment_bundle, next_bundle,
-                                "Bundle mismatch in straight segment: expected {:?}, got {:?}",
-                                segment_bundle, next_bundle
-                            );
+                            if &segment_bundle != next_bundle {
+                                break Some(current_id);
+                            }
                         }
 
                         previous_id = current_id;

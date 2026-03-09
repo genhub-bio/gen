@@ -1,0 +1,24 @@
+---
+source: gen-tui/src/testing/layout_tests.rs
+expression: snapshot
+---
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"     █████                                                  "
+"   ╭─█N0██─╮                                                "
+"   │ █████ │                                                "
+"   │       │                                                "
+"   ╰───────╯                                                "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "

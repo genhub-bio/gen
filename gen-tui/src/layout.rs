@@ -587,7 +587,7 @@ impl<'a> LayoutEngine<'a> {
                         let d: i32 = i32::try_from(domain_idx.index()).unwrap_or(i32::MAX);
                         i32::MAX.saturating_sub(d)
                     }
-                    PartitionNode::Stitch(_) => 0,
+                    PartitionNode::Stitch(_) | PartitionNode::Loopback => 0,
                 };
                 vertex.set_sort_bias(sort_bias);
                 let new_vertex_idx = vertex_graph.add_node(vertex);
@@ -669,12 +669,9 @@ impl<'a> LayoutEngine<'a> {
             let partition_node = &self.partition_graph[node_idx];
 
             // Calculate size
-            let size = if let PartitionNode::Data(_domain_idx) = partition_node {
-                // For Data nodes, use the node sizer
-                node_sizer.get_node_size(&node_idx, detail_level)
-            } else {
-                // For Stitch nodes, use dummy size
-                node_sizer.get_dummy_size()
+            let size = match partition_node {
+                PartitionNode::Data(_) => node_sizer.get_node_size(&node_idx, detail_level),
+                PartitionNode::Stitch(_) | PartitionNode::Loopback => node_sizer.get_dummy_size(),
             };
 
             let (width, height) = (
@@ -687,6 +684,7 @@ impl<'a> LayoutEngine<'a> {
             let role = match partition_node {
                 PartitionNode::Data(d) => NodeRole::Data(*d),
                 PartitionNode::Stitch(s) => NodeRole::Stitch(*s),
+                PartitionNode::Loopback => NodeRole::Routing,
             };
             let layout_node = LayoutNode::new(role, pos, (width, height), Some(0));
 
@@ -804,6 +802,7 @@ impl<'a> LayoutEngine<'a> {
                     match &self.partition_graph[pidx] {
                         PartitionNode::Data(domain_idx) => NodeRole::Data(*domain_idx),
                         PartitionNode::Stitch(side) => NodeRole::Stitch(*side),
+                        PartitionNode::Loopback => NodeRole::Routing,
                     }
                 } else {
                     NodeRole::Routing
@@ -877,19 +876,6 @@ fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
     components
 }
 
-fn mean_y_for_x(
-    layout_graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    x: i64,
-) -> i64 {
-    let layer_ys: Vec<i64> = layout_graph
-        .node_weights()
-        .filter(|node| node.pos.x == x)
-        .map(|node| node.pos.y)
-        .collect::<Vec<i64>>();
-
-    (layer_ys.iter().sum::<i64>() as f64 / layer_ys.len() as f64).round() as i64
-}
-
 /// Take the contents of a layout graph and translate the node coordinates
 /// so that the centers of all data nodes in the first layer are aligned to
 /// each other and the origin (they all share x=0). In the Y-direction the
@@ -899,6 +885,37 @@ fn mean_y_for_x(
 fn align_partition_to_origin(
     layout_graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
 ) -> (i64, i64) {
+    let (min_layer, max_layer) = layout_graph
+        .node_weights()
+        .filter_map(|node| node.layer)
+        .minmax()
+        .into_option()
+        .unwrap_or((0, 0));
+
+    let left_ys: Vec<i64> = layout_graph
+        .node_weights()
+        .filter(|node| node.layer == Some(min_layer))
+        .map(|node| node.pos.y)
+        .collect();
+
+    let right_ys: Vec<i64> = layout_graph
+        .node_weights()
+        .filter(|node| node.layer == Some(max_layer))
+        .map(|node| node.pos.y)
+        .collect();
+
+    let mean_y_left = if !left_ys.is_empty() {
+        (left_ys.iter().sum::<i64>() as f64 / left_ys.len() as f64).round() as i64
+    } else {
+        0
+    };
+
+    let mean_y_right = if !right_ys.is_empty() {
+        (right_ys.iter().sum::<i64>() as f64 / right_ys.len() as f64).round() as i64
+    } else {
+        mean_y_left
+    };
+
     let (min_x, max_x) = layout_graph
         .node_weights()
         .filter(|node| !matches!(node.role, NodeRole::Stitch(_)))
@@ -906,9 +923,6 @@ fn align_partition_to_origin(
         .minmax()
         .into_option()
         .unwrap_or((0, 0));
-
-    let mean_y_left = mean_y_for_x(layout_graph, min_x);
-    let mean_y_right = mean_y_for_x(layout_graph, max_x);
 
     // Apply normalization offsets
     for node in layout_graph.node_weights_mut() {

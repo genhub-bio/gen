@@ -6,8 +6,8 @@ use std::{
 
 use gen_sugiyama::VERTEX_SPACING_DEFAULT;
 use petgraph::visit::{
-    EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
-    NodeCount, NodeIndexable, Visitable,
+    EdgeIndexable, EdgeRef, GraphBase, IntoEdgeReferences, IntoNeighborsDirected,
+    IntoNodeIdentifiers, NodeCount, NodeIndexable, Visitable,
 };
 
 use crate::{
@@ -45,17 +45,19 @@ impl Default for ControllerConfig {
 /// - Handles scale (level of detail) changes and layout computation
 pub struct PartitionController<G, S>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
 {
     pub partition_table: PartitionTable<G>,
     pub current_detail_level: VisualDetail,
     pub node_sizer: S,
 
+    // The original graph, used for loading partition layouts on demand
+    pub graph: G,
+
     // Dynamic partition layout management
     loaded_partition_indices: HashSet<usize>,
     max_loaded_partitions: usize,
-    original_graph: G,
 
     // Vertex spacing for layout computation
     vertex_spacing: f64,
@@ -63,20 +65,9 @@ where
 
 impl<G, S> PartitionController<G, S>
 where
-    G: GraphBase
-        + Clone
-        + EdgeIndexable
-        + NodeIndexable
-        + NodeCount
-        + Visitable
-        + IntoNodeIdentifiers
-        + IntoEdgeReferences
-        + IntoNeighborsDirected,
+    G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash + Ord,
-    G::EdgeId: Clone,
-    for<'b> &'b G: IntoNodeIdentifiers + IntoEdgeReferences + IntoNeighborsDirected,
-    for<'b> &'b G::NodeId: Hash + Ord,
-    for<'b> &'b G::EdgeId: Clone,
+    for<'b> &'b G: IntoNeighborsDirected,
     S: NodeSizer<G>,
 {
     // TODO: a builder pattern may be nice here to support sensible defaults and multiple graph types
@@ -85,7 +76,13 @@ where
     /// - node_sizer: Function object to determine node sizes at different scales
     pub fn new(graph: G, node_sizer: S) -> Self
     where
+        G: EdgeIndexable + NodeCount + Visitable,
+        G::EdgeId: Clone,
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+        for<'c> &'c G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + IntoNodeIdentifiers<NodeId = G::NodeId>
+            + IntoEdgeReferences<EdgeRef: EdgeRef<NodeId = G::NodeId>>
+            + IntoNeighborsDirected,
     {
         Self::new_with_config(
             graph,
@@ -107,19 +104,22 @@ where
         controller_config: ControllerConfig,
     ) -> Self
     where
+        G: EdgeIndexable + NodeCount + Visitable,
+        G::EdgeId: Clone,
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+        for<'c> &'c G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + IntoNodeIdentifiers<NodeId = G::NodeId>
+            + IntoEdgeReferences<EdgeRef: EdgeRef<NodeId = G::NodeId>>
+            + IntoNeighborsDirected,
     {
+        let partition_table = PartitionTable::new_with_full_config(&graph, &partition_config);
         Self {
-            partition_table: PartitionTable::new_with_config(
-                graph,
-                partition_config.layer_count,
-                partition_config.node_count,
-            ),
+            partition_table,
             current_detail_level: VisualDetail::Minimal,
             node_sizer,
+            graph,
             loaded_partition_indices: HashSet::new(),
             max_loaded_partitions: controller_config.max_loaded_partitions,
-            original_graph: graph,
             //scale_change_needs_viewport_reset: false,
             vertex_spacing: VERTEX_SPACING_DEFAULT,
         }
@@ -147,7 +147,7 @@ where
         self.partition_table.load_partition(
             partition_idx,
             &self.node_sizer,
-            &self.original_graph,
+            &self.graph,
             self.vertex_spacing,
         )?;
 
@@ -358,20 +358,12 @@ where
 
             let height = heights[partition_idx];
             let y_offset = if partition_idx == 0 {
-                self.partition_table
-                    .get_scale_data(self.current_detail_level)
-                    .rise
-                    .prefix_sum(0, 0)
+                0
             } else {
                 self.partition_table
                     .get_scale_data(self.current_detail_level)
                     .rise
-                    .prefix_sum(partition_idx, 0)
-                    - self
-                        .partition_table
-                        .get_scale_data(self.current_detail_level)
-                        .rise
-                        .prefix_sum(partition_idx - 1, 0)
+                    .prefix_sum(partition_idx - 1, 0)
             };
 
             min_y = min(min_y, y_offset);
@@ -640,7 +632,7 @@ mod tests {
         };
 
         // Create partition controller
-        let mut controller = PartitionController::new(&domain_graph, node_sizer);
+        let mut controller = PartitionController::new(domain_graph, node_sizer);
 
         // Test basic coverage - small rectangle within anchor partition
         let small_rect = BigRect::from_coords(-5, -10, 5, 10);
@@ -683,7 +675,7 @@ mod tests {
         };
 
         // Create partition controller
-        let mut controller = PartitionController::new(&domain_graph, node_sizer);
+        let mut controller = PartitionController::new(domain_graph, node_sizer);
 
         // Test coverage that should require loading multiple partitions
         // Use a large rectangle that extends beyond the anchor partition
@@ -725,7 +717,7 @@ mod tests {
             height: 8,
         };
 
-        let mut controller = PartitionController::new(&domain_graph, node_sizer);
+        let mut controller = PartitionController::new(domain_graph, node_sizer);
 
         // Set anchor to a partition that's not at index 0 to enable left expansion
         if controller.partition_table.partitions.len() > 2 {
@@ -772,13 +764,14 @@ mod tests {
         let partition_config = PartitionConfig {
             layer_count: 1, // Small layer count
             node_count: 3,  // Small node count to force multiple partitions
+            ..Default::default()
         };
         let config = ControllerConfig {
             max_loaded_partitions: usize::MAX,
         };
 
         let mut controller = PartitionController::new_with_config(
-            &domain_graph,
+            domain_graph,
             node_sizer,
             partition_config,
             config,

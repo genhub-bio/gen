@@ -33,6 +33,10 @@ pub struct CroppedGraph {
     pub node_highlights: Vec<(WorldPos, crate::plotter::PathStyle)>,
     /// Edge highlights: list of world position pairs with their associated styles
     pub edge_highlights: Vec<((WorldPos, WorldPos), crate::plotter::PathStyle)>,
+
+    /// Domain edges that were reversed during cycle removal.
+    /// Used to draw directional arrows on loopback edges.
+    pub backward_edges: HashSet<(NodeIndex, NodeIndex)>,
 }
 
 impl CroppedGraph {
@@ -48,6 +52,7 @@ impl CroppedGraph {
             included_nodes: HashSet::new(),
             node_highlights: Vec::new(),
             edge_highlights: Vec::new(),
+            backward_edges: HashSet::new(),
         }
     }
 
@@ -189,7 +194,54 @@ impl CroppedGraph {
         // Divide the graph up in logical layers by grouping Data nodes by x-coordinate
         this.build_layers_from_coordinates();
 
+        // Remove dangling loopback routing nodes (those with only one or zero visible
+        // connections after stitch edges are dropped). Trace each dead-end chain back
+        // through routing nodes until reaching a T/X junction (degree ≥ 3) or a data node.
+        this.prune_loopback_dead_ends();
+
+        // Copy reversed-edge information so the renderer can draw directional arrows.
+        this.backward_edges = partition_table.backward_edges.clone();
+
         this
+    }
+
+    /// Prune routing nodes that are dead ends (degree ≤ 1) and trace back along the chain.
+    fn prune_loopback_dead_ends(&mut self) {
+        use std::collections::VecDeque;
+
+        // Seed: routing nodes currently at degree ≤ 1
+        let seeds: Vec<WorldPos> = self
+            .node_data_by_pos
+            .iter()
+            .filter(|(pos, node)| {
+                matches!(node.role, NodeRole::Routing) && self.graph.neighbors(**pos).count() <= 1
+            })
+            .map(|(pos, _)| *pos)
+            .collect();
+
+        let mut queue: VecDeque<WorldPos> = seeds.into_iter().collect();
+
+        while let Some(pos) = queue.pop_front() {
+            if !self.node_data_by_pos.contains_key(&pos) {
+                continue;
+            }
+
+            let neighbors: Vec<WorldPos> = self.graph.neighbors(pos).collect();
+            self.graph.remove_node(pos);
+            self.node_data_by_pos.remove(&pos);
+
+            // Propagate: if a routing neighbor becomes a new dead end, queue it
+            for neighbor in neighbors {
+                if let Some(node) = self.node_data_by_pos.get(&neighbor)
+                    && matches!(node.role, NodeRole::Routing)
+                {
+                    let new_degree = self.graph.neighbors(neighbor).count();
+                    if new_degree <= 1 {
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
     }
 
     /// Build layers by grouping Data nodes by their Sugiyama rank within each partition.

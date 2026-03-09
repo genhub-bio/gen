@@ -5,7 +5,6 @@ use ftree::FenwickTree;
 use gen_sugiyama::VERTEX_SPACING_DEFAULT;
 use petgraph::{
     Direction, Undirected,
-    algo::toposort,
     graph::{EdgeIndex, NodeIndex},
     stable_graph::{StableDiGraph, StableGraph},
     visit::{
@@ -15,6 +14,7 @@ use petgraph::{
 };
 
 use crate::{
+    cycle_removal::{self, CycleRemovalResult},
     find_articulation_points,
     geometry::{BigRect, LocalPos, PartitionIndex, WorldPos},
     layout::{LayoutEdge, LayoutEngine, LayoutNode, NodeRole, PartitionLayout, VisualDetail},
@@ -30,6 +30,10 @@ pub struct PartitionConfig {
     /// Number of nodes after which a partition is forcibly closed.
     /// The layer is still finished so the final count could be higher than this.
     pub node_count: usize,
+    /// Optional node to pin as the first node in the ordering (for cycle removal).
+    pub pin_source: Option<NodeIndex<u32>>,
+    /// Optional node to pin as the last node in the ordering (for cycle removal).
+    pub pin_sink: Option<NodeIndex<u32>>,
 }
 
 impl Default for PartitionConfig {
@@ -37,6 +41,8 @@ impl Default for PartitionConfig {
         Self {
             layer_count: 100,
             node_count: usize::MAX,
+            pin_source: None,
+            pin_sink: None,
         }
     }
 }
@@ -61,6 +67,9 @@ where
         (PartitionIndex, PartitionIndex),
         Vec<(NodeIndex<u32>, NodeIndex<u32>, EdgeIndex<u32>)>,
     >,
+    /// Domain edges that were reversed during cycle removal (source, target as NodeIndex).
+    /// These are the "backward" edges that form loopbacks in the visual layout.
+    pub backward_edges: std::collections::HashSet<(NodeIndex<u32>, NodeIndex<u32>)>,
     metrics: Vec<UnifiedLayout>,
     anchor_partition_idx: PartitionIndex,
 }
@@ -171,13 +180,179 @@ where
                 self.original_sizer
                     .get_node_size(&original_node_id, detail_level)
             }
-            PartitionNode::Stitch(_) => self.original_sizer.get_dummy_size(),
+            PartitionNode::Stitch(_) | PartitionNode::Loopback => {
+                self.original_sizer.get_dummy_size()
+            }
         }
     }
 
     fn get_dummy_size(&self) -> (u64, u64) {
         self.original_sizer.get_dummy_size()
     }
+}
+
+/// Intermediate representation for ranked entries that may be domain nodes or loopback waypoints.
+#[derive(Debug, Clone)]
+enum RankedNode<NodeId> {
+    Domain(NodeId),
+    LoopbackLeft { back_edge: (NodeId, NodeId) },
+    LoopbackRight { back_edge: (NodeId, NodeId) },
+}
+
+/// Compute ranks from a pre-computed ordering, skipping backward edges when
+/// determining predecessor ranks. This replaces `compute_all_ranks` which
+/// relied on `toposort` (and thus failed on cycles).
+fn compute_ranks_from_ordering<G>(
+    graph: &G,
+    ordering: &[G::NodeId],
+    excluded_edges: &std::collections::HashSet<(G::NodeId, G::NodeId)>,
+) -> Vec<(G::NodeId, usize)>
+where
+    G: GraphBase + NodeIndexable,
+    for<'a> &'a G: IntoNeighborsDirected<NodeId = G::NodeId>,
+    G::NodeId: Copy + Eq + Hash + Ord,
+{
+    let mut node_ranks: HashMap<G::NodeId, usize> = HashMap::new();
+
+    for &node in ordering {
+        let max_pred_rank = graph
+            .neighbors_directed(node, Direction::Incoming)
+            .filter(|&pred| !excluded_edges.contains(&(pred, node)))
+            .filter_map(|pred| node_ranks.get(&pred))
+            .max();
+
+        let rank = match max_pred_rank {
+            Some(pred_rank) => pred_rank + 1,
+            None => 0,
+        };
+
+        node_ranks.insert(node, rank);
+    }
+
+    let mut ranked_nodes: Vec<(G::NodeId, usize)> = ordering
+        .iter()
+        .map(|&node| (node, node_ranks[&node]))
+        .collect();
+
+    ranked_nodes.sort_by_key(|&(_, rank)| rank);
+    ranked_nodes
+}
+
+/// Take domain ranks and backward edges, produce a merged ranked list
+/// with loopback nodes injected at the appropriate ranks.
+///
+/// For each backward edge (u, v) where rank(u) > rank(v):
+/// - LoopbackLeft is placed at rank(v) - 1 (shifts all ranks up by 1 if needed)
+/// - LoopbackRight is placed at rank(u) + 1
+///
+/// For self-loops (u == u):
+/// - LoopbackLeft at rank(u) - 1
+/// - LoopbackRight at rank(u) + 1
+fn inject_loopback_entries<NodeId: Copy + Eq + Hash>(
+    domain_ranks: Vec<(NodeId, usize)>,
+    backward_edges: &std::collections::HashSet<(NodeId, NodeId)>,
+) -> Vec<(RankedNode<NodeId>, usize)> {
+    if backward_edges.is_empty() {
+        return domain_ranks
+            .into_iter()
+            .map(|(id, rank)| (RankedNode::Domain(id), rank))
+            .collect();
+    }
+
+    // Build rank lookup
+    let rank_map: HashMap<NodeId, usize> = domain_ranks.iter().copied().collect();
+
+    // Collect loopback insertions with their desired ranks
+    let mut loopback_entries: Vec<(RankedNode<NodeId>, usize)> = Vec::new();
+    for &(u, v) in backward_edges {
+        let v_rank = rank_map[&v];
+        let u_rank = rank_map[&u];
+
+        // LoopbackLeft goes before v (lower rank endpoint)
+        // LoopbackRight goes after u (higher rank endpoint)
+        // For self-loops u == v, same logic applies
+        let left_rank = v_rank; // will be shifted to make room
+        let right_rank = u_rank + 1;
+
+        loopback_entries.push((RankedNode::LoopbackLeft { back_edge: (u, v) }, left_rank));
+        loopback_entries.push((RankedNode::LoopbackRight { back_edge: (u, v) }, right_rank));
+    }
+
+    // Shift domain ranks to make room for loopback-left entries.
+    // Each LoopbackLeft at rank R needs a slot before R, so all
+    // domain nodes at rank >= R get shifted up by 1.
+    // We process insertions from highest rank to lowest to avoid cascading.
+    let mut left_ranks: Vec<usize> = loopback_entries
+        .iter()
+        .filter(|(node, _)| matches!(node, RankedNode::LoopbackLeft { .. }))
+        .map(|(_, rank)| *rank)
+        .collect();
+    left_ranks.sort_unstable();
+    left_ranks.dedup();
+    left_ranks.reverse(); // Process highest first
+
+    // Build mutable rank map
+    let mut adjusted_ranks: HashMap<NodeId, usize> = rank_map;
+
+    // Also track adjustments for loopback-right entries
+    let mut rank_adjustments: Vec<(usize, usize)> = Vec::new(); // (threshold, shift)
+
+    for (shift_idx, &threshold) in left_ranks.iter().rev().enumerate() {
+        // Shift all nodes at rank >= threshold up by (shift_idx + 1)
+        // But we need cumulative shifts, so we track them
+        rank_adjustments.push((threshold, shift_idx + 1));
+    }
+
+    // Apply shifts: for each node, count how many thresholds are <= its rank
+    for rank in adjusted_ranks.values_mut() {
+        let mut shift = 0;
+        for &(threshold, _) in &rank_adjustments {
+            if *rank >= threshold {
+                shift += 1;
+            }
+        }
+        *rank += shift;
+    }
+
+    // Build final list
+    let mut result: Vec<(RankedNode<NodeId>, usize)> = adjusted_ranks
+        .into_iter()
+        .map(|(id, rank)| (RankedNode::Domain(id), rank))
+        .collect();
+
+    // Add loopback entries with adjusted ranks
+    for (node, original_rank) in loopback_entries {
+        let adjusted = match &node {
+            RankedNode::LoopbackLeft { .. } => {
+                // LoopbackLeft goes at original_rank, but shifted by
+                // the number of other left-loopbacks at strictly lower ranks
+                let mut shift = 0;
+                for &threshold in &left_ranks {
+                    // left_ranks is in reverse order (highest first)
+                    if threshold < original_rank {
+                        shift += 1;
+                    }
+                }
+                original_rank + shift
+            }
+            RankedNode::LoopbackRight { .. } => {
+                // LoopbackRight: original_rank was u_rank + 1.
+                // Apply same shift as domain nodes at that rank.
+                let mut shift = 0;
+                for &(threshold, _) in &rank_adjustments {
+                    if original_rank > threshold {
+                        shift += 1;
+                    }
+                }
+                original_rank + shift
+            }
+            RankedNode::Domain(_) => unreachable!(),
+        };
+        result.push((node, adjusted));
+    }
+
+    result.sort_by_key(|(_, rank)| *rank);
+    result
 }
 
 /// Partition a Graph (StableDiGraph or DiGraphMap) into subgraphs, preferably at articulation points
@@ -192,87 +367,169 @@ where
 ///     - If the maximum partition size is reached, forcibly close out the current subgraph.
 impl<G> PartitionTable<G>
 where
-    G: GraphBase
-        + Clone
-        + EdgeIndexable
-        + NodeIndexable
-        + NodeCount
-        + Visitable
-        + IntoEdgeReferences
-        + IntoNodeIdentifiers
-        + IntoNeighborsDirected,
+    G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash + Ord,
-    G::EdgeId: Clone,
 {
     /// Create a new PartitionTable from a generic graph (e.g. StableDiGraph or DiGraphMap)
-    pub fn new(graph: G) -> Self
+    pub fn new(graph: &G) -> Self
     where
+        G: EdgeIndexable + NodeCount + Visitable,
+        G::EdgeId: Clone,
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+        for<'a> &'a G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + IntoNodeIdentifiers<NodeId = G::NodeId>
+            + IntoEdgeReferences<EdgeRef: EdgeRef<NodeId = G::NodeId>>
+            + IntoNeighborsDirected,
     {
         // TODO: move these to const or config file
         Self::new_with_config(graph, 1000, usize::MAX)
     }
 
     /// Create a new PartitionTable from a generic graph (e.g. StableDiGraph or DiGraphMap)
-    pub fn new_with_config(graph: G, min_width: usize, max_nodes: usize) -> Self
+    pub fn new_with_config(graph: &G, min_width: usize, max_nodes: usize) -> Self
     where
+        G: EdgeIndexable + NodeCount + Visitable,
+        G::EdgeId: Clone,
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+        for<'a> &'a G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + IntoNodeIdentifiers<NodeId = G::NodeId>
+            + IntoEdgeReferences<EdgeRef: EdgeRef<NodeId = G::NodeId>>
+            + IntoNeighborsDirected,
     {
+        let config = PartitionConfig {
+            layer_count: min_width,
+            node_count: max_nodes,
+            pin_source: None,
+            pin_sink: None,
+        };
+        Self::new_with_full_config(graph, &config)
+    }
+
+    /// Create a new PartitionTable with full configuration including pin options.
+    pub fn new_with_full_config(graph: &G, config: &PartitionConfig) -> Self
+    where
+        G: EdgeIndexable + NodeCount + Visitable,
+        G::EdgeId: Clone,
+        <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+        for<'a> &'a G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + IntoNodeIdentifiers<NodeId = G::NodeId>
+            + IntoEdgeReferences<EdgeRef: EdgeRef<NodeId = G::NodeId>>
+            + IntoNeighborsDirected,
+    {
+        let min_width = config.layer_count;
+        let max_nodes = config.node_count;
+
         let mut all_partitions: Vec<Partition> = Vec::new();
         let mut current_partition: Partition = Partition::new();
         let mut current_partition_index = 0;
 
-        // Mapping from node identifier to (partition index, node index)
-        // (G:NodeId has Copy, so this copies the value into the hashmap)
+        // Mapping from domain node identifier to (partition index, partition node index)
         let mut node_map: HashMap<G::NodeId, (PartitionIndex, NodeIndex<u32>)> = HashMap::new();
 
-        let articulation_points = find_articulation_points(&graph);
+        // Mapping from backward edge to (partition index, partition node index) for loopback nodes
+        #[allow(clippy::type_complexity)]
+        let mut loopback_left_map: HashMap<
+            (G::NodeId, G::NodeId),
+            (PartitionIndex, NodeIndex<u32>),
+        > = HashMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut loopback_right_map: HashMap<
+            (G::NodeId, G::NodeId),
+            (PartitionIndex, NodeIndex<u32>),
+        > = HashMap::new();
+
+        let articulation_points = find_articulation_points(graph);
         log::trace!(
             "Found {} articulation points: {:?}",
             articulation_points.len(),
             articulation_points
         );
 
-        let node_ranks =
-            compute_all_ranks(&graph).expect("Could not compute ranks for graph layout");
+        // Convert pin NodeIndex values to G::NodeId for cycle removal
+        let pin_source_id = config
+            .pin_source
+            .map(|idx| <G as NodeIndexable>::from_index(graph, idx.index()));
+        let pin_sink_id = config
+            .pin_sink
+            .map(|idx| <G as NodeIndexable>::from_index(graph, idx.index()));
+
+        // Step 1: Compute ordering and identify backward edges
+        let CycleRemovalResult {
+            ordering,
+            backward_edges,
+        } = cycle_removal::remove_cycles(graph, pin_source_id, pin_sink_id);
+
+        // Convert backward edges from G::NodeId to NodeIndex for storage
+        let backward_edges_as_indices: std::collections::HashSet<(NodeIndex<u32>, NodeIndex<u32>)> =
+            backward_edges
+                .iter()
+                .map(|&(u, v)| {
+                    let u_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, u));
+                    let v_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, v));
+                    (u_idx, v_idx)
+                })
+                .collect();
+
+        // Step 2: Compute ranks from ordering (skipping backward edges)
+        let domain_ranks = compute_ranks_from_ordering(graph, &ordering, &backward_edges);
+
+        // Step 3: Inject loopback entries for backward edges
+        let ranked_entries = inject_loopback_entries(domain_ranks, &backward_edges);
 
         let mut min_rank = 0; // The minimum rank of the current partition
         let mut prev_rank = 0; // Rank of previous node evaluated
-        for (node, rank) in node_ranks {
-            // Convert the original node identifier to a NodeIndex, regardless of the graph type
-            let node_idx_usize = <G as NodeIndexable>::to_index(&graph, node);
-            let node_idx = NodeIndex::new(node_idx_usize);
-            let can_close_out = rank - min_rank >= min_width;
-            let must_close_out = current_partition.graph.node_count() >= max_nodes;
-            let is_articulation = articulation_points.contains(&node);
+        for (ranked_node, rank) in &ranked_entries {
+            match ranked_node {
+                RankedNode::Domain(node) => {
+                    let node_idx_usize = <G as NodeIndexable>::to_index(graph, *node);
+                    let node_idx = NodeIndex::new(node_idx_usize);
+                    let can_close_out = rank - min_rank >= min_width;
+                    let must_close_out = current_partition.graph.node_count() >= max_nodes;
+                    let is_articulation = articulation_points.contains(node);
 
-            if (can_close_out && is_articulation) || (must_close_out && rank != prev_rank) {
-                log::trace!(
-                    "Split graph at: Node {:?}, rank {}, min_rank {}, can_close_out {}, must_close_out {}, is_articulation {}",
-                    node,
-                    rank,
-                    min_rank,
-                    can_close_out,
-                    must_close_out,
-                    is_articulation
-                );
-                all_partitions.push(current_partition);
-                // The bridge partitions are empty at this point
-                all_partitions.push(Partition::new());
-                current_partition = Partition::new();
-                current_partition_index += 2;
-                min_rank = rank;
+                    if (can_close_out && is_articulation) || (must_close_out && *rank != prev_rank)
+                    {
+                        log::trace!(
+                            "Split graph at: Node {:?}, rank {}, min_rank {}, can_close_out {}, must_close_out {}, is_articulation {}",
+                            node,
+                            rank,
+                            min_rank,
+                            can_close_out,
+                            must_close_out,
+                            is_articulation
+                        );
+                        all_partitions.push(current_partition);
+                        all_partitions.push(Partition::new());
+                        current_partition = Partition::new();
+                        current_partition_index += 2;
+                        min_rank = *rank;
+                    }
+
+                    let partition_node_index: NodeIndex<u32> = current_partition
+                        .graph
+                        .add_node(PartitionNode::Data(node_idx));
+
+                    node_map.insert(*node, (current_partition_index, partition_node_index));
+                    prev_rank = *rank;
+                }
+                RankedNode::LoopbackLeft { back_edge } => {
+                    let partition_node_index: NodeIndex<u32> =
+                        current_partition.graph.add_node(PartitionNode::Loopback);
+                    loopback_left_map
+                        .insert(*back_edge, (current_partition_index, partition_node_index));
+                    prev_rank = *rank;
+                }
+                RankedNode::LoopbackRight { back_edge } => {
+                    let partition_node_index: NodeIndex<u32> =
+                        current_partition.graph.add_node(PartitionNode::Loopback);
+                    loopback_right_map
+                        .insert(*back_edge, (current_partition_index, partition_node_index));
+                    prev_rank = *rank;
+                }
             }
-
-            let partition_node_index: NodeIndex<u32> = current_partition
-                .graph
-                .add_node(PartitionNode::Data(node_idx));
-
-            node_map.insert(node, (current_partition_index, partition_node_index));
-            prev_rank = rank;
         }
 
-        // Add the last section, without bridgesubgraph
+        // Add the last section, without bridge subgraph
         if current_partition.graph.node_count() > 0 {
             all_partitions.push(current_partition);
         }
@@ -284,11 +541,43 @@ where
             Vec<(NodeIndex<u32>, NodeIndex<u32>, EdgeIndex<u32>)>,
         > = HashMap::new();
 
-        for edge in (&graph).edge_references() {
-            let edge_idx_usize = <G as EdgeIndexable>::to_index(&graph, edge.id());
-            let edge_idx = EdgeIndex::new(edge_idx_usize);
+        // Helper to add an edge, either within a partition or across partitions
+        #[allow(clippy::type_complexity)]
+        let add_edge_to_partitions = |src_part: PartitionIndex,
+                                      src_node: NodeIndex<u32>,
+                                      tgt_part: PartitionIndex,
+                                      tgt_node: NodeIndex<u32>,
+                                      weight: PartitionEdge,
+                                      partitions: &mut Vec<Partition>,
+                                      inter_edges: &mut HashMap<
+            (PartitionIndex, PartitionIndex),
+            Vec<(NodeIndex<u32>, NodeIndex<u32>, EdgeIndex<u32>)>,
+        >| {
+            if src_part == tgt_part {
+                partitions[src_part]
+                    .graph
+                    .add_edge(src_node, tgt_node, weight);
+            } else if let Some((src_domain_idx, tgt_domain_idx)) = weight {
+                inter_edges.entry((src_part, tgt_part)).or_default().push((
+                    src_domain_idx,
+                    tgt_domain_idx,
+                    EdgeIndex::new(0),
+                ));
+            }
+        };
+
+        // Pass 1: Normal edges (excluding backward edges)
+        for edge in graph.edge_references() {
             let source = edge.source();
             let target = edge.target();
+
+            // Skip backward edges — they are handled by the loopback chain
+            if backward_edges.contains(&(source, target)) {
+                continue;
+            }
+
+            let edge_idx_usize = <G as EdgeIndexable>::to_index(graph, edge.id());
+            let edge_idx = EdgeIndex::new(edge_idx_usize);
 
             let (source_partition_idx, source_node_index) = node_map
                 .get(&source)
@@ -299,23 +588,63 @@ where
                 .copied()
                 .expect("Encountered edge with unknown target node");
 
-            let source_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(&graph, source));
-            let target_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(&graph, target));
+            let source_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, source));
+            let target_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, target));
 
             if source_partition_idx == target_partition_idx {
-                // Same partition -> add it to the graph
                 all_partitions[source_partition_idx].graph.add_edge(
                     source_node_index,
                     target_node_index,
                     Some((source_domain_idx, target_domain_idx)),
                 );
             } else {
-                // Different partition -> store using domain IDs for unified layout graph
                 inter_partition_edges
                     .entry((source_partition_idx, target_partition_idx))
                     .or_default()
                     .push((source_domain_idx, target_domain_idx, edge_idx));
             }
+        }
+
+        // Pass 2: Loopback chain edges for backward edges
+        for &(u_id, v_id) in &backward_edges {
+            let (l_part, l_node) = loopback_left_map[&(u_id, v_id)];
+            let (r_part, r_node) = loopback_right_map[&(u_id, v_id)];
+            let (v_part, v_node) = node_map[&v_id];
+            let (u_part, u_node) = node_map[&u_id];
+            let u_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, u_id));
+            let v_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, v_id));
+            let weight: PartitionEdge = Some((u_domain_idx, v_domain_idx));
+
+            // L→v
+            add_edge_to_partitions(
+                l_part,
+                l_node,
+                v_part,
+                v_node,
+                weight,
+                &mut all_partitions,
+                &mut inter_partition_edges,
+            );
+            // L→R
+            add_edge_to_partitions(
+                l_part,
+                l_node,
+                r_part,
+                r_node,
+                weight,
+                &mut all_partitions,
+                &mut inter_partition_edges,
+            );
+            // u→R
+            add_edge_to_partitions(
+                u_part,
+                u_node,
+                r_part,
+                r_node,
+                weight,
+                &mut all_partitions,
+                &mut inter_partition_edges,
+            );
         }
 
         let num_partitions = all_partitions.len();
@@ -363,8 +692,39 @@ where
                 })
                 .collect();
 
-            for (node_idx, domain_idx) in data_nodes {
-                // Find all incoming inter-partition edges to this domain node
+            // Collect loopback right nodes for left stitch connection
+            // LoopbackRight has incoming edges from domain node u (higher rank)
+            // and edges from L. For left stitch (incoming to partition), we need to
+            // find inter-partition edges where the TARGET is v (the lower rank endpoint).
+            // LoopbackRight is placed at the higher rank (u_rank + 1), so it represents v.
+            let loopback_right_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
+                .graph
+                .node_indices()
+                .filter(|&node_idx| {
+                    matches!(
+                        partition.graph.node_weight(node_idx),
+                        Some(PartitionNode::Loopback)
+                    )
+                })
+                .filter_map(|node_idx| {
+                    loopback_right_map
+                        .iter()
+                        .find(|&(_, &(part, node))| part == partition_idx && node == node_idx)
+                        .map(|(&back_edge, _)| {
+                            let (_u, v) = back_edge;
+                            // For left stitch (incoming edges), we match against v (the target of backward edge)
+                            let v_domain_idx =
+                                NodeIndex::new(<G as NodeIndexable>::to_index(graph, v));
+                            (node_idx, v_domain_idx)
+                        })
+                })
+                .collect();
+
+            for (node_idx, domain_idx) in data_nodes
+                .into_iter()
+                .chain(loopback_right_nodes.into_iter())
+            {
+                // Find all incoming inter-partition edges to this domain/loopback node
                 let mut bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> =
                     sorted_inter_partition_edges
                         .iter()
@@ -432,8 +792,48 @@ where
                 })
                 .collect();
 
-            for (node_idx, domain_idx) in data_nodes {
-                // Find all outgoing inter-partition edges from this domain node
+            // Collect loopback left nodes for right stitch connection
+            // LoopbackLeft has outgoing edges to domain node v (lower rank)
+            // We need to find inter-partition edges where target == v
+            let loopback_left_nodes: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = partition
+                .graph
+                .node_indices()
+                .filter(|&node_idx| {
+                    matches!(
+                        partition.graph.node_weight(node_idx),
+                        Some(PartitionNode::Loopback)
+                    )
+                })
+                .filter_map(|node_idx| {
+                    loopback_left_map
+                        .iter()
+                        .find(|&(_, &(part, node))| part == partition_idx && node == node_idx)
+                        .map(|(&back_edge, _)| {
+                            let (u, v) = back_edge;
+                            // For right stitch (outgoing edges), we match against u (the source of backward edge)
+                            // because the loopback edge goes from u -> LoopbackRight -> LoopbackLeft -> v
+                            // LoopbackLeft is the target in the source partition, so outgoing edges from it
+                            // should connect to right_stitch
+                            let u_domain_idx =
+                                NodeIndex::new(<G as NodeIndexable>::to_index(graph, u));
+                            log::trace!(
+                                "Found LoopbackLeft in partition {} at {:?}: back_edge=({:?}, {:?}), using u_domain={:?} for right stitch",
+                                partition_idx,
+                                node_idx,
+                                u,
+                                v,
+                                u_domain_idx
+                            );
+                            (node_idx, u_domain_idx)
+                        })
+                })
+                .collect();
+
+            for (node_idx, domain_idx) in data_nodes
+                .into_iter()
+                .chain(loopback_left_nodes.into_iter())
+            {
+                // Find all outgoing inter-partition edges from this domain/loopback node
                 let mut bundles: Vec<(NodeIndex<u32>, NodeIndex<u32>)> =
                     sorted_inter_partition_edges
                         .iter()
@@ -499,6 +899,7 @@ where
             partitions: all_partitions,
             node_map,
             inter_partition_edges,
+            backward_edges: backward_edges_as_indices,
             metrics: vec![
                 UnifiedLayout::new(num_partitions), // Minimal
                 UnifiedLayout::new(num_partitions), // Full
@@ -587,25 +988,14 @@ where
             // Bridge partition
             log::trace!(
                 "load_partition: loading bridge partition {}",
-                partition_index,
+                partition_index
             );
-
             // Ensure adjacent sections are loaded before trying to build the bridge
             let (left_section, right_section) = Self::get_adjacent_sections(partition_index);
             if self.partitions[left_section].layouts[0].is_none() {
-                log::trace!(
-                    "load_partition: loading left section {} for bridge {}",
-                    left_section,
-                    partition_index
-                );
                 self.load_partition(left_section, original_sizer, original_graph, vertex_spacing)?;
             }
             if self.partitions[right_section].layouts[0].is_none() {
-                log::trace!(
-                    "load_partition: loading right section {} for bridge {}",
-                    right_section,
-                    partition_index
-                );
                 self.load_partition(
                     right_section,
                     original_sizer,
@@ -620,27 +1010,8 @@ where
                 VisualDetail::Truncated,
             ] {
                 let (sources, targets) = self.get_bridge_edges(partition_index, detail_level)?;
-                log::trace!(
-                    "get_bridge_edges: partition_index={}, sources.len()={}, targets.len()={}",
-                    partition_index,
-                    sources.len(),
-                    targets.len()
-                );
-
                 let bridge_graph = Self::make_bridge_graph(sources, targets);
-                log::trace!(
-                    "make_bridge_graph: nodes={}, edges={}",
-                    bridge_graph.node_count(),
-                    bridge_graph.edge_count()
-                );
-
                 let partition_layout = PartitionLayout::for_bridge(bridge_graph, vertex_spacing);
-                log::trace!(
-                    "for_bridge: partition_index={}, layout width={}, height={}",
-                    partition_index,
-                    partition_layout.width,
-                    partition_layout.height
-                );
 
                 let nominal_width = partition_layout.width;
                 let nominal_height = partition_layout.height;
@@ -650,36 +1021,12 @@ where
                 self.metrics[detail_level.as_index()]
                     .widths
                     .add_at(partition_index, nominal_width);
-                // Why we're not updating the "rise" tree:
-                // In a bridge layouts endpoints are fixed on the Y-axis, and kept in the same reference
-                // as the partition to its right, hence we keep the rise value set to 0.
-                // (rise = height difference between the mean Y on the left and right side of a partition
-                // this allows graph i+1 to start at the y-level where graph i ended)
+                // Rise tree is not updated for bridge partitions (starts where left partition
+                // ends; ends where right partition starts)
                 self.metrics[detail_level.as_index()].heights[partition_index] = nominal_height;
             }
         }
         Ok(())
-    }
-
-    pub fn debug_fenwick_state(&self, detail_level: VisualDetail) {
-        let metrics = &self.metrics[detail_level.as_index()];
-        log::trace!("\n=== Fenwick Tree State ({:?}) ===", detail_level);
-        for i in 0..self.partitions.len() {
-            let width = if i == 0 {
-                metrics.widths.prefix_sum(0, 0)
-            } else {
-                metrics.widths.prefix_sum(i, 0) - metrics.widths.prefix_sum(i - 1, 0)
-            };
-            let cum_x = metrics.widths.prefix_sum(i, 0);
-            let has_layout = self.has_layout(i, detail_level);
-            log::trace!(
-                "  Partition {}: width={}, cumulative_x={}, has_layout={}",
-                i,
-                width,
-                cum_x,
-                has_layout
-            );
-        }
     }
 
     /// Compute layout for a specific partition, using a specific node sizer and spacing.
@@ -695,13 +1042,6 @@ where
         G: GraphBase + NodeIndexable,
         for<'a> &'a G: petgraph::visit::IntoNeighbors,
     {
-        log::trace!(
-            "compute_partition_layouts: partition_index={}, vertex_spacing={}, total_partitions={}",
-            partition_index,
-            vertex_spacing,
-            self.partitions.len()
-        );
-
         if partition_index >= self.partitions.len() {
             return Err(format!(
                 "Partition index {} out of bounds (max: {})",
@@ -747,8 +1087,8 @@ where
                 log::trace!("Partition {} is {} wide", partition_index, layout.width);
                 let metrics = &mut self.metrics[detail_level.as_index()];
                 metrics.widths.add_at(partition_index, layout.width);
+                metrics.rise.add_at(partition_index, layout.height);
                 metrics.heights[partition_index] = layout.height;
-                self.debug_fenwick_state(detail_level);
             }
         }
 
@@ -1190,69 +1530,11 @@ where
     }
 }
 
-/// Determine the rank of each node in a graph using a topological sorting of its nodes.
-/// In a hierarchical graph layout, this corresponds to the layer (in our case x-coordinate).
-/// The algorithm is simple:
-/// - The first node in the topological order has rank 0
-/// - Each subsequent node has a rank that is one greater than the maximum rank of its predecessors
-///   Results are returned as a Vec of (node, rank) pairs, sorted by rank.
-///   TODO: cache the topological sort.
-pub fn compute_all_ranks<G>(graph: &G) -> Result<Vec<(G::NodeId, usize)>, String>
-where
-    G: GraphBase + NodeIndexable + NodeCount + Visitable,
-    for<'a> &'a G: IntoNodeIdentifiers<NodeId = G::NodeId> + IntoNeighborsDirected,
-    G::NodeId: Copy + Eq + Hash + Ord,
-    G::EdgeId: Clone,
-{
-    if graph.node_count() == 0 {
-        return Ok(Vec::new());
-    }
-
-    // Perform topological sort
-    let sorted_nodes = match toposort(&graph, None) {
-        Ok(nodes) => nodes,
-        Err(_) => {
-            return Err("Could not compute ranks for graph layout. Is there a cycle?".to_string());
-        }
-    };
-
-    // Initialize rank for all nodes to 0
-    let mut node_ranks: HashMap<G::NodeId, usize> = HashMap::new();
-    for node in (&graph).node_identifiers() {
-        node_ranks.insert(node, 0);
-    }
-
-    // Process nodes in topological order
-    for node in sorted_nodes {
-        let max_pred_rank = (&graph)
-            .neighbors_directed(node, Direction::Incoming)
-            .filter_map(|pred| node_ranks.get(&pred))
-            .max();
-
-        let rank = match max_pred_rank {
-            Some(pred_rank) => pred_rank + 1,
-            None => 0, // No predecessors means this is a root node
-        };
-
-        node_ranks.insert(node, rank);
-    }
-
-    // Convert to vector and sort by rank
-    let mut ranked_nodes: Vec<(G::NodeId, usize)> = (&graph)
-        .node_identifiers()
-        .map(|node| (node, node_ranks[&node]))
-        .collect();
-
-    ranked_nodes.sort_by_key(|&(_, rank)| rank);
-
-    Ok(ranked_nodes)
-}
-
 #[cfg(test)]
 mod tests {
     use gen_core::HashId;
     use gen_graph::{GenGraph, GraphNode};
-    use petgraph::{algo::toposort, graphmap::DiGraphMap};
+    use petgraph::graphmap::DiGraphMap;
 
     use super::*;
 
@@ -1279,69 +1561,6 @@ mod tests {
                 *nodes.iter().find(|gn| gn.block_id == *t as i64).unwrap(),
             )
         }))
-    }
-
-    #[test]
-    fn test_calculate_node_ranks_empty_graph() {
-        let graph = DiGraphMap::<GraphNode, ()>::new();
-        let ranks = compute_all_ranks(&graph).unwrap();
-        assert_eq!(ranks, Vec::new());
-    }
-
-    #[test]
-    fn test_calculate_node_ranks_single_node() {
-        let node = GraphNode {
-            block_id: 0,
-            node_id: HashId::pad_str(0),
-            sequence_start: 0,
-            sequence_end: 10,
-        };
-        let mut graph = DiGraphMap::<GraphNode, ()>::new();
-        graph.add_node(node);
-        let ranks = compute_all_ranks(&graph).unwrap();
-        assert_eq!(ranks.len(), 1);
-        assert_eq!(ranks[0].1, 0);
-        assert_eq!(ranks[0].0, node);
-    }
-
-    #[test]
-    fn test_calculate_node_ranks_linear_graph() {
-        // Test case: Simple linear graph
-        // 0 -> 1 -> 2 -> 3 -> 4
-        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
-        let graph = make_test_graph(edges, None);
-        let _sorted_nodes = toposort(&graph, None).unwrap();
-        let ranks = compute_all_ranks(&graph).unwrap();
-        let rank_values: Vec<usize> = ranks.iter().map(|(_, rank)| *rank).collect();
-        assert_eq!(rank_values, vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn test_calculate_node_ranks_parallel_paths() {
-        // Test case: Fork and join graph
-        // 0 -> 1 -> 3
-        //   \-> 2 -/
-        let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
-        let graph = make_test_graph(edges, None);
-        let ranks = compute_all_ranks(&graph).unwrap();
-        let rank_values: Vec<usize> = ranks.iter().map(|(_, rank)| *rank).collect();
-        assert_eq!(rank_values, vec![0, 1, 1, 2]);
-    }
-
-    #[test]
-    fn test_calculate_node_ranks_dissimilar_paths() {
-        // Test case: Multiple paths of different lengths
-        // 0 -> 1 -> 3 -> 4
-        //  \----> 2 ----/
-        let edges = vec![(0, 1), (0, 2), (1, 3), (2, 4), (3, 4)];
-        let graph = make_test_graph(edges, None);
-        let ranks = compute_all_ranks(&graph).unwrap();
-        // Petgraph toposort is not completely deterministic, so we can't assert the exact ranks
-        // other than the first and last nodes.
-        assert_eq!(ranks.len(), 5);
-        assert_eq!(ranks[0].1, 0); // First node in topo order should have rank 0
-        let max_rank = ranks.iter().map(|(_, rank)| *rank).max().unwrap();
-        assert_eq!(max_rank, 3);
     }
 
     #[test]
@@ -1890,9 +2109,9 @@ mod tests {
         let detail_level = VisualDetail::Minimal;
 
         struct SimpleSizer;
-        impl NodeSizer<&GenGraph> for SimpleSizer {
+        impl NodeSizer<GenGraph> for SimpleSizer {
             fn get_node_size(&self, _node: &GraphNode, _detail_level: VisualDetail) -> (u64, u64) {
-                (10, 5) // Fixed size for testing
+                (10, 5)
             }
 
             fn get_dummy_size(&self) -> (u64, u64) {
@@ -1903,7 +2122,7 @@ mod tests {
 
         // First call to compute_partition_layouts
         table
-            .compute_partition_layouts(0, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
+            .compute_partition_layouts(0, &sizer, &graph, VERTEX_SPACING_DEFAULT)
             .unwrap();
 
         let first_width = table.metrics[detail_level.as_index()]
@@ -1917,7 +2136,7 @@ mod tests {
 
         // Second call should not change the values
         table
-            .compute_partition_layouts(0, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
+            .compute_partition_layouts(0, &sizer, &graph, VERTEX_SPACING_DEFAULT)
             .unwrap();
 
         let second_width = table.metrics[detail_level.as_index()]
@@ -1935,7 +2154,7 @@ mod tests {
 
         // Third call for good measure
         table
-            .compute_partition_layouts(0, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
+            .compute_partition_layouts(0, &sizer, &graph, VERTEX_SPACING_DEFAULT)
             .unwrap();
 
         let third_width = table.metrics[detail_level.as_index()]

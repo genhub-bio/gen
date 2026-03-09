@@ -1,11 +1,14 @@
 // This module implements graph rendering using the ViewportGraph system.
 // All legacy rendering paths have been removed in favor of the unified ViewportGraph approach.
 
-use std::hash::Hash;
+use std::{collections::HashSet, hash::Hash};
 
-use petgraph::visit::{
-    EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
-    NodeCount, NodeIndexable, Visitable,
+use petgraph::{
+    graph::NodeIndex,
+    visit::{
+        EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
+        NodeCount, NodeIndexable, Visitable,
+    },
 };
 use ratatui::{
     style::{Color, Style},
@@ -21,6 +24,9 @@ use crate::{
     theme::Theme,
     viewport_graph::CroppedGraph,
 };
+
+/// Number of world-coordinate units between arrow markers on reversed edges.
+const ARROW_GAPS: usize = 16;
 
 /// Line style for path highlighting
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,6 +467,19 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             }
         }
     }
+
+    // Draw direction markers on reversed (backward) edges identified during cycle removal.
+    let mut drawn_reversed: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
+    for (_, _, bundle) in viewport_graph.edges() {
+        for &(src, tgt) in bundle {
+            if src == tgt || !drawn_reversed.insert((src, tgt)) {
+                continue;
+            }
+            if viewport_graph.backward_edges.contains(&(src, tgt)) {
+                draw_arrows(buffer, viewport_graph, src, tgt, ARROW_GAPS);
+            }
+        }
+    }
 }
 
 /// Compute the junction glyph for a routing node based on its connections
@@ -527,6 +546,192 @@ fn draw_edge_with_style(
             // Vertical edges take priority at crossings (normal, heavy, and dashed).
             if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┆')) {
                 buffer.set_char_styled(pos, h_ch, style);
+            }
+        }
+    }
+}
+
+/// Draw direction marker arrows along the visual path of an edge.
+///
+/// Finds the visual path for the domain edge `(source, target)` by extracting the
+/// subgraph of segments whose bundles contain that pair, then walks the path from the
+/// Place directional arrow markers on every segment of a reversed edge.
+///
+/// Arrow placement uses a diagonal grid: a marker is placed at every position where
+/// `(pos.x + pos.y).rem_euclid(gaps) == 0`, keeping markers aligned across partition
+/// boundaries regardless of where each viewport window starts.
+///
+/// Direction is determined by walking the edge's subgraph from a known anchor node:
+/// - If source is visible, walk forward from source.
+/// - If only target is visible, walk backward from target.
+/// - Otherwise, walk from the rightmost degree-1 node (assumed source side).
+/// Segments unreachable from any anchor fall back to geometry:
+/// - Vertical: above y=0 → `▼` (facing down toward nodes), below y=0 → `▲`.
+/// - Horizontal: `◀` (backward edges always go right-to-left).
+///
+/// Only cells already containing a straight line character are overwritten;
+/// the existing style is preserved.
+pub fn draw_arrows(
+    buffer: &mut WorldBuffer,
+    viewport_graph: &CroppedGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    gaps: usize,
+) {
+    if gaps == 0 || source == target {
+        return;
+    }
+    let g = gaps as i64;
+
+    // The subgraph already contains exactly the segments labelled with (source, target).
+    // No search needed — we just walk this pre-filtered graph from an anchor.
+    let sub = viewport_graph.subgraph(|bundle| bundle.contains(&(source, target)));
+    if sub.graph.node_count() == 0 {
+        return;
+    }
+
+    // Find world position of the source or target domain node within the subgraph.
+    let source_pos = sub
+        .node_data_by_pos
+        .iter()
+        .find(|(_, n)| matches!(n.role, NodeRole::Data(idx) if idx == source))
+        .map(|(pos, _)| *pos);
+    let target_pos = sub
+        .node_data_by_pos
+        .iter()
+        .find(|(_, n)| matches!(n.role, NodeRole::Data(idx) if idx == target))
+        .map(|(pos, _)| *pos);
+
+    // Choose walk anchor and direction. Prefer source (forward), else target (backward),
+    // else the rightmost degree-1 node (assumed source side for a backward edge).
+    let (start, forward) = if let Some(p) = source_pos {
+        (p, true)
+    } else if let Some(p) = target_pos {
+        (p, false)
+    } else {
+        let endpoint = sub
+            .graph
+            .nodes()
+            .filter(|&p| sub.graph.neighbors(p).count() == 1)
+            .max_by_key(|p| p.x)
+            .or_else(|| sub.graph.nodes().next());
+        match endpoint {
+            Some(p) => (p, true),
+            None => return,
+        }
+    };
+
+    // Walk from `start` through the subgraph, recording directed (from, to) per edge.
+    // At each junction we simply continue to every unvisited neighbor — no search required.
+    // Key: normalised (lo, hi); value: directed (from, to).
+    let mut directed: Vec<((WorldPos, WorldPos), (WorldPos, WorldPos))> = Vec::new();
+    let mut visited: HashSet<WorldPos> = HashSet::new();
+    let mut stack: Vec<WorldPos> = vec![start];
+    visited.insert(start);
+
+    while let Some(cur) = stack.pop() {
+        for next in sub.graph.neighbors(cur) {
+            let key = if cur <= next {
+                (cur, next)
+            } else {
+                (next, cur)
+            };
+            if directed.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let (from, to) = if forward { (cur, next) } else { (next, cur) };
+            directed.push((key, (from, to)));
+            if !visited.contains(&next) {
+                visited.insert(next);
+                stack.push(next);
+            }
+        }
+    }
+
+    // Offset the diagonal grid so that the outer markers on the longest segment are
+    // equidistant from their respective endpoints.  For a segment of length L with
+    // spacing g, the unused remainder is L % g; splitting that equally gives a margin
+    // of m = (L % g) / 2 at each end, so the first marker lands at lo + m.
+    let grid_offset = {
+        let mut best_len: i64 = -1;
+        let mut offset: i64 = 0;
+        let mut seen_len: HashSet<(WorldPos, WorldPos)> = HashSet::new();
+        for (seg_a, seg_b, _) in sub.edges() {
+            let key = if seg_a <= seg_b {
+                (seg_a, seg_b)
+            } else {
+                (seg_b, seg_a)
+            };
+            if !seen_len.insert(key) {
+                continue;
+            }
+            let (lo, hi) = key;
+            let len = if lo.x == hi.x {
+                hi.y - lo.y
+            } else {
+                hi.x - lo.x
+            };
+            if len > best_len {
+                best_len = len;
+                let margin = len.rem_euclid(g) / 2;
+                offset = (lo.x + lo.y + margin).rem_euclid(g);
+            }
+        }
+        offset
+    };
+
+    // Place markers on every segment in the subgraph.
+    let mut seen: HashSet<(WorldPos, WorldPos)> = HashSet::new();
+    for (seg_a, seg_b, _) in sub.edges() {
+        let key = if seg_a <= seg_b {
+            (seg_a, seg_b)
+        } else {
+            (seg_b, seg_a)
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        let (lo, hi) = key;
+
+        let arrow_ch = if let Some((_, (from, to))) = directed.iter().find(|(k, _)| *k == key) {
+            let (from, to) = (*from, *to);
+            if to.x > from.x {
+                '▶'
+            } else if to.x < from.x {
+                '◀'
+            } else if to.y > from.y {
+                '▲' // world y increases upward → ▲
+            } else {
+                '▼'
+            }
+        } else if lo.x == hi.x {
+            let mid_y = (lo.y + hi.y) / 2;
+            if mid_y >= 0 { '▼' } else { '▲' }
+        } else {
+            '◀'
+        };
+
+        if lo.x == hi.x {
+            for y in lo.y..=hi.y {
+                let pos = WorldPos::new(lo.x, y);
+                if (pos.x + pos.y - grid_offset).rem_euclid(g) == 0
+                    && matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┆'))
+                {
+                    if let Some((_, style)) = buffer.get_char_styled(pos) {
+                        buffer.set_char_styled(pos, arrow_ch, style);
+                    }
+                }
+            }
+        } else {
+            for x in lo.x..=hi.x {
+                let pos = WorldPos::new(x, lo.y);
+                if (pos.x + pos.y - grid_offset).rem_euclid(g) == 0
+                    && matches!(buffer.get_char(pos), Some('─') | Some('━') | Some('┄'))
+                {
+                    if let Some((_, style)) = buffer.get_char_styled(pos) {
+                        buffer.set_char_styled(pos, arrow_ch, style);
+                    }
+                }
             }
         }
     }
