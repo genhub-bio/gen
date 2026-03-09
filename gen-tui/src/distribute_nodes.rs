@@ -25,11 +25,11 @@ pub struct Halves {
     pub hi: i64, // higher/positive direction (right for x, up for y)
 }
 
-/// An inclusive interval [l, r] representing occupied cells.
+/// An inclusive interval [start, end] representing occupied cells.
 #[derive(Clone, Copy, Debug)]
 pub struct Interval {
-    pub l: i64, // inclusive
-    pub r: i64, // inclusive
+    pub start: i64, // inclusive
+    pub end: i64,   // inclusive
 }
 
 /// Result of optimizing a horizontal chain.
@@ -74,15 +74,15 @@ pub fn base_step(width_i: i64, width_j: i64) -> i64 {
 
 /// Check if two intervals overlap.
 fn overlaps(a: Interval, b: Interval) -> bool {
-    a.l <= b.r && b.l <= a.r
+    a.start <= b.end && b.start <= a.end
 }
 
 /// Calculate the occupied interval for a node given its center x and width.
 fn occ_interval(center_x: i64, width: i64) -> Interval {
     let h = halves(width);
     Interval {
-        l: center_x - h.lo,
-        r: center_x + h.hi,
+        start: center_x - h.lo,
+        end: center_x + h.hi,
     }
 }
 
@@ -90,7 +90,7 @@ fn occ_interval(center_x: i64, width: i64) -> Interval {
 /// past a forbidden interval.
 fn shift_right_to_avoid(protected: Interval, center_x: i64, width: i64) -> i64 {
     let h = halves(width);
-    let min_center = protected.r + 1 + h.lo;
+    let min_center = protected.end + 1 + h.lo;
     (min_center - center_x).max(0)
 }
 
@@ -300,8 +300,8 @@ fn find_obstacles(
                     // Vertical edge crosses at x1 (= x2)
                     // Protect the crossing cell and its neighbors
                     obstacles.push(Interval {
-                        l: x1 - 1,
-                        r: x1 + 1,
+                        start: x1 - 1,
+                        end: x1 + 1,
                     });
                 }
             }
@@ -334,8 +334,8 @@ fn find_obstacles(
             if x_intersects && y_intersects {
                 // Block the entire column at this node's x position ± node_separation
                 obstacles.push(Interval {
-                    l: node.pos.x - node_separation,
-                    r: node.pos.x + node_separation,
+                    start: node.pos.x - node_separation,
+                    end: node.pos.x + node_separation,
                 });
             }
         }
@@ -346,14 +346,14 @@ fn find_obstacles(
         return obstacles;
     }
 
-    obstacles.sort_by_key(|i| i.l);
+    obstacles.sort_by_key(|i| i.start);
     let mut merged = vec![obstacles[0]];
 
     for obstacle in obstacles.iter().skip(1) {
         let last = merged.last_mut().unwrap();
-        if obstacle.l <= last.r + 1 {
+        if obstacle.start <= last.end + 1 {
             // Overlapping or adjacent - merge
-            last.r = last.r.max(obstacle.r);
+            last.end = last.end.max(obstacle.end);
         } else {
             merged.push(*obstacle);
         }
@@ -456,7 +456,7 @@ fn feasible_with_min_gap(
                     hit = Some(f);
                     break;
                 }
-                if f.l > occ.r {
+                if f.start > occ.end {
                     break; // sorted, no more overlaps possible
                 }
             }
@@ -541,7 +541,7 @@ fn chain_is_legal(
             if overlaps(occ, f) {
                 return false;
             }
-            if f.l > occ.r {
+            if f.start > occ.end {
                 break; // sorted, no more overlaps possible
             }
         }
@@ -700,33 +700,33 @@ mod tests {
 
     #[test]
     fn test_overlaps() {
-        let a = Interval { l: 0, r: 5 };
-        let b = Interval { l: 3, r: 8 };
+        let a = Interval { start: 0, end: 5 };
+        let b = Interval { start: 3, end: 8 };
         assert!(overlaps(a, b));
 
-        let a = Interval { l: 0, r: 5 };
-        let b = Interval { l: 6, r: 10 };
+        let a = Interval { start: 0, end: 5 };
+        let b = Interval { start: 6, end: 10 };
         assert!(!overlaps(a, b));
 
-        let a = Interval { l: 0, r: 5 };
-        let b = Interval { l: 5, r: 10 };
+        let a = Interval { start: 0, end: 5 };
+        let b = Interval { start: 5, end: 10 };
         assert!(overlaps(a, b)); // touching is overlapping
     }
 
     #[test]
     fn test_occ_interval() {
         let occ = occ_interval(10, 9);
-        assert_eq!(occ.l, 5); // 10 - lo(9) = 10 - 5
-        assert_eq!(occ.r, 14); // 10 + hi(9) = 10 + 4
+        assert_eq!(occ.start, 5); // 10 - lo(9) = 10 - 5
+        assert_eq!(occ.end, 14); // 10 + hi(9) = 10 + 4
 
         let occ = occ_interval(10, 8);
-        assert_eq!(occ.l, 6); // 10 - lo(8) = 10 - 4
-        assert_eq!(occ.r, 14); // 10 + hi(8) = 10 + 4
+        assert_eq!(occ.start, 6); // 10 - lo(8) = 10 - 4
+        assert_eq!(occ.end, 14); // 10 + hi(8) = 10 + 4
     }
 
     #[test]
     fn test_shift_right_to_avoid() {
-        let protected = Interval { l: 5, r: 10 };
+        let protected = Interval { start: 5, end: 10 };
 
         // Already clear
         let shift = shift_right_to_avoid(protected, 20, 9);
@@ -761,7 +761,7 @@ mod tests {
         let widths = vec![8, 8, 8];
         let orig_x = vec![0, 20, 40];
         // Obstacle at x=18-22
-        let forbidden = vec![Interval { l: 18, r: 22 }];
+        let forbidden = vec![Interval { start: 18, end: 22 }];
         let min_gap = 0; // No minimum gap for this test
 
         match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
@@ -777,10 +777,10 @@ mod tests {
                         !overlaps(middle_occ, obs),
                         "Middle node at {} (occupies [{}, {}]) overlaps obstacle [{}, {}]",
                         new_x[1],
-                        middle_occ.l,
-                        middle_occ.r,
-                        obs.l,
-                        obs.r
+                        middle_occ.start,
+                        middle_occ.end,
+                        obs.start,
+                        obs.end
                     );
                 }
             }
@@ -894,8 +894,8 @@ mod tests {
 
         // Should find one obstacle at x=15 (protected: 14, 15, 16)
         assert_eq!(obstacles.len(), 1, "Should find exactly one obstacle");
-        assert_eq!(obstacles[0].l, 14, "Obstacle should protect x-1");
-        assert_eq!(obstacles[0].r, 16, "Obstacle should protect x+1");
+        assert_eq!(obstacles[0].start, 14, "Obstacle should protect x-1");
+        assert_eq!(obstacles[0].end, 16, "Obstacle should protect x+1");
     }
 
     #[test]
@@ -1328,8 +1328,8 @@ mod tests {
         // Verify that the blocking nodes created exclusion zones
         // blocking_node at x=20 should create zone [20-3, 20+3] = [17, 23]
         // blocking_node_2 at x=40 should create zone [40-3, 40+3] = [37, 43]
-        let has_obstacle_at_20 = obstacles.iter().any(|obs| obs.l <= 20 && 20 <= obs.r);
-        let has_obstacle_at_40 = obstacles.iter().any(|obs| obs.l <= 40 && 40 <= obs.r);
+        let has_obstacle_at_20 = obstacles.iter().any(|obs| obs.start <= 20 && 20 <= obs.end);
+        let has_obstacle_at_40 = obstacles.iter().any(|obs| obs.start <= 40 && 40 <= obs.end);
 
         assert!(
             has_obstacle_at_20,

@@ -4,7 +4,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use crate::{
-        graph_controller::GraphController,
+        graph_controller::{GraphConfig, GraphController},
         layout::VisualDetail,
         plotter::NodeSizer,
         testing::mocks::{MockDomainGraph, TestNodeSizers},
