@@ -472,7 +472,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     let mut drawn_reversed: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
     for (_, _, bundle) in viewport_graph.edges() {
         for &(src, tgt) in bundle {
-            if src == tgt || !drawn_reversed.insert((src, tgt)) {
+            if !drawn_reversed.insert((src, tgt)) {
                 continue;
             }
             if viewport_graph.backward_edges.contains(&(src, tgt)) {
@@ -578,7 +578,7 @@ pub fn draw_arrows(
     target: NodeIndex,
     gaps: usize,
 ) {
-    if gaps == 0 || source == target {
+    if gaps == 0 {
         return;
     }
     let g = gaps as i64;
@@ -601,6 +601,44 @@ pub fn draw_arrows(
         .iter()
         .find(|(_, n)| matches!(n.role, NodeRole::Data(idx) if idx == target))
         .map(|(pos, _)| *pos);
+
+    // For self-loops, place a single arrow in the middle of the longest segment.
+    if source == target {
+        let mut best_seg: Option<(WorldPos, WorldPos)> = None;
+        let mut best_len: i64 = -1;
+        for (seg_a, seg_b, _) in sub.edges() {
+            let (lo, hi) = if seg_a <= seg_b {
+                (seg_a, seg_b)
+            } else {
+                (seg_b, seg_a)
+            };
+            let len = if lo.x == hi.x {
+                hi.y - lo.y
+            } else {
+                hi.x - lo.x
+            };
+            if len > best_len {
+                best_len = len;
+                best_seg = Some((lo, hi));
+            }
+        }
+        if let Some((lo, hi)) = best_seg {
+            let mid = WorldPos::new((lo.x + hi.x) / 2, (lo.y + hi.y) / 2);
+            let arrow_ch = if lo.x == hi.x {
+                if hi.y > lo.y { '▼' } else { '▲' }
+            } else {
+                '◀'
+            };
+            if matches!(
+                buffer.get_char(mid),
+                Some('│') | Some('┃') | Some('┆') | Some('─') | Some('━') | Some('┄')
+            ) && let Some((_, style)) = buffer.get_char_styled(mid)
+            {
+                buffer.set_char_styled(mid, arrow_ch, style);
+            }
+        }
+        return;
+    }
 
     // Choose walk anchor and direction. Prefer source (forward), else target (backward),
     // else the rightmost degree-1 node (assumed source side for a backward edge).
