@@ -1513,6 +1513,7 @@ dependencies = [
  "include_dir",
  "indexmap 2.13.0",
  "indicatif",
+ "insta",
  "interavl",
  "intervaltree",
  "itertools 0.14.0",
