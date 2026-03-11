@@ -565,7 +565,7 @@ fn draw_edge_with_style(
 /// - If source is visible, walk forward from source.
 /// - If only target is visible, walk backward from target.
 /// - Otherwise, walk from the rightmost degree-1 node (assumed source side).
-/// Segments unreachable from any anchor fall back to geometry:
+///   Segments unreachable from any anchor fall back to geometry:
 /// - Vertical: above y=0 → `▼` (facing down toward nodes), below y=0 → `▲`.
 /// - Horizontal: `◀` (backward edges always go right-to-left).
 ///
@@ -716,10 +716,9 @@ pub fn draw_arrows(
                 let pos = WorldPos::new(lo.x, y);
                 if (pos.x + pos.y - grid_offset).rem_euclid(g) == 0
                     && matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┆'))
+                    && let Some((_, style)) = buffer.get_char_styled(pos)
                 {
-                    if let Some((_, style)) = buffer.get_char_styled(pos) {
-                        buffer.set_char_styled(pos, arrow_ch, style);
-                    }
+                    buffer.set_char_styled(pos, arrow_ch, style);
                 }
             }
         } else {
@@ -727,10 +726,9 @@ pub fn draw_arrows(
                 let pos = WorldPos::new(x, lo.y);
                 if (pos.x + pos.y - grid_offset).rem_euclid(g) == 0
                     && matches!(buffer.get_char(pos), Some('─') | Some('━') | Some('┄'))
+                    && let Some((_, style)) = buffer.get_char_styled(pos)
                 {
-                    if let Some((_, style)) = buffer.get_char_styled(pos) {
-                        buffer.set_char_styled(pos, arrow_ch, style);
-                    }
+                    buffer.set_char_styled(pos, arrow_ch, style);
                 }
             }
         }
