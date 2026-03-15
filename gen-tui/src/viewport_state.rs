@@ -8,6 +8,7 @@ use crate::{
 };
 
 /// Controller for the Graph widget, managing camera and cursor positions, animations, and zones.
+#[derive(Clone)]
 pub struct ViewportState {
     /// Hard Zone as number of cells from the viewport edge
     /// Camera snaps immediately when cursor enters this zone (in # terminal cells from the sides, half cells on top and bottom)

@@ -617,7 +617,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -688,7 +688,7 @@ dependencies = [
  "encode_unicode",
  "libc",
  "once_cell",
- "unicode-width",
+ "unicode-width 0.2.2",
  "windows-sys 0.61.2",
 ]
 
@@ -1668,7 +1668,6 @@ dependencies = [
  "tachyonfx",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
@@ -2927,7 +2926,7 @@ checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
 dependencies = [
  "console 0.16.2",
  "portable-atomic",
- "unicode-width",
+ "unicode-width 0.2.2",
  "unit-prefix",
  "web-time",
 ]
@@ -4496,7 +4495,7 @@ dependencies = [
  "thiserror 2.0.18",
  "unicode-segmentation",
  "unicode-truncate",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -4547,7 +4546,7 @@ dependencies = [
  "strum",
  "time",
  "unicode-segmentation",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -5423,7 +5422,7 @@ dependencies = [
  "micromath",
  "ratatui-core",
  "thiserror 2.0.18",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -5671,19 +5670,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
- "tokio-macros",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tokio-macros"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -5942,8 +5929,14 @@ checksum = "16b380a1238663e5f8a691f9039c73e1cdae598a30e9855f541d29b08b53e9a5"
 dependencies = [
  "itertools 0.14.0",
  "unicode-segmentation",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
+
+[[package]]
+name = "unicode-width"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"

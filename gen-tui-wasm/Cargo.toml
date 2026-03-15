@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "gen-tui-wasm"
+version = "0.1.0"
+authors = ["Bob Van Hove <1587584+bobvh@users.noreply.github.com>"]
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+ratatui = { version = "0.30.0", default-features = false }
+ratzilla = "0.3.0"
+gen-tui = { path = "../gen-tui", default-features = false }
+petgraph = "0.6.5"
+log = "0.4.26"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# Force tachyonfx to use its WASM-compatible backend (it's a transitive dep via gen-tui)
+tachyonfx = { version = "0.23.0", features = ["wasm"] }
+console_error_panic_hook = "0.1"

@@ -1,5 +1,6 @@
 use std::hash::Hash;
 
+#[cfg(feature = "crossterm")]
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
 use log::trace;
@@ -569,9 +570,20 @@ where
         candidates.first().map(|(idx, _)| *idx)
     }
 
+    /// Move the cursor horizontally by `delta` world units.
+    pub fn navigate_horizontal(&mut self, delta: i64) -> Result<(), String> {
+        self.cursor.move_horizontal(delta, &self.viewport_graph)
+    }
+
+    /// Move the cursor vertically by `delta` world units.
+    pub fn navigate_vertical(&mut self, delta: i64) -> Result<(), String> {
+        self.cursor.move_vertical(delta, &self.viewport_graph)
+    }
+
     /// Handle keyboard events for graph navigation and control
     ///
     /// Returns Some(true) for normal exit, Some(false) for abort, None to continue
+    #[cfg(feature = "crossterm")]
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), String> {
         match key.code {
             KeyCode::Char('r') => {
