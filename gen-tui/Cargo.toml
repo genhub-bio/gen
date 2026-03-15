@@ -8,9 +8,6 @@ homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [dependencies]
-gen-core = { path = "../gen-core", version = "0.1.30" }
-gen-models = { path = "../gen-models", version = "0.1.30" }
-gen-graph = { path = "../gen-graph", version = "0.1.30" }
 gen-sugiyama = { path = "../gen-sugiyama", version = "0.1.30" }
 itertools = "0.14.0"
 petgraph = { version = "0.6.5", features = ["serde-1"] }
@@ -31,7 +28,7 @@ tokio = { version = "1.45.0", features = [
   "time",
   "macros",
 ] }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+
 
 [features]
 default = []
