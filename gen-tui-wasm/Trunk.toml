@@ -1,0 +1,2 @@
+[watch]
+ignore = ["dist", "target", ".playwright-cli", ".claude", ".github"]

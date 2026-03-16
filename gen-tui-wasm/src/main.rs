@@ -2,9 +2,9 @@ use std::{cell::RefCell, io, rc::Rc};
 use web_time::Instant;
 
 use gen_tui::{
-    graph_controller::{GraphConfig, GraphController, WorldBuffer},
+    graph_controller::{GraphConfig, GraphController},
+    graph_widget::GraphWidget,
     layout::VisualDetail,
-    plotter::plot_viewport_graph,
     testing::mocks::{DebugNodeRenderer, FixedNodeSizer, MockDomainGraph, TestGraphs},
     theme::Theme,
 };
@@ -42,18 +42,24 @@ fn make_controller(graph: MockDomainGraph) -> WasmController {
 fn build_named_graphs() -> Vec<(String, MockDomainGraph)> {
     let mut graphs: Vec<(String, MockDomainGraph)> = Vec::new();
 
-    // graphs.push(("Simple Chain".into(), TestGraphs::domain_simple_chain()));
-    // graphs.push(("Diamond".into(), TestGraphs::domain_diamond()));
-    // graphs.push(("Extended Diamond".into(), TestGraphs::domain_extended_diamond()));
+    graphs.push(("Simple Chain".into(), TestGraphs::domain_simple_chain()));
+    graphs.push(("Diamond".into(), TestGraphs::domain_diamond()));
+    graphs.push((
+        "Extended Diamond".into(),
+        TestGraphs::domain_extended_diamond(),
+    ));
     graphs.push((
         "Complex DAG (9 nodes)".into(),
         TestGraphs::domain_complex_dag(),
     ));
-    // graphs.push(("Skip Layer".into(), TestGraphs::domain_skip_layer()));
-    // graphs.push(("Single Node".into(), TestGraphs::domain_single_node()));
-    // graphs.push(("Star Graph".into(), TestGraphs::domain_star_graph()));
-    // graphs.push(("Bridge Graph".into(), TestGraphs::domain_bridge_graph()));
-    // graphs.push(("Articulation Graph".into(), TestGraphs::domain_articulation_graph()));
+    graphs.push(("Skip Layer".into(), TestGraphs::domain_skip_layer()));
+    graphs.push(("Single Node".into(), TestGraphs::domain_single_node()));
+    graphs.push(("Star Graph".into(), TestGraphs::domain_star_graph()));
+    graphs.push(("Bridge Graph".into(), TestGraphs::domain_bridge_graph()));
+    graphs.push((
+        "Articulation Graph".into(),
+        TestGraphs::domain_articulation_graph(),
+    ));
 
     // Double chain from layout tests
     {
@@ -98,7 +104,6 @@ struct App {
     named_controllers: Vec<(String, WasmController)>,
     current_idx: usize,
     renderer: DebugNodeRenderer,
-    needs_rebuild: bool,
     last_frame: Instant,
 }
 
@@ -113,7 +118,6 @@ impl App {
             named_controllers,
             current_idx: 0,
             renderer: DebugNodeRenderer::new(),
-            needs_rebuild: true,
             last_frame: Instant::now(),
         }
     }
@@ -124,7 +128,6 @@ impl App {
 
     fn switch_to(&mut self, idx: usize) {
         self.current_idx = idx;
-        self.needs_rebuild = true;
     }
 
     fn next_graph(&mut self) {
@@ -142,10 +145,26 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        web_sys::console::log_1(&format!("key: {:?}", key.code).into());
+
         match key.code {
             // Graph switching: [ and ] or n and p
             KeyCode::Char(']') | KeyCode::Char('n') => self.next_graph(),
             KeyCode::Char('[') | KeyCode::Char('p') => self.prev_graph(),
+
+            // Navigation mode toggle
+            KeyCode::Enter => {
+                self.named_controllers[self.current_idx]
+                    .1
+                    .cursor
+                    .set_coarse_mode(false);
+            }
+            KeyCode::Esc => {
+                self.named_controllers[self.current_idx]
+                    .1
+                    .cursor
+                    .set_coarse_mode(true);
+            }
 
             // Navigation within graph
             KeyCode::Left | KeyCode::Char('h') => {
@@ -157,7 +176,6 @@ impl App {
                     -1
                 };
                 let _ = ctrl.navigate_horizontal(delta);
-                self.needs_rebuild = true;
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 let ctrl = &mut self.named_controllers[self.current_idx].1;
@@ -168,7 +186,6 @@ impl App {
                     1
                 };
                 let _ = ctrl.navigate_horizontal(delta);
-                self.needs_rebuild = true;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let ctrl = &mut self.named_controllers[self.current_idx].1;
@@ -179,7 +196,6 @@ impl App {
                     1
                 };
                 let _ = ctrl.navigate_vertical(delta);
-                self.needs_rebuild = true;
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let ctrl = &mut self.named_controllers[self.current_idx].1;
@@ -190,21 +206,17 @@ impl App {
                     -1
                 };
                 let _ = ctrl.navigate_vertical(delta);
-                self.needs_rebuild = true;
             }
 
             // Zoom
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.named_controllers[self.current_idx].1.zoom_in();
-                self.needs_rebuild = true;
             }
             KeyCode::Char('-') => {
                 self.named_controllers[self.current_idx].1.zoom_out();
-                self.needs_rebuild = true;
             }
             KeyCode::Char('r') => {
                 self.named_controllers[self.current_idx].1.trigger_rebuild();
-                self.needs_rebuild = true;
             }
             _ => {}
         }
@@ -237,51 +249,41 @@ impl App {
             .bg(Color::DarkGray);
         frame.render_widget(header, chunks[0]);
 
-        // Graph area: set viewport bounds, update animations, then layout + render
+        // Graph area
         let graph_area = chunks[1];
         let ctrl = &mut self.named_controllers[self.current_idx].1;
+        let is_coarse = ctrl.cursor.is_coarse_mode();
         ctrl.viewport_state.viewport_bounds = graph_area;
         ctrl.update_animations(delta);
-
-        if self.needs_rebuild {
-            let _ = ctrl.ensure_camera_coverage();
-            let _ = ctrl.rebuild_viewport_graph();
-            self.needs_rebuild = false;
-        }
-
-        // Collect everything we need from the controller before splitting borrows
-        let ctrl = &mut self.named_controllers[self.current_idx].1;
-        let viewport_graph = ctrl.get_viewport_graph();
-        let detail_level = ctrl.get_detail_level();
-        let graph_ref = ctrl.graph;
-        let theme = ctrl.theme.clone();
-        let viewport_state_snapshot = ctrl.viewport_state.clone();
-
-        let buf = frame.buffer_mut();
-        let mut world_buffer = WorldBuffer::new(buf, &viewport_state_snapshot);
-        plot_viewport_graph(
-            viewport_graph,
-            &mut world_buffer,
-            &mut self.renderer,
-            graph_ref,
-            detail_level,
-            &theme,
+        frame.render_stateful_widget(
+            GraphWidget::with_renderer(self.renderer.clone()).cursor(),
+            graph_area,
+            ctrl,
         );
 
-        // Footer
-        let footer =
-            Paragraph::new(" [/]: prev/next graph  |  h j k l / arrows: navigate  |  +/-: zoom ")
-                .alignment(Alignment::Center)
-                .fg(Color::DarkGray)
-                .bg(Color::Black);
+        // Footer — mode-aware
+        let footer_text = if is_coarse {
+            " [/]: graphs  |  h j k l: navigate  |  enter: fine mode  |  +/-: zoom "
+        } else {
+            " [/]: graphs  |  h j k l: navigate  |  esc: coarse mode  |  +/-: zoom "
+        };
+        let footer_style = if is_coarse {
+            Color::DarkGray
+        } else {
+            Color::Yellow
+        };
+        let footer = Paragraph::new(footer_text)
+            .alignment(Alignment::Center)
+            .fg(footer_style)
+            .bg(Color::Black);
         frame.render_widget(footer, chunks[2]);
     }
 }
 
 fn main() -> io::Result<()> {
     console_error_panic_hook::set_once();
-    let backend_options = WebGl2BackendOptions::new()
-        .font_atlas(FontAtlasData::default());
+    let font_atlas_data = FontAtlasData::from_binary(include_bytes!("bitmap_font.atlas"));
+    let backend_options = WebGl2BackendOptions::new().font_atlas(font_atlas_data.unwrap());
     let backend = WebGl2Backend::new_with_options(backend_options)?;
     let terminal = Terminal::new(backend)?;
 

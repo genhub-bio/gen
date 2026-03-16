@@ -124,6 +124,11 @@ impl ViewportState {
             let width = self.viewport_bounds.width;
             let height = self.viewport_bounds.height;
 
+            // Zero-size viewport: zone arithmetic assumes non-zero dimensions (u16 underflow otherwise)
+            if width == 0 || height == 0 {
+                return;
+            }
+
             // If viewport is too small for configured zones, use minimal zones instead
             let min_viewport_dimension = width.min(height);
             let (soft_zone, hard_zone) = if self.soft_zone > min_viewport_dimension / 2 {

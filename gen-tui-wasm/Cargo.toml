@@ -5,7 +5,7 @@ name = "gen-tui-wasm"
 version = "0.1.0"
 authors = ["Bob Van Hove <1587584+bobvh@users.noreply.github.com>"]
 license = "MIT"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 ratatui = { version = "0.30.0", default-features = false }
@@ -18,3 +18,4 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 tachyonfx = { version = "0.23.0", features = ["wasm"] }
 web-time = "1.1"
 console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["console"] }
