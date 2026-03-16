@@ -1,13 +1,14 @@
+mod gfa;
+
 use std::{cell::RefCell, io, rc::Rc};
-use web_time::Instant;
 
 use gen_tui::{
     graph_controller::{GraphConfig, GraphController},
     graph_widget::GraphWidget,
     layout::VisualDetail,
-    testing::mocks::{DebugNodeRenderer, FixedNodeSizer, MockDomainGraph, TestGraphs},
     theme::Theme,
 };
+use gfa::{GfaGraph, GfaNodeRenderer, GfaNodeSizer, parse_gfa};
 use ratatui::{
     Frame, Terminal,
     layout::{Alignment, Constraint, Direction, Layout},
@@ -19,204 +20,95 @@ use ratzilla::{
     backend::webgl2::{FontAtlasData, WebGl2BackendOptions},
     event::{KeyCode, KeyEvent},
 };
+use web_time::Instant;
 
-// Use 'static references so the controller can live in the WASM app state.
-// Graphs are intentionally leaked (small test data, WASM demo context).
-type WasmController = GraphController<&'static MockDomainGraph, FixedNodeSizer>;
+type WasmController = GraphController<&'static GfaGraph, GfaNodeSizer>;
 
-fn make_controller(graph: MockDomainGraph) -> WasmController {
-    let graph: &'static MockDomainGraph = Box::leak(Box::new(graph));
-    let node_sizer = FixedNodeSizer {
-        width: 5,
-        height: 3,
-    };
+fn make_controller(graph: GfaGraph) -> WasmController {
+    let graph: &'static GfaGraph = Box::leak(Box::new(graph));
+    let node_sizer = GfaNodeSizer;
     let mut config = GraphConfig::default();
     config.partition.layer_count = usize::MAX;
     config.partition.node_count = usize::MAX;
     let mut controller = GraphController::new_with_config(graph, node_sizer, config);
-    controller.set_detail_level(VisualDetail::Full);
+    controller.set_detail_level(VisualDetail::Truncated);
     controller.show_cursor();
     controller.with_theme(Theme::default())
 }
 
-fn build_named_graphs() -> Vec<(String, MockDomainGraph)> {
-    let mut graphs: Vec<(String, MockDomainGraph)> = Vec::new();
-
-    graphs.push(("Simple Chain".into(), TestGraphs::domain_simple_chain()));
-    graphs.push(("Diamond".into(), TestGraphs::domain_diamond()));
-    graphs.push((
-        "Extended Diamond".into(),
-        TestGraphs::domain_extended_diamond(),
-    ));
-    graphs.push((
-        "Complex DAG (9 nodes)".into(),
-        TestGraphs::domain_complex_dag(),
-    ));
-    graphs.push(("Skip Layer".into(), TestGraphs::domain_skip_layer()));
-    graphs.push(("Single Node".into(), TestGraphs::domain_single_node()));
-    graphs.push(("Star Graph".into(), TestGraphs::domain_star_graph()));
-    graphs.push(("Bridge Graph".into(), TestGraphs::domain_bridge_graph()));
-    graphs.push((
-        "Articulation Graph".into(),
-        TestGraphs::domain_articulation_graph(),
-    ));
-
-    // Double chain from layout tests
-    {
-        let mut g = MockDomainGraph::new();
-        let nodes: Vec<_> = (0..18).map(|_| g.add_node(())).collect();
-        for i in 0..9 {
-            g.add_edge(nodes[i], nodes[i + 1], ());
-        }
-        g.add_edge(nodes[0], nodes[10], ());
-        for i in 10..17 {
-            g.add_edge(nodes[i], nodes[i + 1], ());
-        }
-        g.add_edge(nodes[17], nodes[9], ());
-        graphs.push(("Double Chain (18 nodes)".into(), g));
-    }
-
-    // Asymmetric diamond (3-2 legs)
-    {
-        let mut g = MockDomainGraph::new();
-        let a = g.add_node(());
-        let b = g.add_node(());
-        let c = g.add_node(());
-        let d = g.add_node(());
-        let e = g.add_node(());
-        let f1 = g.add_node(());
-        let f2 = g.add_node(());
-        g.add_edge(a, b, ());
-        g.add_edge(b, c, ());
-        g.add_edge(c, d, ());
-        g.add_edge(d, e, ());
-        g.add_edge(a, f1, ());
-        g.add_edge(f1, f2, ());
-        g.add_edge(f2, e, ());
-        graphs.push(("Asymmetric Diamond (3-2)".into(), g));
-    }
-
-    graphs
-}
-
 struct App {
-    // Names paired with controllers; graphs are owned by the controllers (leaked for 'static).
-    named_controllers: Vec<(String, WasmController)>,
-    current_idx: usize,
-    renderer: DebugNodeRenderer,
+    controller: WasmController,
+    renderer: GfaNodeRenderer,
     last_frame: Instant,
 }
 
 impl App {
     fn new() -> Self {
-        let named_graphs = build_named_graphs();
-        let named_controllers = named_graphs
-            .into_iter()
-            .map(|(name, graph)| (name, make_controller(graph)))
-            .collect();
+        let gfa_src = include_str!("sample.gfa");
+        let (graph, sequences) = parse_gfa(gfa_src);
+        let controller = make_controller(graph);
+        let renderer = GfaNodeRenderer::new(sequences);
         App {
-            named_controllers,
-            current_idx: 0,
-            renderer: DebugNodeRenderer::new(),
+            controller,
+            renderer,
             last_frame: Instant::now(),
         }
-    }
-
-    fn current_name(&self) -> &str {
-        &self.named_controllers[self.current_idx].0
-    }
-
-    fn switch_to(&mut self, idx: usize) {
-        self.current_idx = idx;
-    }
-
-    fn next_graph(&mut self) {
-        let next = (self.current_idx + 1) % self.named_controllers.len();
-        self.switch_to(next);
-    }
-
-    fn prev_graph(&mut self) {
-        let prev = if self.current_idx == 0 {
-            self.named_controllers.len() - 1
-        } else {
-            self.current_idx - 1
-        };
-        self.switch_to(prev);
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
         web_sys::console::log_1(&format!("key: {:?}", key.code).into());
 
         match key.code {
-            // Graph switching: [ and ] or n and p
-            KeyCode::Char(']') | KeyCode::Char('n') => self.next_graph(),
-            KeyCode::Char('[') | KeyCode::Char('p') => self.prev_graph(),
-
-            // Navigation mode toggle
             KeyCode::Enter => {
-                self.named_controllers[self.current_idx]
-                    .1
-                    .cursor
-                    .set_coarse_mode(false);
+                self.controller.cursor.set_coarse_mode(false);
             }
             KeyCode::Esc => {
-                self.named_controllers[self.current_idx]
-                    .1
-                    .cursor
-                    .set_coarse_mode(true);
+                self.controller.cursor.set_coarse_mode(true);
             }
-
-            // Navigation within graph
             KeyCode::Left | KeyCode::Char('h') => {
-                let ctrl = &mut self.named_controllers[self.current_idx].1;
-                let vp_w = ctrl.viewport_state.viewport_bounds.width as i64;
-                let delta = if ctrl.cursor.is_coarse_mode() {
+                let vp_w = self.controller.viewport_state.viewport_bounds.width as i64;
+                let delta = if self.controller.cursor.is_coarse_mode() {
                     -vp_w
                 } else {
                     -1
                 };
-                let _ = ctrl.navigate_horizontal(delta);
+                let _ = self.controller.navigate_horizontal(delta);
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                let ctrl = &mut self.named_controllers[self.current_idx].1;
-                let vp_w = ctrl.viewport_state.viewport_bounds.width as i64;
-                let delta = if ctrl.cursor.is_coarse_mode() {
+                let vp_w = self.controller.viewport_state.viewport_bounds.width as i64;
+                let delta = if self.controller.cursor.is_coarse_mode() {
                     vp_w
                 } else {
                     1
                 };
-                let _ = ctrl.navigate_horizontal(delta);
+                let _ = self.controller.navigate_horizontal(delta);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                let ctrl = &mut self.named_controllers[self.current_idx].1;
-                let vp_h = ctrl.viewport_state.viewport_bounds.height as i64;
-                let delta = if ctrl.cursor.is_coarse_mode() {
+                let vp_h = self.controller.viewport_state.viewport_bounds.height as i64;
+                let delta = if self.controller.cursor.is_coarse_mode() {
                     vp_h
                 } else {
                     1
                 };
-                let _ = ctrl.navigate_vertical(delta);
+                let _ = self.controller.navigate_vertical(delta);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let ctrl = &mut self.named_controllers[self.current_idx].1;
-                let vp_h = ctrl.viewport_state.viewport_bounds.height as i64;
-                let delta = if ctrl.cursor.is_coarse_mode() {
+                let vp_h = self.controller.viewport_state.viewport_bounds.height as i64;
+                let delta = if self.controller.cursor.is_coarse_mode() {
                     -vp_h
                 } else {
                     -1
                 };
-                let _ = ctrl.navigate_vertical(delta);
+                let _ = self.controller.navigate_vertical(delta);
             }
-
-            // Zoom
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.named_controllers[self.current_idx].1.zoom_in();
+                self.controller.zoom_in();
             }
             KeyCode::Char('-') => {
-                self.named_controllers[self.current_idx].1.zoom_out();
+                self.controller.zoom_out();
             }
             KeyCode::Char('r') => {
-                self.named_controllers[self.current_idx].1.trigger_rebuild();
+                self.controller.trigger_rebuild();
             }
             _ => {}
         }
@@ -235,37 +127,27 @@ impl App {
             ])
             .split(frame.area());
 
-        // Header
-        let title = format!(
-            " gen-tui  [{}/{}]  {} ",
-            self.current_idx + 1,
-            self.named_controllers.len(),
-            self.current_name()
-        );
-        let header = Paragraph::new(title)
+        let header = Paragraph::new(" gen-tui-wasm  |  GFA viewer ")
             .block(Block::bordered())
             .alignment(Alignment::Center)
             .fg(Color::White)
             .bg(Color::DarkGray);
         frame.render_widget(header, chunks[0]);
 
-        // Graph area
         let graph_area = chunks[1];
-        let ctrl = &mut self.named_controllers[self.current_idx].1;
-        let is_coarse = ctrl.cursor.is_coarse_mode();
-        ctrl.viewport_state.viewport_bounds = graph_area;
-        ctrl.update_animations(delta);
+        let is_coarse = self.controller.cursor.is_coarse_mode();
+        self.controller.viewport_state.viewport_bounds = graph_area;
+        self.controller.update_animations(delta);
         frame.render_stateful_widget(
             GraphWidget::with_renderer(self.renderer.clone()).cursor(),
             graph_area,
-            ctrl,
+            &mut self.controller,
         );
 
-        // Footer — mode-aware
         let footer_text = if is_coarse {
-            " [/]: graphs  |  h j k l: navigate  |  enter: fine mode  |  +/-: zoom "
+            " h j k l: navigate  |  enter: fine mode  |  +/-: zoom "
         } else {
-            " [/]: graphs  |  h j k l: navigate  |  esc: coarse mode  |  +/-: zoom "
+            " h j k l: navigate  |  esc: coarse mode  |  +/-: zoom "
         };
         let footer_style = if is_coarse {
             Color::DarkGray
@@ -282,6 +164,8 @@ impl App {
 
 fn main() -> io::Result<()> {
     console_error_panic_hook::set_once();
+    // Font Atlas Data generated using:
+    // beamterm-atlas "DejaVu Sans Mono"  --emoji-font "DejaVu Sans Mono" --output src/bitmap_font.atlas --line-height 1.5
     let font_atlas_data = FontAtlasData::from_binary(include_bytes!("bitmap_font.atlas"));
     let backend_options = WebGl2BackendOptions::new().font_atlas(font_atlas_data.unwrap());
     let backend = WebGl2Backend::new_with_options(backend_options)?;
