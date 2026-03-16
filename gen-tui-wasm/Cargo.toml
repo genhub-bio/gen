@@ -16,4 +16,5 @@ log = "0.4.26"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 # Force tachyonfx to use its WASM-compatible backend (it's a transitive dep via gen-tui)
 tachyonfx = { version = "0.23.0", features = ["wasm"] }
+web-time = "1.1"
 console_error_panic_hook = "0.1"

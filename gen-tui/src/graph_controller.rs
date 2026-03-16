@@ -684,6 +684,7 @@ where
         trace!("rebuild_viewport_graph: starting cursor-anchored rebuild");
 
         // Step 1: Handle first-time viewport initialization
+        // When transitioning from 0x0 viewport to real bounds, cursor viewport position needs setup.
         // When transitioning from 0x0 viewport to real bounds, cursor viewport position needs setup
         let viewport_was_uninitialized =
             viewport_bounds_snapshot.width == 0 || viewport_bounds_snapshot.height == 0;

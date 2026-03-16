@@ -529,6 +529,7 @@ dependencies = [
  "ratatui",
  "ratzilla",
  "tachyonfx",
+ "web-time",
 ]
 
 [[package]]

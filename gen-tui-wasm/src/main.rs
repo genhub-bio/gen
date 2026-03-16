@@ -1,4 +1,5 @@
 use std::{cell::RefCell, io, rc::Rc};
+use web_time::Instant;
 
 use gen_tui::{
     graph_controller::{GraphConfig, GraphController, WorldBuffer},
@@ -14,7 +15,8 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 use ratzilla::{
-    DomBackend, WebRenderer,
+    WebGl2Backend, WebRenderer,
+    backend::webgl2::{FontAtlasData, WebGl2BackendOptions},
     event::{KeyCode, KeyEvent},
 };
 
@@ -34,7 +36,6 @@ fn make_controller(graph: MockDomainGraph) -> WasmController {
     let mut controller = GraphController::new_with_config(graph, node_sizer, config);
     controller.set_detail_level(VisualDetail::Full);
     controller.show_cursor();
-    controller.initialize_cursor();
     controller.with_theme(Theme::default())
 }
 
@@ -98,6 +99,7 @@ struct App {
     current_idx: usize,
     renderer: DebugNodeRenderer,
     needs_rebuild: bool,
+    last_frame: Instant,
 }
 
 impl App {
@@ -112,6 +114,7 @@ impl App {
             current_idx: 0,
             renderer: DebugNodeRenderer::new(),
             needs_rebuild: true,
+            last_frame: Instant::now(),
         }
     }
 
@@ -208,6 +211,9 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut Frame) {
+        let delta = self.last_frame.elapsed();
+        self.last_frame = Instant::now();
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -231,10 +237,11 @@ impl App {
             .bg(Color::DarkGray);
         frame.render_widget(header, chunks[0]);
 
-        // Graph area: set viewport bounds, then layout + render
+        // Graph area: set viewport bounds, update animations, then layout + render
         let graph_area = chunks[1];
         let ctrl = &mut self.named_controllers[self.current_idx].1;
         ctrl.viewport_state.viewport_bounds = graph_area;
+        ctrl.update_animations(delta);
 
         if self.needs_rebuild {
             let _ = ctrl.ensure_camera_coverage();
@@ -273,7 +280,9 @@ impl App {
 
 fn main() -> io::Result<()> {
     console_error_panic_hook::set_once();
-    let backend = DomBackend::new()?;
+    let backend_options = WebGl2BackendOptions::new()
+        .font_atlas(FontAtlasData::default());
+    let backend = WebGl2Backend::new_with_options(backend_options)?;
     let terminal = Terminal::new(backend)?;
 
     let app = Rc::new(RefCell::new(App::new()));
