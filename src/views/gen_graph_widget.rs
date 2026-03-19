@@ -5,12 +5,13 @@ use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::GraphConnection, node::Node};
 use gen_tui::{
     geometry::WorldRect,
-    graph_controller::{GraphController, WorldBuffer},
+    graph_controller::{GraphConfig, GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer},
     theme::Theme,
 };
+use petgraph::{graph::NodeIndex, visit::IntoNodeIdentifiers};
 use ratatui::style::{Color, Style};
 
 use crate::config::get_theme_color;
@@ -205,16 +206,40 @@ pub fn create_gen_graph_controller(
     graph: &GenGraph,
 ) -> GraphController<&GenGraph, GenGraphNodeSizer> {
     let node_sizer = GenGraphNodeSizer;
-    let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme {
-        canvas: get_theme_color("canvas").unwrap(),
-        node_fg: get_theme_color("text").unwrap(),
-        node_bg: get_theme_color("node").unwrap(),
-        edge_fg: get_theme_color("edge").unwrap(),
-        edge_bg: get_theme_color("canvas").unwrap(),
-        cursor_fg: get_theme_color("cursor_fg").unwrap(),
-        cursor_bg: get_theme_color("cursor_bg").unwrap(),
-        highlight: Color::Cyan,
+
+    // Find PATH_START/PATH_END nodes to pin as source/sink for cycle removal.
+    // For circular sequences, this ensures PATH_END→PATH_START is correctly
+    // identified as the backward/loopback edge rather than an arbitrary content edge.
+    let pin_source = graph.node_identifiers().enumerate().find_map(|(i, n)| {
+        if is_start_node(n.node_id) {
+            Some(NodeIndex::new(i))
+        } else {
+            None
+        }
     });
+    let pin_sink = graph.node_identifiers().enumerate().find_map(|(i, n)| {
+        if is_end_node(n.node_id) {
+            Some(NodeIndex::new(i))
+        } else {
+            None
+        }
+    });
+
+    let mut config = GraphConfig::default();
+    config.partition.pin_source = pin_source;
+    config.partition.pin_sink = pin_sink;
+
+    let mut controller =
+        GraphController::new_with_config(graph, node_sizer, config).with_theme(Theme {
+            canvas: get_theme_color("canvas").unwrap(),
+            node_fg: get_theme_color("text").unwrap(),
+            node_bg: get_theme_color("node").unwrap(),
+            edge_fg: get_theme_color("edge").unwrap(),
+            edge_bg: get_theme_color("canvas").unwrap(),
+            cursor_fg: get_theme_color("cursor_fg").unwrap(),
+            cursor_bg: get_theme_color("cursor_bg").unwrap(),
+            highlight: Color::Cyan,
+        });
     controller.set_detail_level(VisualDetail::Truncated);
     controller.show_cursor();
     controller

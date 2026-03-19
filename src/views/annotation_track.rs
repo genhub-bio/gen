@@ -229,7 +229,7 @@ pub fn draw_annotations_panel(
         track,
         controller.get_viewport_graph(),
         &controller.viewport_state,
-        controller.graph,
+        controller.graph(),
     );
     if visible_indices.is_empty() {
         return;

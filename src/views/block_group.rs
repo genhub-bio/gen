@@ -114,7 +114,7 @@ fn toggle_path_highlight(
         Ok(false)
     } else {
         // Get the path nodes for this block group
-        let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph)?;
+        let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph())?;
 
         // Set the path highlight using GraphNodes directly
         controller.set_path_highlight(style, path_nodes);
@@ -148,7 +148,7 @@ fn current_view_coordinate_window(
     use petgraph::visit::NodeIndexable;
 
     let viewport_graph = controller.get_viewport_graph();
-    let graph = controller.graph;
+    let graph = *controller.graph();
     let mut start = i64::MAX;
     let mut end = i64::MIN;
 

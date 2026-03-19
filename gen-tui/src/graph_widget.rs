@@ -261,7 +261,7 @@ where
             viewport_graph,
             &mut world_buffer,
             &mut self.renderer,
-            &controller.graph,
+            controller.graph(),
             detail_level,
             node_highlights,
             edge_highlights,

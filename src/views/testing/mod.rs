@@ -3,3 +3,4 @@
 
 //pub mod connectivity_test;
 //pub mod keyboard_navigation_test;
+pub mod snapshot_tests;

@@ -14,6 +14,7 @@ use crate::layout::{PartitionLayout, VisualDetail};
 pub enum PartitionNode {
     Data(NodeIndex),
     Stitch(StitchSide),
+    Loopback,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Eq)]

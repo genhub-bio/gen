@@ -6,8 +6,8 @@ use log::trace;
 use petgraph::{
     graph::NodeIndex,
     visit::{
-        EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
-        NodeCount, NodeIndexable, Visitable,
+        EdgeIndexable, EdgeRef, GraphBase, IntoEdgeReferences, IntoNeighborsDirected,
+        IntoNodeIdentifiers, NodeCount, NodeIndexable, Visitable,
     },
 };
 use ratatui::style::Color;
@@ -40,12 +40,9 @@ pub struct GraphConfig {
 /// graph loading and layout computation, then used by widgets during rendering.
 pub struct GraphController<G, S>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
 {
-    /// The original graph used for node lookups and rendering
-    pub graph: G,
-
     /// Viewport state managing camera, animations, and viewport bounds
     pub viewport_state: ViewportState,
 
@@ -85,20 +82,9 @@ pub enum HighlightKind<N> {
 
 impl<G, S> GraphController<G, S>
 where
-    G: GraphBase
-        + Clone
-        + EdgeIndexable
-        + NodeIndexable
-        + NodeCount
-        + Visitable
-        + IntoNodeIdentifiers
-        + IntoEdgeReferences
-        + IntoNeighborsDirected,
+    G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash + Ord,
-    G::EdgeId: Clone,
-    for<'b> &'b G: IntoNodeIdentifiers + IntoEdgeReferences + IntoNeighborsDirected,
-    for<'b> &'b G::NodeId: Hash + Ord,
-    for<'b> &'b G::EdgeId: Clone,
+    for<'b> &'b G: IntoNeighborsDirected,
     S: NodeSizer<G>,
 {
     /// Get the default theme (Catppuccin Mocha colors)
@@ -119,7 +105,13 @@ where
     /// - node_sizer: Function object to determine node sizes at different levels of detail
     pub fn new(graph: G, node_sizer: S) -> Self
     where
+        G: EdgeIndexable + NodeCount + Visitable,
+        G::EdgeId: Clone,
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+        for<'c> &'c G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + IntoNodeIdentifiers<NodeId = G::NodeId>
+            + IntoEdgeReferences<EdgeRef: EdgeRef<NodeId = G::NodeId>>
+            + IntoNeighborsDirected,
     {
         Self::new_with_config(graph, node_sizer, GraphConfig::default())
     }
@@ -132,7 +124,13 @@ where
     /// - config: Configuration for partitioning, memory management, and layout
     pub fn new_with_config(graph: G, node_sizer: S, config: GraphConfig) -> Self
     where
+        G: EdgeIndexable + NodeCount + Visitable,
+        G::EdgeId: Clone,
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+        for<'c> &'c G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + IntoNodeIdentifiers<NodeId = G::NodeId>
+            + IntoEdgeReferences<EdgeRef: EdgeRef<NodeId = G::NodeId>>
+            + IntoNeighborsDirected,
     {
         let partition_controller = PartitionController::new_with_config(
             graph,
@@ -142,7 +140,6 @@ where
         );
 
         let mut controller = Self {
-            graph,
             viewport_state: ViewportState::new(),
             cursor: Cursor::default(),
             detail_level: VisualDetail::Truncated, // Default detail level
@@ -159,6 +156,11 @@ where
         }
 
         controller
+    }
+
+    /// Get a reference to the underlying graph
+    pub fn graph(&self) -> &G {
+        &self.partition_controller.graph
     }
 
     pub fn get_layout(&self, partition_idx: usize) -> Option<&PartitionLayout> {
@@ -297,14 +299,25 @@ where
 
     /// Set a node highlight
     pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
-        Self::apply_node_highlight(&mut self.viewport_graph, &self.graph, node_id, style);
+        Self::apply_node_highlight(
+            &mut self.viewport_graph,
+            &self.partition_controller.graph,
+            node_id,
+            style,
+        );
         let kind = HighlightKind::Node(node_id);
         self.highlights.push((kind, style));
     }
 
     /// Set an edge highlight
     pub fn set_edge_highlight(&mut self, edge: (G::NodeId, G::NodeId), style: PathStyle) {
-        Self::apply_edge_highlight(&mut self.viewport_graph, &self.graph, edge.0, edge.1, style);
+        Self::apply_edge_highlight(
+            &mut self.viewport_graph,
+            &self.partition_controller.graph,
+            edge.0,
+            edge.1,
+            style,
+        );
         let kind = HighlightKind::Edge(edge.0, edge.1);
         self.highlights.push((kind, style));
     }
@@ -315,7 +328,12 @@ where
     /// - style: PathStyle for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
     pub fn set_path_highlight(&mut self, style: PathStyle, path_nodes: Vec<G::NodeId>) {
-        Self::apply_path_highlight(&mut self.viewport_graph, &self.graph, &path_nodes, style);
+        Self::apply_path_highlight(
+            &mut self.viewport_graph,
+            &self.partition_controller.graph,
+            &path_nodes,
+            style,
+        );
         let kind = HighlightKind::Path(path_nodes);
         self.highlights.push((kind, style));
     }
@@ -663,7 +681,16 @@ where
     ///
     /// This ensures the cursor stays at its viewport position while the world coordinates
     /// align correctly, preventing coordinate drift during rebuilds.
-    pub fn rebuild_viewport_graph(&mut self) -> Result<(), String> {
+    pub fn rebuild_viewport_graph(&mut self) -> Result<(), String>
+    where
+        G: EdgeIndexable
+            + NodeCount
+            + Visitable
+            + IntoNodeIdentifiers
+            + IntoEdgeReferences
+            + IntoNeighborsDirected,
+        G::EdgeId: Clone,
+    {
         let detail_level = self.detail_level;
 
         // Capture viewport bounds at start to ensure consistency throughout rebuild
@@ -692,7 +719,10 @@ where
 
         // Step 2: Find which partition the cursor's node belongs to
         let cursor_partition = if let Some(node_idx) = self.cursor.node_idx() {
-            let node_id = <G as NodeIndexable>::from_index(&self.graph, node_idx.index());
+            let node_id = <G as NodeIndexable>::from_index(
+                &self.partition_controller.graph,
+                node_idx.index(),
+            );
             self.partition_controller
                 .partition_table
                 .node_map
@@ -808,7 +838,7 @@ where
                 HighlightKind::Node(node_id) => {
                     Self::apply_node_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         *node_id,
                         *style,
                     );
@@ -816,7 +846,7 @@ where
                 HighlightKind::Edge(src, tgt) => {
                     Self::apply_edge_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         *src,
                         *tgt,
                         *style,
@@ -825,7 +855,7 @@ where
                 HighlightKind::Path(nodes) => {
                     Self::apply_path_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         nodes,
                         *style,
                     );
