@@ -1,7 +1,8 @@
+use r#gen::graphs::combinatorial_library::{SequencePart, parse_library};
 use gen_models::errors::OperationError;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
-use crate::PyDbContext;
+use crate::{PyDbContext, python_api::sequence_part::PySequencePart};
 
 #[pyfunction]
 #[expect(
@@ -255,7 +256,7 @@ pub fn update_with_genbank(
     clippy::too_many_arguments,
     reason = "Python API mirrors the CLI signature to avoid breaking changes"
 )]
-pub fn update_with_library(
+pub fn update_with_library_files(
     context: PyRef<'_, PyDbContext>,
     name: Option<String>,
     sample: String,
@@ -267,6 +268,13 @@ pub fn update_with_library(
     parts: String,
 ) -> PyResult<String> {
     println!("Update with library called");
+
+    let parts_list = match parse_library(&parts, &library) {
+        Ok(parts_list) => parts_list,
+        Err(_) => {
+            return Err(PyRuntimeError::new_err("Couldn't parse library files."));
+        }
+    };
 
     let context = &context.0;
     let conn = context.graph().conn();
@@ -289,8 +297,77 @@ pub fn update_with_library(
         &path_name,
         start,
         end,
-        &parts,
-        &library,
+        parts_list,
+        Some(&parts),
+        Some(&library),
+    ) {
+        conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+        operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+        return Err(PyRuntimeError::new_err(format!("Update failed: {err}")));
+    }
+
+    conn.execute("END TRANSACTION;", []).unwrap();
+    operation_conn.execute("END TRANSACTION;", []).unwrap();
+
+    Ok("Updated with library.".to_string())
+}
+
+#[pyfunction]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Python API mirrors the CLI signature to avoid breaking changes"
+)]
+pub fn update_with_library(
+    context: PyRef<'_, PyDbContext>,
+    name: Option<String>,
+    sample: Option<String>,
+    new_sample_name: String,
+    path_name: String,
+    start: i64,
+    end: i64,
+    parts_list: Vec<Vec<PySequencePart>>,
+) -> PyResult<String> {
+    println!("Update with library called");
+
+    let context = &context.0;
+    let conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
+
+    if let Err(err) = r#gen::track_database(conn, operation_conn) {
+        panic!("Error tracking database: {err}");
+    }
+
+    conn.execute("BEGIN TRANSACTION", []).unwrap();
+    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+
+    let collection_name =
+        name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+
+    let rust_parts_list = parts_list
+        .iter()
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|part| SequencePart {
+                    name: part.name.clone(),
+                    sequence: part.sequence.clone(),
+                    sequence_length: part.sequence_length,
+                })
+                .collect()
+        })
+        .collect();
+
+    if let Err(err) = r#gen::updates::library::update_with_library(
+        context,
+        &collection_name,
+        sample.as_deref(),
+        &new_sample_name,
+        &path_name,
+        start,
+        end,
+        rust_parts_list,
+        None,
+        None,
     ) {
         conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
         operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();

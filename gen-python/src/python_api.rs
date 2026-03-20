@@ -6,6 +6,7 @@ pub mod factory;
 pub mod hash_id;
 pub mod node_key;
 pub mod repository;
+pub mod sequence_part;
 pub mod utils;
 
 // Re-export components for use in the main module
@@ -17,7 +18,7 @@ use crate::{
     init,
     python_api::{
         block_group::PyBlockGroup, hash_id::PyHashId, node_key::PyNodeKey,
-        repository::PyRepository, utils::get_gen_dir_py,
+        repository::PyRepository, sequence_part::PySequencePart, utils::get_gen_dir_py,
     },
     updates::{
         update_with_fasta, update_with_gaf, update_with_genbank, update_with_gfa,
@@ -55,6 +56,7 @@ pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlockGroup>()?;
     m.add_class::<PyHashId>()?;
     m.add_class::<PyNodeKey>()?;
+    m.add_class::<PySequencePart>()?;
 
     Ok(())
 }

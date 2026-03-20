@@ -3,6 +3,7 @@ use clap::Args;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
+    graphs::combinatorial_library::parse_library,
     updates::library::update_with_library,
 };
 
@@ -50,6 +51,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
 
+    let parts_list = parse_library(&cmd.parts, &cmd.library)?;
+
     if let Err(err) = update_with_library(
         context,
         name,
@@ -58,8 +61,9 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path_name,
         cmd.start,
         cmd.end,
-        &cmd.parts,
-        &cmd.library,
+        parts_list,
+        Some(&cmd.parts),
+        Some(&cmd.library),
     ) {
         conn.execute("ROLLBACK TRANSACTION;", [])?;
         operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
@@ -68,6 +72,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("END TRANSACTION;", [])?;
     operation_conn.execute("END TRANSACTION;", [])?;
+
+    println!("Updated with library file: {0}", cmd.library);
 
     Ok(())
 }
