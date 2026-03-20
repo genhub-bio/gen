@@ -168,12 +168,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 None => get_default_collection(operation_conn)?,
             });
 
-            if !full && let Some(name) = graph.as_ref() {
+            if !full && let (Some(name), Some(sample_name)) = (graph.as_ref(), sample.as_ref()) {
                 // Use the inline widget by default if a graph is specified
                 let block_group = BlockGroup::get(
                     graph_conn,
                     "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                    params![collection_name, &sample, name],
+                    params![collection_name, sample_name, name],
                 );
 
                 match block_group {
@@ -194,7 +194,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                     operation_conn,
                                     &workspace,
                                     graph,
-                                    Some(sample.clone()),
+                                    sample,
                                     collection_name,
                                     position,
                                 )?;
@@ -208,7 +208,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => {
                         eprintln!(
                             "No block group found with name {:?} and sample {:?} in collection {}",
-                            name, sample, collection_name
+                            name, sample_name, collection_name
                         );
                     }
                 }
@@ -219,7 +219,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     operation_conn,
                     &workspace,
                     graph,
-                    Some(sample),
+                    sample,
                     collection_name,
                     position,
                 )?;

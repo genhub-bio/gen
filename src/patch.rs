@@ -292,7 +292,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -324,7 +324,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -375,7 +375,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -420,7 +420,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -459,7 +459,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();

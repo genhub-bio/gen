@@ -666,7 +666,6 @@ impl BlockGroup {
                 path_pos = start_block.end
             )));
         }
-
         let end_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(change.end).map(|x| &x.value).collect();
         assert_eq!(end_blocks.len(), 1);

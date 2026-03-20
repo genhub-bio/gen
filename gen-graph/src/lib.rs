@@ -7,7 +7,8 @@ use std::{
 };
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_START_NODE_ID, PathBlock, Strand, is_end_node, is_start_node,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
+    is_end_node, is_start_node,
 };
 use interavl::IntervalTree as IT2;
 use intervaltree::IntervalTree;
@@ -372,7 +373,15 @@ pub fn flatten_to_interval_tree(
     let tree: IntervalTree<i64, NodeIntervalBlock> = spans
         .iter()
         .filter(|block| !remove_ambiguous_positions || !excluded_nodes.contains(&block.node_id))
-        .map(|block| (block.start..block.end, *block))
+        .map(|block| {
+            if block.node_id == PATH_START_NODE_ID {
+                (i64::MIN + 1..0, *block)
+            } else if block.node_id == PATH_END_NODE_ID {
+                (block.end..i64::MAX, *block)
+            } else {
+                (block.start..block.end, *block)
+            }
+        })
         .collect();
     tree
 }

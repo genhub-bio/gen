@@ -196,11 +196,12 @@ pub fn update_with_vcf<'a>(
     vcf_path: &String,
     collection_name: &'a str,
     fixed_genotype: String,
-    fixed_sample: String,
+    fixed_sample: impl Into<Option<&'a str>>,
     coordinate_frame: impl Into<Option<&'a str>>,
 ) -> Result<Operation, VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
+    let fixed_sample = fixed_sample.into();
     let coordinate_frame = coordinate_frame.into();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
 
@@ -214,8 +215,8 @@ pub fn update_with_vcf<'a>(
     for name in sample_names {
         Sample::get_or_create(conn, name);
     }
-    if !fixed_sample.is_empty() {
-        Sample::get_or_create(conn, &fixed_sample);
+    if let Some(fixed_sample) = fixed_sample {
+        Sample::get_or_create(conn, fixed_sample);
     }
     let mut genotype = vec![];
     if !fixed_genotype.is_empty() {
@@ -231,7 +232,7 @@ pub fn update_with_vcf<'a>(
     let mut changes: HashMap<(Path, String), Vec<PathChange>> = HashMap::new();
 
     let mut parent_block_groups: HashMap<(&str, HashId), HashId> = HashMap::new();
-    let mut created_samples = HashSet::new();
+    let mut created_samples: HashSet<&str> = HashSet::new();
 
     let mut path_lengths: HashMap<HashId, i64> = HashMap::new();
 
@@ -264,15 +265,15 @@ pub fn update_with_vcf<'a>(
             _ => 0,
         };
 
-        if !fixed_sample.is_empty() && !genotype.is_empty() {
-            if !created_samples.contains(&fixed_sample) {
-                Sample::get_or_create_child(conn, collection_name, &fixed_sample, coordinate_frame);
-                created_samples.insert(&fixed_sample);
+        if let Some(fixed_sample) = fixed_sample.filter(|_| !genotype.is_empty()) {
+            if !created_samples.contains(fixed_sample) {
+                Sample::get_or_create_child(conn, collection_name, fixed_sample, coordinate_frame);
+                created_samples.insert(fixed_sample);
             }
             let sample_bg_id = BlockGroupCache::lookup(
                 &mut block_group_cache,
                 collection_name,
-                &fixed_sample,
+                fixed_sample,
                 seq_name.clone(),
                 coordinate_frame,
             )
@@ -336,7 +337,7 @@ pub fn update_with_vcf<'a>(
                             ref_start,
                             block_group_id: sample_bg_id,
                             path: sample_path.clone(),
-                            sample_name: fixed_sample.clone(),
+                            sample_name: fixed_sample.to_string(),
                             alt_seq,
                             chromosome_index: chromosome_index as i64,
                             phased,
@@ -356,7 +357,7 @@ pub fn update_with_vcf<'a>(
             }
         } else {
             for (sample_index, sample) in record.samples().iter().enumerate() {
-                let sample_name = &sample_names[sample_index];
+                let sample_name = sample_names[sample_index].as_ref();
                 if !created_samples.contains(sample_name) {
                     Sample::get_or_create_child(
                         conn,
@@ -447,7 +448,7 @@ pub fn update_with_vcf<'a>(
                                         block_group_id: sample_bg_id,
                                         ref_start,
                                         path: sample_path.clone(),
-                                        sample_name: sample_name.clone(),
+                                        sample_name: sample_name.to_string(),
                                         alt_seq,
                                         chromosome_index: chromosome_index as i64,
                                         phased,
@@ -635,7 +636,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -684,7 +685,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -740,7 +741,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
-            "sample 1".to_string(),
+            Some("sample 1"),
             Some("reference"),
         )
         .unwrap();
@@ -797,7 +798,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
-            "sample 1".to_string(),
+            Some("sample 1"),
             Some("reference"),
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
@@ -829,7 +830,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -874,7 +875,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -914,7 +915,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -956,7 +957,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -969,7 +970,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         );
         assert!(matches!(
@@ -985,10 +986,8 @@ mod tests {
     #[test]
     fn test_deduplicates_nodes_multiple_paths() {
         let context = setup_gen();
-        let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        vcf_path.push("fixtures/multiseq.vcf");
-        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_path.push("fixtures/multiseq.fa");
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/multiseq.vcf");
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/multiseq.fa");
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
 
@@ -1015,7 +1014,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -1028,7 +1027,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         );
         assert!(matches!(
@@ -1071,7 +1070,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0|1".to_string(),
-            "test".to_string(),
+            Some("test"),
             Some("reference"),
         )
         .unwrap();
@@ -1110,7 +1109,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -1164,7 +1163,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -1188,7 +1187,7 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -1225,7 +1224,7 @@ mod tests {
             &f0_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             Some("reference"),
         )
         .unwrap();
@@ -1235,7 +1234,7 @@ mod tests {
             &f1_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             "f1",
         )
         .unwrap();
@@ -1245,7 +1244,7 @@ mod tests {
             &f2_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             "f2",
         )
         .unwrap();

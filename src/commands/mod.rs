@@ -47,9 +47,9 @@ pub enum Commands {
         /// The name of the graph to view
         #[clap(index = 1)]
         graph: Option<String>,
-        /// View the graph for a specific sample
+        /// Optional sample to open directly. If omitted, choose it in the UI.
         #[arg(short, long)]
-        sample: String,
+        sample: Option<String>,
         /// Look for the sample in a specific collection
         #[arg(short, long)]
         collection: Option<String>,
