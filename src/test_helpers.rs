@@ -126,7 +126,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         &HashId::convert_str(&format!("test-g-node.{}", a_seq.hash)),
     );
     let _collection = Collection::create(conn, "test");
-    let block_group = BlockGroup::create(conn, "test", None, "chr1");
+    Sample::get_or_create(conn, "test");
+    let block_group = BlockGroup::create(conn, "test", "test", "chr1");
     let edge0 = Edge::create(
         conn,
         PATH_START_NODE_ID,
@@ -258,12 +259,11 @@ where
     assert_eq!(v2, expected);
 }
 
-pub fn get_sample_bg<'a>(
+pub fn get_sample_bg(
     conn: &GraphConnection,
     collection_name: &str,
-    sample_name: impl Into<Option<&'a str>>,
+    sample_name: &str,
 ) -> BlockGroup {
-    let sample_name = sample_name.into();
     let mut results = Sample::get_block_groups(conn, collection_name, sample_name);
     results.pop().unwrap()
 }

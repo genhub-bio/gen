@@ -170,19 +170,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             if !full && let Some(name) = graph.as_ref() {
                 // Use the inline widget by default if a graph is specified
-                let block_group = if let Some(ref sample_name) = sample {
-                    BlockGroup::get(
-                        graph_conn,
-                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                        params![collection_name, sample_name, name],
-                    )
-                } else {
-                    BlockGroup::get(
-                        graph_conn,
-                        "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
-                        params![collection_name, name],
-                    )
-                };
+                let block_group = BlockGroup::get(
+                    graph_conn,
+                    "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+                    params![collection_name, &sample, name],
+                );
 
                 match block_group {
                     Ok(bg) => {
@@ -202,7 +194,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                     operation_conn,
                                     &workspace,
                                     graph,
-                                    sample,
+                                    Some(sample.clone()),
                                     collection_name,
                                     position,
                                 )?;
@@ -216,9 +208,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => {
                         eprintln!(
                             "No block group found with name {:?} and sample {:?} in collection {}",
-                            name,
-                            sample.clone().unwrap_or_else(|| "null".to_string()),
-                            collection_name
+                            name, sample, collection_name
                         );
                     }
                 }
@@ -229,7 +219,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     operation_conn,
                     &workspace,
                     graph,
-                    sample,
+                    Some(sample),
                     collection_name,
                     position,
                 )?;
@@ -279,7 +269,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(translate::bed::translate_bed(
                     graph_conn,
                     collection_name,
-                    sample.as_deref(),
+                    sample.as_str(),
                     &mut bed_file,
                     &mut handle,
                 )?)
@@ -290,7 +280,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(translate::gff::translate_gff(
                     graph_conn,
                     collection_name,
-                    sample.as_deref(),
+                    sample.as_str(),
                     &mut gff_file,
                     &mut handle,
                 )?)
@@ -576,15 +566,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(collection) => collection,
                 None => get_default_collection(operation_conn)?,
             });
-            let from_sample_name = from_sample.clone();
-
             graph_conn.execute("BEGIN TRANSACTION", [])?;
             operation_conn.execute("BEGIN TRANSACTION", [])?;
 
             propagate_gff(
                 graph_conn,
                 collection_name,
-                from_sample_name.as_deref(),
+                from_sample.as_str(),
                 &to_sample,
                 &gff,
                 &output_gff,
@@ -606,7 +594,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &collection_name,
                 &name,
                 group.as_deref(),
-                sample.as_deref(),
+                sample.as_str(),
                 &region,
             )?;
             println!("Annotation {name} added in operation {}", operation.hash);
@@ -643,8 +631,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(collection) => collection,
                 None => get_default_collection(operation_conn)?,
             });
-            let block_groups =
-                Sample::get_block_groups(graph_conn, collection_name, sample.as_deref());
+            let block_groups = Sample::get_block_groups(graph_conn, collection_name, &sample);
             for block_group in block_groups {
                 println!("{}", block_group.name);
             }
@@ -662,13 +649,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(collection) => collection,
                 None => get_default_collection(operation_conn)?,
             });
-            let block_groups =
-                Sample::get_block_groups(graph_conn, collection_name, sample.as_deref());
+            let block_groups = Sample::get_block_groups(graph_conn, collection_name, &sample);
 
-            let formatted_sample_name = match sample {
-                Some(s) => format!("sample {s}"),
-                None => "default sample".to_string(),
-            };
+            let formatted_sample_name = format!("sample {sample}");
 
             let (parsed_graph_name, start_coordinate, mut end_coordinate) =
                 if let Some(region) = region {
@@ -720,8 +703,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 graph_conn,
                 collection_name,
                 &PathBuf::from(gfa),
-                sample1.as_deref(),
-                sample2.as_deref(),
+                sample1.as_str(),
+                sample2.as_str(),
             )?;
             Ok(())
         }

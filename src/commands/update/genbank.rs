@@ -21,6 +21,9 @@ pub struct Command {
     /// The name of the collection to update
     #[arg(short, long)]
     name: Option<String>,
+    /// The name of the sample to update
+    #[arg(short, long)]
+    sample: String,
     /// If a new entity is found, create it as a normal import
     #[arg(long, action, alias = "cm")]
     create_missing: bool,
@@ -46,6 +49,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         context,
         &f,
         name.as_ref(),
+        &cmd.sample,
         cmd.create_missing,
         &OperationInfo {
             files: vec![OperationFile {

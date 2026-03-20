@@ -86,13 +86,13 @@ where
     Ok(())
 }
 
-pub fn update_with_gaf<'a, P>(
+pub fn update_with_gaf<P>(
     context: &DbContext,
     gaf_path: P,
     csv_path: P,
-    collection_name: &'a str,
-    sample_name: impl Into<Option<&'a str>>,
-    parent_sample: impl Into<Option<&'a str>>,
+    collection_name: &str,
+    sample_name: &str,
+    parent_sample: Option<&str>,
 ) -> Result<(), GafUpdateError>
 where
     P: AsRef<Path> + Clone,
@@ -102,10 +102,8 @@ where
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
-    let parent_sample = parent_sample.into();
-    let sample_name = sample_name
-        .into()
-        .map(|name| Sample::get_or_create_child(conn, collection_name, name, parent_sample).name);
+    let sample_name =
+        Sample::get_or_create_child(conn, collection_name, sample_name, parent_sample).name;
 
     let mut node_lengths: HashMap<String, (HashId, i64)> = HashMap::new();
 
@@ -365,19 +363,11 @@ where
             }
 
             let edge_ids = Edge::bulk_create(conn, &new_edges);
-            let bgs = if let Some(sample) = sample_name.clone() {
-                BlockGroup::query(
-                    conn,
-                    "select distinct bg.* from block_groups bg left join block_group_edges bge on (bg.id = bge.block_group_id) left join edges e on (e.id = bge.edge_id and (e.source_node_id in rarray(?3) or e.target_node_id in rarray(?3))) where collection_name = ?1 and sample_name = ?2",
-                    params!(collection_name.to_string(), sample, Rc::new(bg_nodes)),
-                )
-            } else {
-                BlockGroup::query(
-                    conn,
-                    "select distinct bg.* from block_groups bg left join block_group_edges bge on (bg.id = bge.block_group_id) left join edges e on (e.id = bge.edge_id and (e.source_node_id in rarray(?2) or e.target_node_id in rarray(?2))) where collection_name = ?1 and sample_name is null",
-                    params!(collection_name.to_string(), Rc::new(bg_nodes)),
-                )
-            };
+            let bgs = BlockGroup::query(
+                conn,
+                "select distinct bg.* from block_groups bg left join block_group_edges bge on (bg.id = bge.block_group_id) left join edges e on (e.id = bge.edge_id and (e.source_node_id in rarray(?3) or e.target_node_id in rarray(?3))) where collection_name = ?1 and sample_name = ?2",
+                params!(collection_name.to_string(), sample_name, Rc::new(bg_nodes)),
+            );
             for bg in bgs.iter() {
                 let new_block_group_edges = edge_ids
                     .iter()
@@ -501,7 +491,7 @@ mod tests {
         let gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gfa");
         let csv_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_insert.csv");
 
-        let _ = import_gfa(&context, &gfa_path, &collection, None);
+        let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
         let graph = Sample::get_graph(conn, "test", "child");
@@ -569,7 +559,7 @@ mod tests {
         let gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gfa");
         let csv_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_insert.csv");
 
-        let _ = import_gfa(&context, &gfa_path, &collection, None);
+        let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
         let graph = Sample::get_graph(conn, "test", "child");

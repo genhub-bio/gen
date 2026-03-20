@@ -28,17 +28,16 @@ use crate::{
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
 
-pub fn import_fasta<'a>(
+pub fn import_fasta(
     context: &DbContext,
     fasta: &String,
     name: &str,
-    sample: impl Into<Option<&'a str>>,
+    sample: &str,
     shallow: bool,
 ) -> Result<Operation, FastaError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
-
     let path = PathBuf::from(fasta);
 
     let file = std::fs::File::open(fasta)?;
@@ -57,10 +56,7 @@ pub fn import_fasta<'a>(
             name: name.to_string(),
         }
     };
-    let sample = sample.into();
-    if let Some(sample_name) = sample {
-        Sample::get_or_create(conn, sample_name);
-    }
+    Sample::get_or_create(conn, sample);
     let mut summary: HashMap<String, i64> = HashMap::new();
 
     let _ = progress_bar.println("Parsing Fasta");
@@ -189,11 +185,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            None,
+            "reference",
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", None, "m123");
+        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -220,11 +216,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            None,
+            "reference",
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", None, "m123");
+        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -244,11 +240,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            None,
+            "reference",
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", None, "chr22");
+        let block_group_id = BlockGroup::get_id("test", "reference", "chr22");
         let sequences = Sequence::query_by_blockgroup(conn, &block_group_id);
         let dna = sequences
             .iter()
@@ -271,11 +267,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            None,
+            "reference",
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", None, "m123");
+        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -300,7 +296,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", Some("new-sample"), "m123");
+        let block_group_id = BlockGroup::get_id("test", "new-sample", "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -331,11 +327,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            None,
+            "reference",
             true,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", None, "m123");
+        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -363,7 +359,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -376,7 +372,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap_err();

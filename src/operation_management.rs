@@ -1668,7 +1668,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -1686,7 +1686,7 @@ mod tests {
         assert_eq!(edge_count, 2);
         assert_eq!(block_group_edge_count, 2);
         assert_eq!(node_count, 3);
-        assert_eq!(sample_count, 0);
+        assert_eq!(sample_count, 1);
         assert_eq!(op_count, 1);
         update_with_vcf(
             &context,
@@ -1694,7 +1694,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
         let block_group_count =
@@ -1729,7 +1729,7 @@ mod tests {
         // * 1 node created by the initial fasta import
         // * 2 nodes created by the VCF update.  See above explanation of edge count for more details.
         assert_eq!(node_count, 5);
-        assert_eq!(sample_count, 3);
+        assert_eq!(sample_count, 4);
         assert_eq!(op_count, 2);
 
         // revert back to state 1 where vcf samples and blockpaths do not exist
@@ -1754,7 +1754,7 @@ mod tests {
         assert_eq!(edge_count, 2);
         assert_eq!(block_group_edge_count, 2);
         assert_eq!(node_count, 3);
-        assert_eq!(sample_count, 0);
+        assert_eq!(sample_count, 1);
         assert_eq!(op_count, 2);
 
         let op = Operation::get_by_id(op_conn, &OperationState::get_operation(op_conn).unwrap())
@@ -1777,7 +1777,7 @@ mod tests {
         assert_eq!(edge_count, 8);
         assert_eq!(block_group_edge_count, 21);
         assert_eq!(node_count, 5);
-        assert_eq!(sample_count, 3);
+        assert_eq!(sample_count, 4);
         assert_eq!(op_count, 2);
     }
 
@@ -1797,7 +1797,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -1812,11 +1812,11 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
 
-        let foo_bg_id = BlockGroup::get_id(&collection, Some("foo"), "m123");
+        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123");
         let patch_1_seqs =
             HashSet::from_iter(vec!["ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string()]);
 
@@ -1827,10 +1827,10 @@ mod tests {
         assert_eq!(
             BlockGroup::query(conn, "select * from block_groups;", rusqlite::params!())
                 .iter()
-                .map(|v| v.sample_name.clone().unwrap_or("".to_string()))
+                .map(|v| v.sample_name.clone())
                 .collect::<Vec<String>>(),
             vec![
-                "".to_string(),
+                "reference".to_string(),
                 "unknown".to_string(),
                 "G1".to_string(),
                 "foo".to_string()
@@ -1844,10 +1844,10 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         );
 
-        let foo_bg_id = BlockGroup::get_id(&collection, Some("foo"), "m123");
+        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123");
         let patch_2_seqs = HashSet::from_iter(vec!["ATCGATCGATCGAGATCGGGAACACACAGAGA".to_string()]);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &foo_bg_id, false),
@@ -1857,15 +1857,15 @@ mod tests {
         assert_eq!(
             BlockGroup::query(conn, "select * from block_groups;", rusqlite::params!())
                 .iter()
-                .map(|v| v.sample_name.clone().unwrap_or("".to_string()))
+                .map(|v| v.sample_name.clone())
                 .collect::<Vec<String>>(),
-            vec!["".to_string(), "foo".to_string()]
+            vec!["reference".to_string(), "foo".to_string()]
         );
 
         // apply changes from branch-1, it will be operation id 2
         apply(&context, &op_2.hash, None, false).unwrap();
 
-        let foo_bg_id = BlockGroup::get_id(&collection, Some("foo"), "m123");
+        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123");
         let patch_2_seqs = HashSet::from_iter(vec!["ATCATCGATCGAGATCGGGAACACACAGAGA".to_string()]);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &foo_bg_id, false),
@@ -1874,17 +1874,17 @@ mod tests {
         assert_eq!(
             BlockGroup::query(conn, "select * from block_groups;", rusqlite::params!())
                 .iter()
-                .map(|v| v.sample_name.clone().unwrap_or("".to_string()))
+                .map(|v| v.sample_name.clone())
                 .collect::<HashSet<String>>(),
             HashSet::from_iter([
-                "".to_string(),
+                "reference".to_string(),
                 "foo".to_string(),
                 "unknown".to_string(),
                 "G1".to_string()
             ])
         );
 
-        let unknown_bg_id = BlockGroup::get_id(&collection, Some("unknown"), "m123");
+        let unknown_bg_id = BlockGroup::get_id(&collection, "unknown", "m123");
         let unknown_seqs =
             HashSet::from_iter(vec!["ATCATCGATAGACGATCGATCGGGAACACACAGAGA".to_string()]);
         assert_eq!(
@@ -1909,7 +1909,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -1924,7 +1924,7 @@ mod tests {
         assert_eq!(edge_count, 2);
         assert_eq!(block_group_edge_count, 2);
         assert_eq!(node_count, 3);
-        assert_eq!(sample_count, 0);
+        assert_eq!(sample_count, 1);
         assert_eq!(op_count, 1);
 
         let branch_1 = Branch::get_or_create(op_conn, "branch_1");
@@ -1943,7 +1943,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
         let edge_count = Edge::query(conn, "select * from edges", rusqlite::params!()).len();
@@ -1957,7 +1957,7 @@ mod tests {
         assert_eq!(edge_count, 8);
         assert_eq!(block_group_edge_count, 21);
         assert_eq!(node_count, 5);
-        assert_eq!(sample_count, 3);
+        assert_eq!(sample_count, 4);
         assert_eq!(op_count, 2);
 
         // checkout branch 2
@@ -1980,7 +1980,7 @@ mod tests {
         assert_eq!(edge_count, 2);
         assert_eq!(block_group_edge_count, 2);
         assert_eq!(node_count, 3);
-        assert_eq!(sample_count, 0);
+        assert_eq!(sample_count, 1);
         assert_eq!(op_count, 2);
 
         // apply vcf2
@@ -1990,7 +1990,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
         let edge_count = Edge::query(conn, "select * from edges", rusqlite::params!()).len();
@@ -2004,7 +2004,7 @@ mod tests {
         assert_eq!(edge_count, 5);
         assert_eq!(block_group_edge_count, 8);
         assert_eq!(node_count, 4);
-        assert_eq!(sample_count, 1);
+        assert_eq!(sample_count, 2);
         assert_eq!(op_count, 3);
 
         // migrate to branch 1 again
@@ -2025,7 +2025,7 @@ mod tests {
         assert_eq!(edge_count, 8);
         assert_eq!(block_group_edge_count, 21);
         assert_eq!(node_count, 5);
-        assert_eq!(sample_count, 3);
+        assert_eq!(sample_count, 4);
         assert_eq!(op_count, 3);
     }
 

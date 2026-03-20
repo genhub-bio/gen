@@ -21,7 +21,7 @@ pub struct Command {
     genotype: Option<String>,
     /// The name of the sample to update
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
     /// Use the given sample as the parent sample for changes.
     #[arg(long, alias = "cf")]
     coordinate_frame: Option<String>,
@@ -47,7 +47,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path,
         name,
         cmd.genotype.clone().unwrap_or("".to_string()),
-        cmd.sample.clone().unwrap_or("".to_string()),
+        cmd.sample.clone(),
         cmd.coordinate_frame.as_deref(),
     ) {
         Ok(_) => {

@@ -219,19 +219,14 @@ pub fn view_block_group(
                 params![collection_name, sample_name, name],
             )
         } else {
-            // modified version:
-            BlockGroup::get(
-                conn,
-                "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
-                params![collection_name, name],
-            )
+            panic!("sample name is required to view a specific block group")
         };
 
         if block_group.is_err() {
             panic!(
                 "No block group found with name {:?} and sample {:?} in collection {} ",
                 name,
-                sample_name.clone().unwrap_or_else(|| "null".to_string()),
+                sample_name.clone(),
                 collection_name
             );
         }
@@ -295,7 +290,7 @@ pub fn view_block_group(
         if last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
             let selected_sample = current_block_group
                 .as_ref()
-                .and_then(|bg| bg.sample_name.as_deref());
+                .map(|bg| bg.sample_name.as_str());
             if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
@@ -353,7 +348,7 @@ pub fn view_block_group(
                     conn,
                     workspace,
                     collection_name,
-                    sample_name: bg.sample_name.as_deref(),
+                    sample_name: bg.sample_name.as_str(),
                     block_group_name: Some(&bg.name),
                     query_window: Some(query_window),
                     node_filter: &node_filter,
@@ -724,7 +719,7 @@ pub fn view_block_group(
             current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
             let selected_sample = current_block_group
                 .as_ref()
-                .and_then(|bg| bg.sample_name.as_deref());
+                .map(|bg| bg.sample_name.as_str());
             if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
@@ -774,7 +769,7 @@ pub fn view_block_group(
                         conn,
                         workspace,
                         collection_name,
-                        sample_name: bg.sample_name.as_deref(),
+                        sample_name: bg.sample_name.as_str(),
                         block_group_name: Some(&bg.name),
                         query_window,
                         node_filter: &node_filter,
@@ -939,7 +934,7 @@ pub fn view_block_group(
                                     conn,
                                     workspace,
                                     collection_name,
-                                    sample_name: bg.sample_name.as_deref(),
+                                    sample_name: bg.sample_name.as_str(),
                                     block_group_name: Some(&bg.name),
                                     query_window,
                                     node_filter: &node_filter,

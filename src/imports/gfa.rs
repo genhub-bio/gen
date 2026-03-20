@@ -38,21 +38,17 @@ pub enum GFAImportError {
     OperationError(#[from] OperationError),
 }
 
-pub fn import_gfa<'a>(
+pub fn import_gfa(
     context: &DbContext,
     gfa_path: &FilePath,
     collection_name: &str,
-    sample_name: impl Into<Option<&'a str>>,
+    sample_name: &str,
 ) -> Result<Operation, GFAImportError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
-
     Collection::create(conn, collection_name);
-    let sample_name = sample_name.into();
-    if let Some(sample_name) = sample_name {
-        Sample::get_or_create(conn, sample_name);
-    }
+    Sample::get_or_create(conn, sample_name);
     let block_group = BlockGroup::create(conn, collection_name, sample_name, "");
     let bar = progress_bar.add(get_time_elapsed_bar());
     bar.set_message("Parsing GFA");
@@ -473,9 +469,9 @@ mod tests {
         let conn = context.graph().conn();
 
         track_database(conn, context.operations().conn()).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
@@ -515,9 +511,9 @@ mod tests {
         let conn = context.graph().conn();
 
         track_database(conn, context.operations().conn()).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(
             all_sequences,
@@ -537,9 +533,9 @@ mod tests {
         let conn = context.graph().conn();
 
         track_database(conn, context.operations().conn()).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
@@ -563,9 +559,9 @@ mod tests {
         let conn = context.graph().conn();
 
         track_database(conn, context.operations().conn()).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
@@ -590,12 +586,12 @@ mod tests {
         let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
         let paths = Path::query_for_collection(conn, &collection_name);
         assert_eq!(paths.len(), 20);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
@@ -696,9 +692,9 @@ mod tests {
         let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
         let path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 AND name = ?2",
@@ -726,9 +722,9 @@ mod tests {
         let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(
@@ -749,9 +745,9 @@ mod tests {
         let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, None);
+        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
 
-        let block_group_id = BlockGroup::get_id(&collection_name, None, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(

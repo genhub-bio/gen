@@ -242,9 +242,7 @@ fn collect_components(graphs: &[BlockGroupDiff], change_label: &'static str) -> 
         let (collection, sample, block_group) = if let Some(bg) = &graph_diff.block_group {
             (
                 bg.collection_name.clone(),
-                bg.sample_name
-                    .clone()
-                    .unwrap_or_else(|| "Reference".to_string()),
+                bg.sample_name.clone(),
                 bg.name.clone(),
             )
         } else {

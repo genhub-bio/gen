@@ -38,7 +38,7 @@ pub enum DeriveChunksOperationError {
 pub fn derive_chunks_operation(
     db_context: &DbContext,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     region: String,
     backbone: Option<String>,
@@ -64,7 +64,7 @@ pub fn derive_chunks_operation(
     let path_length = get_path(
         graph_conn,
         collection_name,
-        sample_name.as_deref(),
+        sample_name.as_str(),
         &region_name.to_string(),
         backbone.as_deref(),
     )?
@@ -129,7 +129,7 @@ pub fn derive_chunks_operation(
     if let Err(err) = derive_chunks(
         db_context,
         collection_name,
-        sample_name.as_deref(),
+        sample_name.as_str(),
         &new_sample_name,
         &region_name.to_string(),
         backbone.as_deref(),

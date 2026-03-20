@@ -4,7 +4,10 @@ use std::{collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, 
 use gb_io::{self, QualifierKey, seq::Location};
 use gen_core::{is_terminal, path::PathBlock};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, sample::Sample};
+use gen_models::{
+    block_group::BlockGroup, collection::Collection, db::GraphConnection, node::Node,
+    sample::Sample,
+};
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};
 use rusqlite::{self, Connection};
@@ -138,7 +141,11 @@ pub fn export_genbank(
     // sequence returned. Once again, we assume there is only one graph bubble when we encounter
     // them, so there is only 1 change to represent. We do not guard against this being an incorrect
     // assumption.
-    let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
+    let block_groups = if let Some(sample_name) = sample_name {
+        Sample::get_block_groups(conn, collection_name, sample_name)
+    } else {
+        Collection::get_block_groups(conn, collection_name)
+    };
 
     let file = File::create(filename)?;
     let mut writer = gb_io::writer::SeqWriter::new(file);
@@ -383,7 +390,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            None,
+            "reference",
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -414,7 +421,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            None,
+            "reference",
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -445,7 +452,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            None,
+            "reference",
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),

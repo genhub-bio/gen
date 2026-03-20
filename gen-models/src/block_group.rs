@@ -27,6 +27,7 @@ use crate::{
     node::Node,
     path::{Path, PathData},
     path_edge::PathEdge,
+    sample::Sample,
     traits::*,
 };
 
@@ -34,7 +35,7 @@ use crate::{
 pub struct BlockGroup {
     pub id: HashId,
     pub collection_name: String,
-    pub sample_name: Option<String>,
+    pub sample_name: String,
     pub name: String,
     pub created_on: i64,
 }
@@ -46,14 +47,7 @@ impl<'a> Capnp<'a> for BlockGroup {
     fn write_capnp(&self, builder: &mut Self::Builder) {
         builder.set_id(&self.id.0).unwrap();
         builder.set_collection_name(&self.collection_name);
-        match &self.sample_name {
-            None => {
-                builder.reborrow().get_sample_name().set_none(());
-            }
-            Some(n) => {
-                builder.reborrow().get_sample_name().set_some(n.clone());
-            }
-        }
+        builder.set_sample_name(&self.sample_name);
         builder.set_name(&self.name);
         builder.set_created_on(self.created_on);
     }
@@ -67,10 +61,7 @@ impl<'a> Capnp<'a> for BlockGroup {
             .try_into()
             .unwrap();
         let collection_name = reader.get_collection_name().unwrap().to_string().unwrap();
-        let sample_name: Option<String> = match reader.get_sample_name().which().unwrap() {
-            block_group::sample_name::None(()) => None,
-            block_group::sample_name::Some(n) => Some(n.unwrap().to_string().unwrap()),
-        };
+        let sample_name = reader.get_sample_name().unwrap().to_string().unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
         let created_on = reader.get_created_on();
 
@@ -87,7 +78,7 @@ impl<'a> Capnp<'a> for BlockGroup {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BlockGroupData<'a> {
     pub collection_name: &'a str,
-    pub sample_name: Option<&'a str>,
+    pub sample_name: &'a str,
     pub name: String,
 }
 
@@ -155,11 +146,12 @@ impl BlockGroup {
     pub fn create(
         conn: &GraphConnection,
         collection_name: &str,
-        sample_name: Option<&str>,
+        sample_name: &str,
         name: &str,
     ) -> BlockGroup {
+        Sample::get_or_create(conn, sample_name);
         let hash = HashId(calculate_hash(&format!(
-            "{collection_name}:{sample_name:?}:{name}"
+            "{collection_name}:{sample_name}:{name}"
         )));
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
         let query = "INSERT INTO block_groups (id, collection_name, sample_name, name, created_on) VALUES (?1, ?2, ?3, ?4, ?5);";
@@ -167,7 +159,7 @@ impl BlockGroup {
         let bg = BlockGroup {
             id: hash,
             collection_name: collection_name.to_string(),
-            sample_name: sample_name.map(|s| s.to_string()),
+            sample_name: sample_name.to_string(),
             name: name.to_string(),
             created_on: timestamp,
         };
@@ -186,27 +178,17 @@ impl BlockGroup {
         }
     }
 
-    pub fn delete(
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: Option<&str>,
-        name: &str,
-    ) {
-        if let Some(n) = sample_name {
-            let query = "delete from block_groups where collection_name = ?1 and sample_name = ?2 and name = ?3;";
-            conn.execute(
-                query,
-                params![collection_name.to_string(), n.to_string(), name.to_string()],
-            )
-            .unwrap();
-        } else {
-            let query = "delete from block_groups where collection_name = ?1 and sample_name is null and name = ?2;";
-            conn.execute(
-                query,
-                params![collection_name.to_string(), name.to_string()],
-            )
-            .unwrap();
-        }
+    pub fn delete(conn: &GraphConnection, collection_name: &str, sample_name: &str, name: &str) {
+        let query = "delete from block_groups where collection_name = ?1 and sample_name = ?2 and name = ?3;";
+        conn.execute(
+            query,
+            params![
+                collection_name.to_string(),
+                sample_name.to_string(),
+                name.to_string()
+            ],
+        )
+        .unwrap();
     }
 
     pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> BlockGroup {
@@ -313,16 +295,12 @@ impl BlockGroup {
                 params![collection_name, parent_sample_name, group_name],
             )
         } else {
-            BlockGroup::query(
-                conn,
-                "select * from block_groups where collection_name = ?1 AND sample_name IS null AND name = ?2",
-                params![collection_name, group_name],
-            )
+            vec![]
         };
 
         if let Some(parent_block_group) = block_groups.first() {
             let new_block_group =
-                BlockGroup::create(conn, collection_name, Some(sample_name), group_name);
+                BlockGroup::create(conn, collection_name, sample_name, group_name);
 
             // clone parent blocks/edges/path
             parent_block_group.duplicate(conn, &new_block_group.id);
@@ -334,17 +312,15 @@ impl BlockGroup {
                     "Block group not found for either new sample ({sample_name}) or parent sample ({parent_sample_name})"
                 )
             } else {
-                format!(
-                    "Block group not found for new sample ({sample_name}) and default parent sample"
-                )
+                format!("Block group not found for sample ({sample_name})")
             };
             Err(QueryError::ResultsNotFound(error_message))
         }
     }
 
-    pub fn get_id(collection_name: &str, sample_name: Option<&str>, group_name: &str) -> HashId {
+    pub fn get_id(collection_name: &str, sample_name: &str, group_name: &str) -> HashId {
         HashId(calculate_hash(&format!(
-            "{collection_name}:{sample_name:?}:{group_name}"
+            "{collection_name}:{sample_name}:{group_name}"
         )))
     }
 
@@ -661,21 +637,37 @@ impl BlockGroup {
     ) -> Result<Vec<AugmentedEdgeData>, ChangeError> {
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(change.start).map(|x| &x.value).collect();
-        assert_eq!(start_blocks.len(), 1);
-        // NOTE: This may not be used but needs to be initialized here instead of inside the if
-        // statement that uses it, so that the borrow checker is happy
-        let previous_start_blocks: Vec<&NodeIntervalBlock> = tree
-            .query_point(change.start - 1)
-            .map(|x| &x.value)
-            .collect();
-        assert_eq!(previous_start_blocks.len(), 1);
-        let start_block = if start_blocks[0].start == change.start {
-            // First part of this block will be replaced/deleted, need to get previous block to add
-            // edge including it
-            previous_start_blocks[0]
+        let previous_start_blocks: Vec<&NodeIntervalBlock> = if change.start > 0 {
+            tree.query_point(change.start - 1)
+                .map(|x| &x.value)
+                .collect()
         } else {
-            start_blocks[0]
+            vec![]
         };
+        let start_block =
+            if start_blocks.len() == 1 && start_blocks[0].start == change.start && change.start > 0
+            {
+                // First part of this block will be replaced/deleted, need to get previous block to add
+                // edge including it
+                assert_eq!(previous_start_blocks.len(), 1);
+                previous_start_blocks[0]
+            } else if start_blocks.len() == 1 {
+                start_blocks[0]
+            } else if start_blocks.is_empty()
+                && change.start > 0
+                && previous_start_blocks.len() == 1
+                && previous_start_blocks[0].end == change.start
+            {
+                // The flattened graph interval tree represents terminal nodes as zero-length spans,
+                // so a change that starts exactly at the path end needs to anchor to the last real
+                // block instead.
+                previous_start_blocks[0]
+            } else {
+                return Err(ChangeError::OutOfBounds(format!(
+                    "Invalid change specified. Coordinate {pos} is outside the path range.",
+                    pos = change.start
+                )));
+            };
 
         // Ensure the change is within the path bounds. The logic here is a bit backwards, where
         // we check if the start is before the start block's end and the end is before the end
@@ -693,8 +685,37 @@ impl BlockGroup {
 
         let end_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(change.end).map(|x| &x.value).collect();
-        assert_eq!(end_blocks.len(), 1);
-        let end_block = end_blocks[0];
+        let previous_end_blocks: Vec<&NodeIntervalBlock> = if change.end > 0 {
+            tree.query_point(change.end - 1).map(|x| &x.value).collect()
+        } else {
+            vec![]
+        };
+        let end_block_storage;
+        let end_block = if end_blocks.len() == 1 {
+            end_blocks[0]
+        } else if end_blocks.is_empty()
+            && previous_end_blocks.len() == 1
+            && previous_end_blocks[0].end == change.end
+        {
+            // The flattened graph interval tree omits terminal nodes from point lookups because
+            // they are stored as zero-length spans. For changes ending exactly at the path end,
+            // synthesize the terminal end block here.
+            end_block_storage = NodeIntervalBlock {
+                block_id: -2,
+                node_id: PATH_END_NODE_ID,
+                start: change.end,
+                end: change.end,
+                sequence_start: 0,
+                sequence_end: 0,
+                strand: Strand::Forward,
+            };
+            &end_block_storage
+        } else {
+            return Err(ChangeError::OutOfBounds(format!(
+                "Invalid change specified. Coordinate {pos} is outside the path range.",
+                pos = change.end
+            )));
+        };
 
         if is_end_node(end_block.node_id) && change.end > end_block.start {
             return Err(ChangeError::OutOfBounds(format!(
@@ -1178,26 +1199,8 @@ mod tests {
         let block_group = BlockGroup {
             id: HashId::pad_str(42),
             collection_name: "test_collection".to_string(),
-            sample_name: Some("test_sample".to_string()),
+            sample_name: "test_sample".to_string(),
             name: "test_block_group".to_string(),
-            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
-        };
-
-        let mut message = TypedBuilder::<block_group::Owned>::new_default();
-        let mut root = message.init_root();
-        block_group.write_capnp(&mut root);
-
-        let deserialized = BlockGroup::read_capnp(root.into_reader());
-        assert_eq!(block_group, deserialized);
-    }
-
-    #[test]
-    fn test_capnp_serialization_no_sample() {
-        let block_group = BlockGroup {
-            id: HashId::pad_str(43),
-            collection_name: "test_collection_2".to_string(),
-            sample_name: None,
-            name: "test_block_group_2".to_string(),
             created_on: Utc::now().timestamp_nanos_opt().unwrap(),
         };
 
@@ -1213,41 +1216,28 @@ mod tests {
     fn test_blockgroup_create() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
-        let bg1 = BlockGroup::create(conn, "test", None, "hg19");
+        Sample::get_or_create(conn, "reference");
+        let bg1 = BlockGroup::create(conn, "test", "reference", "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(conn, "sample");
-        let bg2 = BlockGroup::create(conn, "test", Some("sample"), "hg19");
+        let bg2 = BlockGroup::create(conn, "test", "sample", "hg19");
         assert_eq!(bg2.collection_name, "test");
         assert_eq!(bg2.name, "hg19");
-        assert_eq!(bg2.sample_name, Some("sample".to_string()));
+        assert_eq!(bg2.sample_name, "sample".to_string());
         assert_ne!(&bg1.id, &bg2.id);
     }
 
     #[test]
-    fn test_blockgroup_delete_without_sample() {
-        let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test");
-        let bg1 = BlockGroup::create(conn, "test", None, "hg19");
-        let bg2 = BlockGroup::create(conn, "test", None, "hg38");
-
-        BlockGroup::delete(conn, "test", None, &bg1.name);
-
-        let bgs = BlockGroup::all(conn);
-        assert_eq!(bgs.len(), 1);
-        assert_eq!(bgs[0], bg2);
-    }
-
-    #[test]
-    fn test_blockgroup_delete_with_sample() {
+    fn test_blockgroup_delete() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
         Sample::get_or_create(conn, "sample1");
         Sample::get_or_create(conn, "sample2");
-        let bg1 = BlockGroup::create(conn, "test", Some("sample1"), "hg19");
-        let bg2 = BlockGroup::create(conn, "test", Some("sample2"), "hg19");
+        let bg1 = BlockGroup::create(conn, "test", "sample1", "hg19");
+        let bg2 = BlockGroup::create(conn, "test", "sample2", "hg19");
 
-        BlockGroup::delete(conn, "test", bg1.sample_name.as_deref(), &bg1.name);
+        BlockGroup::delete(conn, "test", &bg1.sample_name, &bg1.name);
 
         let bgs = BlockGroup::all(conn);
         assert_eq!(bgs.len(), 1);
@@ -1258,13 +1248,19 @@ mod tests {
     fn test_blockgroup_clone() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
-        let bg1 = BlockGroup::create(conn, "test", None, "hg19");
+        Sample::get_or_create(conn, "reference");
+        let bg1 = BlockGroup::create(conn, "test", "reference", "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(conn, "sample");
-        let bg2 =
-            BlockGroup::get_or_create_sample_block_group(conn, "test", "sample", "hg19", None)
-                .unwrap();
+        let bg2 = BlockGroup::get_or_create_sample_block_group(
+            conn,
+            "test",
+            "sample",
+            "hg19",
+            Some("reference"),
+        )
+        .unwrap();
         assert_eq!(
             BlockGroupEdge::edges_for_block_group(conn, &bg1.id),
             BlockGroupEdge::edges_for_block_group(conn, &bg2)
@@ -1293,9 +1289,14 @@ mod tests {
         );
 
         Sample::get_or_create(conn, "sample2");
-        let _bg2 =
-            BlockGroup::get_or_create_sample_block_group(conn, "test", "sample2", "chr1", None)
-                .unwrap();
+        let _bg2 = BlockGroup::get_or_create_sample_block_group(
+            conn,
+            "test",
+            "sample2",
+            "chr1",
+            Some("test"),
+        )
+        .unwrap();
         assert_eq!(
             Accession::query(
                 conn,
@@ -2282,9 +2283,14 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id =
-            BlockGroup::get_or_create_sample_block_group(conn, "test", "child", "chr1", None)
-                .unwrap();
+        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            Some("test"),
+        )
+        .unwrap();
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2465,9 +2471,14 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id =
-            BlockGroup::get_or_create_sample_block_group(conn, "test", "child", "chr1", None)
-                .unwrap();
+        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            Some("test"),
+        )
+        .unwrap();
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2562,9 +2573,14 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id =
-            BlockGroup::get_or_create_sample_block_group(conn, "test", "child", "chr1", None)
-                .unwrap();
+        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            Some("test"),
+        )
+        .unwrap();
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2677,9 +2693,14 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id =
-            BlockGroup::get_or_create_sample_block_group(conn, "test", "child", "chr1", None)
-                .unwrap();
+        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            Some("test"),
+        )
+        .unwrap();
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2893,7 +2914,7 @@ mod tests {
             let end_block = blocks[blocks.len() - 1];
             let end_node_coordinate = 25 - end_block.start + end_block.sequence_start;
 
-            let block_group2 = BlockGroup::create(conn, "test", None, "chr1.1");
+            let block_group2 = BlockGroup::create(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
                 "test",
@@ -3100,7 +3121,7 @@ mod tests {
             let end_block = blocks[blocks.len() - 1];
             let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
-            let block_group2 = BlockGroup::create(conn, "test", None, "chr1.1");
+            let block_group2 = BlockGroup::create(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
                 "test",
@@ -3364,7 +3385,7 @@ mod tests {
             let end_block = blocks[blocks.len() - 1];
             let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
-            let block_group2 = BlockGroup::create(conn, "test", None, "chr1.1");
+            let block_group2 = BlockGroup::create(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
                 "test",

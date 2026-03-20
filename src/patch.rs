@@ -283,7 +283,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -293,7 +293,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -315,7 +315,7 @@ mod tests {
             &source_context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -325,7 +325,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -363,7 +363,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -376,7 +376,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -411,7 +411,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -421,7 +421,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
 
@@ -450,7 +450,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -460,7 +460,7 @@ mod tests {
             &collection,
             "".to_string(),
             "".to_string(),
-            None,
+            Some("reference"),
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();

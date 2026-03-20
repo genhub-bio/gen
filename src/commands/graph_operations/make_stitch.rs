@@ -27,7 +27,7 @@ pub enum MakeStitchOperationError {
 pub fn make_stitch_operation(
     db_context: &DbContext,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     regions: String,
     new_region: String,
@@ -52,7 +52,7 @@ pub fn make_stitch_operation(
     match make_stitch(
         db_context,
         collection_name,
-        sample_name.as_deref(),
+        sample_name.as_str(),
         &new_sample_name,
         &region_names,
         &new_region,

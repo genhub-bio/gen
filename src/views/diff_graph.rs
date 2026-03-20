@@ -84,10 +84,7 @@ pub fn block_group_label(diff: &BlockGroupDiff) -> String {
         format!(
             "{collection} {sample} {name}",
             collection = bg.collection_name,
-            sample = bg
-                .sample_name
-                .clone()
-                .unwrap_or_else(|| "Reference".to_string()),
+            sample = bg.sample_name.clone(),
             name = bg.name
         )
     } else {

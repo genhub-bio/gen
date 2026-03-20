@@ -22,6 +22,7 @@ pub fn get_connection() -> GraphConnection {
 
 pub fn setup_test_data(conn: &GraphConnection) {
     let collection = Collection::create(conn, "test");
+    Sample::get_or_create(conn, "reference");
     let seq1 = Sequence::new()
         .sequence_type("DNA")
         .sequence("ATCGATCGATCGATCGA")
@@ -48,7 +49,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
             hash = seq2.hash
         )),
     );
-    let block_group = BlockGroup::create(conn, &collection.name, None, "m123");
+    let block_group = BlockGroup::create(conn, &collection.name, "reference", "m123");
 
     let edge_into = Edge::create(
         conn,
@@ -108,11 +109,16 @@ pub fn setup_test_data(conn: &GraphConnection) {
     );
 
     Sample::get_or_create(conn, "foo");
-    let _ = Sample::get_or_create_child(conn, "test", "foo", None);
+    let _ = Sample::get_or_create_child(conn, "test", "foo", Some("reference"));
 
-    let sample_bg_id =
-        BlockGroup::get_or_create_sample_block_group(conn, "test", "foo", "m123", None)
-            .expect("should create child block group");
+    let sample_bg_id = BlockGroup::get_or_create_sample_block_group(
+        conn,
+        "test",
+        "foo",
+        "m123",
+        Some("reference"),
+    )
+    .expect("should create child block group");
     let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
     let tree = sample_path.intervaltree(conn);
 

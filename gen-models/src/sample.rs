@@ -70,12 +70,7 @@ impl Sample {
         stmt.execute([name]).unwrap();
     }
 
-    pub fn get_graph<'a>(
-        conn: &GraphConnection,
-        collection: &str,
-        name: impl Into<Option<&'a str>>,
-    ) -> GenGraph {
-        let name = name.into();
+    pub fn get_graph(conn: &GraphConnection, collection: &str, name: &str) -> GenGraph {
         let block_groups = Sample::get_block_groups(conn, collection, name);
         let mut sample_graph = GenGraph::new();
         for bg in block_groups {
@@ -102,28 +97,22 @@ impl Sample {
         parent_sample: Option<&str>,
     ) -> Sample {
         if let Ok(new_sample) = Sample::create(conn, sample_name) {
-            let bgs = if let Some(parent) = parent_sample {
-                BlockGroup::query(
+            if let Some(parent) = parent_sample {
+                let bgs = BlockGroup::query(
                     conn,
                     "select * from block_groups where collection_name = ?1 AND sample_name = ?2",
                     params!(collection_name, parent),
-                )
-            } else {
-                BlockGroup::query(
-                    conn,
-                    "select * from block_groups where collection_name = ?1 AND sample_name is null;",
-                    params!(collection_name),
-                )
-            };
-            for bg in bgs.iter() {
-                BlockGroup::get_or_create_sample_block_group(
-                    conn,
-                    collection_name,
-                    &new_sample.name,
-                    &bg.name,
-                    parent_sample,
-                )
-                .expect("failed to get or create blockgroup clone.");
+                );
+                for bg in bgs.iter() {
+                    BlockGroup::get_or_create_sample_block_group(
+                        conn,
+                        collection_name,
+                        &new_sample.name,
+                        &bg.name,
+                        parent_sample,
+                    )
+                    .expect("failed to get or create blockgroup clone.");
+                }
             }
             new_sample
         } else {
@@ -136,21 +125,13 @@ impl Sample {
     pub fn get_block_groups(
         conn: &GraphConnection,
         collection_name: &str,
-        sample_name: Option<&str>,
+        sample_name: &str,
     ) -> Vec<BlockGroup> {
-        if let Some(sample) = sample_name {
-            BlockGroup::query(
-                conn,
-                "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-                params![collection_name, sample],
-            )
-        } else {
-            BlockGroup::query(
-                conn,
-                "select * from block_groups where collection_name = ?1 AND sample_name IS NULL;",
-                params![collection_name],
-            )
-        }
+        BlockGroup::query(
+            conn,
+            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
+            params![collection_name, sample_name],
+        )
     }
 
     pub fn get_all_names(conn: &GraphConnection) -> Vec<String> {

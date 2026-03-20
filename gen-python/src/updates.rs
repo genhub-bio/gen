@@ -207,6 +207,7 @@ pub fn update_with_genbank(
     context: PyRef<'_, PyDbContext>,
     filename: String,
     name: Option<String>,
+    sample: String,
     create_missing: bool,
 ) -> PyResult<String> {
     println!("Update with GenBank called");
@@ -230,6 +231,7 @@ pub fn update_with_genbank(
         context,
         &file,
         name.as_ref(),
+        &sample,
         create_missing,
         &gen_models::operations::OperationInfo {
             files: vec![gen_models::operations::OperationFile {

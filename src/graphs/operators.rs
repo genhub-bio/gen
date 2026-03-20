@@ -34,7 +34,7 @@ pub enum GraphOperationError {
 pub fn get_path(
     conn: &GraphConnection,
     collection_name: &str,
-    sample_name: Option<&str>,
+    sample_name: &str,
     region_name: &str,
     backbone: Option<&str>,
 ) -> Result<Path, GraphOperationError> {
@@ -65,7 +65,7 @@ pub fn get_path(
 pub fn derive_chunks(
     context: &DbContext,
     collection_name: &str,
-    parent_sample_name: Option<&str>,
+    parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
     backbone: Option<&str>,
@@ -108,7 +108,7 @@ pub fn derive_chunks(
             let child_block_group = BlockGroup::create(
                 conn,
                 collection_name,
-                Some(new_sample_name),
+                new_sample_name,
                 child_block_group_name.as_str(),
             );
             child_block_group.id
@@ -262,7 +262,7 @@ pub fn derive_chunks(
 fn get_block_group_id(
     conn: &GraphConnection,
     collection_name: &str,
-    parent_sample_name: Option<&str>,
+    parent_sample_name: &str,
     region_name: &str,
 ) -> Result<HashId, GraphOperationError> {
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
@@ -284,7 +284,7 @@ fn get_block_group_id(
 pub fn make_stitch(
     context: &DbContext,
     collection_name: &str,
-    parent_sample_name: Option<&str>,
+    parent_sample_name: &str,
     new_sample_name: &str,
     region_names: &Vec<&str>,
     new_region_name: &str,
@@ -303,12 +303,8 @@ pub fn make_stitch(
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
 
-    let child_block_group = BlockGroup::create(
-        conn,
-        collection_name,
-        Some(new_sample_name),
-        new_region_name,
-    );
+    let child_block_group =
+        BlockGroup::create(conn, collection_name, new_sample_name, new_region_name);
 
     let mut block_group_chunks = vec![];
 
@@ -534,8 +530,8 @@ mod tests {
         derive_chunks(
             &context,
             "test",
-            None,
             "test",
+            "reference",
             "chr1",
             None,
             vec![Range { start: 15, end: 25 }],
@@ -544,7 +540,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, "test", Some("test"));
+        let block_groups = Sample::get_block_groups(conn, "test", "reference");
         let block_group2 = block_groups.iter().find(|x| x.name == "chr1").unwrap();
 
         let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
@@ -576,7 +572,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -584,7 +580,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             collection,
-            None,
+            "reference",
             "test1",
             "m123",
             3,
@@ -596,7 +592,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             collection,
-            Some("test1"),
+            "test1",
             "test2",
             "m123",
             15,
@@ -605,7 +601,7 @@ mod tests {
             false,
         );
 
-        let original_block_groups = Sample::get_block_groups(conn, collection, None);
+        let original_block_groups = Sample::get_block_groups(conn, collection, "reference");
         let original_block_group_id = &original_block_groups[0].id;
         let all_original_sequences =
             BlockGroup::get_all_sequences(conn, original_block_group_id, false);
@@ -614,7 +610,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
 
-        let grandchild_block_groups = Sample::get_block_groups(conn, collection, Some("test2"));
+        let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2");
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, grandchild_block_group_id, false);
@@ -631,7 +627,7 @@ mod tests {
         derive_chunks(
             &context,
             collection,
-            Some("test2"),
+            "test2",
             "test3",
             "m123",
             None,
@@ -646,7 +642,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, Some("test3"));
+        let block_groups = Sample::get_block_groups(conn, collection, "test3");
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
         let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
@@ -691,7 +687,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
@@ -699,7 +695,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             collection,
-            None,
+            "reference",
             "test1",
             "m123",
             3,
@@ -711,7 +707,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             collection,
-            Some("test1"),
+            "test1",
             "test2",
             "m123",
             15,
@@ -720,7 +716,7 @@ mod tests {
             false,
         );
 
-        let original_block_groups = Sample::get_block_groups(conn, collection, None);
+        let original_block_groups = Sample::get_block_groups(conn, collection, "reference");
         let original_block_group_id = &original_block_groups[0].id;
         let all_original_sequences =
             BlockGroup::get_all_sequences(conn, original_block_group_id, false);
@@ -729,7 +725,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
 
-        let grandchild_block_groups = Sample::get_block_groups(conn, collection, Some("test2"));
+        let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2");
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, grandchild_block_group_id, false);
@@ -746,7 +742,7 @@ mod tests {
         derive_chunks(
             &context,
             collection,
-            Some("test2"),
+            "test2",
             "test3",
             "m123",
             None,
@@ -761,7 +757,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, Some("test3"));
+        let block_groups = Sample::get_block_groups(conn, collection, "test3");
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
         let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
@@ -790,14 +786,14 @@ mod tests {
         make_stitch(
             &context,
             collection,
-            Some("test3"),
+            "test3",
             "test4",
             &vec!["m123.2", "m123.3"],
             "m123.stitched",
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, Some("test4"));
+        let block_groups = Sample::get_block_groups(conn, collection, "test4");
         let block_group4 = block_groups
             .iter()
             .find(|x| x.name == "m123.stitched")
@@ -822,14 +818,14 @@ mod tests {
         make_stitch(
             &context,
             collection,
-            Some("test3"),
+            "test3",
             "test5",
             &vec!["m123.3", "m123.2"],
             "m123.reverse-stitched",
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, Some("test5"));
+        let block_groups = Sample::get_block_groups(conn, collection, "test5");
         let block_group5 = block_groups
             .iter()
             .find(|x| x.name == "m123.reverse-stitched")

@@ -21,7 +21,7 @@ use crate::fasta::FastaError;
 pub fn update_with_fasta(
     context: &DbContext,
     collection_name: &str,
-    parent_sample_name: Option<&str>,
+    parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
     start_coordinate: i64,
@@ -44,7 +44,7 @@ pub fn update_with_fasta(
             collection_name,
             new_sample_name,
             &block_group.name,
-            parent_sample_name,
+            Some(parent_sample_name),
         )?;
 
         if block_group.name == region_name {
@@ -241,14 +241,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -295,14 +295,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -313,7 +313,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "other sample",
             "m123",
             2,
@@ -359,14 +359,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -421,14 +421,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -440,7 +440,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             &collection,
-            Some("child sample"),
+            "child sample",
             "grandchild sample",
             "m123",
             4,
@@ -494,14 +494,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -513,7 +513,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             &collection,
-            Some("child sample"),
+            "child sample",
             "grandchild sample",
             "m123",
             1,
@@ -573,14 +573,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -592,7 +592,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             &collection,
-            Some("child sample"),
+            "child sample",
             "grandchild sample",
             "m123",
             1,
@@ -646,14 +646,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -665,7 +665,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             &collection,
-            Some("child sample"),
+            "child sample",
             "grandchild sample",
             "m123",
             6,
@@ -717,14 +717,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,
@@ -736,7 +736,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             &collection,
-            Some("child sample"),
+            "child sample",
             "grandchild sample",
             "m123",
             4,
@@ -787,14 +787,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            "reference",
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            "reference",
             "child sample",
             "m123",
             2,

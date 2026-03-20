@@ -14,10 +14,10 @@ use noodles::{
     core::Position,
 };
 
-pub fn translate_bed<'a, R, W>(
+pub fn translate_bed<R, W>(
     conn: &GraphConnection,
     collection: &str,
-    sample: impl Into<Option<&'a str>>,
+    sample: &str,
     reader: R,
     writer: &mut W,
 ) -> Result<(), Error>
@@ -25,7 +25,6 @@ where
     R: Read,
     W: Write,
 {
-    let sample = sample.into();
     let mut record = bed::Record::default();
     let mut bed_reader = bed::io::reader::Builder::<3>.build_from_reader(reader);
     let mut bed_writer = bed::io::Writer::<3, _>::new(writer);
@@ -95,7 +94,7 @@ mod tests {
         translate_bed(
             &conn,
             &collection,
-            Some("foo"),
+            "foo",
             File::open(bed_path.clone()).expect("should open fixture bed"),
             &mut buffer,
         )
@@ -118,11 +117,11 @@ mod tests {
         translate_bed(
             &conn,
             &collection,
-            None,
+            "reference",
             File::open(bed_path).expect("should open fixture bed"),
             &mut buffer,
         )
-        .expect("should translate bed for default sample");
+        .expect("should translate bed for reference sample");
         let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
         assert_eq!(
             results,

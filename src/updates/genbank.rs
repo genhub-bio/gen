@@ -24,6 +24,7 @@ pub fn update_with_genbank<'a, R>(
     context: &DbContext,
     data: R,
     collection: impl Into<Option<&'a str>>,
+    sample_name: &str,
     create_missing: bool,
     operation_info: &OperationInfo,
 ) -> Result<Operation, GenBankError>
@@ -60,9 +61,10 @@ where
 
                 let block_group = if let Ok(bg) = BlockGroup::get(
                     conn,
-                    "select * from block_groups where collection_name = ?1 AND sample_name is null AND name = ?2",
+                    "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
                     params![
                         Value::from(collection.name.clone()),
+                        Value::from(sample_name.to_string()),
                         Value::from(locus.name.clone())
                     ],
                 ) {
@@ -74,7 +76,7 @@ where
                             contig = &locus.name
                         )));
                     }
-                    BlockGroup::create(conn, &collection.name, None, &locus.name)
+                    BlockGroup::create(conn, &collection.name, sample_name, &locus.name)
                 };
                 let paths = Path::query(
                     conn,
@@ -252,6 +254,7 @@ mod tests {
                 &context,
                 BufReader::new("this is not valid".as_bytes()),
                 None,
+                "reference",
                 false,
                 &OperationInfo {
                     files: vec![OperationFile {
@@ -282,6 +285,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
+            "reference",
             true,
             &OperationInfo {
                 files: vec![OperationFile {
@@ -321,7 +325,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                "reference",
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -338,6 +342,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
+                "reference",
                 true,
                 &OperationInfo {
                     files: vec![OperationFile {
@@ -350,7 +355,7 @@ mod tests {
 
             let f = reader::parse_file(&path).unwrap();
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let block_group_id = BlockGroup::get_id("", None, "insertion");
+            let block_group_id = BlockGroup::get_id("", "reference", "insertion");
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -377,7 +382,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                "reference",
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -394,6 +399,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
+                "reference",
                 true,
                 &OperationInfo {
                     files: vec![OperationFile {
@@ -405,7 +411,7 @@ mod tests {
             );
 
             let f = reader::parse_file(&path).unwrap();
-            let block_group_id = BlockGroup::get_id("", None, "insertion");
+            let block_group_id = BlockGroup::get_id("", "reference", "insertion");
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -418,7 +424,7 @@ mod tests {
 
             // we have a new blockgroup called deletion that uses the same base sequence but
             // has a deletion in it.
-            let block_group_id = BlockGroup::get_id("", None, "deletion");
+            let block_group_id = BlockGroup::get_id("", "reference", "deletion");
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -445,7 +451,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                "reference",
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -462,6 +468,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
+                "reference",
                 false,
                 &OperationInfo {
                     files: vec![OperationFile {

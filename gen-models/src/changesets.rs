@@ -493,7 +493,7 @@ pub fn process_changesetiter(
                 "block_groups" => {
                     let bg_pk = HashId(parse_blob(item, pk_column));
                     let collection = parse_string(item, 1);
-                    let sample_name = parse_maybe_string(item, 2);
+                    let sample_name = parse_string(item, 2);
                     let name = parse_string(item, 3);
                     let created_on = parse_number(item, 4);
 
@@ -509,9 +509,7 @@ pub fn process_changesetiter(
                     if !created_collections_set.contains(&collection) {
                         previous_collections.insert(collection);
                     }
-                    if let Some(sample_name) = sample_name
-                        && !created_samples_set.contains(&sample_name)
-                    {
+                    if !created_samples_set.contains(&sample_name) {
                         previous_samples.insert(sample_name);
                     }
                 }
@@ -802,8 +800,7 @@ pub fn apply_changeset(
     }
 
     for bg in dependencies.block_group.iter() {
-        let sample_name = bg.sample_name.as_ref().map(|v| v as &str);
-        BlockGroup::create(conn, &bg.collection_name, sample_name, &bg.name);
+        BlockGroup::create(conn, &bg.collection_name, &bg.sample_name, &bg.name);
     }
 
     for node in dependencies.nodes.iter() {
@@ -851,12 +848,7 @@ pub fn apply_changeset(
         NewSequence::from(sequence).save(conn);
     }
     for bg in &changeset.block_groups {
-        BlockGroup::create(
-            conn,
-            &bg.collection_name,
-            bg.sample_name.as_deref(),
-            &bg.name,
-        );
+        BlockGroup::create(conn, &bg.collection_name, &bg.sample_name, &bg.name);
     }
 
     for node in &changeset.nodes {
@@ -1166,7 +1158,7 @@ mod tests {
             block_groups: vec![BlockGroup {
                 id: HashId::pad_str(1),
                 collection_name: "test_collection".to_string(),
-                sample_name: Some("test_sample".to_string()),
+                sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: Utc::now().timestamp_nanos_opt().unwrap(),
             }],
@@ -1324,7 +1316,7 @@ mod tests {
             block_groups: vec![BlockGroup {
                 id: HashId::pad_str(1),
                 collection_name: "test_collection".to_string(),
-                sample_name: Some("test_sample".to_string()),
+                sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: Utc::now().timestamp_nanos_opt().unwrap(),
             }],
@@ -1489,7 +1481,7 @@ mod tests {
             let mut session = start_operation(conn);
             // make a blockgroup with an edge from our parent blockgroup
             let _ = Sample::create(conn, "new").unwrap();
-            let new_bg = BlockGroup::create(conn, "test", Some("new"), "new-bg");
+            let new_bg = BlockGroup::create(conn, "test", "new", "new-bg");
             let shared_edge = old_edges[0].edge.clone();
             BlockGroupEdge::bulk_create(
                 conn,

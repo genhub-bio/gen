@@ -235,15 +235,10 @@ impl Path {
     pub fn query_for_collection_and_sample(
         conn: &GraphConnection,
         collection_name: &str,
-        sample_name: Option<String>,
+        sample_name: String,
     ) -> Vec<Path> {
-        if let Some(actual_sample_name) = sample_name {
-            let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
-            Path::query(conn, query, params![collection_name, actual_sample_name])
-        } else {
-            let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name IS NULL";
-            Path::query(conn, query, params![collection_name])
-        }
+        let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
+        Path::query(conn, query, params![collection_name, sample_name])
     }
 
     pub fn sequence(&self, conn: &GraphConnection) -> String {
@@ -890,7 +885,8 @@ mod tests {
     fn test_path_delete() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
 
         // Create first path
         let sequence1 = Sequence::new()
@@ -984,7 +980,8 @@ mod tests {
     fn test_gets_sequence() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1071,7 +1068,8 @@ mod tests {
     fn test_gets_sequence_with_rc() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1165,7 +1163,8 @@ mod tests {
     fn test_intervaltree() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1284,7 +1283,8 @@ mod tests {
         // sequence is correctly generated
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1409,7 +1409,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1471,7 +1472,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1568,7 +1570,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1683,7 +1686,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1800,7 +1804,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -1916,7 +1921,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2020,7 +2026,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2152,7 +2159,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2283,7 +2291,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2394,7 +2403,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2459,7 +2469,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2562,7 +2573,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2680,7 +2692,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2798,7 +2811,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -2916,7 +2930,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3048,7 +3063,8 @@ mod tests {
         */
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3152,7 +3168,8 @@ mod tests {
     fn test_new_path_with() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3284,7 +3301,8 @@ mod tests {
     fn test_new_path_with_deletion() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3365,7 +3383,8 @@ mod tests {
     fn test_duplicate_edge_warning() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3411,7 +3430,8 @@ mod tests {
     fn test_edges_must_be_in_path_block_group() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3446,7 +3466,8 @@ mod tests {
     fn test_consecutive_edges_must_share_a_node() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3503,7 +3524,8 @@ mod tests {
     fn test_consecutive_edges_must_share_the_same_strand() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3555,7 +3577,8 @@ mod tests {
     fn test_consecutive_edges_must_have_different_coordinates_on_a_node() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3605,7 +3628,8 @@ mod tests {
     fn test_node_blocks_for_range() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -3748,7 +3772,8 @@ mod tests {
     fn test_node_blocks_for_range_with_node_parts() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
-        let block_group = BlockGroup::create(conn, "test collection", None, "test block group");
+        let block_group =
+            BlockGroup::create(conn, "test collection", "test-sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
