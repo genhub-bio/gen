@@ -8,8 +8,8 @@ use std::{
 use gen_core::{HashId, is_terminal, strand::Strand};
 use gen_graph::{GenGraph, project_path};
 use gen_models::{
-    block_group::BlockGroup, block_group_edge::BlockGroupEdge, collection::Collection,
-    db::GraphConnection, edge::Edge, path::Path, sample::Sample,
+    block_group::BlockGroup, block_group_edge::BlockGroupEdge, db::GraphConnection, edge::Edge,
+    path::Path, sample::Sample,
 };
 use itertools::Itertools;
 use thiserror::Error;
@@ -20,36 +20,35 @@ use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_s
 pub enum GfaExportError {
     #[error("I/O error while exporting GFA: {0}")]
     Io(#[from] std::io::Error),
+    #[error("No block groups found for collection {collection_name} and sample {sample_name}")]
+    MissingBlockGroups {
+        collection_name: String,
+        sample_name: String,
+    },
 }
 
 pub fn export_gfa(
     conn: &GraphConnection,
     collection_name: &str,
     filename: &PathBuf,
-    sample_name: Option<String>,
+    sample_name: &str,
     max_size: impl Into<Option<i64>>,
 ) -> Result<(), GfaExportError> {
     let chunk_size = max_size.into().unwrap_or(i64::MAX);
     // General note about how we encode segment IDs.  The node ID and the start coordinate in the
     // sequence are all that's needed, because the end coordinate can be inferred from the length of
     // the segment's sequence.  So the segment ID is of the form <node ID>.<start coordinate>
-    let block_groups = Collection::get_block_groups(conn, collection_name);
-
     let mut edge_set = HashSet::new();
-    if let Some(sample) = sample_name.as_deref() {
-        let sample_block_groups = Sample::get_block_groups(conn, collection_name, sample);
-        if sample_block_groups.is_empty() {
-            panic!("No block groups found for collection {collection_name} and sample {sample}");
-        }
-        for block_group in sample_block_groups {
-            let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
-            edge_set.extend(block_group_edges);
-        }
-    } else {
-        for block_group in block_groups {
-            let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
-            edge_set.extend(block_group_edges);
-        }
+    let sample_block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
+    if sample_block_groups.is_empty() {
+        return Err(GfaExportError::MissingBlockGroups {
+            collection_name: collection_name.to_string(),
+            sample_name: sample_name.to_string(),
+        });
+    }
+    for block_group in sample_block_groups {
+        let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        edge_set.extend(block_group_edges);
     }
 
     let edges = edge_set.into_iter().collect::<Vec<_>>();
@@ -197,15 +196,11 @@ pub fn export_gfa(
 fn get_paths(
     conn: &GraphConnection,
     collection_name: &str,
-    sample_name: Option<String>,
+    sample_name: &str,
     graph: &GenGraph,
     split_segments: &HashMap<HashId, Vec<(i64, i64)>>,
 ) -> HashMap<String, Vec<(String, Strand)>> {
-    let paths = if let Some(sample_name) = sample_name {
-        Path::query_for_collection_and_sample(conn, collection_name, sample_name)
-    } else {
-        Path::query_for_collection(conn, collection_name)
-    };
+    let paths = Path::query_for_collection_and_sample(conn, collection_name, sample_name);
 
     let mut path_links: HashMap<String, Vec<(String, Strand)>> = HashMap::new();
 
@@ -437,7 +432,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, collection_name, &gfa_path, None, None).unwrap();
+        export_gfa(conn, collection_name, &gfa_path, "reference", None).unwrap();
         // NOTE: Not directly checking file contents because segments are written in random order
         let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
 
@@ -454,6 +449,28 @@ mod tests {
     }
 
     #[test]
+    fn test_errors_when_sample_has_no_block_groups() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+
+        let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
+        let gfa_path = PathBuf::from(temp_dir.path()).join("missing.gfa");
+
+        let result = export_gfa(conn, "missing", &gfa_path, "reference", None);
+
+        assert!(matches!(
+            result,
+            Err(GfaExportError::MissingBlockGroups {
+                collection_name,
+                sample_name,
+            }) if collection_name == "missing" && sample_name == "reference"
+        ));
+    }
+
+    #[test]
     fn test_splits_nodes() {
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -467,7 +484,7 @@ mod tests {
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("split.gfa");
 
-        export_gfa(conn, "test", &gfa_path, None, 5).unwrap();
+        export_gfa(conn, "test", &gfa_path, "test", 5).unwrap();
 
         let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
 
@@ -520,7 +537,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
+        export_gfa(conn, &collection_name, &gfa_path, "reference", None).unwrap();
         let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
@@ -551,7 +568,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
+        export_gfa(conn, &collection_name, &gfa_path, "reference", None).unwrap();
         let _ = import_gfa(&context, &gfa_path, "anderson promoters 2", "reference");
 
         let block_group2 = Collection::get_block_groups(conn, "anderson promoters 2")
@@ -582,7 +599,7 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, None, None).unwrap();
+        export_gfa(conn, &collection_name, &gfa_path, "reference", None).unwrap();
         let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
@@ -672,7 +689,7 @@ mod tests {
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
-        export_gfa(conn, "test", &gfa_path, None, None).unwrap();
+        export_gfa(conn, "test", &gfa_path, "test", None).unwrap();
         let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")

@@ -637,37 +637,21 @@ impl BlockGroup {
     ) -> Result<Vec<AugmentedEdgeData>, ChangeError> {
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(change.start).map(|x| &x.value).collect();
-        let previous_start_blocks: Vec<&NodeIntervalBlock> = if change.start > 0 {
-            tree.query_point(change.start - 1)
-                .map(|x| &x.value)
-                .collect()
+        assert_eq!(start_blocks.len(), 1);
+        // NOTE: This may not be used but needs to be initialized here instead of inside the if
+        // statement that uses it, so that the borrow checker is happy
+        let previous_start_blocks: Vec<&NodeIntervalBlock> = tree
+            .query_point(change.start - 1)
+            .map(|x| &x.value)
+            .collect();
+        assert_eq!(previous_start_blocks.len(), 1);
+        let start_block = if start_blocks[0].start == change.start {
+            // First part of this block will be replaced/deleted, need to get previous block to add
+            // edge including it
+            previous_start_blocks[0]
         } else {
-            vec![]
+            start_blocks[0]
         };
-        let start_block =
-            if start_blocks.len() == 1 && start_blocks[0].start == change.start && change.start > 0
-            {
-                // First part of this block will be replaced/deleted, need to get previous block to add
-                // edge including it
-                assert_eq!(previous_start_blocks.len(), 1);
-                previous_start_blocks[0]
-            } else if start_blocks.len() == 1 {
-                start_blocks[0]
-            } else if start_blocks.is_empty()
-                && change.start > 0
-                && previous_start_blocks.len() == 1
-                && previous_start_blocks[0].end == change.start
-            {
-                // The flattened graph interval tree represents terminal nodes as zero-length spans,
-                // so a change that starts exactly at the path end needs to anchor to the last real
-                // block instead.
-                previous_start_blocks[0]
-            } else {
-                return Err(ChangeError::OutOfBounds(format!(
-                    "Invalid change specified. Coordinate {pos} is outside the path range.",
-                    pos = change.start
-                )));
-            };
 
         // Ensure the change is within the path bounds. The logic here is a bit backwards, where
         // we check if the start is before the start block's end and the end is before the end
@@ -685,37 +669,8 @@ impl BlockGroup {
 
         let end_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(change.end).map(|x| &x.value).collect();
-        let previous_end_blocks: Vec<&NodeIntervalBlock> = if change.end > 0 {
-            tree.query_point(change.end - 1).map(|x| &x.value).collect()
-        } else {
-            vec![]
-        };
-        let end_block_storage;
-        let end_block = if end_blocks.len() == 1 {
-            end_blocks[0]
-        } else if end_blocks.is_empty()
-            && previous_end_blocks.len() == 1
-            && previous_end_blocks[0].end == change.end
-        {
-            // The flattened graph interval tree omits terminal nodes from point lookups because
-            // they are stored as zero-length spans. For changes ending exactly at the path end,
-            // synthesize the terminal end block here.
-            end_block_storage = NodeIntervalBlock {
-                block_id: -2,
-                node_id: PATH_END_NODE_ID,
-                start: change.end,
-                end: change.end,
-                sequence_start: 0,
-                sequence_end: 0,
-                strand: Strand::Forward,
-            };
-            &end_block_storage
-        } else {
-            return Err(ChangeError::OutOfBounds(format!(
-                "Invalid change specified. Coordinate {pos} is outside the path range.",
-                pos = change.end
-            )));
-        };
+        assert_eq!(end_blocks.len(), 1);
+        let end_block = end_blocks[0];
 
         if is_end_node(end_block.node_id) && change.end > end_block.start {
             return Err(ChangeError::OutOfBounds(format!(

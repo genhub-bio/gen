@@ -112,7 +112,7 @@ pub struct CollectionExplorerData {
     /// The final segment of the current collection name. For example,
     /// if the full collection is "/foo/bar", this would be "bar".
     pub current_collection: String,
-    /// The block groups in the *entire* collection that are not associated with a sample
+    /// The block groups in the *entire* collection that have is_reference set
     pub reference_block_groups: Vec<(gen_core::HashId, String)>,
     /// The samples in the entire collection
     pub collection_samples: Vec<String>,

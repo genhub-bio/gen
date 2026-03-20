@@ -44,7 +44,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         conn,
         name,
         &PathBuf::from(cmd.path),
-        Some(cmd.sample.clone()),
+        cmd.sample.as_str(),
         cmd.node_max,
     )?;
 

@@ -210,17 +210,12 @@ pub fn view_block_group(
     let mut block_group_id: Option<gen_core::HashId> = None;
     let mut focus_zone = FocusZone::Sidebar;
 
-    if let Some(name) = name {
-        // Get the block group for two cases: with and without a sample
-        let block_group = if let Some(ref sample_name) = sample_name {
-            BlockGroup::get(
-                conn,
-                "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                params![collection_name, sample_name, name],
-            )
-        } else {
-            panic!("sample name is required to view a specific block group")
-        };
+    if let (Some(name), Some(sample_name)) = (name, sample_name.as_ref()) {
+        let block_group = BlockGroup::get(
+            conn,
+            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+            params![collection_name, sample_name, name],
+        );
 
         if block_group.is_err() {
             panic!(

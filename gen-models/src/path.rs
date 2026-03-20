@@ -235,7 +235,7 @@ impl Path {
     pub fn query_for_collection_and_sample(
         conn: &GraphConnection,
         collection_name: &str,
-        sample_name: String,
+        sample_name: &str,
     ) -> Vec<Path> {
         let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
         Path::query(conn, query, params![collection_name, sample_name])

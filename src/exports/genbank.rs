@@ -4,10 +4,7 @@ use std::{collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, 
 use gb_io::{self, QualifierKey, seq::Location};
 use gen_core::{is_terminal, path::PathBlock};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
-use gen_models::{
-    block_group::BlockGroup, collection::Collection, db::GraphConnection, node::Node,
-    sample::Sample,
-};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, sample::Sample};
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};
 use rusqlite::{self, Connection};
@@ -124,7 +121,7 @@ fn get_path_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode>
 pub fn export_genbank(
     conn: &GraphConnection,
     collection_name: &str,
-    sample_name: Option<&str>,
+    sample_name: &str,
     filename: &PathBuf,
 ) -> Result<(), GenbankExportError> {
     // GenBank don't really support graph like structures. Programs like Geneious use features to
@@ -141,11 +138,7 @@ pub fn export_genbank(
     // sequence returned. Once again, we assume there is only one graph bubble when we encounter
     // them, so there is only 1 change to represent. We do not guard against this being an incorrect
     // assumption.
-    let block_groups = if let Some(sample_name) = sample_name {
-        Sample::get_block_groups(conn, collection_name, sample_name)
-    } else {
-        Collection::get_block_groups(conn, collection_name)
-    };
+    let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
 
     let file = File::create(filename)?;
     let mut writer = gb_io::writer::SeqWriter::new(file);
@@ -402,7 +395,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename).unwrap();
+        export_genbank(conn, "", "reference", &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
@@ -433,7 +426,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename).unwrap();
+        export_genbank(conn, "", "reference", &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
@@ -464,7 +457,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename).unwrap();
+        export_genbank(conn, "", "reference", &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
