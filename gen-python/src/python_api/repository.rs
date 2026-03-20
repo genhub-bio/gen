@@ -238,7 +238,7 @@ impl PyRepository {
     /// Args:
     ///     name: The name of the BlockGroup
     ///     collection_name: The name of the collection
-    ///     sample_name: Optional name of the sample
+    ///     sample_name: Name of the sample
     ///
     /// Returns:
     ///     A PyBlockGroup instance
@@ -246,15 +246,10 @@ impl PyRepository {
         &self,
         name: String,
         collection_name: String,
-        sample_name: Option<String>,
+        sample_name: String,
     ) -> PyResult<PyBlockGroup> {
         self.with_connection(|conn| {
-            let block_group = BlockGroup::create(
-                conn,
-                &collection_name,
-                sample_name.as_deref(), // Option<String> to Option<&str>
-                &name,
-            );
+            let block_group = BlockGroup::create(conn, &collection_name, &sample_name, &name);
 
             Ok(PyBlockGroup {
                 id: block_group.id,

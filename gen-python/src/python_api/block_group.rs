@@ -11,7 +11,7 @@ pub struct PyBlockGroup {
     #[pyo3(get)]
     pub collection_name: String,
     #[pyo3(get)]
-    pub sample_name: Option<String>,
+    pub sample_name: String,
     #[pyo3(get)]
     pub name: String,
 }
@@ -19,12 +19,7 @@ pub struct PyBlockGroup {
 #[pymethods]
 impl PyBlockGroup {
     #[new]
-    pub fn new(
-        id: HashId,
-        collection_name: String,
-        name: String,
-        sample_name: Option<String>,
-    ) -> Self {
+    pub fn new(id: HashId, collection_name: String, name: String, sample_name: String) -> Self {
         PyBlockGroup {
             id,
             collection_name,
@@ -40,7 +35,7 @@ impl PyBlockGroup {
 
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "BlockGroup({}, {}, {:?}, {})",
+            "BlockGroup({}, {}, {}, {})",
             self.id, self.collection_name, self.sample_name, self.name
         ))
     }
@@ -51,11 +46,9 @@ impl PyBlockGroup {
         hash = hash
             .wrapping_mul(31)
             .wrapping_add(self.collection_name.len() as isize);
-        if let Some(ref sample_name) = self.sample_name {
-            hash = hash
-                .wrapping_mul(31)
-                .wrapping_add(sample_name.len() as isize);
-        }
+        hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(self.sample_name.len() as isize);
         hash = hash.wrapping_mul(31).wrapping_add(self.name.len() as isize);
         Ok(hash)
     }

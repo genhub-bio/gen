@@ -14,7 +14,7 @@ pub fn import_fasta(
     context: PyRef<'_, PyDbContext>,
     filename: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     shallow: bool,
 ) -> PyResult<String> {
     println!("Fasta import called");
@@ -32,13 +32,7 @@ pub fn import_fasta(
 
     let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
 
-    match r#gen::imports::fasta::import_fasta(
-        context,
-        &filename,
-        &name,
-        sample.clone().as_deref(),
-        shallow,
-    ) {
+    match r#gen::imports::fasta::import_fasta(context, &filename, &name, &sample, shallow) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
@@ -62,7 +56,7 @@ pub fn import_gfa(
     context: PyRef<'_, PyDbContext>,
     filename: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
 ) -> PyResult<String> {
     println!("GFA import called");
 
@@ -79,12 +73,7 @@ pub fn import_gfa(
 
     let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
 
-    match r#gen::imports::gfa::import_gfa(
-        context,
-        &PathBuf::from(filename),
-        &name,
-        sample.as_deref(),
-    ) {
+    match r#gen::imports::gfa::import_gfa(context, &PathBuf::from(filename), &name, &sample) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
@@ -108,7 +97,7 @@ pub fn import_genbank(
     context: PyRef<'_, PyDbContext>,
     filename: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
 ) -> PyResult<String> {
     println!("GenBank import called");
 
@@ -139,7 +128,7 @@ pub fn import_genbank(
         context,
         &mut reader,
         name.as_ref(),
-        sample.as_deref(),
+        &sample,
         OperationInfo {
             files: vec![OperationFile {
                 file_path: filename.clone(),
@@ -168,7 +157,7 @@ pub fn import_library(
     parts: String,
     library: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
 ) -> PyResult<String> {
     println!("Library import called");
 
@@ -188,7 +177,7 @@ pub fn import_library(
     match r#gen::imports::library::import_library(
         context,
         &name,
-        sample.as_deref(),
+        &sample,
         &parts,
         &library,
         &library_name,

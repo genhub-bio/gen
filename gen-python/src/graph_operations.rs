@@ -6,7 +6,7 @@ use crate::PyDbContext;
 pub fn derive_chunks(
     context: PyRef<'_, PyDbContext>,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     region: String,
     backbone: Option<String>,
@@ -36,7 +36,7 @@ pub fn derive_chunks(
 pub fn derive_subgraph(
     context: PyRef<'_, PyDbContext>,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     region: String,
     backbone: Option<String>,
@@ -62,7 +62,7 @@ pub fn derive_subgraph(
 pub fn make_stitch(
     context: PyRef<'_, PyDbContext>,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     regions: String,
     new_region: String,

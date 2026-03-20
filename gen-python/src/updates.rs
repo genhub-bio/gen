@@ -12,7 +12,7 @@ pub fn update_with_fasta(
     context: PyRef<'_, PyDbContext>,
     filename: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     region_name: String,
     start: i64,
@@ -38,7 +38,7 @@ pub fn update_with_fasta(
     match r#gen::updates::fasta::update_with_fasta(
         context,
         name.as_str(),
-        sample.clone().as_deref(),
+        &sample,
         &new_sample,
         &region_name,
         start,
@@ -69,7 +69,7 @@ pub fn update_with_gfa(
     context: PyRef<'_, PyDbContext>,
     filename: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
 ) -> PyResult<String> {
     println!("Update with GFA called");
@@ -87,13 +87,7 @@ pub fn update_with_gfa(
 
     let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
 
-    match r#gen::updates::gfa::update_with_gfa(
-        context,
-        &name,
-        sample.as_deref(),
-        &new_sample,
-        &filename,
-    ) {
+    match r#gen::updates::gfa::update_with_gfa(context, &name, &sample, &new_sample, &filename) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
@@ -113,7 +107,7 @@ pub fn update_with_gaf(
     filename: String,
     csv: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     parent_sample: Option<String>,
 ) -> PyResult<String> {
     println!("Update with GAF called");
@@ -136,7 +130,7 @@ pub fn update_with_gaf(
         &filename,
         &csv,
         &name,
-        sample.as_deref(),
+        &sample,
         parent_sample.as_deref(),
     ) {
         conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
@@ -179,7 +173,7 @@ pub fn update_with_vcf(
         &filename,
         &name,
         genotype.unwrap_or_default(),
-        sample.unwrap_or_default(),
+        sample.as_deref(),
         coordinate_frame.as_deref(),
     ) {
         Ok(_) => {
@@ -262,7 +256,7 @@ pub fn update_with_genbank(
 pub fn update_with_library(
     context: PyRef<'_, PyDbContext>,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     path_name: String,
     start: i64,
@@ -288,7 +282,7 @@ pub fn update_with_library(
     if let Err(err) = r#gen::updates::library::update_with_library(
         context,
         &name,
-        sample.as_deref(),
+        &sample,
         &new_sample,
         &path_name,
         start,
@@ -316,7 +310,7 @@ pub fn update_with_sequence(
     context: PyRef<'_, PyDbContext>,
     sequence: String,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     region_name: String,
     start: i64,
@@ -341,7 +335,7 @@ pub fn update_with_sequence(
     if let Err(err) = r#gen::updates::sequence::update_with_sequence(
         context,
         &name,
-        sample.as_deref(),
+        &sample,
         &new_sample,
         &region_name,
         start,
