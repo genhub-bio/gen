@@ -588,93 +588,11 @@ pub fn view_block_group(
             last_selected_block_group_id = explorer_state.selected_block_group_id;
         }
 
-        // Update the graph controller if a new block group was selected
-        if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
-            // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id);
-            // Update the graph controller
-            graph_controller = create_gen_graph_controller(&block_graph);
-            current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
-            let selected_sample = current_block_group
-                .as_ref()
-                .and_then(|bg| bg.sample_name.as_deref());
-            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
-                explorer.force_reload(&mut explorer_state);
-                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
-                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
-            }
-            annotation_file_tracks.clear();
-            annotation_file_index_available.clear();
-            annotation_file_loaded_windows.clear();
-            annotation_group_tracks.clear();
-            if let Some(bg) = current_block_group.as_ref() {
-                let node_filter: std::collections::HashSet<HashId> =
-                    block_graph.nodes().map(|node| node.node_id).collect();
-                let visible_node_ranges = visible_ranges_by_node(&block_graph);
-                let query_window =
-                    current_view_coordinate_window(&graph_controller).map(expand_query_window);
-                for entry in explorer.data.annotation_groups.iter() {
-                    if explorer_state.is_annotation_group_active(&entry.name) {
-                        let spans = match load_annotations_for_group(
-                            conn,
-                            &entry.name,
-                            &visible_node_ranges,
-                        ) {
-                            Ok(spans) => spans,
-                            Err(err) => {
-                                messages.push_warn(format!(
-                                    "Failed to load annotations for group {}: {err}",
-                                    entry.name
-                                ));
-                                Vec::new()
-                            }
-                        };
-                        if spans.is_empty() {
-                            continue;
-                        }
-                        annotation_group_tracks.insert(
-                            entry.name.clone(),
-                            AnnotationTrack::new(entry.name.clone(), spans),
-                        );
-                    }
-                }
-                for entry in explorer.data.annotation_files.iter() {
-                    let id = entry.file_addition.id;
-                    if !explorer_state.is_annotation_file_active(&id) {
-                        continue;
-                    }
-                    let request = AnnotationFileTrackRequest {
-                        conn,
-                        workspace,
-                        collection_name,
-                        sample_name: bg.sample_name.as_deref(),
-                        block_group_name: Some(&bg.name),
-                        query_window,
-                        node_filter: &node_filter,
-                        entry,
-                    };
-                    match load_annotation_file_track(&request) {
-                        Ok(load) => {
-                            annotation_file_tracks.insert(id, load.track);
-                            if let Some(window) = load.loaded_window {
-                                annotation_file_loaded_windows.insert(id, window);
-                            }
-                            annotation_file_index_available.insert(id, load.index_available);
-                        }
-                        Err(err) => {
-                            messages.push_warn(format!("{err}"));
-                            explorer_state.deactivate_annotation_file(&id);
-                        }
-                    }
-                }
-            }
-
-            is_loading = false;
-        }
-
-        // Refresh explorer data and force reload on change
+        // Refresh explorer data and force reload on change.
+        // Skipped when loading — we want the draw to happen first so the loading
+        // indicator is shown without any extra latency.
         // I do this every REFRESH_INTERVAL seconds.
-        if last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
+        if !is_loading && last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
             let selected_sample = current_block_group
                 .as_ref()
                 .and_then(|bg| bg.sample_name.as_deref());
@@ -913,9 +831,8 @@ pub fn view_block_group(
 
             // Canvas area
             if is_loading {
-                // Draw loading message in canvas area
                 let loading_text = Text::styled(
-                    "Loading...",
+                    "Loading…",
                     Style::default()
                         .fg(get_theme_color("text").unwrap())
                         .add_modifier(Modifier::BOLD),
@@ -1094,6 +1011,92 @@ pub fn view_block_group(
                 tui_layout_change = false;
             }
         })?;
+
+        // Update the graph controller if a new block group was selected.
+        // This runs after terminal.draw() so the loading indicator is visible
+        // for the full duration of the blocking DB work.
+        if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
+            // Create a new graph for the selected block group
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            // Update the graph controller
+            graph_controller = create_gen_graph_controller(&block_graph);
+            current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
+            let selected_sample = current_block_group
+                .as_ref()
+                .and_then(|bg| bg.sample_name.as_deref());
+            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
+                explorer.force_reload(&mut explorer_state);
+                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
+            }
+            annotation_file_tracks.clear();
+            annotation_file_index_available.clear();
+            annotation_file_loaded_windows.clear();
+            annotation_group_tracks.clear();
+            if let Some(bg) = current_block_group.as_ref() {
+                let node_filter: std::collections::HashSet<HashId> =
+                    block_graph.nodes().map(|node| node.node_id).collect();
+                let visible_node_ranges = visible_ranges_by_node(&block_graph);
+                let query_window =
+                    current_view_coordinate_window(&graph_controller).map(expand_query_window);
+                for entry in explorer.data.annotation_groups.iter() {
+                    if explorer_state.is_annotation_group_active(&entry.name) {
+                        let spans = match load_annotations_for_group(
+                            conn,
+                            &entry.name,
+                            &visible_node_ranges,
+                        ) {
+                            Ok(spans) => spans,
+                            Err(err) => {
+                                messages.push_warn(format!(
+                                    "Failed to load annotations for group {}: {err}",
+                                    entry.name
+                                ));
+                                Vec::new()
+                            }
+                        };
+                        if spans.is_empty() {
+                            continue;
+                        }
+                        annotation_group_tracks.insert(
+                            entry.name.clone(),
+                            AnnotationTrack::new(entry.name.clone(), spans),
+                        );
+                    }
+                }
+                for entry in explorer.data.annotation_files.iter() {
+                    let id = entry.file_addition.id;
+                    if !explorer_state.is_annotation_file_active(&id) {
+                        continue;
+                    }
+                    let request = AnnotationFileTrackRequest {
+                        conn,
+                        workspace,
+                        collection_name,
+                        sample_name: bg.sample_name.as_deref(),
+                        block_group_name: Some(&bg.name),
+                        query_window,
+                        node_filter: &node_filter,
+                        entry,
+                    };
+                    match load_annotation_file_track(&request) {
+                        Ok(load) => {
+                            annotation_file_tracks.insert(id, load.track);
+                            if let Some(window) = load.loaded_window {
+                                annotation_file_loaded_windows.insert(id, window);
+                            }
+                            annotation_file_index_available.insert(id, load.index_available);
+                        }
+                        Err(err) => {
+                            messages.push_warn(format!("{err}"));
+                            explorer_state.deactivate_annotation_file(&id);
+                        }
+                    }
+                }
+            }
+
+            is_loading = false;
+        }
 
         // If an animation is running, wake up after tick_rate to advance it.
         // If the display is idle, block indefinitely — the next input event will wake us.
