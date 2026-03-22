@@ -462,6 +462,11 @@ where
 
     /// Increase vertex spacing and refresh layouts
     pub fn disperse(&mut self) {
+        // Cap at ~5 zoom levels above default to prevent runaway layout recomputes
+        const MAX_VERTEX_SPACING: f64 = VERTEX_SPACING_DEFAULT + 10.0;
+        if self.partition_controller.get_vertex_spacing() >= MAX_VERTEX_SPACING {
+            return;
+        }
         // Increase vertex spacing
         self.partition_controller.adjust_vertex_spacing(2.0);
         trace!(
@@ -901,6 +906,13 @@ where
     pub fn update_animations(&mut self, delta: std::time::Duration) {
         self.viewport_state
             .update(delta, &mut self.cursor, &self.viewport_graph);
+    }
+
+    /// Returns true if any animation is currently in flight (camera easing).
+    /// Callers can use this to decide whether to redraw at a fixed rate or block
+    /// indefinitely waiting for the next input event.
+    pub fn is_animating(&self) -> bool {
+        self.viewport_state.camera_anim.is_some()
     }
 
     /// Enable cursor rendering
