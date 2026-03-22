@@ -10,7 +10,7 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, trait
 use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
 use ratatui::{
-    layout::{Constraint, Direction, HorizontalAlignment, Layout, Rect},
+    layout::{Constraint, Direction, HorizontalAlignment, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Padding, Paragraph, Wrap},
@@ -288,6 +288,7 @@ pub fn view_block_group(
     // Mouse drag state
     let mut mouse_last_pos: Option<(u16, u16)> = None;
     let mut mouse_is_dragging = false;
+    let mut last_sidebar_area = Rect::default();
 
     // Track the last selected block group to detect changes
     let mut last_selected_block_group_id = block_group_id;
@@ -528,6 +529,20 @@ pub fn view_block_group(
                                 }
                             }
                         }
+                    }
+                }
+                event::Event::Mouse(mouse)
+                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                        && last_sidebar_area.contains(Position {
+                            x: mouse.column,
+                            y: mouse.row,
+                        }) =>
+                {
+                    focus_zone = FocusZone::Sidebar;
+                    explorer.handle_mouse(&mut explorer_state, mouse.column, mouse.row);
+                    if let Some(requested_zone) = explorer_state.focus_change_requested {
+                        focus_zone = requested_zone;
+                        explorer_state.focus_change_requested = None;
                     }
                 }
                 event::Event::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
@@ -794,6 +809,7 @@ pub fn view_block_group(
                 .constraints(vec![Constraint::Percentage(20), Constraint::Percentage(80)])
                 .split(outer_layout[0]);
             let sidebar_area = sidebar_layout[0];
+            last_sidebar_area = sidebar_area;
             let viewer_root_area = sidebar_layout[1];
 
             // Split viewer area between graph and annotation panels
