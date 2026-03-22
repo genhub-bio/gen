@@ -907,6 +907,109 @@ where
     pub fn show_cursor(&mut self) {
         self.cursor.set_visibility(true);
     }
+
+    // ==================== Mouse / Panning Mode ====================
+
+    /// Returns true when panning mode is active (cursor hidden, camera free of cursor-following).
+    pub fn is_panning_mode(&self) -> bool {
+        self.viewport_state.panning
+    }
+
+    /// Enter panning mode: hide the cursor and disable multizone camera-following.
+    /// The cursor still tracks the closest node so zoom-anchoring continues to work.
+    pub fn enter_panning_mode(&mut self) {
+        self.viewport_state.panning = true;
+        self.cursor.set_visibility(false);
+    }
+
+    /// Exit panning mode: show the cursor and re-enable multizone camera-following.
+    pub fn exit_panning_mode(&mut self) {
+        self.viewport_state.stop_panning();
+        self.cursor.set_visibility(true);
+    }
+
+    /// Pan the camera by a drag delta expressed in terminal coordinates.
+    ///
+    /// The Y-axis flip (world Y+ is up, terminal Y+ is down) is handled here so
+    /// callers can pass raw terminal deltas directly.
+    ///
+    /// Panning is applied immediately with no animation so the canvas tracks the
+    /// pointer without lag.
+    pub fn handle_pan_terminal(&mut self, terminal_dx: i16, terminal_dy: i16) {
+        // X: drag right → camera moves left (negate)
+        // Y: drag down (+terminal_dy) → camera moves down → camera_y increases because world Y+ is up
+        let world_dx = -(terminal_dx as i64);
+        let world_dy = terminal_dy as i64;
+
+        self.viewport_state.panning = true;
+        let new = WorldPos::new(
+            self.viewport_state.camera_target.x + world_dx,
+            self.viewport_state.camera_target.y + world_dy,
+        );
+        self.viewport_state.camera_current = new;
+        self.viewport_state.camera_target = new;
+        self.viewport_state.camera_anim = None;
+    }
+
+    /// Handle a click at the given terminal coordinates.
+    ///
+    /// - If a data node occupies the clicked cell: places the cursor on that node,
+    ///   exits panning mode, and returns `true`.
+    /// - If the click is on the canvas background (or outside the viewport): enters
+    ///   panning mode and returns `false`.
+    pub fn handle_click(&mut self, terminal_x: u16, terminal_y: u16) -> bool {
+        let Some(click_world) = self
+            .viewport_state
+            .terminal_to_world(terminal_x, terminal_y)
+        else {
+            self.enter_panning_mode();
+            return false;
+        };
+
+        // Collect the hit result before any mutable borrow to satisfy the borrow checker.
+        let hit =
+            self.viewport_graph
+                .data_nodes()
+                .find_map(|(node_center, domain_idx, layout_node)| {
+                    let rect = BigRect::from_center_and_size(node_center, layout_node.size);
+                    if rect.contains(click_world) {
+                        let frac_x = ((click_world.x - rect.left()) as f64
+                            / layout_node.size.0.max(1) as f64)
+                            .clamp(0.0, 1.0);
+                        let frac_y = ((click_world.y - rect.bottom()) as f64
+                            / layout_node.size.1.max(1) as f64)
+                            .clamp(0.0, 1.0);
+                        Some((domain_idx, (frac_x, frac_y)))
+                    } else {
+                        None
+                    }
+                });
+
+        if let Some((domain_idx, frac)) = hit {
+            self.cursor.set_node(domain_idx, frac);
+            self.exit_panning_mode();
+            true
+        } else {
+            self.enter_panning_mode();
+            false
+        }
+    }
+
+    /// Update the invisible cursor to track the data node closest to the viewport center.
+    ///
+    /// Call this after each panning step so that zoom (which is cursor-anchored) always
+    /// targets a sensible node even while the cursor is hidden.
+    pub fn sync_cursor_to_closest_node(&mut self) {
+        let center = self.viewport_state.camera_current;
+        let best = self.viewport_graph.data_nodes().min_by_key(|(pos, _, _)| {
+            let dx = pos.x - center.x;
+            let dy = pos.y - center.y;
+            dx * dx + dy * dy
+        });
+        if let Some((_, domain_idx, _)) = best {
+            self.cursor.set_node(domain_idx, (0.5, 0.5));
+        }
+    }
 }
 
 #[cfg(test)]

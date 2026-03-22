@@ -194,7 +194,7 @@ pub fn create_gen_graph_widget(
 ///
 /// This is the standard way to initialize a graph controller for GenGraph visualization.
 /// It applies the application's theme colors, sets the detail level to Truncated, and
-/// enables the cursor.
+/// starts in panning mode (cursor hidden until the user clicks a node or uses keyboard nav).
 ///
 /// # Arguments
 /// * `graph` - The GenGraph to visualize
@@ -216,7 +216,7 @@ pub fn create_gen_graph_controller(
         highlight: Color::Cyan,
     });
     controller.set_detail_level(VisualDetail::Truncated);
-    controller.show_cursor();
+    controller.enter_panning_mode();
     controller
 }
 
