@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, hash_map},
     fmt::Write,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use petgraph::stable_graph::StableGraph;
@@ -170,10 +169,7 @@ impl TempGraph {
     /// Export this graph to DOT format for debugging
     #[allow(dead_code)]
     pub fn export_to_dot(&self, base_filename: &str, title: &str) {
-        let test_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let test_timestamp = 0u64;
 
         let mut dot = String::new();
         writeln!(&mut dot, "// {}", title).unwrap();

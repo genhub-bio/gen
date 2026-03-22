@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
@@ -655,12 +652,6 @@ fn layout_layer_internal(
     edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
     reverse_order: bool,
 ) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
-    // Generate timestamp at the start of test for consistent filenames
-    let _test_timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
     // If reverse_order is true, flip the vertical positions of nodes within each layer.
     // This mirrors the layer across a horizontal axis (top becomes bottom).
     // After routing, we'll flip the result back.

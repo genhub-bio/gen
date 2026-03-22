@@ -1250,57 +1250,32 @@ where
 
 #[cfg(test)]
 mod tests {
-    use gen_core::HashId;
-    use gen_graph::{GenGraph, GraphNode};
     use petgraph::{algo::toposort, graphmap::DiGraphMap};
 
     use super::*;
 
-    fn make_test_graph(edges: Vec<(i32, i32)>, nodes: Option<Vec<GraphNode>>) -> GenGraph {
-        // Create default nodes if none provided
-        let nodes = nodes.unwrap_or_else(|| {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+    struct TestNode(i64);
+
+    fn make_test_graph(edges: Vec<(i32, i32)>) -> DiGraphMap<TestNode, ()> {
+        DiGraphMap::from_edges(
             edges
                 .iter()
-                .flat_map(|(s, t)| vec![*s, *t])
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .map(|id| GraphNode {
-                    node_id: HashId::pad_str(id),
-                    sequence_start: 0,
-                    sequence_end: 10,
-                })
-                .collect()
-        });
-
-        DiGraphMap::from_edges(edges.iter().map(|(s, t)| {
-            (
-                *nodes
-                    .iter()
-                    .find(|gn| gn.node_id == HashId::pad_str(*s))
-                    .unwrap(),
-                *nodes
-                    .iter()
-                    .find(|gn| gn.node_id == HashId::pad_str(*t))
-                    .unwrap(),
-            )
-        }))
+                .map(|(s, t)| (TestNode(*s as i64), TestNode(*t as i64))),
+        )
     }
 
     #[test]
     fn test_calculate_node_ranks_empty_graph() {
-        let graph = DiGraphMap::<GraphNode, ()>::new();
+        let graph = DiGraphMap::<TestNode, ()>::new();
         let ranks = compute_all_ranks(&graph).unwrap();
         assert_eq!(ranks, Vec::new());
     }
 
     #[test]
     fn test_calculate_node_ranks_single_node() {
-        let node = GraphNode {
-            node_id: HashId::pad_str(0),
-            sequence_start: 0,
-            sequence_end: 10,
-        };
-        let mut graph = DiGraphMap::<GraphNode, ()>::new();
+        let node = TestNode(0);
+        let mut graph = DiGraphMap::<TestNode, ()>::new();
         graph.add_node(node);
         let ranks = compute_all_ranks(&graph).unwrap();
         assert_eq!(ranks.len(), 1);
@@ -1313,7 +1288,7 @@ mod tests {
         // Test case: Simple linear graph
         // 0 -> 1 -> 2 -> 3 -> 4
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let _sorted_nodes = toposort(&graph, None).unwrap();
         let ranks = compute_all_ranks(&graph).unwrap();
         let rank_values: Vec<usize> = ranks.iter().map(|(_, rank)| *rank).collect();
@@ -1326,7 +1301,7 @@ mod tests {
         // 0 -> 1 -> 3
         //   \-> 2 -/
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let ranks = compute_all_ranks(&graph).unwrap();
         let rank_values: Vec<usize> = ranks.iter().map(|(_, rank)| *rank).collect();
         assert_eq!(rank_values, vec![0, 1, 1, 2]);
@@ -1338,7 +1313,7 @@ mod tests {
         // 0 -> 1 -> 3 -> 4
         //  \----> 2 ----/
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 4), (3, 4)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let ranks = compute_all_ranks(&graph).unwrap();
         // Petgraph toposort is not completely deterministic, so we can't assert the exact ranks
         // other than the first and last nodes.
@@ -1363,7 +1338,7 @@ mod tests {
             (4, 5), // 4 -> 5
             (5, 6), // 5 -> 6
         ];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
 
         // Create partition with min_width=2, which should split after node 1
         let partition_table = PartitionTable::new_with_config(&graph, 2, usize::MAX);
@@ -1496,7 +1471,7 @@ mod tests {
         //      v    v
         //      4 -> 5 -> 6
         let edges = vec![(1, 2), (2, 3), (2, 4), (3, 5), (4, 5), (5, 6)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let partition = PartitionTable::new_with_config(&graph, 3, 10); // min_width, max_nodes
         assert_eq!(partition.section_count(), 2);
         assert_eq!(partition.inter_partition_edges.len(), 1); // One partition pair
@@ -1580,7 +1555,7 @@ mod tests {
         //      v    v
         //      4 -> 5 -> 6
         let edges = vec![(1, 2), (2, 3), (2, 4), (3, 5), (4, 5), (5, 6)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let table = PartitionTable::new_with_config(&graph, 1, 10); // min_width, max_nodes
         assert_eq!(table.section_count(), 3);
         assert_eq!(table.inter_partition_edges.len(), 2); // Two partition pairs: (0,1) and (1,2)
@@ -1595,7 +1570,7 @@ mod tests {
         //      v    v
         //      4 -> 5 -> 6
         let edges = vec![(1, 2), (2, 3), (2, 4), (3, 5), (4, 5), (5, 6)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let table = PartitionTable::new_with_config(&graph, 1, 2); // min_width, max_nodes
         assert_eq!(table.section_count(), 4);
         assert_eq!(table.inter_partition_edges.len(), 4); // Multiple partition pairs including branching
@@ -1606,7 +1581,7 @@ mod tests {
         // Create a test graph with multiple partitions
         // 1 -> 2 -> 3 -> 4 -> 5 -> 6
         let edges = vec![(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
 
         // Create partition table with partitions that are at least 2 wide
         let mut table = PartitionTable::new_with_config(&graph, 2, usize::MAX); // Break every 2 layers
@@ -1735,7 +1710,7 @@ mod tests {
     #[test]
     fn test_set_anchor_partition_error_cases() {
         let edges = vec![(1, 2), (2, 3)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let mut table = PartitionTable::new_with_config(&graph, 1, 2);
 
         // Test with invalid partition index
@@ -1750,7 +1725,7 @@ mod tests {
         // Create a simple graph: 1->2->3->4->5->6
         // If you break the graph every 2 layers, this creates 6 partitions (alternating real sections and bridges)
         let edges = vec![(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let mut table = PartitionTable::new_with_config(&graph, 2, usize::MAX);
 
         // Set up known widths for predictable testing (normally done by layout computation)
@@ -1810,7 +1785,7 @@ mod tests {
         // This test simulates the key benefit: when we load partitions to the left,
         // world coordinates should remain stable
         let edges = vec![(1, 2), (2, 3)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let mut table = PartitionTable::new_with_config(&graph, 1, 1); // Force single nodes per partition
 
         let detail_level = VisualDetail::Minimal;
@@ -1841,7 +1816,7 @@ mod tests {
         // This test ensures that calling compute_partition_layouts multiple times
         // doesn't cause values to accumulate in the Fenwick trees
         let edges = vec![(1, 2), (2, 3)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let mut table = PartitionTable::new_with_config(&graph, 1, usize::MAX); // 2 partitions
 
         let detail_level = VisualDetail::Minimal;
@@ -1888,14 +1863,14 @@ mod tests {
     fn test_compute_partition_layouts_idempotent() {
         // This test ensures compute_partition_layouts can be called multiple times safely
         let edges = vec![(1, 2), (2, 3)];
-        let graph = make_test_graph(edges, None);
+        let graph = make_test_graph(edges);
         let mut table = PartitionTable::new_with_config(&graph, 1, usize::MAX);
 
         let detail_level = VisualDetail::Minimal;
 
         struct SimpleSizer;
-        impl NodeSizer<&GenGraph> for SimpleSizer {
-            fn get_node_size(&self, _node: &GraphNode, _detail_level: VisualDetail) -> (u64, u64) {
+        impl NodeSizer<&DiGraphMap<TestNode, ()>> for SimpleSizer {
+            fn get_node_size(&self, _node: &TestNode, _detail_level: VisualDetail) -> (u64, u64) {
                 (10, 5) // Fixed size for testing
             }
 
