@@ -151,7 +151,8 @@ pub fn update_with_vcf(
     name: Option<String>,
     genotype: Option<String>,
     sample: Option<String>,
-    coordinate_frame: Option<String>,
+    parent_sample: Option<String>,
+    in_place: bool,
 ) -> PyResult<String> {
     println!("Update with VCF called");
 
@@ -174,8 +175,8 @@ pub fn update_with_vcf(
         &name,
         genotype.unwrap_or_default(),
         sample.as_deref(),
-        coordinate_frame.as_deref(),
-        false,
+        parent_sample.as_deref(),
+        in_place,
     ) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();

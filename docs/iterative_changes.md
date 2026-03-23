@@ -56,13 +56,13 @@ m123	27	.	GA	G	1611.92	.		GT	1
 ```
 
 ```bash
-gen --db simple.db update --vcf round2.vcf --name simple_example --coordinate-frame f1
+gen --db simple.db update --vcf round2.vcf --name simple_example --parent-sample f1
 ```
 
 This command is very similar, with the exception that we are able to define which reference frame to use for changes. Here,
-we specify the reference frame of sample `f1`. This operation creates a new sample, `f2`, with the reference frame of
-`f1` for coordinates. If no coordinate frame is provided, the reference genome's frame of reference is used. The resulting
-genome appears as follows:
+we specify sample `f1` as the parent sample, so its coordinate frame is used for the changes. This operation creates a
+new sample, `f2`, with the reference frame of `f1` for coordinates. If no parent sample is provided, the reference
+genome's frame of reference is used. The resulting genome appears as follows:
 
 ![F2 Genome](figures/iterative_changes_f2.png)
 

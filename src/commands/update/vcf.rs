@@ -23,8 +23,8 @@ pub struct Command {
     #[arg(short, long)]
     sample: Option<String>,
     /// Use the given sample as the parent sample for changes.
-    #[arg(long, alias = "cf")]
-    coordinate_frame: Option<String>,
+    #[arg(long = "parent-sample", aliases = ["ps"])]
+    parent_sample: Option<String>,
     /// Apply edits in-place instead of using parent sample's reference coordinates
     #[arg(long = "inplace")]
     in_place: bool,
@@ -51,7 +51,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         name,
         cmd.genotype.clone().unwrap_or("".to_string()),
         cmd.sample.as_deref(),
-        cmd.coordinate_frame.as_deref(),
+        cmd.parent_sample.as_deref(),
         cmd.in_place,
     ) {
         Ok(_) => {
