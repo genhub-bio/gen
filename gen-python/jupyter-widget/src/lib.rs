@@ -517,7 +517,11 @@ impl App {
                 if mouse.button == MouseButton::Left {
                     if !self.mouse_is_dragging {
                         let (cell_x, cell_y) = self.px_to_cell(mouse.x, mouse.y);
-                        self.controller.handle_click(cell_x, cell_y);
+                        let was_panning = self.controller.is_panning_mode();
+                        let hit = self.controller.handle_click(cell_x, cell_y);
+                        if hit && !was_panning && self.controller.cursor.is_coarse_mode() {
+                            self.controller.cursor.set_coarse_mode(false);
+                        }
                     }
                     self.mouse_down_pos = None;
                     self.mouse_is_dragging = false;
