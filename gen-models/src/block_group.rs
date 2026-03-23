@@ -312,7 +312,7 @@ impl BlockGroup {
                     "Block group not found for either new sample ({sample_name}) or parent sample ({parent_sample_name})"
                 )
             } else {
-                format!("Block group not found for sample ({sample_name})")
+                format!("Block group {group_name} not found for sample ({sample_name})")
             };
             Err(QueryError::ResultsNotFound(error_message))
         }

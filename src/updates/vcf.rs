@@ -197,12 +197,12 @@ pub fn update_with_vcf<'a>(
     collection_name: &'a str,
     fixed_genotype: String,
     fixed_sample: impl Into<Option<&'a str>>,
-    coordinate_frame: impl Into<Option<&'a str>>,
+    parent_sample: impl Into<Option<&'a str>>,
 ) -> Result<Operation, VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let fixed_sample = fixed_sample.into();
-    let coordinate_frame = coordinate_frame.into();
+    let parent_sample = parent_sample.into();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
 
     let mut session = start_operation(conn);
@@ -212,12 +212,6 @@ pub fn update_with_vcf<'a>(
         .expect("Unable to parse");
     let header = reader.read_header().unwrap();
     let sample_names = header.sample_names();
-    for name in sample_names {
-        Sample::get_or_create(conn, name);
-    }
-    if let Some(fixed_sample) = fixed_sample {
-        Sample::get_or_create(conn, fixed_sample);
-    }
     let mut genotype = vec![];
     if !fixed_genotype.is_empty() {
         genotype = parse_genotype(&fixed_genotype);
@@ -267,7 +261,7 @@ pub fn update_with_vcf<'a>(
 
         if let Some(fixed_sample) = fixed_sample.filter(|_| !genotype.is_empty()) {
             if !created_samples.contains(fixed_sample) {
-                Sample::get_or_create_child(conn, collection_name, fixed_sample, coordinate_frame);
+                Sample::get_or_create_child(conn, collection_name, fixed_sample, parent_sample);
                 created_samples.insert(fixed_sample);
             }
             let sample_bg_id = BlockGroupCache::lookup(
@@ -275,7 +269,7 @@ pub fn update_with_vcf<'a>(
                 collection_name,
                 fixed_sample,
                 seq_name.clone(),
-                coordinate_frame,
+                parent_sample,
             )
             .expect("can't find sample bg....check this out more");
             let has_ref = genotype.iter().any(|gt| {
@@ -359,12 +353,7 @@ pub fn update_with_vcf<'a>(
             for (sample_index, sample) in record.samples().iter().enumerate() {
                 let sample_name = sample_names[sample_index].as_ref();
                 if !created_samples.contains(sample_name) {
-                    Sample::get_or_create_child(
-                        conn,
-                        collection_name,
-                        sample_name,
-                        coordinate_frame,
-                    );
+                    Sample::get_or_create_child(conn, collection_name, sample_name, parent_sample);
                     created_samples.insert(sample_name);
                 }
                 let sample_bg_id = BlockGroupCache::lookup(
@@ -372,7 +361,7 @@ pub fn update_with_vcf<'a>(
                     collection_name,
                     sample_name,
                     seq_name.clone(),
-                    coordinate_frame,
+                    parent_sample,
                 )
                 .expect("can't find sample bg....check this out more");
                 let genotype = sample.get(&header, "GT");
@@ -488,7 +477,7 @@ pub fn update_with_vcf<'a>(
             let sequence_string = sequence.get_sequence(None, None);
 
             let parent_path_id = parent_block_groups.entry((collection_name, vcf_entry.path.id)).or_insert_with(|| {
-                let parent_bg = if let Some(parent_sample_name) = coordinate_frame {
+                let parent_bg = if let Some(parent_sample_name) = parent_sample {
                     BlockGroup::query(
                         conn,
                         "select * from block_groups where collection_name = ?1 AND sample_name = ?2 and name = ?3",
@@ -544,8 +533,7 @@ pub fn update_with_vcf<'a>(
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(1000) {
-            BlockGroup::insert_changes(conn, chunk, &mut path_cache, coordinate_frame.is_some())
-                .unwrap();
+            BlockGroup::insert_changes(conn, chunk, &mut path_cache, false).unwrap();
             bar.inc(chunk.len() as u64);
         }
         summary
@@ -958,7 +946,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            "reference",
         )
         .unwrap();
 
@@ -971,11 +959,11 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            "reference",
         );
         assert!(matches!(
             second_update,
-            Ok(_) | Err(VcfError::OperationError(OperationError::NoChanges))
+            Err(VcfError::OperationError(OperationError::NoChanges))
         ));
         assert_eq!(
             Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
@@ -1032,7 +1020,7 @@ mod tests {
         );
         assert!(matches!(
             second_update,
-            Ok(_) | Err(VcfError::OperationError(OperationError::NoChanges))
+            Err(VcfError::OperationError(OperationError::NoChanges))
         ));
         assert_eq!(
             Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
@@ -1225,7 +1213,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            "reference",
         )
         .unwrap();
 

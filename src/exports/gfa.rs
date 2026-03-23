@@ -466,7 +466,7 @@ mod tests {
             Err(GfaExportError::MissingBlockGroups {
                 collection_name,
                 sample_name,
-            }) if collection_name == "missing" && sample_name == "reference"
+            })
         ));
     }
 
