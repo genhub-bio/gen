@@ -66,11 +66,20 @@ class GenGraphWidget(anywidget.AnyWidget):
     topology = traitlets.Dict({}).tag(sync=True)
     # Palette: six hex colour slots chosen by Python from the active theme.
     palette = traitlets.Dict({}).tag(sync=True)
+    # Path nodes for the most recent path (same GraphNode schema as topology nodes).
+    # Empty list when no path exists.
+    path_nodes = traitlets.List([]).tag(sync=True)
 
     def __init__(self, block_group, repository, **kwargs):
         topology, self._spec_map = _serialize_topology(block_group, repository)
         palette = kwargs.pop("palette", _default_palette())
-        super().__init__(topology=topology, palette=palette, **kwargs)
+        path_nodes = kwargs.pop("path_nodes", None)
+        if path_nodes is None:
+            try:
+                path_nodes = repository.get_block_group_path_nodes(block_group) or []
+            except Exception:
+                path_nodes = []
+        super().__init__(topology=topology, palette=palette, path_nodes=path_nodes, **kwargs)
         self._repository = repository
         self.on_msg(self._on_message)
 

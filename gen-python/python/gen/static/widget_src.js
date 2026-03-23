@@ -30,9 +30,10 @@ async function render({ model, el }) {
   // Mount the gen-tui widget into the container.
   const topology = JSON.stringify(model.get("topology"));
   const palette = JSON.stringify(model.get("palette"));
+  const pathNodes = JSON.stringify(model.get("path_nodes") || []);
   let app;
   try {
-    app = mount_app(uid, topology, palette);
+    app = mount_app(uid, topology, palette, pathNodes);
   } catch (err) {
     el.textContent = "gen widget error: " + err;
     console.error("gen widget mount_app failed", err);
@@ -61,7 +62,7 @@ async function render({ model, el }) {
   const WIDGET_KEYS = new Set([
     "h", "j", "k", "l",
     "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
-    "Enter", "Escape", "+", "=", "-", "r",
+    "Enter", "Escape", "+", "=", "-", "r", "p",
   ]);
   container.addEventListener("keydown", (e) => {
     if (WIDGET_KEYS.has(e.key)) {

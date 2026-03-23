@@ -1,9 +1,10 @@
 use std::{path::PathBuf, sync::Mutex};
 
 use r#gen::{core::HashId, get_connection};
-use gen_core::config::Workspace;
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use pyo3::{prelude::*, types::PyModule};
+use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, config::Workspace};
+use gen_graph::project_path;
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, path::Path, traits::Query};
+use pyo3::{prelude::*, types::{PyDict, PyList, PyModule}};
 
 use super::{
     block_group::PyBlockGroup,
@@ -276,6 +277,49 @@ impl PyRepository {
                 sample_name: block_group.sample_name,
                 name: block_group.name,
                 repository: Some(repo_py.clone_ref(py)),
+            })
+        })
+    }
+
+    /// Returns the nodes of the most recent path for a block group, projected onto
+    /// the current graph state.  Returns None if no path exists.
+    ///
+    /// Each element is a dict with keys block_id, node_id (hex string),
+    /// sequence_start, and sequence_end — the same schema used by topology nodes.
+    fn get_block_group_path_nodes(
+        &self,
+        block_group: &PyBlockGroup,
+    ) -> PyResult<Option<PyObject>> {
+        Python::with_gil(|py| {
+            self.with_connection(|conn| {
+                let path = Path::get(
+                    conn,
+                    "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
+                    rusqlite::params![block_group.id],
+                );
+                let path = match path {
+                    Ok(p) => p,
+                    Err(_) => return Ok(None),
+                };
+
+                let path_blocks = path.blocks(conn);
+                let graph = BlockGroup::get_graph(conn, &block_group.id);
+                let projected = project_path(&graph, &path_blocks);
+
+                let list = PyList::empty(py);
+                for (node, _strand) in &projected {
+                    if node.node_id == PATH_START_NODE_ID || node.node_id == PATH_END_NODE_ID {
+                        continue;
+                    }
+                    let dict = PyDict::new(py);
+                    dict.set_item("block_id", node.block_id)?;
+                    dict.set_item("node_id", node.node_id.to_string())?;
+                    dict.set_item("sequence_start", node.sequence_start)?;
+                    dict.set_item("sequence_end", node.sequence_end)?;
+                    list.append(dict)?;
+                }
+
+                Ok(Some(list.into()))
             })
         })
     }

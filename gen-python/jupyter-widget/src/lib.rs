@@ -1,11 +1,12 @@
 use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc};
 
 use gen_tui::{
+    LineStyle,
     geometry::WorldRect,
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::GraphWidget,
     layout::VisualDetail,
-    plotter::{NodeRenderer, NodeSizer},
+    plotter::{NodeRenderer, NodeSizer, PathStyle},
     theme::Theme,
 };
 use js_sys::Function;
@@ -365,6 +366,8 @@ struct App {
     mouse_down_pos: Option<(u32, u32)>,
     mouse_is_dragging: bool,
     pan_acc: (f64, f64),
+    /// Nodes forming the most recent path (empty when no path was provided).
+    path_nodes: Vec<GraphNode>,
 }
 
 impl App {
@@ -437,6 +440,18 @@ impl App {
             }
             KeyCode::Char('r') => {
                 controller.trigger_rebuild();
+            }
+            KeyCode::Char('p') => {
+                if !self.path_nodes.is_empty() {
+                    let style = PathStyle::new(ratatui::style::Color::Red)
+                        .with_line_style(LineStyle::Bold)
+                        .with_merge_glyphs(true);
+                    if controller.has_highlight(&style) {
+                        controller.clear_highlight(&style);
+                    } else {
+                        controller.set_path_highlight(style, self.path_nodes.clone());
+                    }
+                }
             }
             _ => {}
         }
@@ -531,8 +546,13 @@ impl App {
             &mut self.controller,
         );
 
+        let has_path = !self.path_nodes.is_empty();
         let footer_text = if self.controller.is_panning_mode() {
-            " drag: pan  |  click: select  |  +/-: zoom  |  arrows: nav "
+            if has_path {
+                " drag: pan  |  click: select  |  +/-: zoom  |  p: path "
+            } else {
+                " drag: pan  |  click: select  |  +/-: zoom  |  arrows: nav "
+            }
         } else if is_coarse {
             " ← → ↑ ↓: navigate  |  enter: fine nav  |  +/-: zoom "
         } else {
@@ -561,7 +581,7 @@ impl App {
 /// The topology JSON must match the `TopologyResponse` schema:
 /// `{"nodes": [...], "edges": [[src, dst], ...]}`.
 #[wasm_bindgen]
-pub fn mount_app(container_id: &str, topology_json: &str, palette_json: &str) -> Result<AppHandle, JsValue> {
+pub fn mount_app(container_id: &str, topology_json: &str, palette_json: &str, path_nodes_json: &str) -> Result<AppHandle, JsValue> {
     console_error_panic_hook::set_once();
 
     // Parse topology
@@ -592,6 +612,10 @@ pub fn mount_app(container_id: &str, topology_json: &str, palette_json: &str) ->
         .map(WidgetPalette::from)
         .map_err(|e| JsValue::from_str(&format!("palette parse error: {e}")))?;
 
+    // Parse path nodes (best-effort: ignore errors so the widget still loads without a path)
+    let path_nodes: Vec<GraphNode> = json_from_str::<Vec<GraphNode>>(path_nodes_json)
+        .unwrap_or_default();
+
     // Shared sequence state
     let cache: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
     let pending: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -621,6 +645,7 @@ pub fn mount_app(container_id: &str, topology_json: &str, palette_json: &str) ->
         mouse_down_pos: None,
         mouse_is_dragging: false,
         pan_acc: (0.0, 0.0),
+        path_nodes,
     }));
 
     let event_app = Rc::clone(&app);
