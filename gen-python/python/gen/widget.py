@@ -15,10 +15,34 @@ gen/__init__.py when both gen_widget and IPython are available.
 """
 
 import json
+import os
 import pathlib
 
 import anywidget
 import traitlets
+
+# Catppuccin Mocha (dark) and Latte (light) — hex strings without '#'.
+# Keys match the PaletteHex struct in jupyter-widget/src/lib.rs.
+_MOCHA = {
+    "canvas_bg": "181825",
+    "node_bg":   "45475a",
+    "node_fg":   "cdd6f4",
+    "panel_bg":  "1e1e2e",
+    "text_muted": "585b70",
+    "highlight": "b4befe",
+}
+
+_LATTE = {
+    "canvas_bg": "e6e9ef",
+    "node_bg":   "bcc0cc",
+    "node_fg":   "4c4f69",
+    "panel_bg":  "eff1f5",
+    "text_muted": "acb0be",
+    "highlight": "7287fd",
+}
+
+def _default_palette() -> dict:
+    return _LATTE if os.environ.get("GEN_THEME") == "light" else _MOCHA
 
 _STATIC = pathlib.Path(__file__).parent / "static"
 _WIDGET_JS = _STATIC / "widget.js"
@@ -40,10 +64,13 @@ class GenGraphWidget(anywidget.AnyWidget):
 
     # Topology JSON sent to the frontend at creation time.
     topology = traitlets.Dict({}).tag(sync=True)
+    # Palette: six hex colour slots chosen by Python from the active theme.
+    palette = traitlets.Dict({}).tag(sync=True)
 
     def __init__(self, block_group, repository, **kwargs):
         topology, self._spec_map = _serialize_topology(block_group, repository)
-        super().__init__(topology=topology, **kwargs)
+        palette = kwargs.pop("palette", _default_palette())
+        super().__init__(topology=topology, palette=palette, **kwargs)
         self._repository = repository
         self.on_msg(self._on_message)
 

@@ -2,8 +2,7 @@ use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc};
 
 use gen_tui::{
     geometry::WorldRect,
-    graph_controller::GraphController,
-    graph_controller::WorldBuffer,
+    graph_controller::{GraphController, WorldBuffer},
     graph_widget::GraphWidget,
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer},
@@ -11,9 +10,8 @@ use gen_tui::{
 };
 use js_sys::Function;
 use petgraph::graphmap::DiGraphMap;
-use ratatui::Terminal;
 use ratatui::{
-    Frame,
+    Frame, Terminal,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style, Stylize},
     widgets::Paragraph,
@@ -27,6 +25,7 @@ use serde::{
     Deserialize, Serialize, Serializer,
     de::{self, Visitor},
 };
+use serde_json::from_str as json_from_str;
 use wasm_bindgen::prelude::*;
 use web_time::Instant;
 
@@ -84,9 +83,11 @@ impl<'de> Deserialize<'de> for NodeId {
         struct HexVisitor;
         impl<'de> Visitor<'de> for HexVisitor {
             type Value = NodeId;
+
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a 64-character hex string")
             }
+
             fn visit_str<E: de::Error>(self, v: &str) -> Result<NodeId, E> {
                 let bytes = hex::decode(v).map_err(de::Error::custom)?;
                 let arr: [u8; 32] = bytes
@@ -139,6 +140,53 @@ pub struct TopologyResponse {
 pub type WidgetGraph = DiGraphMap<GraphNode, ()>;
 
 // ---------------------------------------------------------------------------
+// WidgetPalette — Catppuccin colour slots used by the widget.
+// Deserialized from a JSON object of 6-character hex strings sent by Python.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct WidgetPalette {
+    canvas_bg: Color,  // base01 – graph area background
+    node_bg: Color,    // base03 – node fill
+    node_fg: Color,    // base05 – node text
+    panel_bg: Color,   // base00 – footer / panel background
+    text_muted: Color, // base04 – footer text in coarse-nav mode
+    highlight: Color,  // base07 – footer text in fine-nav mode
+}
+
+/// Intermediate serde target: one hex string per slot (no leading `#`).
+#[derive(Deserialize)]
+struct PaletteHex {
+    canvas_bg: String,
+    node_bg: String,
+    node_fg: String,
+    panel_bg: String,
+    text_muted: String,
+    highlight: String,
+}
+
+fn hex_to_color(hex: &str) -> Color {
+    let h = hex.trim_start_matches('#');
+    let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(0);
+    let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(0);
+    let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(0);
+    Color::Rgb(r, g, b)
+}
+
+impl From<PaletteHex> for WidgetPalette {
+    fn from(h: PaletteHex) -> Self {
+        Self {
+            canvas_bg: hex_to_color(&h.canvas_bg),
+            node_bg: hex_to_color(&h.node_bg),
+            node_fg: hex_to_color(&h.node_fg),
+            panel_bg: hex_to_color(&h.panel_bg),
+            text_muted: hex_to_color(&h.text_muted),
+            highlight: hex_to_color(&h.highlight),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // NodeSizer
 // ---------------------------------------------------------------------------
 
@@ -175,6 +223,7 @@ struct WidgetNodeRenderer {
     /// JS callback set by the widget host.
     /// Called with a single spec string each time a sequence is needed.
     sequence_cb: Rc<RefCell<Option<Function>>>,
+    palette: WidgetPalette,
 }
 
 impl WidgetNodeRenderer {
@@ -182,11 +231,13 @@ impl WidgetNodeRenderer {
         cache: Rc<RefCell<HashMap<String, String>>>,
         pending: Rc<RefCell<Vec<String>>>,
         sequence_cb: Rc<RefCell<Option<Function>>>,
+        palette: WidgetPalette,
     ) -> Self {
         Self {
             cache,
             pending,
             sequence_cb,
+            palette,
         }
     }
 
@@ -215,8 +266,8 @@ impl NodeRenderer<&WidgetGraph> for WidgetNodeRenderer {
         node: &GraphNode,
         detail_level: VisualDetail,
     ) {
-        let node_style = Style::default().fg(Color::White).bg(Color::DarkGray);
-        let canvas_style = Style::default().fg(Color::DarkGray).bg(Color::Black);
+        let node_style = Style::default().fg(self.palette.node_fg).bg(self.palette.node_bg);
+        let canvas_style = Style::default().fg(self.palette.node_bg).bg(self.palette.canvas_bg);
         buffer.fill_rect(area, ' ');
 
         if node.node_id.is_start() {
@@ -306,8 +357,11 @@ type WidgetController = GraphController<&'static WidgetGraph, WidgetNodeSizer>;
 struct App {
     controller: WidgetController,
     renderer: WidgetNodeRenderer,
+    palette: WidgetPalette,
     last_frame: Instant,
     cell_size: (u32, u32),
+    /// The canvas container element, used to correct viewport-relative mouse coords.
+    container: web_sys::Element,
     mouse_down_pos: Option<(u32, u32)>,
     mouse_is_dragging: bool,
     pan_acc: (f64, f64),
@@ -388,8 +442,36 @@ impl App {
         }
     }
 
+    /// Returns CSS-pixel cell size derived from the canvas bounding rect and terminal grid size.
+    /// This correctly handles devicePixelRatio scaling unlike the raw atlas cell_size.
+    fn css_cell_size(&self) -> (f64, f64) {
+        let rect = self.container.get_bounding_client_rect();
+        let bounds = self.controller.viewport_state.viewport_bounds;
+        if bounds.width > 0 && bounds.height > 0 {
+            // bounds is the graph area (excludes the 1-row footer), but the canvas
+            // spans the full terminal height. Use bounds.height + 1 so css_ch reflects
+            // one actual cell row, not a slightly-stretched fraction.
+            let total_rows = bounds.height + 1;
+            (
+                rect.width() / bounds.width as f64,
+                rect.height() / total_rows as f64,
+            )
+        } else {
+            // Fallback before first render: atlas cell size (likely wrong on HiDPI but safe)
+            (self.cell_size.0 as f64, self.cell_size.1 as f64)
+        }
+    }
+
+    /// Convert a viewport-relative CSS pixel position to terminal cell coordinates.
+    fn px_to_cell(&self, px: u32, py: u32) -> (u16, u16) {
+        let rect = self.container.get_bounding_client_rect();
+        let (css_cw, css_ch) = self.css_cell_size();
+        let rel_x = (px as f64 - rect.left()).max(0.0);
+        let rel_y = (py as f64 - rect.top()).max(0.0);
+        ((rel_x / css_cw) as u16, (rel_y / css_ch) as u16)
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        let controller = &mut self.controller;
         match mouse.event {
             MouseEventKind::Pressed => {
                 if mouse.button == MouseButton::Left {
@@ -399,18 +481,18 @@ impl App {
             }
             MouseEventKind::Moved => {
                 if let Some((lx, ly)) = self.mouse_down_pos {
-                    let (cw, ch) = self.cell_size;
+                    let (css_cw, css_ch) = self.css_cell_size();
                     let dx_px = mouse.x as f64 - lx as f64;
                     let dy_px = mouse.y as f64 - ly as f64;
-                    self.pan_acc.0 += dx_px / cw as f64;
-                    self.pan_acc.1 += dy_px / ch as f64;
+                    self.pan_acc.0 += dx_px / css_cw;
+                    self.pan_acc.1 += dy_px / css_ch;
                     let cell_dx = self.pan_acc.0.trunc() as i16;
                     let cell_dy = self.pan_acc.1.trunc() as i16;
                     self.pan_acc.0 = self.pan_acc.0.fract();
                     self.pan_acc.1 = self.pan_acc.1.fract();
                     if cell_dx != 0 || cell_dy != 0 {
-                        controller.handle_pan_terminal(cell_dx, cell_dy);
-                        controller.sync_cursor_to_closest_node();
+                        self.controller.handle_pan_terminal(cell_dx, cell_dy);
+                        self.controller.sync_cursor_to_closest_node();
                     }
                     self.mouse_down_pos = Some((mouse.x, mouse.y));
                     self.mouse_is_dragging = true;
@@ -419,10 +501,8 @@ impl App {
             MouseEventKind::Released => {
                 if mouse.button == MouseButton::Left {
                     if !self.mouse_is_dragging {
-                        let (cw, ch) = self.cell_size;
-                        let cell_x = (mouse.x / cw) as u16;
-                        let cell_y = (mouse.y / ch) as u16;
-                        controller.handle_click(cell_x, cell_y);
+                        let (cell_x, cell_y) = self.px_to_cell(mouse.x, mouse.y);
+                        self.controller.handle_click(cell_x, cell_y);
                     }
                     self.mouse_down_pos = None;
                     self.mouse_is_dragging = false;
@@ -458,15 +538,15 @@ impl App {
         } else {
             " ← → ↑ ↓: navigate  |  esc: coarse nav  |  +/-: zoom "
         };
-        let footer_style = if is_coarse {
-            Color::DarkGray
+        let footer_fg = if is_coarse {
+            self.palette.text_muted
         } else {
-            Color::Yellow
+            self.palette.highlight
         };
         let footer = Paragraph::new(footer_text)
             .alignment(Alignment::Center)
-            .fg(footer_style)
-            .bg(Color::Black);
+            .fg(footer_fg)
+            .bg(self.palette.panel_bg);
         frame.render_widget(footer, chunks[1]);
     }
 }
@@ -481,7 +561,7 @@ impl App {
 /// The topology JSON must match the `TopologyResponse` schema:
 /// `{"nodes": [...], "edges": [[src, dst], ...]}`.
 #[wasm_bindgen]
-pub fn mount_app(container_id: &str, topology_json: &str) -> Result<AppHandle, JsValue> {
+pub fn mount_app(container_id: &str, topology_json: &str, palette_json: &str) -> Result<AppHandle, JsValue> {
     console_error_panic_hook::set_once();
 
     // Parse topology
@@ -501,6 +581,17 @@ pub fn mount_app(container_id: &str, topology_json: &str) -> Result<AppHandle, J
     // Build terminal mounted to the container element
     let (terminal, cell_size) = build_terminal(container_id)?;
 
+    // Grab the container element so we can correct viewport-relative mouse coords.
+    let container = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(container_id))
+        .ok_or_else(|| JsValue::from_str(&format!("element not found: {container_id}")))?;
+
+    // Parse palette
+    let palette: WidgetPalette = json_from_str::<PaletteHex>(palette_json)
+        .map(WidgetPalette::from)
+        .map_err(|e| JsValue::from_str(&format!("palette parse error: {e}")))?;
+
     // Shared sequence state
     let cache: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
     let pending: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -517,13 +608,16 @@ pub fn mount_app(container_id: &str, topology_json: &str) -> Result<AppHandle, J
         Rc::clone(&cache),
         Rc::clone(&pending),
         Rc::clone(&sequence_cb),
+        palette,
     );
 
     let app = Rc::new(RefCell::new(App {
         controller,
         renderer,
+        palette,
         last_frame: Instant::now(),
         cell_size,
+        container,
         mouse_down_pos: None,
         mouse_is_dragging: false,
         pan_acc: (0.0, 0.0),

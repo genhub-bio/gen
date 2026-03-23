@@ -29,9 +29,10 @@ async function render({ model, el }) {
 
   // Mount the gen-tui widget into the container.
   const topology = JSON.stringify(model.get("topology"));
+  const palette = JSON.stringify(model.get("palette"));
   let app;
   try {
-    app = mount_app(uid, topology);
+    app = mount_app(uid, topology, palette);
   } catch (err) {
     el.textContent = "gen widget error: " + err;
     console.error("gen widget mount_app failed", err);
@@ -52,6 +53,20 @@ async function render({ model, el }) {
   model.on("msg:custom", (msg) => {
     if (msg.type === "sequences_response") {
       app.deliver_sequences(JSON.stringify(msg.data));
+    }
+  });
+
+  // Prevent widget navigation keys from leaking to Jupyter / the browser.
+  // Arrow keys would scroll the page; hjkl/Enter/Esc trigger notebook shortcuts.
+  const WIDGET_KEYS = new Set([
+    "h", "j", "k", "l",
+    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+    "Enter", "Escape", "+", "=", "-", "r",
+  ]);
+  container.addEventListener("keydown", (e) => {
+    if (WIDGET_KEYS.has(e.key)) {
+      e.preventDefault();
+      e.stopPropagation();
     }
   });
 
