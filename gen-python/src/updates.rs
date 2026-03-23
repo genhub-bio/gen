@@ -267,7 +267,7 @@ pub fn update_with_library_files(
     library: String,
     parts: String,
 ) -> PyResult<String> {
-    println!("Update with library called");
+    println!("Update with library files called");
 
     let parts_list = match parse_library(&parts, &library) {
         Ok(parts_list) => parts_list,

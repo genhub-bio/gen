@@ -1,5 +1,6 @@
 use std::{fs::File, path::PathBuf};
 
+use r#gen::graphs::combinatorial_library::{SequencePart, parse_library};
 use gen_models::{
     errors::OperationError,
     file_types::FileTypes,
@@ -7,7 +8,7 @@ use gen_models::{
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
-use crate::PyDbContext;
+use crate::{PyDbContext, python_api::sequence_part::PySequencePart};
 
 #[pyfunction]
 pub fn import_fasta(
@@ -151,7 +152,7 @@ pub fn import_genbank(
 }
 
 #[pyfunction]
-pub fn import_library(
+pub fn import_library_files(
     context: PyRef<'_, PyDbContext>,
     library_name: String,
     parts: String,
@@ -159,7 +160,16 @@ pub fn import_library(
     name: Option<String>,
     sample: String,
 ) -> PyResult<String> {
-    println!("Library import called");
+    println!("Import library with files called");
+
+    let parts_list = match parse_library(&parts, &library) {
+        Ok(result) => result,
+        Err(err) => {
+            return Err(PyRuntimeError::new_err(format!(
+                "Problem parsing library files: {err}"
+            )));
+        }
+    };
 
     let context = &context.0;
     let operation_conn = context.operations().conn();
@@ -178,9 +188,78 @@ pub fn import_library(
         context,
         &name,
         &sample,
-        &parts,
-        &library,
         &library_name,
+        parts_list,
+        Some(&parts),
+        Some(&library),
+    ) {
+        Ok(_) => {
+            conn.execute("END TRANSACTION;", []).unwrap();
+            operation_conn.execute("END TRANSACTION;", []).unwrap();
+            Ok("Library imported.".to_string())
+        }
+        Err(r#gen::imports::library::LibraryImportError::OperationError(
+            OperationError::NoChanges,
+        )) => {
+            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            Err(PyRuntimeError::new_err("Library already exists."))
+        }
+        Err(err) => {
+            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            Err(PyRuntimeError::new_err(format!(
+                "Library import failed: {err}"
+            )))
+        }
+    }
+}
+
+#[pyfunction]
+pub fn import_library(
+    context: PyRef<'_, PyDbContext>,
+    library_name: String,
+    parts_list: Vec<Vec<PySequencePart>>,
+    name: Option<String>,
+    sample: Option<String>,
+) -> PyResult<String> {
+    println!("Import library called");
+
+    let context = &context.0;
+    let operation_conn = context.operations().conn();
+    let conn = context.graph().conn();
+
+    if let Err(err) = r#gen::track_database(conn, operation_conn) {
+        panic!("Error tracking database: {err}");
+    }
+
+    conn.execute("BEGIN TRANSACTION", []).unwrap();
+    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+
+    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+
+    let rust_parts_list = parts_list
+        .iter()
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|part| SequencePart {
+                    name: part.name.clone(),
+                    sequence: part.sequence.clone(),
+                    sequence_length: part.sequence_length,
+                })
+                .collect()
+        })
+        .collect();
+
+    match r#gen::imports::library::import_library(
+        context,
+        &name,
+        sample.as_deref(),
+        &library_name,
+        rust_parts_list,
+        None,
+        None,
     ) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();

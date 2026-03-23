@@ -14,8 +14,7 @@ use gen_models::{
 use thiserror::Error;
 
 use crate::graphs::combinatorial_library::{
-    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
-    parse_library,
+    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart, create_library,
 };
 
 #[derive(Error, Debug)]
@@ -48,9 +47,10 @@ pub fn import_library(
     context: &DbContext,
     collection_name: &str,
     sample: &str,
-    parts_file_path: &str,
-    library_file_path: &str,
     library_name: &str,
+    parts_list: Vec<Vec<SequencePart>>,
+    parts_file_path: Option<&str>,
+    library_file_path: Option<&str>,
 ) -> Result<Operation, LibraryImportError> {
     let conn = context.graph().conn();
     let mut session = session_operations::start_operation(conn);
@@ -61,32 +61,34 @@ pub fn import_library(
     Sample::get_or_create(conn, sample);
     let new_block_group = BlockGroup::create(conn, collection_name, sample, library_name);
 
-    let parts_list = parse_library(parts_file_path, library_file_path)?;
     let _block_group_boundaries =
         create_library(conn, new_block_group.id, library_name, parts_list, true)?;
+
+    let mut files = vec![];
+    if let Some(library_file_path) = library_file_path {
+        files.push(OperationFile {
+            file_path: library_file_path.to_string(),
+            file_type: FileTypes::CSV,
+        });
+    }
+    if let Some(parts_file_path) = parts_file_path {
+        files.push(OperationFile {
+            file_path: parts_file_path.to_string(),
+            file_type: FileTypes::Fasta,
+        });
+    }
 
     let summary_str = format!("{library_name} created.\n");
     let op = session_operations::end_operation(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![
-                OperationFile {
-                    file_path: library_file_path.to_string(),
-                    file_type: FileTypes::CSV,
-                },
-                OperationFile {
-                    file_path: parts_file_path.to_string(),
-                    file_type: FileTypes::Fasta,
-                },
-            ],
+            files,
             description: "library_csv_import".to_string(),
         },
         &summary_str,
         None,
     )?;
-
-    println!("Imported library file {library_file_path} and parts file {parts_file_path}");
 
     Ok(op)
 }
@@ -98,10 +100,12 @@ mod tests {
     use gen_models::block_group::BlockGroup;
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::{
+        graphs::combinatorial_library::parse_library, test_helpers::setup_gen, track_database,
+    };
 
     #[test]
-    fn imports_a_library() {
+    fn imports_a_library() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -109,17 +113,32 @@ mod tests {
         track_database(conn, op_conn).unwrap();
         let collection = "test";
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/affix_parts.fa");
-        let library_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/affix_layout.csv");
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/affix_parts.fa");
+        let parts_path = binding.to_str().unwrap();
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/affix_layout.csv");
+        let library_path = binding.to_str().unwrap();
+
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = import_library(
             &context,
             collection,
+<<<<<<< HEAD
             Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
+||||||| parent of 299dc86 (Add in-memory python call for import library)
+            None,
+            parts_path.to_str().unwrap(),
+            library_path.to_str().unwrap(),
+=======
+            None,
+>>>>>>> 299dc86 (Add in-memory python call for import library)
             "library graph",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
@@ -149,10 +168,12 @@ mod tests {
             current_path.sequence(conn),
             "TCTAGAGAAAGAGGGGACAAACTAGATGCGTAAAGGAGAAGAACTTTAA"
         );
+
+        Ok(())
     }
 
     #[test]
-    fn one_column_of_parts() {
+    fn one_column_of_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -160,17 +181,33 @@ mod tests {
         track_database(conn, op_conn).unwrap();
         let collection = "test";
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+
+        let binding =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = import_library(
             &context,
             collection,
+<<<<<<< HEAD
             Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
+||||||| parent of 299dc86 (Add in-memory python call for import library)
+            None,
+            parts_path.to_str().unwrap(),
+            library_path.to_str().unwrap(),
+=======
+            None,
+>>>>>>> 299dc86 (Add in-memory python call for import library)
             "m123",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
@@ -185,10 +222,12 @@ mod tests {
                 "CAAC".to_string(),
             ])
         );
+
+        Ok(())
     }
 
     #[test]
-    fn two_columns_of_same_parts() {
+    fn two_columns_of_same_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -196,17 +235,33 @@ mod tests {
         track_database(conn, op_conn).unwrap();
         let collection = "test";
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+
+        let binding =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/design_reusing_parts.csv");
+        let library_path = binding.to_str().unwrap();
+
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = import_library(
             &context,
             collection,
+<<<<<<< HEAD
             Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
+||||||| parent of 299dc86 (Add in-memory python call for import library)
+            None,
+            parts_path.to_str().unwrap(),
+            library_path.to_str().unwrap(),
+=======
+            None,
+>>>>>>> 299dc86 (Add in-memory python call for import library)
             "m123",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
@@ -226,5 +281,7 @@ mod tests {
                 .map(|x| x.to_string())
                 .collect()
         );
+
+        Ok(())
     }
 }
