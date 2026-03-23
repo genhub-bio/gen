@@ -39,6 +39,41 @@ try:
         update_with_vcf,
     )
 
+    # ---------------------------------------------------------------------------
+    # Jupyter display hook for PyBlockGroup
+    #
+    # When the gen_widget package is installed (i.e. the WASM bundle has been
+    # built and placed in gen/static/widget.js), evaluating a PyBlockGroup in a
+    # notebook cell renders the interactive graph widget automatically.
+    #
+    # Gracefully degrades to plain __repr__ if:
+    #   - anywidget is not installed
+    #   - the widget.js bundle has not been built yet
+    #   - the block group has no associated repository
+    # ---------------------------------------------------------------------------
+
+    def _in_jupyter():
+        try:
+            from IPython import get_ipython
+            ip = get_ipython()
+            return ip is not None and 'IPKernelApp' in ip.config
+        except ImportError:
+            return False
+
+    if _in_jupyter():
+        def _block_group_ipython_display_(self, **kwargs):
+            if self.repository is None:
+                print(repr(self))
+                return
+            try:
+                from .widget import GenGraphWidget
+                from IPython.display import display
+                display(GenGraphWidget(self, self.repository))
+            except ImportError:
+                print(repr(self))
+
+        PyBlockGroup._ipython_display_ = _block_group_ipython_display_
+
     # Through Python (helpers.py), currently not used
     # from .helpers import ...
 

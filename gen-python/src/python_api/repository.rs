@@ -16,7 +16,7 @@ use super::{
 ///
 /// This class manages the database connection and provides methods for
 /// querying and manipulating the database.
-#[pyclass(name = "Repository")]
+#[pyclass(name = "Repository", subclass)]
 pub struct PyRepository {
     // We use custom getters, hence no #[pyo3(get)]
     pub gen_dir: PathBuf,
@@ -95,8 +95,10 @@ impl PyRepository {
     ///
     /// Returns:
     ///     A PyBlockGroup instance representing the requested BlockGroup
-    fn get_block_group_by_id(&self, id: &HashId) -> PyResult<PyBlockGroup> {
-        self.with_connection(|conn| {
+    fn get_block_group_by_id(slf: &Bound<'_, Self>, id: &HashId) -> PyResult<PyBlockGroup> {
+        let py = slf.py();
+        let repo_py: Py<PyRepository> = slf.clone().unbind();
+        slf.borrow().with_connection(|conn| {
             let block_group = BlockGroup::get_by_id(conn, id);
 
             Ok(PyBlockGroup {
@@ -104,6 +106,7 @@ impl PyRepository {
                 collection_name: block_group.collection_name,
                 sample_name: block_group.sample_name,
                 name: block_group.name,
+                repository: Some(repo_py.clone_ref(py)),
             })
         })
     }
@@ -112,8 +115,10 @@ impl PyRepository {
     ///
     /// Returns:
     ///     A vector of PyBlockGroup instances
-    fn get_block_groups(&self) -> PyResult<Vec<PyBlockGroup>> {
-        self.with_connection(|conn| {
+    fn get_block_groups(slf: &Bound<'_, Self>) -> PyResult<Vec<PyBlockGroup>> {
+        let py = slf.py();
+        let repo_py: Py<PyRepository> = slf.clone().unbind();
+        slf.borrow().with_connection(|conn| {
             let block_groups = BlockGroup::all(conn);
 
             let result = block_groups
@@ -123,6 +128,7 @@ impl PyRepository {
                     collection_name: bg.collection_name,
                     sample_name: bg.sample_name,
                     name: bg.name,
+                    repository: Some(repo_py.clone_ref(py)),
                 })
                 .collect();
 
@@ -137,8 +143,13 @@ impl PyRepository {
     ///
     /// Returns:
     ///     A vector of PyBlockGroup instances
-    fn get_block_groups_by_collection(&self, collection_name: &str) -> PyResult<Vec<PyBlockGroup>> {
-        self.with_connection(|conn| {
+    fn get_block_groups_by_collection(
+        slf: &Bound<'_, Self>,
+        collection_name: &str,
+    ) -> PyResult<Vec<PyBlockGroup>> {
+        let py = slf.py();
+        let repo_py: Py<PyRepository> = slf.clone().unbind();
+        slf.borrow().with_connection(|conn| {
             let block_groups = BlockGroup::query(
                 conn,
                 "SELECT * FROM block_groups WHERE collection_name = ?1",
@@ -152,6 +163,7 @@ impl PyRepository {
                     collection_name: bg.collection_name,
                     sample_name: bg.sample_name,
                     name: bg.name,
+                    repository: Some(repo_py.clone_ref(py)),
                 })
                 .collect();
 
@@ -243,16 +255,18 @@ impl PyRepository {
     /// Returns:
     ///     A PyBlockGroup instance
     fn create_block_group(
-        &self,
+        slf: &Bound<'_, Self>,
         name: String,
         collection_name: String,
         sample_name: Option<String>,
     ) -> PyResult<PyBlockGroup> {
-        self.with_connection(|conn| {
+        let py = slf.py();
+        let repo_py: Py<PyRepository> = slf.clone().unbind();
+        slf.borrow().with_connection(|conn| {
             let block_group = BlockGroup::create(
                 conn,
                 &collection_name,
-                sample_name.as_deref(), // Option<String> to Option<&str>
+                sample_name.as_deref(),
                 &name,
             );
 
@@ -261,6 +275,7 @@ impl PyRepository {
                 collection_name: block_group.collection_name,
                 sample_name: block_group.sample_name,
                 name: block_group.name,
+                repository: Some(repo_py.clone_ref(py)),
             })
         })
     }

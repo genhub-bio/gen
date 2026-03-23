@@ -1,11 +1,10 @@
 use r#gen::core::HashId;
 use pyo3::prelude::*;
 
-use super::hash_id::PyHashId;
+use super::{hash_id::PyHashId, repository::PyRepository};
 
 /// Exposes a BlockGroup to Python.
 #[pyclass]
-#[derive(Clone)]
 pub struct PyBlockGroup {
     pub id: HashId,
     #[pyo3(get)]
@@ -14,6 +13,20 @@ pub struct PyBlockGroup {
     pub sample_name: Option<String>,
     #[pyo3(get)]
     pub name: String,
+    #[pyo3(get)]
+    pub repository: Option<Py<PyRepository>>,
+}
+
+impl Clone for PyBlockGroup {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| PyBlockGroup {
+            id: self.id,
+            collection_name: self.collection_name.clone(),
+            sample_name: self.sample_name.clone(),
+            name: self.name.clone(),
+            repository: self.repository.as_ref().map(|r| r.clone_ref(py)),
+        })
+    }
 }
 
 #[pymethods]
@@ -30,6 +43,7 @@ impl PyBlockGroup {
             collection_name,
             sample_name,
             name,
+            repository: None,
         }
     }
 
