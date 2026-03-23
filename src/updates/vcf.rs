@@ -198,6 +198,7 @@ pub fn update_with_vcf<'a>(
     fixed_genotype: String,
     fixed_sample: impl Into<Option<&'a str>>,
     parent_sample: impl Into<Option<&'a str>>,
+    in_place: bool,
 ) -> Result<Operation, VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
@@ -533,7 +534,7 @@ pub fn update_with_vcf<'a>(
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(1000) {
-            BlockGroup::insert_changes(conn, chunk, &mut path_cache, false).unwrap();
+            BlockGroup::insert_changes(conn, chunk, &mut path_cache, in_place).unwrap();
             bar.inc(chunk.len() as u64);
         }
         summary
@@ -626,6 +627,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -675,6 +677,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -731,6 +734,7 @@ mod tests {
             "0/1".to_string(),
             Some("sample 1"),
             Some("reference"),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -788,6 +792,7 @@ mod tests {
             "0/1".to_string(),
             Some("sample 1"),
             Some("reference"),
+            false,
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
     }
@@ -820,6 +825,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
 
@@ -865,6 +871,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -905,6 +912,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
 
@@ -947,6 +955,7 @@ mod tests {
             "".to_string(),
             None,
             "reference",
+            false,
         )
         .unwrap();
 
@@ -960,6 +969,7 @@ mod tests {
             "".to_string(),
             None,
             "reference",
+            false,
         );
         assert!(matches!(
             second_update,
@@ -1004,6 +1014,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
 
@@ -1017,6 +1028,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         );
         assert!(matches!(
             second_update,
@@ -1060,6 +1072,7 @@ mod tests {
             "0|1".to_string(),
             Some("test"),
             Some("reference"),
+            false,
         )
         .unwrap();
         let elapsed = s.elapsed().as_secs();
@@ -1099,6 +1112,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1153,6 +1167,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
 
@@ -1177,6 +1192,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
     }
@@ -1214,6 +1230,7 @@ mod tests {
             "".to_string(),
             None,
             "reference",
+            true,
         )
         .unwrap();
 
@@ -1224,6 +1241,7 @@ mod tests {
             "".to_string(),
             None,
             "f1",
+            true,
         )
         .unwrap();
 
@@ -1234,6 +1252,7 @@ mod tests {
             "".to_string(),
             None,
             "f2",
+            true,
         )
         .unwrap();
 

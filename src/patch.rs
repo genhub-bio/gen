@@ -294,6 +294,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -326,6 +327,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -377,6 +379,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -422,6 +425,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
 
@@ -461,6 +465,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();

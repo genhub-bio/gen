@@ -175,6 +175,7 @@ pub fn update_with_vcf(
         genotype.unwrap_or_default(),
         sample.as_deref(),
         coordinate_frame.as_deref(),
+        false,
     ) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();

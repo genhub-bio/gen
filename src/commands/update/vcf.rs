@@ -25,6 +25,9 @@ pub struct Command {
     /// Use the given sample as the parent sample for changes.
     #[arg(long, alias = "cf")]
     coordinate_frame: Option<String>,
+    /// Apply edits in-place instead of using parent sample's reference coordinates
+    #[arg(long = "inplace")]
+    in_place: bool,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -49,6 +52,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.genotype.clone().unwrap_or("".to_string()),
         cmd.sample.as_deref(),
         cmd.coordinate_frame.as_deref(),
+        cmd.in_place,
     ) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", [])?;

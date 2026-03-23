@@ -1695,6 +1695,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         let block_group_count =
@@ -1813,6 +1814,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
 
@@ -1845,6 +1847,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         );
 
         let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123");
@@ -1944,6 +1947,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         let edge_count = Edge::query(conn, "select * from edges", rusqlite::params!()).len();
@@ -1991,6 +1995,7 @@ mod tests {
             "".to_string(),
             None,
             Some("reference"),
+            false,
         )
         .unwrap();
         let edge_count = Edge::query(conn, "select * from edges", rusqlite::params!()).len();
