@@ -5,7 +5,10 @@ use gen_graph::GenGraph;
 use rusqlite::{Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{block_group::BlockGroup, db::GraphConnection, gen_models_capnp::sample, traits::*};
+use crate::{
+    block_group::BlockGroup, db::GraphConnection, gen_models_capnp::sample,
+    sample_lineage::SampleLineage, traits::*,
+};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
@@ -41,6 +44,21 @@ impl Query for Sample {
 
 impl Sample {
     pub const DEFAULT_NAME: &str = "reference";
+    
+    pub fn get_parent_names(conn: &GraphConnection, sample_name: &str) -> Vec<String> {
+        SampleLineage::get_parents(conn, sample_name)
+    }
+
+    pub fn resolve_parent_names(
+        conn: &GraphConnection,
+        sample_name: &str,
+        parent_sample: Option<&str>,
+    ) -> Vec<String> {
+        match parent_sample {
+            Some(parent_sample) => vec![parent_sample.to_string()],
+            None => Sample::get_parent_names(conn, sample_name),
+        }
+    }
 
     pub fn create(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
         let mut stmt = conn
@@ -98,28 +116,41 @@ impl Sample {
         sample_name: &str,
         parent_sample: Option<&str>,
     ) -> Sample {
-        if let Ok(new_sample) = Sample::create(conn, sample_name) {
-            if let Some(parent) = parent_sample {
-                let bgs = BlockGroup::query(
-                    conn,
-                    "select * from block_groups where collection_name = ?1 AND sample_name = ?2",
-                    params!(collection_name, parent),
-                );
-                for bg in bgs.iter() {
-                    BlockGroup::get_or_create_sample_block_group(
+        match Sample::create(conn, sample_name) {
+            Ok(new_sample) => {
+                if let Some(parent) = parent_sample {
+                    let bgs = BlockGroup::query(
                         conn,
-                        collection_name,
-                        &new_sample.name,
-                        &bg.name,
-                        parent_sample,
-                    )
-                    .expect("failed to get or create blockgroup clone.");
+                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2",
+                        params!(collection_name, parent),
+                    );
+                    for bg in bgs.iter() {
+                        BlockGroup::get_or_create_sample_block_group(
+                            conn,
+                            collection_name,
+                            &new_sample.name,
+                            &bg.name,
+                            parent_sample,
+                        )
+                        .expect("failed to get or create blockgroup clone.");
+                    }
+                    SampleLineage::create(conn, parent, &new_sample.name)
+                        .expect("failed to create sample lineage");
+                }
+
+                new_sample
+            }
+            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
+                if err.code == rusqlite::ErrorCode::ConstraintViolation {
+                    Sample {
+                        name: sample_name.to_string(),
+                    }
+                } else {
+                    panic!("something bad happened querying the database")
                 }
             }
-            new_sample
-        } else {
-            Sample {
-                name: sample_name.to_string(),
+            Err(_) => {
+                panic!("something bad happened.")
             }
         }
     }
@@ -185,5 +216,16 @@ mod tests {
 
         assert!(Sample::get_by_name(conn, "sample1").is_err());
         assert!(Sample::get_by_name(conn, "sample2").is_ok());
+    }
+
+    #[test]
+    fn test_get_or_create_child_does_not_add_lineage_for_existing_sample() {
+        let conn = &get_connection(None).unwrap();
+        Sample::get_or_create(conn, "parent");
+        Sample::get_or_create(conn, "child");
+
+        Sample::get_or_create_child(conn, "test", "child", Some("parent"));
+
+        assert!(SampleLineage::get_parents(conn, "child").is_empty());
     }
 }

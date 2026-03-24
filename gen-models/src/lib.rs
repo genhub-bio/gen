@@ -12,6 +12,7 @@ pub mod files;
 #[allow(clippy::all)]
 pub mod generated;
 pub use generated::gen_models_capnp;
+pub mod lineage;
 pub mod manifest;
 pub mod metadata;
 pub mod migrations;
@@ -20,6 +21,7 @@ pub mod operations;
 pub mod path;
 pub mod path_edge;
 pub mod sample;
+pub mod sample_lineage;
 pub mod sequence;
 pub mod session_operations;
 #[cfg(test)]

@@ -168,6 +168,7 @@ pub fn attach_session(session: &mut session::Session) {
         "annotation_groups",
         "annotations",
         "annotation_group_samples",
+        "sample_lineage",
     ] {
         session.attach(Some(table)).unwrap();
     }

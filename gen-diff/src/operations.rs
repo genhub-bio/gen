@@ -366,6 +366,7 @@ mod tests {
         let changeset = ChangesetModels {
             collections: vec![],
             samples: vec![],
+            sample_lineages: vec![],
             sequences: vec![seq.clone()],
             block_groups: vec![block_group.clone()],
             nodes: vec![node.clone()],

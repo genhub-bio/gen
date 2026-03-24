@@ -10,8 +10,8 @@ use gen_core::{
     calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp,
 };
 use gen_graph::{
-    GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
-    flatten_to_interval_tree,
+    GenGraph, GenGraphExt as _, GraphNode, all_intermediate_edges, all_reachable_nodes,
+    all_simple_paths, flatten_to_interval_tree,
 };
 use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value as SQLValue};
@@ -276,6 +276,38 @@ impl BlockGroup {
         group_name: &str,
         parent_sample: Option<&str>,
     ) -> Result<HashId, QueryError> {
+        let parent_samples = parent_sample
+            .map(|parent_sample| vec![parent_sample.to_string()])
+            .unwrap_or_default();
+        BlockGroup::get_or_create_sample_block_group_from_parents(
+            conn,
+            collection_name,
+            sample_name,
+            group_name,
+            &parent_samples,
+        )
+    }
+
+    pub fn find_parent_block_group(
+        conn: &GraphConnection,
+        collection_name: &str,
+        group_name: &str,
+        parent_samples: &[String],
+    ) -> Result<Option<BlockGroup>, QueryError> {
+        Ok(
+            BlockGroup::find_parent_block_groups(conn, collection_name, group_name, parent_samples)
+                .into_iter()
+                .next(),
+        )
+    }
+
+    pub fn get_or_create_sample_block_group_from_parents(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        group_name: &str,
+        parent_samples: &[String],
+    ) -> Result<HashId, QueryError> {
         let binding = BlockGroup::query(
             conn,
             "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
@@ -287,35 +319,77 @@ impl BlockGroup {
             return Ok(block_group.id);
         }
 
-        let block_groups = if let Some(parent_sample_name) = parent_sample {
-            // use the base reference group if it exists
-            BlockGroup::query(
-                conn,
-                "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                params![collection_name, parent_sample_name, group_name],
-            )
-        } else {
-            vec![]
-        };
+        let parent_block_groups =
+            BlockGroup::find_parent_block_groups(conn, collection_name, group_name, parent_samples);
 
-        if let Some(parent_block_group) = block_groups.first() {
+        if let Some(parent_block_group) = parent_block_groups.first() {
             let new_block_group =
                 BlockGroup::create(conn, collection_name, sample_name, group_name);
 
             // clone parent blocks/edges/path
             parent_block_group.duplicate(conn, &new_block_group.id);
+            for parent_block_group in parent_block_groups.iter().skip(1) {
+                parent_block_group.merge_into(conn, &new_block_group.id);
+            }
 
             Ok(new_block_group.id)
         } else {
-            let error_message = if let Some(parent_sample_name) = parent_sample {
-                format!(
-                    "Block group not found for either new sample ({sample_name}) or parent sample ({parent_sample_name})"
-                )
-            } else {
+            let error_message = if parent_samples.is_empty() {
                 format!("Block group {group_name} not found for sample ({sample_name})")
+            } else {
+                format!(
+                    "Block group not found for either new sample ({sample_name}) or parent samples ({})",
+                    parent_samples.join(", ")
+                )
             };
             Err(QueryError::ResultsNotFound(error_message))
         }
+    }
+
+    fn find_parent_block_groups(
+        conn: &GraphConnection,
+        collection_name: &str,
+        group_name: &str,
+        parent_samples: &[String],
+    ) -> Vec<BlockGroup> {
+        if parent_samples.is_empty() {
+            return vec![];
+        }
+
+        BlockGroup::query(
+            conn,
+            "select * from block_groups where collection_name = ?1 AND sample_name IN rarray(?2) AND name = ?3 order by sample_name",
+            params![
+                collection_name,
+                Rc::new(
+                    parent_samples
+                        .iter()
+                        .cloned()
+                        .map(SQLValue::from)
+                        .collect::<Vec<_>>()
+                ),
+                group_name
+            ],
+        )
+    }
+
+    fn merge_into(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
+        let mut merged_graph = BlockGroup::get_graph(conn, target_block_group_id);
+        let parent_graph = BlockGroup::get_graph(conn, &self.id);
+        merged_graph.merge_graph(&parent_graph);
+
+        let new_block_group_edges = merged_graph
+            .all_edges()
+            .flat_map(|(_source, _target, edges)| {
+                edges.iter().map(|edge| BlockGroupEdgeData {
+                    block_group_id: *target_block_group_id,
+                    edge_id: edge.edge_id,
+                    chromosome_index: edge.chromosome_index,
+                    phased: edge.phased,
+                })
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
     }
 
     pub fn get_id(collection_name: &str, sample_name: &str, group_name: &str) -> HashId {
@@ -1142,6 +1216,7 @@ impl Query for BlockGroup {
 #[cfg(test)]
 mod tests {
     use core::ops::Range;
+    use std::collections::HashSet;
 
     use capnp::message::TypedBuilder;
     use chrono::Utc;
@@ -1227,6 +1302,113 @@ mod tests {
             BlockGroupEdge::edges_for_block_group(conn, &bg1.id),
             BlockGroupEdge::edges_for_block_group(conn, &bg2)
         );
+    }
+
+    #[test]
+    fn test_blockgroup_merge_from_multiple_parents() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test");
+        Sample::get_or_create(conn, "parent_a");
+        Sample::get_or_create(conn, "parent_b");
+        Sample::get_or_create(conn, "child");
+
+        let parent_a_bg = BlockGroup::create(conn, "test", "parent_a", "chr1");
+        let parent_b_bg = BlockGroup::create(conn, "test", "parent_b", "chr1");
+
+        let seq_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAA")
+            .save(conn);
+        let seq_b = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCCC")
+            .save(conn);
+        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("merge-parent-a"));
+        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("merge-parent-b"));
+
+        let parent_a_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_a,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_a,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+        let parent_b_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_b,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_b,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_a_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_a_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_b_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_b_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let merged_bg_id = BlockGroup::get_or_create_sample_block_group_from_parents(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            &["parent_a".to_string(), "parent_b".to_string()],
+        )
+        .unwrap();
+
+        let merged_graph = BlockGroup::get_graph(conn, &merged_bg_id);
+        let merged_node_ids = merged_graph
+            .nodes()
+            .filter(|node| !is_terminal(node.node_id))
+            .map(|node| node.node_id)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(merged_node_ids, HashSet::from([node_a, node_b]));
     }
 
     #[test]

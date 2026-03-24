@@ -46,6 +46,23 @@ impl GraphNode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct GraphNodeKey {
+    node_id: HashId,
+    sequence_start: i64,
+    sequence_end: i64,
+}
+
+impl From<GraphNode> for GraphNodeKey {
+    fn from(node: GraphNode) -> Self {
+        Self {
+            node_id: node.node_id,
+            sequence_start: node.sequence_start,
+            sequence_end: node.sequence_end,
+        }
+    }
+}
+
 pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
 pub type OperationGraph = DiGraphMap<HashId, ()>;
 
@@ -57,6 +74,42 @@ pub struct GraphEdge {
     pub chromosome_index: i64,
     pub phased: i64,
     pub created_on: i64,
+}
+
+pub trait GenGraphExt {
+    fn merge_graph(&mut self, other: &GenGraph);
+}
+
+impl GenGraphExt for GenGraph {
+    fn merge_graph(&mut self, other: &GenGraph) {
+        let mut nodes_by_key = self
+            .nodes()
+            .map(|node| (GraphNodeKey::from(node), node))
+            .collect::<HashMap<_, _>>();
+
+        for node in other.nodes() {
+            let key = GraphNodeKey::from(node);
+            if let std::collections::hash_map::Entry::Vacant(entry) = nodes_by_key.entry(key) {
+                self.add_node(node);
+                entry.insert(node);
+            }
+        }
+
+        for (source, target, edges) in other.all_edges() {
+            let source = nodes_by_key[&GraphNodeKey::from(source)];
+            let target = nodes_by_key[&GraphNodeKey::from(target)];
+
+            if let Some(existing_edges) = self.edge_weight_mut(source, target) {
+                for edge in edges.iter().copied() {
+                    if !existing_edges.contains(&edge) {
+                        existing_edges.push(edge);
+                    }
+                }
+            } else {
+                self.add_edge(source, target, edges.clone());
+            }
+        }
+    }
 }
 
 // #[derive(Debug)]
@@ -674,6 +727,174 @@ mod tests {
                 vec![1, 2, 4, 6, 7],
                 vec![1, 3, 4, 6, 7]
             ])
+        );
+    }
+
+    #[test]
+    fn merges_gen_graphs_and_preserves_distinct_edges() {
+        let start = GraphNode {
+            block_id: -1,
+            node_id: HashId::convert_str("merge-start"),
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let middle = GraphNode {
+            block_id: 1,
+            node_id: HashId::convert_str("merge-middle"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let end = GraphNode {
+            block_id: -1,
+            node_id: HashId::convert_str("merge-end"),
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let edge_a = GraphEdge {
+            edge_id: HashId::convert_str("merge-edge-a"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 1,
+        };
+        let edge_b = GraphEdge {
+            edge_id: HashId::convert_str("merge-edge-b"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 1,
+            phased: 1,
+            created_on: 2,
+        };
+
+        let mut graph_a = GenGraph::new();
+        graph_a.add_edge(start, middle, vec![edge_a]);
+
+        let mut graph_b = GenGraph::new();
+        graph_b.add_edge(start, middle, vec![edge_b]);
+        graph_b.add_edge(middle, end, vec![edge_a]);
+
+        graph_a.merge_graph(&graph_b);
+
+        assert_eq!(graph_a.edge_weight(start, middle).unwrap().len(), 2);
+        assert!(
+            graph_a
+                .edge_weight(start, middle)
+                .unwrap()
+                .contains(&edge_a)
+        );
+        assert!(
+            graph_a
+                .edge_weight(start, middle)
+                .unwrap()
+                .contains(&edge_b)
+        );
+        assert_eq!(graph_a.edge_weight(middle, end).unwrap(), &vec![edge_a]);
+    }
+
+    #[test]
+    fn merges_gen_graphs_without_duplicating_identical_edges() {
+        let start = GraphNode {
+            block_id: -1,
+            node_id: HashId::convert_str("dedup-start"),
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let end = GraphNode {
+            block_id: -1,
+            node_id: HashId::convert_str("dedup-end"),
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let edge = GraphEdge {
+            edge_id: HashId::convert_str("dedup-edge"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 1,
+        };
+
+        let mut graph_a = GenGraph::new();
+        graph_a.add_edge(start, end, vec![edge]);
+
+        let mut graph_b = GenGraph::new();
+        graph_b.add_edge(start, end, vec![edge]);
+
+        graph_a.merge_graph(&graph_b);
+
+        assert_eq!(graph_a.edge_weight(start, end).unwrap(), &vec![edge]);
+    }
+
+    #[test]
+    fn merges_gen_graphs_by_logical_node_interval_not_block_id() {
+        let source_a = GraphNode {
+            block_id: 1,
+            node_id: HashId::convert_str("shared-node"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let target_a = GraphNode {
+            block_id: 2,
+            node_id: HashId::convert_str("target-node"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let source_b = GraphNode {
+            block_id: 10,
+            node_id: source_a.node_id,
+            sequence_start: source_a.sequence_start,
+            sequence_end: source_a.sequence_end,
+        };
+        let target_b = GraphNode {
+            block_id: 20,
+            node_id: target_a.node_id,
+            sequence_start: target_a.sequence_start,
+            sequence_end: target_a.sequence_end,
+        };
+        let edge_a = GraphEdge {
+            edge_id: HashId::convert_str("logical-edge-a"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 1,
+        };
+        let edge_b = GraphEdge {
+            edge_id: HashId::convert_str("logical-edge-b"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 1,
+            phased: 1,
+            created_on: 2,
+        };
+
+        let mut graph_a = GenGraph::new();
+        graph_a.add_edge(source_a, target_a, vec![edge_a]);
+
+        let mut graph_b = GenGraph::new();
+        graph_b.add_edge(source_b, target_b, vec![edge_b]);
+
+        graph_a.merge_graph(&graph_b);
+
+        assert_eq!(graph_a.nodes().count(), 2);
+        let merged_source = graph_a
+            .nodes()
+            .find(|node| node.node_id == source_a.node_id)
+            .unwrap();
+        let merged_target = graph_a
+            .nodes()
+            .find(|node| node.node_id == target_a.node_id)
+            .unwrap();
+
+        assert_eq!(merged_source.block_id, source_a.block_id);
+        assert_eq!(merged_target.block_id, target_a.block_id);
+        assert_eq!(
+            graph_a
+                .edge_weight(merged_source, merged_target)
+                .unwrap()
+                .len(),
+            2
         );
     }
 
