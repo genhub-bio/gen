@@ -4,7 +4,7 @@ use gen_tui::{
     LineStyle,
     geometry::WorldRect,
     graph_controller::{GraphController, WorldBuffer},
-    graph_widget::GraphWidget,
+    graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer, PathStyle},
     theme::Theme,
@@ -267,8 +267,12 @@ impl NodeRenderer<&WidgetGraph> for WidgetNodeRenderer {
         node: &GraphNode,
         detail_level: VisualDetail,
     ) {
-        let node_style = Style::default().fg(self.palette.node_fg).bg(self.palette.node_bg);
-        let canvas_style = Style::default().fg(self.palette.node_bg).bg(self.palette.canvas_bg);
+        let node_style = Style::default()
+            .fg(self.palette.node_fg)
+            .bg(self.palette.node_bg);
+        let canvas_style = Style::default()
+            .fg(self.palette.node_bg)
+            .bg(self.palette.canvas_bg);
         buffer.fill_rect(area, ' ');
 
         if node.node_id.is_start() {
@@ -289,7 +293,7 @@ impl NodeRenderer<&WidgetGraph> for WidgetNodeRenderer {
                 let spec = node.spec();
                 let cached = self.cache.borrow().get(&spec).cloned();
                 if let Some(seq) = cached {
-                    let truncated: String = seq.chars().take(max_width).collect();
+                    let truncated = inner_truncation(&seq, max_width as u32);
                     buffer.set_string_styled(area.left_center(), &truncated, node_style);
                 } else {
                     buffer.set_string_styled(
@@ -575,6 +579,19 @@ impl App {
     }
 }
 
+/// Truncate a sequence from the inside, keeping the beginning and end.
+fn inner_truncation(s: &str, target_length: u32) -> String {
+    if s.len() <= target_length as usize {
+        return s.to_string();
+    } else if target_length < 5 {
+        return NODE_GLYPH.to_string();
+    }
+    let left_len = (target_length - 3) / 2 + ((target_length - 3) % 2);
+    let right_len = (target_length - 3) / 2;
+    let left = &s[..left_len as usize];
+    let right = &s[(s.len() - right_len as usize)..];
+    format!("{}...{}", left, right)
+}
 // ---------------------------------------------------------------------------
 // mount_app — the main entry point exported to JS
 // ---------------------------------------------------------------------------
@@ -585,7 +602,12 @@ impl App {
 /// The topology JSON must match the `TopologyResponse` schema:
 /// `{"nodes": [...], "edges": [[src, dst], ...]}`.
 #[wasm_bindgen]
-pub fn mount_app(container_id: &str, topology_json: &str, palette_json: &str, path_nodes_json: &str) -> Result<AppHandle, JsValue> {
+pub fn mount_app(
+    container_id: &str,
+    topology_json: &str,
+    palette_json: &str,
+    path_nodes_json: &str,
+) -> Result<AppHandle, JsValue> {
     console_error_panic_hook::set_once();
 
     // Parse topology
@@ -617,8 +639,8 @@ pub fn mount_app(container_id: &str, topology_json: &str, palette_json: &str, pa
         .map_err(|e| JsValue::from_str(&format!("palette parse error: {e}")))?;
 
     // Parse path nodes (best-effort: ignore errors so the widget still loads without a path)
-    let path_nodes: Vec<GraphNode> = json_from_str::<Vec<GraphNode>>(path_nodes_json)
-        .unwrap_or_default();
+    let path_nodes: Vec<GraphNode> =
+        json_from_str::<Vec<GraphNode>>(path_nodes_json).unwrap_or_default();
 
     // Shared sequence state
     let cache: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
