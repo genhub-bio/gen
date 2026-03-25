@@ -1,8 +1,8 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use r#gen::{core::HashId, get_connection};
 use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, config::Workspace};
-use gen_graph::project_path;
+use gen_graph::{GraphNode, project_path};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, path::Path, traits::Query};
 use pyo3::{prelude::*, types::{PyDict, PyList, PyModule}};
 

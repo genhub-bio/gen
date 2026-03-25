@@ -1,8 +1,8 @@
-// widget_src.js — pre-bundle source for the gen Jupyter widget.
+// graph_widget_src.js — pre-bundle source for the gen Jupyter widget.
 //
 // This file is NOT loaded directly by the browser.  build_bundle.py reads it,
 // prepends the wasm-pack-generated glue + the WASM binary (base64-encoded),
-// and writes the combined self-contained bundle to static/widget.js.
+// and writes the combined self-contained bundle to static/graph_widget.js.
 //
 // The bundle is then inlined by anywidget via _esm = Path("static/widget.js"),
 // which creates a blob URL from the file contents and imports it as an ES
@@ -28,9 +28,9 @@ async function render({ model, el }) {
   el.appendChild(container);
 
   // Mount the gen-tui widget into the container.
-  const topology = JSON.stringify(model.get("topology"));
-  const palette = JSON.stringify(model.get("palette"));
-  const pathNodes = JSON.stringify(model.get("path_nodes") || []);
+  const topology = model.get("topology");
+  const palette = model.get("palette");
+  const pathNodes = model.get("path_nodes");
   let app;
   try {
     app = mount_app(uid, topology, palette, pathNodes);
@@ -53,7 +53,7 @@ async function render({ model, el }) {
 
   model.on("msg:custom", (msg) => {
     if (msg.type === "sequences_response") {
-      app.deliver_sequences(JSON.stringify(msg.data));
+      app.deliver_sequences(msg.data_json);
     }
   });
 

@@ -66,7 +66,7 @@ try:
                 print(repr(self))
                 return
             try:
-                from .widget import GenGraphWidget
+                from .graph_widget import GenGraphWidget
                 from IPython.display import display
                 display(GenGraphWidget(self, self.repository))
             except ImportError:

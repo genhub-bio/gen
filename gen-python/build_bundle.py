@@ -10,7 +10,7 @@ Then from the repo root:
 
     python gen-python/build_bundle.py
 
-Output: gen-python/python/gen/static/widget.js
+Output: gen-python/python/gen/static/graph_widget.js
   A single ESM module with the WASM binary base64-encoded inline.
   anywidget inlines this as a blob URL — no server extension needed.
 """
@@ -23,8 +23,8 @@ import sys
 ROOT = pathlib.Path(__file__).parent
 PKG = ROOT / "jupyter-widget" / "pkg"
 STATIC = ROOT / "python" / "gen" / "static"
-WIDGET_SRC = STATIC / "widget_src.js"
-OUTPUT = STATIC / "widget.js"
+WIDGET_SRC = STATIC / "graph_widget_src.js"
+OUTPUT = STATIC / "graph_widget.js"
 
 
 def main() -> None:
@@ -49,7 +49,7 @@ def main() -> None:
     # The wasm-pack --target web glue ends with a re-export line such as:
     #   export { initSync, __wbg_init as default };
     # Strip that line so the bundle has no conflicting default export, then
-    # expose __wbg_init under the name __GEN_WASM_INIT__ for widget_src.js.
+    # expose __wbg_init under the name __GEN_WASM_INIT__ for graph_widget_src.js.
     glue = re.sub(
         r"^\s*export\s+\{[^}]*__wbg_init\s+as\s+default[^}]*\}\s*;\s*$",
         "",
@@ -73,7 +73,7 @@ const __GEN_WASM_BYTES__ = Uint8Array.from(atob(__GEN_WASM_B64__), c => c.charCo
 // the widget source expects.
 const __GEN_WASM_INIT__ = __wbg_init;
 
-// --- widget host (widget_src.js) ---
+// --- widget host (graph_widget_src.js) ---
 {widget_src}
 """
 
