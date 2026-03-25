@@ -163,7 +163,6 @@ where
                                 start,
                                 end,
                                 block: PathBlock {
-                                    id: 0,
                                     node_id: change_node,
                                     block_sequence: edit.new_sequence.clone(),
                                     sequence_start: 0,
@@ -184,7 +183,6 @@ where
                             start,
                             end,
                             block: PathBlock {
-                                id: 0,
                                 node_id: wt_node_id,
                                 block_sequence: "".to_string(),
                                 sequence_start: 0,

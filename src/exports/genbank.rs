@@ -466,13 +466,11 @@ mod tests {
         let mut graph = GenGraph::new();
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
@@ -489,13 +487,11 @@ mod tests {
         // second starting point for the graph, this also represents a node that is part of the path, but part of the sequence we don't want to use in our path
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("20"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
@@ -512,13 +508,11 @@ mod tests {
         // represent node_id being split into 3 pieces
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 20,
                 sequence_end: 30,
@@ -535,13 +529,11 @@ mod tests {
         // put the same node_id 1 somewhere random in the graph on an edge we don't want to follow
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("30"),
                 sequence_start: 0,
                 sequence_end: 10,
@@ -557,13 +549,11 @@ mod tests {
         );
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("30"),
                 sequence_start: 0,
                 sequence_end: 10,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
@@ -579,13 +569,11 @@ mod tests {
         );
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 10,
                 sequence_end: 20,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 20,
                 sequence_end: 30,
@@ -602,13 +590,11 @@ mod tests {
         // final part of path block
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("10"),
                 sequence_start: 20,
                 sequence_end: 30,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("20"),
                 sequence_start: 30,
                 sequence_end: 40,
@@ -624,13 +610,11 @@ mod tests {
         );
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("20"),
                 sequence_start: 30,
                 sequence_end: 40,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("20"),
                 sequence_start: 40,
                 sequence_end: 60,
@@ -646,13 +630,11 @@ mod tests {
         );
         graph.add_edge(
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("20"),
                 sequence_start: 30,
                 sequence_end: 40,
             },
             GraphNode {
-                block_id: -1,
                 node_id: HashId::convert_str("40"),
                 sequence_start: 40,
                 sequence_end: 60,
@@ -668,7 +650,6 @@ mod tests {
         );
         let path_blocks = vec![
             PathBlock {
-                id: 0,
                 node_id: HashId::convert_str("10"),
                 block_sequence: String::new(),
                 sequence_start: 0,
@@ -678,7 +659,6 @@ mod tests {
                 strand: Forward,
             },
             PathBlock {
-                id: 0,
                 node_id: HashId::convert_str("20"),
                 block_sequence: String::new(),
                 sequence_start: 30,
@@ -692,31 +672,26 @@ mod tests {
             get_path_nodes(&graph, &path_blocks),
             vec![
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("10"),
                     sequence_start: 0,
                     sequence_end: 10
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("10"),
                     sequence_start: 10,
                     sequence_end: 20
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("10"),
                     sequence_start: 20,
                     sequence_end: 30
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("20"),
                     sequence_start: 30,
                     sequence_end: 40
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("20"),
                     sequence_start: 40,
                     sequence_end: 60
@@ -730,13 +705,11 @@ mod tests {
         let mut graph = GenGraph::new();
         graph.add_edge(
             GraphNode {
-                block_id: 0,
                 node_id: HashId::convert_str("3"),
                 sequence_start: 0,
                 sequence_end: 1425,
             },
             GraphNode {
-                block_id: 0,
                 node_id: HashId::convert_str("3"),
                 sequence_start: 2220,
                 sequence_end: 8302,
@@ -752,13 +725,11 @@ mod tests {
         );
         graph.add_edge(
             GraphNode {
-                block_id: 0,
                 node_id: HashId::convert_str("3"),
                 sequence_start: 0,
                 sequence_end: 1425,
             },
             GraphNode {
-                block_id: 0,
                 node_id: HashId::convert_str("3"),
                 sequence_start: 1425,
                 sequence_end: 2220,
@@ -774,13 +745,11 @@ mod tests {
         );
         graph.add_edge(
             GraphNode {
-                block_id: 0,
                 node_id: HashId::convert_str("3"),
                 sequence_start: 1425,
                 sequence_end: 2220,
             },
             GraphNode {
-                block_id: 0,
                 node_id: HashId::convert_str("3"),
                 sequence_start: 2220,
                 sequence_end: 8302,
@@ -795,7 +764,6 @@ mod tests {
             }],
         );
         let path_blocks = vec![PathBlock {
-            id: 0,
             node_id: HashId::convert_str("3"),
             block_sequence: String::new(),
             sequence_start: 0,
@@ -808,19 +776,16 @@ mod tests {
             get_path_nodes(&graph, &path_blocks),
             vec![
                 GraphNode {
-                    block_id: 0,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 1425
                 },
                 GraphNode {
-                    block_id: 0,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 1425,
                     sequence_end: 2220
                 },
                 GraphNode {
-                    block_id: 0,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 2220,
                     sequence_end: 8302

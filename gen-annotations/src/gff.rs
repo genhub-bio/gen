@@ -234,7 +234,6 @@ mod tests {
             start: 15,
             end: 25,
             block: PathBlock {
-                id: 0,
                 node_id,
                 block_sequence: replacement_sequence.to_string(),
                 sequence_start: 0,

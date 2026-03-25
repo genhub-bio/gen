@@ -212,7 +212,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
     let mut selected_diff_component: usize = 0;
     empty_graph.add_node(GraphNode {
         node_id: PATH_START_NODE_ID,
-        block_id: 0,
         sequence_start: 0,
         sequence_end: 1,
     });

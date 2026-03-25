@@ -90,6 +90,8 @@ where
 mod tests {
     use std::{fs::File, io::BufReader, path::PathBuf};
 
+    use gen_models::sample::Sample;
+
     use super::translate_gff;
     use crate::test_helpers::{get_connection, setup_test_data};
 

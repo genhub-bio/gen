@@ -74,13 +74,11 @@ pub fn get_change_graph(
         let mut graph: DiGraphMap<HashId, Vec<(i64, i64)>> = DiGraphMap::new();
         let mut block_graph = GenGraph::new();
         block_graph.add_node(GraphNode {
-            block_id: -1,
             node_id: start_node.id,
             sequence_start: 0,
             sequence_end: 0,
         });
         block_graph.add_node(GraphNode {
-            block_id: -1,
             node_id: end_node.id,
             sequence_start: 0,
             sequence_end: 0,
@@ -142,7 +140,6 @@ pub fn get_change_graph(
             let mut blocks = vec![];
             for (i, j) in block_starts.iter().zip(block_ends.iter()) {
                 let node = GraphNode {
-                    block_id: -1,
                     node_id: node,
                     sequence_start: *i,
                     sequence_end: *j,

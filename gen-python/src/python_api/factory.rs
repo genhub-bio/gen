@@ -29,7 +29,6 @@ impl Factory {
             let nodes = PyDict::new(py);
             for node in graph.nodes() {
                 let node_dict = PyDict::new(py);
-                node_dict.set_item("block_id", node.block_id)?;
                 node_dict.set_item("node_id", node.node_id)?;
                 node_dict.set_item("sequence_start", node.sequence_start)?;
                 node_dict.set_item("sequence_end", node.sequence_end)?;
@@ -91,7 +90,6 @@ impl Factory {
             for node in graph.nodes() {
                 // Create a Python dictionary to store node data
                 let node_data = PyDict::new(py);
-                node_data.set_item("block_id", node.block_id)?;
                 node_data.set_item("node_id", node.node_id)?;
                 node_data.set_item("sequence_start", node.sequence_start)?;
                 node_data.set_item("sequence_end", node.sequence_end)?;
@@ -153,7 +151,6 @@ impl Factory {
             for node in graph.nodes() {
                 // Create a Python dictionary to store node data
                 let node_data = PyDict::new(py);
-                node_data.set_item("block_id", node.block_id)?;
                 node_data.set_item("node_id", node.node_id)?;
                 node_data.set_item("sequence_start", node.sequence_start)?;
                 node_data.set_item("sequence_end", node.sequence_end)?;

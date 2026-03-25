@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct GraphNode {
-    pub block_id: i64,
     pub node_id: HashId,
     pub sequence_start: i64,
     pub sequence_end: i64,
@@ -301,7 +300,6 @@ pub fn flatten_to_interval_tree(
                     // Use the first edge in the vector for strand information
                     let edge = &edges[0];
                     spans.insert(NodeIntervalBlock {
-                        block_id: source_node.block_id,
                         node_id: source_node.node_id,
                         start: node_start,
                         end: node_end,
@@ -310,7 +308,6 @@ pub fn flatten_to_interval_tree(
                         strand: edge.source_strand,
                     });
                     spans.insert(NodeIntervalBlock {
-                        block_id: target_node.block_id,
                         node_id: target_node.node_id,
                         start: node_end,
                         end: node_end + target_node.length(),
@@ -941,13 +938,11 @@ mod tests {
             let mut graph = GenGraph::new();
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: PATH_START_NODE_ID,
                     sequence_start: 0,
                     sequence_end: 0,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 5,
@@ -965,13 +960,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 5,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("4"),
                     sequence_start: 3,
                     sequence_end: 5,
@@ -989,13 +982,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("4"),
                     sequence_start: 3,
                     sequence_end: 5,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("5"),
                     sequence_start: 0,
                     sequence_end: 3,
@@ -1013,13 +1004,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("5"),
                     sequence_start: 0,
                     sequence_end: 3,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("6"),
                     sequence_start: 5,
                     sequence_end: 15,
@@ -1037,13 +1026,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 5,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 5,
                     sequence_end: 15,
@@ -1061,13 +1048,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 5,
                     sequence_end: 15,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: PATH_END_NODE_ID,
                     sequence_start: 0,
                     sequence_end: 0,
@@ -1085,7 +1070,6 @@ mod tests {
             );
             let path_blocks = vec![
                 PathBlock {
-                    id: 0,
                     node_id: PATH_START_NODE_ID,
                     block_sequence: "".to_string(),
                     sequence_start: 0,
@@ -1095,7 +1079,6 @@ mod tests {
                     strand: Strand::Forward,
                 },
                 PathBlock {
-                    id: 0,
                     node_id: HashId::convert_str("3"),
                     block_sequence: "".to_string(),
                     sequence_start: 0,
@@ -1105,7 +1088,6 @@ mod tests {
                     strand: Strand::Forward,
                 },
                 PathBlock {
-                    id: 0,
                     node_id: PATH_END_NODE_ID,
                     block_sequence: "".to_string(),
                     sequence_start: 0,
@@ -1121,7 +1103,6 @@ mod tests {
                 [
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: PATH_START_NODE_ID,
                             sequence_start: 0,
                             sequence_end: 0
@@ -1130,7 +1111,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: HashId::convert_str("3"),
                             sequence_start: 0,
                             sequence_end: 5
@@ -1139,7 +1119,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: HashId::convert_str("3"),
                             sequence_start: 5,
                             sequence_end: 15
@@ -1148,7 +1127,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: PATH_END_NODE_ID,
                             sequence_start: 0,
                             sequence_end: 0
@@ -1169,13 +1147,11 @@ mod tests {
             let mut graph = GenGraph::new();
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: PATH_START_NODE_ID,
                     sequence_start: 0,
                     sequence_end: 0,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 5,
@@ -1193,13 +1169,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 5,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("4"),
                     sequence_start: 3,
                     sequence_end: 5,
@@ -1217,13 +1191,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("4"),
                     sequence_start: 3,
                     sequence_end: 5,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("5"),
                     sequence_start: 0,
                     sequence_end: 3,
@@ -1241,13 +1213,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("5"),
                     sequence_start: 0,
                     sequence_end: 3,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 5,
                     sequence_end: 10,
@@ -1265,13 +1235,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 0,
                     sequence_end: 5,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 5,
                     sequence_end: 10,
@@ -1290,13 +1258,11 @@ mod tests {
 
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 5,
                     sequence_end: 10,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 10,
                     sequence_end: 15,
@@ -1315,13 +1281,11 @@ mod tests {
 
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 5,
                     sequence_end: 10,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("6"),
                     sequence_start: 0,
                     sequence_end: 3,
@@ -1340,13 +1304,11 @@ mod tests {
 
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("6"),
                     sequence_start: 0,
                     sequence_end: 3,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("6"),
                     sequence_start: 3,
                     sequence_end: 7,
@@ -1365,13 +1327,11 @@ mod tests {
 
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("6"),
                     sequence_start: 0,
                     sequence_end: 3,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("7"),
                     sequence_start: 0,
                     sequence_end: 2,
@@ -1389,13 +1349,11 @@ mod tests {
             );
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("7"),
                     sequence_start: 0,
                     sequence_end: 2,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("6"),
                     sequence_start: 3,
                     sequence_end: 7,
@@ -1414,13 +1372,11 @@ mod tests {
 
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("6"),
                     sequence_start: 3,
                     sequence_end: 7,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 10,
                     sequence_end: 15,
@@ -1439,13 +1395,11 @@ mod tests {
 
             graph.add_edge(
                 GraphNode {
-                    block_id: -1,
                     node_id: HashId::convert_str("3"),
                     sequence_start: 10,
                     sequence_end: 15,
                 },
                 GraphNode {
-                    block_id: -1,
                     node_id: PATH_END_NODE_ID,
                     sequence_start: 0,
                     sequence_end: 0,
@@ -1463,7 +1417,6 @@ mod tests {
             );
             let path_blocks = vec![
                 PathBlock {
-                    id: 0,
                     node_id: PATH_START_NODE_ID,
                     block_sequence: "".to_string(),
                     sequence_start: 0,
@@ -1473,7 +1426,6 @@ mod tests {
                     strand: Strand::Forward,
                 },
                 PathBlock {
-                    id: 0,
                     node_id: HashId::convert_str("3"),
                     block_sequence: "".to_string(),
                     sequence_start: 0,
@@ -1483,7 +1435,6 @@ mod tests {
                     strand: Strand::Forward,
                 },
                 PathBlock {
-                    id: 0,
                     node_id: HashId::convert_str("3"),
                     block_sequence: "".to_string(),
                     sequence_start: 5,
@@ -1493,7 +1444,6 @@ mod tests {
                     strand: Strand::Forward,
                 },
                 PathBlock {
-                    id: 0,
                     node_id: HashId::convert_str("6"),
                     block_sequence: "".to_string(),
                     sequence_start: 0,
@@ -1503,7 +1453,6 @@ mod tests {
                     strand: Strand::Forward,
                 },
                 PathBlock {
-                    id: 0,
                     node_id: HashId::convert_str("3"),
                     block_sequence: "".to_string(),
                     sequence_start: 10,
@@ -1513,7 +1462,6 @@ mod tests {
                     strand: Strand::Forward,
                 },
                 PathBlock {
-                    id: 0,
                     node_id: PATH_END_NODE_ID,
                     block_sequence: "".to_string(),
                     sequence_start: 0,
@@ -1529,7 +1477,6 @@ mod tests {
                 [
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: PATH_START_NODE_ID,
                             sequence_start: 0,
                             sequence_end: 0
@@ -1538,7 +1485,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: HashId::convert_str("3"),
                             sequence_start: 0,
                             sequence_end: 5
@@ -1547,7 +1493,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: HashId::convert_str("3"),
                             sequence_start: 5,
                             sequence_end: 10
@@ -1556,7 +1501,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: HashId::convert_str("6"),
                             sequence_start: 0,
                             sequence_end: 3
@@ -1565,7 +1509,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: HashId::convert_str("6"),
                             sequence_start: 3,
                             sequence_end: 7
@@ -1574,7 +1517,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: HashId::convert_str("3"),
                             sequence_start: 10,
                             sequence_end: 15
@@ -1583,7 +1525,6 @@ mod tests {
                     ),
                     (
                         GraphNode {
-                            block_id: -1,
                             node_id: PATH_END_NODE_ID,
                             sequence_start: 0,
                             sequence_end: 0
