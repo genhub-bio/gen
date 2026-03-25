@@ -235,7 +235,7 @@ mod tests {
                 &context,
                 BufReader::new("this is not valid".as_bytes()),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -266,7 +266,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            "reference",
+            Sample::DEFAULT_NAME,
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -333,7 +333,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -344,7 +344,7 @@ mod tests {
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let block_group_id = BlockGroup::get_id("", "reference", "insertion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion");
             let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
@@ -371,7 +371,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -395,7 +395,7 @@ mod tests {
         GCTGAACGGTCTGGTTATAGGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTAC
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
-            let block_group_id = BlockGroup::get_id("", "reference", "deletion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion");
             let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
@@ -426,7 +426,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -453,7 +453,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", "reference", "deletion_and_insertion"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion"),
                 false,
             );
             assert_eq!(
@@ -487,7 +487,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -514,7 +514,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", "reference", "substitution"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution"),
                 false,
             );
             assert_eq!(
@@ -546,7 +546,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -560,7 +560,7 @@ mod tests {
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let sequences: HashSet<String> = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", "reference", "insertion"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion"),
                 false,
             )
             .iter()

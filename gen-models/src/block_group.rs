@@ -1170,8 +1170,8 @@ mod tests {
     fn test_blockgroup_create() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
-        Sample::get_or_create(conn, "reference");
-        let bg1 = BlockGroup::create(conn, "test", "reference", "hg19");
+        Sample::get_or_create(conn, Sample::DEFAULT_NAME);
+        let bg1 = BlockGroup::create(conn, "test", Sample::DEFAULT_NAME, "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(conn, "sample");
@@ -1202,8 +1202,8 @@ mod tests {
     fn test_blockgroup_clone() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
-        Sample::get_or_create(conn, "reference");
-        let bg1 = BlockGroup::create(conn, "test", "reference", "hg19");
+        Sample::get_or_create(conn, Sample::DEFAULT_NAME);
+        let bg1 = BlockGroup::create(conn, "test", Sample::DEFAULT_NAME, "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(conn, "sample");
@@ -1212,7 +1212,7 @@ mod tests {
             "test",
             "sample",
             "hg19",
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
         )
         .unwrap();
         assert_eq!(

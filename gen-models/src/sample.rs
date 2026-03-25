@@ -40,6 +40,8 @@ impl Query for Sample {
 }
 
 impl Sample {
+    pub const DEFAULT_NAME: &str = "reference";
+
     pub fn create(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
         let mut stmt = conn
             .prepare("INSERT INTO samples (name) VALUES (?1) returning (name);")

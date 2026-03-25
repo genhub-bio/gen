@@ -137,7 +137,7 @@ mod tests {
 
     fn create_block_group(conn: &GraphConnection) {
         let collection = Collection::create(conn, "test");
-        Sample::get_or_create(conn, "reference");
+        Sample::get_or_create(conn, Sample::DEFAULT_NAME);
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -152,7 +152,7 @@ mod tests {
                 hash = reference_sequence.hash
             )),
         );
-        let block_group = BlockGroup::create(conn, &collection.name, "reference", "m123");
+        let block_group = BlockGroup::create(conn, &collection.name, Sample::DEFAULT_NAME, "m123");
 
         let edge_into = Edge::create(
             conn,
@@ -199,14 +199,15 @@ mod tests {
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
         Sample::get_or_create(conn, "child sample");
-        let _ = Sample::get_or_create_child(conn, "test", "child sample", Some("reference"));
+        let _ =
+            Sample::get_or_create_child(conn, "test", "child sample", Some(Sample::DEFAULT_NAME));
 
         let sample_bg_id = BlockGroup::get_or_create_sample_block_group(
             conn,
             "test",
             "child sample",
             "m123",
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
         )
         .expect("should create child block group");
         let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
@@ -278,7 +279,7 @@ mod tests {
         propagate_gff(
             &conn,
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             gff_path.to_str().expect("should convert gff path to UTF-8"),
             output_path

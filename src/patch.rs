@@ -258,6 +258,7 @@ mod tests {
     use gen_models::{
         block_group::BlockGroup,
         operations::{Branch, OperationState},
+        sample::Sample,
     };
 
     use super::*;
@@ -283,7 +284,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -293,7 +294,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -316,7 +317,7 @@ mod tests {
             &source_context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -326,7 +327,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -365,7 +366,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -378,7 +379,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -414,7 +415,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -424,7 +425,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -454,7 +455,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -464,7 +465,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();

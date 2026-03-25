@@ -116,13 +116,13 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
             "library graph",
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, "reference");
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = HashSet::new();
@@ -167,13 +167,13 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
             "m123",
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, "reference");
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
@@ -203,13 +203,13 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
             "m123",
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, "reference");
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = vec![];

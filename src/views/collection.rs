@@ -808,7 +808,7 @@ mod tests {
         Collection::create(conn, "/foo/baz");
 
         // Create samples
-        let sample_reference = Sample::get_or_create(conn, "reference");
+        let sample_reference = Sample::get_or_create(conn, Sample::DEFAULT_NAME);
         let sample_alpha = Sample::get_or_create(conn, "SampleAlpha");
         let sample_beta = Sample::get_or_create(conn, "SampleBeta");
 
@@ -835,7 +835,7 @@ mod tests {
         assert!(
             explorer_data
                 .collection_samples
-                .contains(&"reference".to_string())
+                .contains(&Sample::DEFAULT_NAME.to_string())
         );
         assert!(
             explorer_data
@@ -849,7 +849,10 @@ mod tests {
         );
 
         // (D) Sample block groups
-        let reference_bg = explorer_data.sample_block_groups.get("reference").unwrap();
+        let reference_bg = explorer_data
+            .sample_block_groups
+            .get(Sample::DEFAULT_NAME)
+            .unwrap();
         let reference_bg_names: Vec<_> = reference_bg.iter().map(|(_, n)| n.clone()).collect();
         assert_eq!(
             reference_bg_names,

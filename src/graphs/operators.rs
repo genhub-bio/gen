@@ -531,7 +531,7 @@ mod tests {
             &context,
             "test",
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             "chr1",
             None,
             vec![Range { start: 15, end: 25 }],
@@ -540,7 +540,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, "test", "reference");
+        let block_groups = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME);
         let block_group2 = block_groups.iter().find(|x| x.name == "chr1").unwrap();
 
         let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
@@ -572,7 +572,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -580,7 +580,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "test1",
             "m123",
             3,
@@ -601,7 +601,8 @@ mod tests {
             false,
         );
 
-        let original_block_groups = Sample::get_block_groups(conn, collection, "reference");
+        let original_block_groups =
+            Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let original_block_group_id = &original_block_groups[0].id;
         let all_original_sequences =
             BlockGroup::get_all_sequences(conn, original_block_group_id, false);
@@ -687,7 +688,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -695,7 +696,7 @@ mod tests {
         let _ = update_with_fasta(
             &context,
             collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "test1",
             "m123",
             3,
@@ -716,7 +717,8 @@ mod tests {
             false,
         );
 
-        let original_block_groups = Sample::get_block_groups(conn, collection, "reference");
+        let original_block_groups =
+            Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let original_block_group_id = &original_block_groups[0].id;
         let all_original_sequences =
             BlockGroup::get_all_sequences(conn, original_block_group_id, false);

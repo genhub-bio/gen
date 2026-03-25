@@ -316,8 +316,12 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
-        let block_group =
-            BlockGroup::create(conn, collection_name, "reference", "test block group");
+        let block_group = BlockGroup::create(
+            conn,
+            collection_name,
+            Sample::DEFAULT_NAME,
+            "test block group",
+        );
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAA")
@@ -432,9 +436,14 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, collection_name, &gfa_path, "reference", None).unwrap();
+        export_gfa(conn, collection_name, &gfa_path, Sample::DEFAULT_NAME, None).unwrap();
         // NOTE: Not directly checking file contents because segments are written in random order
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -459,7 +468,7 @@ mod tests {
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("missing.gfa");
 
-        let result = export_gfa(conn, "missing", &gfa_path, "reference", None);
+        let result = export_gfa(conn, "missing", &gfa_path, Sample::DEFAULT_NAME, None);
 
         assert!(matches!(
             result,
@@ -486,7 +495,12 @@ mod tests {
 
         export_gfa(conn, "test", &gfa_path, "test", 5).unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -528,17 +542,29 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
+        let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
+        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, "reference", None).unwrap();
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        export_gfa(
+            conn,
+            &collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            None,
+        )
+        .unwrap();
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -559,17 +585,29 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
+        let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
+        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, "reference", None).unwrap();
-        let _ = import_gfa(&context, &gfa_path, "anderson promoters 2", "reference");
+        export_gfa(
+            conn,
+            &collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            None,
+        )
+        .unwrap();
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "anderson promoters 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let block_group2 = Collection::get_block_groups(conn, "anderson promoters 2")
             .pop()
@@ -590,17 +628,29 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, &collection_name, "reference");
+        let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, "reference", "");
+        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "");
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
 
-        export_gfa(conn, &collection_name, &gfa_path, "reference", None).unwrap();
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        export_gfa(
+            conn,
+            &collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            None,
+        )
+        .unwrap();
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -690,7 +740,12 @@ mod tests {
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
         export_gfa(conn, "test", &gfa_path, "test", None).unwrap();
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let block_group2 = Collection::get_block_groups(conn, "test collection 2")
             .pop()

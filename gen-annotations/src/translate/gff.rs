@@ -139,7 +139,7 @@ mod tests {
         translate_gff(
             &conn,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             BufReader::new(File::open(gff_path).expect("should open fixture gff")),
             &mut buffer,
         )

@@ -267,8 +267,12 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
-        let block_group =
-            BlockGroup::create(conn, collection_name, "reference", "test block group");
+        let block_group = BlockGroup::create(
+            conn,
+            collection_name,
+            Sample::DEFAULT_NAME,
+            "test block group",
+        );
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -324,7 +328,7 @@ mod tests {
 
         // Set up child
         let _child_sample =
-            Sample::get_or_create_child(conn, collection_name, "child", Some("reference"));
+            Sample::get_or_create_child(conn, collection_name, "child", Some(Sample::DEFAULT_NAME));
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -367,9 +371,21 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "reference", "child").unwrap();
+        gfa_sample_diff(
+            conn,
+            collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            "child",
+        )
+        .unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -431,9 +447,21 @@ mod tests {
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 10, 14, &edge6, &edge7);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "reference", "grandchild").unwrap();
+        gfa_sample_diff(
+            conn,
+            collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            "grandchild",
+        )
+        .unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 3", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 3",
+            Sample::DEFAULT_NAME,
+        );
         let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
             .unwrap();
@@ -457,7 +485,12 @@ mod tests {
         let gfa_path = temp_dir.path().join("child-grandchild-diff.gfa");
         gfa_sample_diff(conn, collection_name, &gfa_path, "child", "grandchild").unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 4", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 4",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 4")
             .pop()
@@ -543,9 +576,21 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("diff-against-nothing.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "reference", "test sample").unwrap();
+        gfa_sample_diff(
+            conn,
+            collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            "test sample",
+        )
+        .unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -639,7 +684,12 @@ mod tests {
         )
         .unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -781,7 +831,12 @@ mod tests {
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
         gfa_sample_diff(conn, collection_name, &gfa_path, "sample1", "sample2").unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 3", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 3",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
@@ -923,7 +978,12 @@ mod tests {
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
         gfa_sample_diff(conn, collection_name, &gfa_path, "sample1", "sample2").unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 3", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 3",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
@@ -952,8 +1012,12 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
-        let block_group =
-            BlockGroup::create(conn, collection_name, "reference", "test block group");
+        let block_group = BlockGroup::create(
+            conn,
+            collection_name,
+            Sample::DEFAULT_NAME,
+            "test block group",
+        );
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAAAAAAAAAA")
@@ -995,7 +1059,7 @@ mod tests {
 
         // Set up child
         let _child_sample =
-            Sample::get_or_create_child(conn, collection_name, "child", Some("reference"));
+            Sample::get_or_create_child(conn, collection_name, "child", Some(Sample::DEFAULT_NAME));
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -1038,9 +1102,21 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "reference", "child").unwrap();
+        gfa_sample_diff(
+            conn,
+            collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            "child",
+        )
+        .unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 2", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 2",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
@@ -1102,9 +1178,21 @@ mod tests {
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 4, 10, &edge5, &edge6);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "reference", "grandchild").unwrap();
+        gfa_sample_diff(
+            conn,
+            collection_name,
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            "grandchild",
+        )
+        .unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 3", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 3",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
@@ -1126,7 +1214,12 @@ mod tests {
         let gfa_path = temp_dir.path().join("child-grandchild-diff.gfa");
         gfa_sample_diff(conn, collection_name, &gfa_path, "child", "grandchild").unwrap();
 
-        let _ = import_gfa(&context, &gfa_path, "test collection 4", "reference");
+        let _ = import_gfa(
+            &context,
+            &gfa_path,
+            "test collection 4",
+            Sample::DEFAULT_NAME,
+        );
 
         let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 4")
             .pop()

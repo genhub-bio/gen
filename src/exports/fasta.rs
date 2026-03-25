@@ -72,7 +72,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -121,14 +121,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,

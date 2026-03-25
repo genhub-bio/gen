@@ -185,11 +185,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -216,11 +216,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -240,11 +240,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", "reference", "chr22");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "chr22");
         let sequences = Sequence::query_by_blockgroup(conn, &block_group_id);
         let dna = sequences
             .iter()
@@ -267,11 +267,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -327,11 +327,11 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             true,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", "reference", "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -359,7 +359,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -372,7 +372,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap_err();

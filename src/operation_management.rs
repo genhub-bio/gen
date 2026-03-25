@@ -1668,7 +1668,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1694,7 +1694,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1798,7 +1798,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1813,7 +1813,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1832,7 +1832,7 @@ mod tests {
                 .map(|v| v.sample_name.clone())
                 .collect::<Vec<String>>(),
             vec![
-                "reference".to_string(),
+                Sample::DEFAULT_NAME.to_string(),
                 "unknown".to_string(),
                 "G1".to_string(),
                 "foo".to_string()
@@ -1846,7 +1846,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         );
 
@@ -1862,7 +1862,7 @@ mod tests {
                 .iter()
                 .map(|v| v.sample_name.clone())
                 .collect::<Vec<String>>(),
-            vec!["reference".to_string(), "foo".to_string()]
+            vec![Sample::DEFAULT_NAME.to_string(), "foo".to_string()]
         );
 
         // apply changes from branch-1, it will be operation id 2
@@ -1880,7 +1880,7 @@ mod tests {
                 .map(|v| v.sample_name.clone())
                 .collect::<HashSet<String>>(),
             HashSet::from_iter([
-                "reference".to_string(),
+                Sample::DEFAULT_NAME.to_string(),
                 "foo".to_string(),
                 "unknown".to_string(),
                 "G1".to_string()
@@ -1912,7 +1912,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1946,7 +1946,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1994,7 +1994,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();

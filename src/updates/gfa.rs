@@ -497,7 +497,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -508,7 +508,7 @@ mod tests {
         let _ = update_with_gfa(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "applied diff",
             gfa_update_path.to_str().unwrap(),
         );
@@ -549,7 +549,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -560,7 +560,7 @@ mod tests {
         let _ = update_with_gfa(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "applied diff",
             gfa_update_path.to_str().unwrap(),
         );

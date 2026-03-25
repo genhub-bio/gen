@@ -226,7 +226,7 @@ where
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_models::{file_types::FileTypes, operations::OperationFile};
+    use gen_models::{file_types::FileTypes, operations::OperationFile, sample::Sample};
     use noodles::fasta;
 
     use super::*;
@@ -254,7 +254,7 @@ mod tests {
                 &context,
                 BufReader::new("this is not valid".as_bytes()),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 false,
                 &OperationInfo {
                     files: vec![OperationFile {
@@ -285,7 +285,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            "reference",
+            Sample::DEFAULT_NAME,
             true,
             &OperationInfo {
                 files: vec![OperationFile {
@@ -304,7 +304,7 @@ mod tests {
 
     #[cfg(test)]
     mod geneious_genbanks {
-        use gen_models::operations::OperationFile;
+        use gen_models::{operations::OperationFile, sample::Sample};
 
         use super::*;
         use crate::{imports::genbank::import_genbank, test_helpers::setup_gen, track_database};
@@ -325,7 +325,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -342,7 +342,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 true,
                 &OperationInfo {
                     files: vec![OperationFile {
@@ -355,7 +355,7 @@ mod tests {
 
             let f = reader::parse_file(&path).unwrap();
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let block_group_id = BlockGroup::get_id("", "reference", "insertion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion");
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -382,7 +382,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -399,7 +399,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 true,
                 &OperationInfo {
                     files: vec![OperationFile {
@@ -411,7 +411,7 @@ mod tests {
             );
 
             let f = reader::parse_file(&path).unwrap();
-            let block_group_id = BlockGroup::get_id("", "reference", "insertion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion");
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -424,7 +424,7 @@ mod tests {
 
             // we have a new blockgroup called deletion that uses the same base sequence but
             // has a deletion in it.
-            let block_group_id = BlockGroup::get_id("", "reference", "deletion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion");
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -451,7 +451,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -468,7 +468,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                "reference",
+                Sample::DEFAULT_NAME,
                 false,
                 &OperationInfo {
                     files: vec![OperationFile {

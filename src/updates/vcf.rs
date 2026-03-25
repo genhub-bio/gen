@@ -616,7 +616,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -626,14 +626,14 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                &get_sample_bg(conn, &collection, "reference").id,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -666,7 +666,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -676,14 +676,14 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                &get_sample_bg(conn, &collection, "reference").id,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -723,7 +723,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -733,14 +733,14 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("sample 1"),
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                &get_sample_bg(conn, &collection, "reference").id,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -781,7 +781,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -791,7 +791,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("sample 1"),
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
@@ -814,7 +814,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -824,7 +824,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -860,7 +860,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -870,7 +870,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -900,7 +900,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -911,7 +911,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -943,7 +943,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -954,7 +954,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -968,7 +968,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         );
         assert!(matches!(
@@ -997,7 +997,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1013,7 +1013,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1027,7 +1027,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         );
         assert!(matches!(
@@ -1059,7 +1059,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1071,7 +1071,7 @@ mod tests {
             &collection,
             "0|1".to_string(),
             Some("test"),
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1100,7 +1100,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1111,7 +1111,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1155,7 +1155,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1166,7 +1166,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1191,7 +1191,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some("reference"),
+            Some(Sample::DEFAULT_NAME),
             false,
         )
         .unwrap();
@@ -1218,7 +1218,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1229,7 +1229,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            "reference",
+            Sample::DEFAULT_NAME,
             true,
         )
         .unwrap();
@@ -1259,7 +1259,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                &get_sample_bg(conn, &collection, "reference").id,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 true,
             ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])

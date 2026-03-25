@@ -117,7 +117,7 @@ mod tests {
         translate_bed(
             &conn,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             File::open(bed_path).expect("should open fixture bed"),
             &mut buffer,
         )

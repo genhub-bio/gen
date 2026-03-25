@@ -43,9 +43,10 @@ mod tests {
 
         // Track the database before starting operations
         track_database(conn, op_conn).expect("Failed to track database");
-        import_gfa(&context, &gfa_path, collection_name, "reference").expect("GFA import failed");
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
+            .expect("GFA import failed");
 
-        let gen_graph = Sample::get_graph(conn, collection_name, "reference");
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
 
         let config = GraphConfig {
             partition: PartitionConfig {
@@ -314,9 +315,10 @@ mod tests {
 
         // Track the database before starting operations
         track_database(conn, op_conn).expect("Failed to track database");
-        import_gfa(&context, &gfa_path, collection_name, "reference").expect("GFA import failed");
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
+            .expect("GFA import failed");
 
-        let gen_graph = Sample::get_graph(conn, collection_name, "reference");
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
 
         // Configure with large partition for stability
         let config = GraphConfig {
@@ -384,9 +386,10 @@ mod tests {
 
         // Track the database before starting operations
         track_database(conn, op_conn).expect("Failed to track database");
-        import_gfa(&context, &gfa_path, collection_name, "reference").expect("GFA import failed");
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
+            .expect("GFA import failed");
 
-        let gen_graph = Sample::get_graph(conn, collection_name, "reference");
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
 
         // Configure with large partition for stability
         let config = GraphConfig {

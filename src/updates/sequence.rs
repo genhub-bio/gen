@@ -209,14 +209,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,
@@ -257,14 +257,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,
@@ -275,7 +275,7 @@ mod tests {
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "other sample",
             "m123",
             2,
@@ -318,14 +318,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,
@@ -382,14 +382,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,
@@ -452,14 +452,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,
@@ -516,14 +516,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,
@@ -580,14 +580,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,
@@ -643,14 +643,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_sequence(
             &context,
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,

@@ -212,7 +212,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -224,7 +224,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             7,
@@ -268,7 +268,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -280,7 +280,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             7,
@@ -324,7 +324,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -336,7 +336,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             7,
@@ -379,7 +379,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -391,7 +391,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             0,
@@ -429,7 +429,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -441,7 +441,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            "reference",
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             0,
