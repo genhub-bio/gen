@@ -24,7 +24,8 @@ async function render({ model, el }) {
   const uid = "gen-" + crypto.randomUUID();
   const container = document.createElement("div");
   container.id = uid;
-  container.style.cssText = "width:100%;height:500px;overflow:hidden;";
+  container.tabIndex = 0;
+  container.style.cssText = "width:100%;height:500px;overflow:hidden;outline:none;";
   el.appendChild(container);
 
   // Mount the gen-tui widget into the container.
@@ -56,6 +57,10 @@ async function render({ model, el }) {
       app.deliver_sequences(msg.data_json);
     }
   });
+
+  // Enable keyboard handling only while the widget has focus.
+  container.addEventListener('focusin',  () => app.set_active(true));
+  container.addEventListener('focusout', () => app.set_active(false));
 
   // Prevent widget navigation keys from leaking to Jupyter / the browser.
   // Arrow keys would scroll the page; hjkl/Enter/Esc trigger notebook shortcuts.

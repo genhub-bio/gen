@@ -317,6 +317,7 @@ pub struct AppHandle {
     cache: Rc<RefCell<HashMap<String, String>>>,
     pending: Rc<RefCell<Vec<String>>>,
     sequence_cb: Rc<RefCell<Option<Function>>>,
+    active: Rc<RefCell<bool>>,
 }
 
 #[wasm_bindgen]
@@ -328,6 +329,12 @@ impl AppHandle {
     /// by eventually calling `deliver_sequences`.
     pub fn set_sequence_callback(&self, cb: Function) {
         *self.sequence_cb.borrow_mut() = Some(cb);
+    }
+
+    /// Enable or disable keyboard handling. Call with `true` when the widget
+    /// gains focus and `false` when it loses focus.
+    pub fn set_active(&self, active: bool) {
+        *self.active.borrow_mut() = active;
     }
 
     /// Deliver fetched sequences back to the renderer cache.
@@ -674,9 +681,14 @@ pub fn mount_app(
         path_nodes,
     }));
 
+    let active: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+
     let event_app = Rc::clone(&app);
+    let event_active = Rc::clone(&active);
     let _ = terminal.on_key_event(move |key| {
-        event_app.borrow_mut().handle_key(key);
+        if *event_active.borrow() {
+            event_app.borrow_mut().handle_key(key);
+        }
     });
 
     let mouse_app = Rc::clone(&app);
@@ -693,6 +705,7 @@ pub fn mount_app(
         cache,
         pending,
         sequence_cb,
+        active,
     })
 }
 
