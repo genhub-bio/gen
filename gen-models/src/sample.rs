@@ -44,7 +44,7 @@ impl Query for Sample {
 
 impl Sample {
     pub const DEFAULT_NAME: &str = "reference";
-    
+
     pub fn get_parent_names(conn: &GraphConnection, sample_name: &str) -> Vec<String> {
         SampleLineage::get_parents(conn, sample_name)
     }

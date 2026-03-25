@@ -239,7 +239,7 @@ pub fn view_patches(
                 let node_id = node.node_id;
                 let start = node.sequence_start;
                 let end = node.sequence_end;
-                let block_id = format!("{node_id}.{start}.{end}");
+                let dot_node_id = format!("{node_id}.{start}.{end}");
                 if is_terminal(node.node_id) {
                     let label = if is_start_node(node.node_id) {
                         "start"
@@ -247,7 +247,7 @@ pub fn view_patches(
                         "end"
                     };
                     dot.push_str(&format!(
-                        "\"{block_id}\" [label=\"{label}\", shape=ellipse]\n",
+                        "\"{dot_node_id}\" [label=\"{label}\", shape=ellipse]\n",
                     ));
                     continue;
                 }
@@ -286,7 +286,7 @@ pub fn view_patches(
                     escaped_seq = html_escape::encode_safe(&formatted_seq)
                 );
 
-                dot.push_str(&format!("\"{block_id}\" [label={label}]\n",));
+                dot.push_str(&format!("\"{dot_node_id}\" [label={label}]\n",));
             }
 
             for (src_node, dst_node, _) in block_graph.all_edges() {

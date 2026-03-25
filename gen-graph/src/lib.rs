@@ -46,23 +46,6 @@ impl GraphNode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct GraphNodeKey {
-    node_id: HashId,
-    sequence_start: i64,
-    sequence_end: i64,
-}
-
-impl From<GraphNode> for GraphNodeKey {
-    fn from(node: GraphNode) -> Self {
-        Self {
-            node_id: node.node_id,
-            sequence_start: node.sequence_start,
-            sequence_end: node.sequence_end,
-        }
-    }
-}
-
 pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
 pub type OperationGraph = DiGraphMap<HashId, ()>;
 
@@ -82,23 +65,11 @@ pub trait GenGraphExt {
 
 impl GenGraphExt for GenGraph {
     fn merge_graph(&mut self, other: &GenGraph) {
-        let mut nodes_by_key = self
-            .nodes()
-            .map(|node| (GraphNodeKey::from(node), node))
-            .collect::<HashMap<_, _>>();
-
         for node in other.nodes() {
-            let key = GraphNodeKey::from(node);
-            if let std::collections::hash_map::Entry::Vacant(entry) = nodes_by_key.entry(key) {
-                self.add_node(node);
-                entry.insert(node);
-            }
+            self.add_node(node);
         }
 
         for (source, target, edges) in other.all_edges() {
-            let source = nodes_by_key[&GraphNodeKey::from(source)];
-            let target = nodes_by_key[&GraphNodeKey::from(target)];
-
             if let Some(existing_edges) = self.edge_weight_mut(source, target) {
                 for edge in edges.iter().copied() {
                     if !existing_edges.contains(&edge) {
@@ -733,19 +704,16 @@ mod tests {
     #[test]
     fn merges_gen_graphs_and_preserves_distinct_edges() {
         let start = GraphNode {
-            block_id: -1,
             node_id: HashId::convert_str("merge-start"),
             sequence_start: 0,
             sequence_end: 0,
         };
         let middle = GraphNode {
-            block_id: 1,
             node_id: HashId::convert_str("merge-middle"),
             sequence_start: 0,
             sequence_end: 5,
         };
         let end = GraphNode {
-            block_id: -1,
             node_id: HashId::convert_str("merge-end"),
             sequence_start: 0,
             sequence_end: 0,
@@ -795,13 +763,11 @@ mod tests {
     #[test]
     fn merges_gen_graphs_without_duplicating_identical_edges() {
         let start = GraphNode {
-            block_id: -1,
             node_id: HashId::convert_str("dedup-start"),
             sequence_start: 0,
             sequence_end: 0,
         };
         let end = GraphNode {
-            block_id: -1,
             node_id: HashId::convert_str("dedup-end"),
             sequence_start: 0,
             sequence_end: 0,
@@ -827,27 +793,23 @@ mod tests {
     }
 
     #[test]
-    fn merges_gen_graphs_by_logical_node_interval_not_block_id() {
+    fn merges_gen_graphs_by_graph_node_value() {
         let source_a = GraphNode {
-            block_id: 1,
             node_id: HashId::convert_str("shared-node"),
             sequence_start: 0,
             sequence_end: 5,
         };
         let target_a = GraphNode {
-            block_id: 2,
             node_id: HashId::convert_str("target-node"),
             sequence_start: 0,
             sequence_end: 5,
         };
         let source_b = GraphNode {
-            block_id: 10,
             node_id: source_a.node_id,
             sequence_start: source_a.sequence_start,
             sequence_end: source_a.sequence_end,
         };
         let target_b = GraphNode {
-            block_id: 20,
             node_id: target_a.node_id,
             sequence_start: target_a.sequence_start,
             sequence_end: target_a.sequence_end,
@@ -878,24 +840,9 @@ mod tests {
         graph_a.merge_graph(&graph_b);
 
         assert_eq!(graph_a.nodes().count(), 2);
-        let merged_source = graph_a
-            .nodes()
-            .find(|node| node.node_id == source_a.node_id)
-            .unwrap();
-        let merged_target = graph_a
-            .nodes()
-            .find(|node| node.node_id == target_a.node_id)
-            .unwrap();
-
-        assert_eq!(merged_source.block_id, source_a.block_id);
-        assert_eq!(merged_target.block_id, target_a.block_id);
-        assert_eq!(
-            graph_a
-                .edge_weight(merged_source, merged_target)
-                .unwrap()
-                .len(),
-            2
-        );
+        assert!(graph_a.nodes().any(|node| node == source_a));
+        assert!(graph_a.nodes().any(|node| node == target_a));
+        assert_eq!(graph_a.edge_weight(source_a, target_a).unwrap().len(), 2);
     }
 
     #[test]
