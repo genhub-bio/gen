@@ -258,6 +258,7 @@ mod tests {
     use gen_models::{
         block_group::BlockGroup,
         operations::{Branch, OperationState},
+        sample::Sample,
     };
 
     use super::*;
@@ -283,7 +284,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -292,8 +293,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -315,7 +317,7 @@ mod tests {
             &source_context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -324,8 +326,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -363,7 +366,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -375,8 +378,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();
@@ -411,7 +415,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -420,8 +424,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
 
@@ -450,7 +455,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -459,8 +464,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         let mut write_stream: Vec<u8> = Vec::new();

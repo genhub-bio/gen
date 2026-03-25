@@ -64,7 +64,7 @@ impl<'a> BlockGroupCache<'_> {
     ) -> Result<HashId, QueryError> {
         let block_group_key = BlockGroupData {
             collection_name,
-            sample_name: Some(sample_name),
+            sample_name,
             name: name.clone(),
         };
         let block_group_lookup = block_group_cache.cache.get(&block_group_key);
@@ -196,12 +196,14 @@ pub fn update_with_vcf<'a>(
     vcf_path: &String,
     collection_name: &'a str,
     fixed_genotype: String,
-    fixed_sample: String,
-    coordinate_frame: impl Into<Option<&'a str>>,
+    fixed_sample: impl Into<Option<&'a str>>,
+    parent_sample: impl Into<Option<&'a str>>,
+    in_place: bool,
 ) -> Result<Operation, VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let coordinate_frame = coordinate_frame.into();
+    let fixed_sample = fixed_sample.into();
+    let parent_sample = parent_sample.into();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
 
     let mut session = start_operation(conn);
@@ -211,12 +213,6 @@ pub fn update_with_vcf<'a>(
         .expect("Unable to parse");
     let header = reader.read_header().unwrap();
     let sample_names = header.sample_names();
-    for name in sample_names {
-        Sample::get_or_create(conn, name);
-    }
-    if !fixed_sample.is_empty() {
-        Sample::get_or_create(conn, &fixed_sample);
-    }
     let mut genotype = vec![];
     if !fixed_genotype.is_empty() {
         genotype = parse_genotype(&fixed_genotype);
@@ -231,7 +227,7 @@ pub fn update_with_vcf<'a>(
     let mut changes: HashMap<(Path, String), Vec<PathChange>> = HashMap::new();
 
     let mut parent_block_groups: HashMap<(&str, HashId), HashId> = HashMap::new();
-    let mut created_samples = HashSet::new();
+    let mut created_samples: HashSet<&str> = HashSet::new();
 
     let mut path_lengths: HashMap<HashId, i64> = HashMap::new();
 
@@ -264,17 +260,17 @@ pub fn update_with_vcf<'a>(
             _ => 0,
         };
 
-        if !fixed_sample.is_empty() && !genotype.is_empty() {
-            if !created_samples.contains(&fixed_sample) {
-                Sample::get_or_create_child(conn, collection_name, &fixed_sample, coordinate_frame);
-                created_samples.insert(&fixed_sample);
+        if let Some(fixed_sample) = fixed_sample.filter(|_| !genotype.is_empty()) {
+            if !created_samples.contains(fixed_sample) {
+                Sample::get_or_create_child(conn, collection_name, fixed_sample, parent_sample);
+                created_samples.insert(fixed_sample);
             }
             let sample_bg_id = BlockGroupCache::lookup(
                 &mut block_group_cache,
                 collection_name,
-                &fixed_sample,
+                fixed_sample,
                 seq_name.clone(),
-                coordinate_frame,
+                parent_sample,
             )
             .expect("can't find sample bg....check this out more");
             let has_ref = genotype.iter().any(|gt| {
@@ -336,7 +332,7 @@ pub fn update_with_vcf<'a>(
                             ref_start,
                             block_group_id: sample_bg_id,
                             path: sample_path.clone(),
-                            sample_name: fixed_sample.clone(),
+                            sample_name: fixed_sample.to_string(),
                             alt_seq,
                             chromosome_index: chromosome_index as i64,
                             phased,
@@ -356,14 +352,9 @@ pub fn update_with_vcf<'a>(
             }
         } else {
             for (sample_index, sample) in record.samples().iter().enumerate() {
-                let sample_name = &sample_names[sample_index];
+                let sample_name = sample_names[sample_index].as_ref();
                 if !created_samples.contains(sample_name) {
-                    Sample::get_or_create_child(
-                        conn,
-                        collection_name,
-                        sample_name,
-                        coordinate_frame,
-                    );
+                    Sample::get_or_create_child(conn, collection_name, sample_name, parent_sample);
                     created_samples.insert(sample_name);
                 }
                 let sample_bg_id = BlockGroupCache::lookup(
@@ -371,7 +362,7 @@ pub fn update_with_vcf<'a>(
                     collection_name,
                     sample_name,
                     seq_name.clone(),
-                    coordinate_frame,
+                    parent_sample,
                 )
                 .expect("can't find sample bg....check this out more");
                 let genotype = sample.get(&header, "GT");
@@ -447,7 +438,7 @@ pub fn update_with_vcf<'a>(
                                         block_group_id: sample_bg_id,
                                         ref_start,
                                         path: sample_path.clone(),
-                                        sample_name: sample_name.clone(),
+                                        sample_name: sample_name.to_string(),
                                         alt_seq,
                                         chromosome_index: chromosome_index as i64,
                                         phased,
@@ -487,7 +478,15 @@ pub fn update_with_vcf<'a>(
             let sequence_string = sequence.get_sequence(None, None);
 
             let parent_path_id = parent_block_groups.entry((collection_name, vcf_entry.path.id)).or_insert_with(|| {
-                let parent_bg = BlockGroup::query(conn, "select * from block_groups where collection_name = ?1 AND sample_name is null and name = ?2", params![collection_name, &vcf_entry.path.name]);
+                let parent_bg = if let Some(parent_sample_name) = parent_sample {
+                    BlockGroup::query(
+                        conn,
+                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2 and name = ?3",
+                        params![collection_name, parent_sample_name, &vcf_entry.path.name],
+                    )
+                } else {
+                    vec![]
+                };
                 if parent_bg.is_empty() {
                     vcf_entry.path.id
                 } else {
@@ -535,8 +534,7 @@ pub fn update_with_vcf<'a>(
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(1000) {
-            BlockGroup::insert_changes(conn, chunk, &mut path_cache, coordinate_frame.is_some())
-                .unwrap();
+            BlockGroup::insert_changes(conn, chunk, &mut path_cache, in_place).unwrap();
             bar.inc(chunk.len() as u64);
         }
         summary
@@ -618,7 +616,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -627,12 +625,17 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, None).id, false),
+            BlockGroup::get_all_sequences(
+                conn,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
+                false,
+            ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `G1` genotype has no changes
@@ -663,7 +666,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -672,12 +675,17 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, None).id, false),
+            BlockGroup::get_all_sequences(
+                conn,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
+                false,
+            ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `bar` sample has the refrence + a deletion of the C
@@ -715,7 +723,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -724,12 +732,17 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
-            "sample 1".to_string(),
-            None,
+            Some("sample 1"),
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, None).id, false),
+            BlockGroup::get_all_sequences(
+                conn,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
+                false,
+            ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
@@ -768,7 +781,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -777,8 +790,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0/1".to_string(),
-            "sample 1".to_string(),
-            None,
+            Some("sample 1"),
+            Some(Sample::DEFAULT_NAME),
+            false,
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
     }
@@ -800,7 +814,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -809,8 +823,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
 
@@ -845,7 +860,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -854,8 +869,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -884,7 +900,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -894,8 +910,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
 
@@ -926,7 +943,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -936,34 +953,39 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Sample::DEFAULT_NAME,
+            false,
         )
         .unwrap();
 
         let nodes = Node::query(conn, "select * from nodes;", rusqlite::params!());
         assert_eq!(nodes.len(), 5);
 
-        assert_eq!(
-            update_with_vcf(
-                &context,
-                &vcf_path.to_str().unwrap().to_string(),
-                &collection,
-                "".to_string(),
-                "".to_string(),
-                None,
-            ),
+        let second_update = update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            Sample::DEFAULT_NAME,
+            false,
+        );
+        assert!(matches!(
+            second_update,
             Err(VcfError::OperationError(OperationError::NoChanges))
-        )
+        ));
+        assert_eq!(
+            Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
+            5
+        );
     }
 
     #[test]
     fn test_deduplicates_nodes_multiple_paths() {
         let context = setup_gen();
-        let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        vcf_path.push("fixtures/multiseq.vcf");
-        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fasta_path.push("fixtures/multiseq.fa");
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/multiseq.vcf");
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/multiseq.fa");
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
 
@@ -975,7 +997,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -990,25 +1012,32 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
 
         let nodes = Node::query(conn, "select * from nodes;", rusqlite::params!());
         assert_eq!(nodes.len(), 8);
 
-        assert_eq!(
-            update_with_vcf(
-                &context,
-                &vcf_path.to_str().unwrap().to_string(),
-                &collection,
-                "".to_string(),
-                "".to_string(),
-                None,
-            ),
+        let second_update = update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            Some(Sample::DEFAULT_NAME),
+            false,
+        );
+        assert!(matches!(
+            second_update,
             Err(VcfError::OperationError(OperationError::NoChanges))
-        )
+        ));
+        assert_eq!(
+            Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
+            8
+        );
     }
 
     #[test]
@@ -1030,7 +1059,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1041,8 +1070,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "0|1".to_string(),
-            "test".to_string(),
-            None,
+            Some("test"),
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         let elapsed = s.elapsed().as_secs();
@@ -1070,7 +1100,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1080,8 +1110,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1124,7 +1155,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1134,8 +1165,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
 
@@ -1158,8 +1190,9 @@ mod tests {
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Some(Sample::DEFAULT_NAME),
+            false,
         )
         .unwrap();
     }
@@ -1185,7 +1218,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -1195,8 +1228,9 @@ mod tests {
             &f0_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
             None,
+            Sample::DEFAULT_NAME,
+            true,
         )
         .unwrap();
 
@@ -1205,8 +1239,9 @@ mod tests {
             &f1_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             "f1",
+            true,
         )
         .unwrap();
 
@@ -1215,13 +1250,18 @@ mod tests {
             &f2_path.to_str().unwrap().to_string(),
             &collection,
             "".to_string(),
-            "".to_string(),
+            None,
             "f2",
+            true,
         )
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, None).id, true),
+            BlockGroup::get_all_sequences(
+                conn,
+                &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
+                true,
+            ),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(

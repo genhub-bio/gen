@@ -19,7 +19,7 @@ pub struct Command {
     name: Option<String>,
     /// The name of the sample for exporting
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
     /// The max sequence length per node
     #[arg(long)]
     node_max: Option<i64>,
@@ -44,7 +44,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         conn,
         name,
         &PathBuf::from(cmd.path),
-        cmd.sample.clone(),
+        cmd.sample.as_str(),
         cmd.node_max,
     )?;
 

@@ -24,7 +24,7 @@ pub struct Command {
     name: Option<String>,
     /// A sample name to associate the library with
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -44,7 +44,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     match import_library(
         context,
         name,
-        cmd.sample.as_deref(),
+        cmd.sample.as_str(),
         cmd.parts.as_deref().unwrap(),
         cmd.library.as_deref().unwrap(),
         &cmd.library_name,

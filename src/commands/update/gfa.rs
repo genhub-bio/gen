@@ -17,7 +17,7 @@ pub struct Command {
     name: Option<String>,
     /// The name of the sample to update
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
     /// A new sample name to associate with the update
     #[arg(long)]
     new_sample: String,
@@ -41,7 +41,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     match update_with_gfa(
         context,
         name,
-        cmd.sample.clone().as_deref(),
+        cmd.sample.as_str(),
         &cmd.new_sample,
         &cmd.path,
     ) {

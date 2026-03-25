@@ -19,12 +19,15 @@ pub struct Command {
     /// If no genotype is provided, enter the genotype to assign variants
     #[arg(short, long)]
     genotype: Option<String>,
-    /// The name of the sample to update
+    /// Optional sample override. If omitted, use samples defined in the VCF.
     #[arg(short, long)]
     sample: Option<String>,
     /// Use the given sample as the parent sample for changes.
-    #[arg(long, alias = "cf")]
-    coordinate_frame: Option<String>,
+    #[arg(long = "parent-sample", aliases = ["ps"])]
+    parent_sample: Option<String>,
+    /// Apply edits in-place instead of using parent sample's reference coordinates
+    #[arg(long = "inplace")]
+    in_place: bool,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -47,8 +50,9 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path,
         name,
         cmd.genotype.clone().unwrap_or("".to_string()),
-        cmd.sample.clone().unwrap_or("".to_string()),
-        cmd.coordinate_frame.as_deref(),
+        cmd.sample.as_deref(),
+        cmd.parent_sample.as_deref(),
+        cmd.in_place,
     ) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", [])?;
@@ -58,7 +62,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
             conn.execute("ROLLBACK TRANSACTION;", [])?;
             operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
             println!(
-                "No changes made. If the VCF lacks a sample or genotype, they need to be provided via --sample and --genotype."
+                "No changes made. If the VCF lacks samples or genotypes, provide them via --sample and --genotype."
             );
         }
         Err(e) => {

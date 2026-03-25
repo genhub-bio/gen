@@ -39,7 +39,7 @@ pub enum Commands {
         collection: Option<String>,
         /// The sample name whose graph coordinates are mapped against
         #[arg(short, long)]
-        sample: Option<String>,
+        sample: String,
     },
     /// Show a visual representation of a graph in the terminal
     #[command()]
@@ -47,7 +47,7 @@ pub enum Commands {
         /// The name of the graph to view
         #[clap(index = 1)]
         graph: Option<String>,
-        /// View the graph for a specific sample
+        /// Optional sample to open directly. If omitted, choose it in the UI.
         #[arg(short, long)]
         sample: Option<String>,
         /// Look for the sample in a specific collection
@@ -202,7 +202,7 @@ pub enum Commands {
         name: Option<String>,
         /// The name of the sample the annotations are referenced to (if not provided, the default)
         #[arg(short, long)]
-        from_sample: Option<String>,
+        from_sample: String,
         /// The name of the sample to annotate
         #[arg(short, long)]
         to_sample: String,
@@ -224,7 +224,7 @@ pub enum Commands {
         group: Option<String>,
         /// The sample name to annotate (defaults to the collection's default sample)
         #[arg(short, long)]
-        sample: Option<String>,
+        sample: String,
         /// The region to annotate (region:start-end)
         #[clap(index = 1)]
         region: String,
@@ -258,7 +258,7 @@ pub enum Commands {
         name: Option<String>,
         /// The name of the sample to list graphs for
         #[arg(short, long)]
-        sample: Option<String>,
+        sample: String,
     },
     /// Extract a sequence from a graph
     #[command(arg_required_else_help(true))]
@@ -268,7 +268,7 @@ pub enum Commands {
         name: Option<String>,
         /// The name of the sample containing the sequence
         #[arg(short, long)]
-        sample: Option<String>,
+        sample: String,
         /// The name of the graph to get the sequence for
         #[arg(short, long)]
         graph: Option<String>,
@@ -289,10 +289,10 @@ pub enum Commands {
         name: Option<String>,
         /// The name of the first sample to diff
         #[arg(long)]
-        sample1: Option<String>,
+        sample1: String,
         /// The name of the second sample to diff
         #[arg(long)]
-        sample2: Option<String>,
+        sample2: String,
         /// The name of the output GFA file
         #[arg(long)]
         gfa: String,
@@ -304,7 +304,7 @@ pub enum Commands {
         name: Option<String>,
         /// The name of the parent sample
         #[arg(short, long)]
-        sample: Option<String>,
+        sample: String,
         /// The name of the new sample
         #[arg(long)]
         new_sample: String,
@@ -322,7 +322,7 @@ pub enum Commands {
         name: Option<String>,
         /// The name of the parent sample
         #[arg(short, long)]
-        sample: Option<String>,
+        sample: String,
         /// The name of the new sample
         #[arg(long)]
         new_sample: String,
@@ -350,7 +350,7 @@ pub enum Commands {
         name: Option<String>,
         /// The name of the parent sample
         #[arg(short, long)]
-        sample: Option<String>,
+        sample: String,
         /// The name of the new sample
         #[arg(long)]
         new_sample: String,

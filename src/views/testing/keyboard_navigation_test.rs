@@ -18,9 +18,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use crate::{
-        imports::gfa::import_gfa,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
+        imports::gfa::import_gfa, test_helpers::setup_gen, track_database,
         views::gen_graph_widget::GenGraphNodeSizer,
     };
 
@@ -28,9 +26,9 @@ mod tests {
     #[test]
     fn test_keyboard_navigation_with_gfa() {
         // Setup environment and database
-        setup_gen_dir();
-        let conn = get_connection(None).expect("could not connect to main db");
-        let op_conn = &get_operation_connection(None).expect("could not connect to operations db");
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         // Load Anderson GFA file as specified by user
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");
@@ -44,25 +42,11 @@ mod tests {
         let collection_name = "/navigation_test";
 
         // Track the database before starting operations
-        track_database(&conn, op_conn).expect("Failed to track database");
+        track_database(conn, op_conn).expect("Failed to track database");
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
+            .expect("GFA import failed");
 
-        // Import GFA data
-        conn.execute("BEGIN TRANSACTION", []).unwrap();
-        op_conn.execute("BEGIN TRANSACTION", []).unwrap();
-
-        match import_gfa(&gfa_path, collection_name, None, &conn, op_conn) {
-            Ok(_) => {
-                conn.execute("END TRANSACTION", []).unwrap();
-                op_conn.execute("END TRANSACTION", []).unwrap();
-            }
-            Err(e) => {
-                conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                op_conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                panic!("GFA import failed: {:?}", e);
-            }
-        }
-
-        let gen_graph = Sample::get_graph(&conn, collection_name, None);
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
 
         let config = GraphConfig {
             partition: PartitionConfig {
@@ -316,9 +300,9 @@ mod tests {
     #[test]
     fn test_rapid_navigation() {
         // Setup environment and database
-        setup_gen_dir();
-        let conn = get_connection(None).expect("could not connect to main db");
-        let op_conn = &get_operation_connection(None).expect("could not connect to operations db");
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         // Use anderson_promoters as specified
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");
@@ -330,25 +314,11 @@ mod tests {
         let collection_name = "/rapid_test";
 
         // Track the database before starting operations
-        track_database(&conn, op_conn).expect("Failed to track database");
+        track_database(conn, op_conn).expect("Failed to track database");
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
+            .expect("GFA import failed");
 
-        // Import GFA data
-        conn.execute("BEGIN TRANSACTION", []).unwrap();
-        op_conn.execute("BEGIN TRANSACTION", []).unwrap();
-
-        match import_gfa(&gfa_path, collection_name, None, &conn, op_conn) {
-            Ok(_) => {
-                conn.execute("END TRANSACTION", []).unwrap();
-                op_conn.execute("END TRANSACTION", []).unwrap();
-            }
-            Err(e) => {
-                conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                op_conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                panic!("GFA import failed: {:?}", e);
-            }
-        }
-
-        let gen_graph = Sample::get_graph(&conn, collection_name, None);
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
 
         // Configure with large partition for stability
         let config = GraphConfig {
@@ -401,9 +371,9 @@ mod tests {
     #[test]
     fn test_boundary_navigation() {
         // Setup environment and database
-        setup_gen_dir();
-        let conn = get_connection(None).expect("could not connect to main db");
-        let op_conn = &get_operation_connection(None).expect("could not connect to operations db");
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         // Use anderson_promoters for boundary testing as requested
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");
@@ -415,25 +385,11 @@ mod tests {
         let collection_name = "/boundary_test";
 
         // Track the database before starting operations
-        track_database(&conn, op_conn).expect("Failed to track database");
+        track_database(conn, op_conn).expect("Failed to track database");
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
+            .expect("GFA import failed");
 
-        // Import GFA data
-        conn.execute("BEGIN TRANSACTION", []).unwrap();
-        op_conn.execute("BEGIN TRANSACTION", []).unwrap();
-
-        match import_gfa(&gfa_path, collection_name, None, &conn, op_conn) {
-            Ok(_) => {
-                conn.execute("END TRANSACTION", []).unwrap();
-                op_conn.execute("END TRANSACTION", []).unwrap();
-            }
-            Err(e) => {
-                conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                op_conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                panic!("GFA import failed: {:?}", e);
-            }
-        }
-
-        let gen_graph = Sample::get_graph(&conn, collection_name, None);
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
 
         // Configure with large partition for stability
         let config = GraphConfig {

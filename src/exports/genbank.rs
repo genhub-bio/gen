@@ -121,7 +121,7 @@ fn get_path_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode>
 pub fn export_genbank(
     conn: &GraphConnection,
     collection_name: &str,
-    sample_name: Option<&str>,
+    sample_name: &str,
     filename: &PathBuf,
 ) -> Result<(), GenbankExportError> {
     // GenBank don't really support graph like structures. Programs like Geneious use features to
@@ -383,7 +383,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            None,
+            Sample::DEFAULT_NAME,
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -395,7 +395,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename).unwrap();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
@@ -414,7 +414,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            None,
+            Sample::DEFAULT_NAME,
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -426,7 +426,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename).unwrap();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 
@@ -445,7 +445,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            None,
+            Sample::DEFAULT_NAME,
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -457,7 +457,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", None, &filename).unwrap();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
         compare_genbanks(&path, &filename);
     }
 

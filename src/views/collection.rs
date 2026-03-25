@@ -6,7 +6,6 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::HashId;
 use gen_models::{
-    block_group::BlockGroup,
     collection::Collection,
     db::{GraphConnection, OperationsConnection},
     file_types::FileTypes,
@@ -113,7 +112,7 @@ pub struct CollectionExplorerData {
     /// The final segment of the current collection name. For example,
     /// if the full collection is "/foo/bar", this would be "bar".
     pub current_collection: String,
-    /// The block groups in the *entire* collection that have sample_name = NULL
+    /// The block groups in the *entire* collection that have is_reference set
     pub reference_block_groups: Vec<(gen_core::HashId, String)>,
     /// The samples in the entire collection
     pub collection_samples: Vec<String>,
@@ -127,7 +126,7 @@ pub struct CollectionExplorerData {
     pub annotation_groups: Vec<AnnotationGroupEntry>,
 }
 
-/// Gathers information about a hierarchical collection, enumerating reference (null-sample)
+/// Gathers information about a hierarchical collection, enumerating reference
 /// block groups, sample block groups, and immediate sub-collections.
 pub fn gather_collection_explorer_data(
     conn: &GraphConnection,
@@ -138,30 +137,19 @@ pub fn gather_collection_explorer_data(
     let current_collection = collection_basename(full_collection_name).to_string();
     let _parent = parent_collection(full_collection_name);
 
-    // 2) Query block groups that have sample_name = NULL for the entire collection
-    let base_bgs = BlockGroup::query(
-        conn,
-        "SELECT * FROM block_groups
-         WHERE collection_name = ?1
-           AND sample_name IS NULL",
-        params![full_collection_name],
-    );
-    let reference_block_groups: Vec<(HashId, String)> =
-        base_bgs.iter().map(|bg| (bg.id, bg.name.clone())).collect();
+    let reference_block_groups: Vec<(HashId, String)> = vec![];
 
     // 3) Gather all samples associated with the entire collection
     let all_blocks = Collection::get_block_groups(conn, full_collection_name);
-    let mut sample_names: HashSet<String> = all_blocks
-        .iter()
-        .filter_map(|bg| bg.sample_name.clone())
-        .collect();
+    let mut sample_names: HashSet<String> =
+        all_blocks.iter().map(|bg| bg.sample_name.clone()).collect();
     let mut collection_samples: Vec<String> = sample_names.drain().collect();
     collection_samples.sort();
 
     // 4) For each sample, retrieve block groups
     let mut sample_block_groups = HashMap::new();
     for sample in &collection_samples {
-        let bgs = Sample::get_block_groups(conn, full_collection_name, Some(sample));
+        let bgs = Sample::get_block_groups(conn, full_collection_name, sample);
         let pairs = bgs
             .iter()
             .map(|bg| (bg.id, bg.name.clone()))
@@ -190,7 +178,9 @@ pub fn gather_collection_explorer_data(
     }
 
     let annotation_files = load_annotation_file_entries(op_conn);
-    let annotation_groups = load_annotation_group_entries(conn, sample_name);
+    let annotation_groups = sample_name
+        .map(|sample_name| load_annotation_group_entries(conn, sample_name))
+        .unwrap_or_default();
 
     CollectionExplorerData {
         current_collection,
@@ -818,14 +808,15 @@ mod tests {
         Collection::create(conn, "/foo/baz");
 
         // Create samples
+        let sample_reference = Sample::get_or_create(conn, Sample::DEFAULT_NAME);
         let sample_alpha = Sample::get_or_create(conn, "SampleAlpha");
         let sample_beta = Sample::get_or_create(conn, "SampleBeta");
 
-        // Create block groups: some with sample = null (reference), some with a sample
-        BlockGroup::create(conn, "/foo/bar", None, "BG_ReferenceA");
-        BlockGroup::create(conn, "/foo/bar", None, "BG_ReferenceB");
-        BlockGroup::create(conn, "/foo/bar", Some(&sample_alpha.name), "BG_Alpha1");
-        BlockGroup::create(conn, "/foo/bar", Some(&sample_beta.name), "BG_Beta1");
+        // Create block groups for three explicit samples
+        BlockGroup::create(conn, "/foo/bar", &sample_reference.name, "BG_ReferenceA");
+        BlockGroup::create(conn, "/foo/bar", &sample_reference.name, "BG_ReferenceB");
+        BlockGroup::create(conn, "/foo/bar", &sample_alpha.name, "BG_Alpha1");
+        BlockGroup::create(conn, "/foo/bar", &sample_beta.name, "BG_Beta1");
 
         // Call the function under test—notice we pass the full path
         let op_conn = context.operations().conn();
@@ -835,19 +826,17 @@ mod tests {
         // (A) The final path component is "bar"
         assert_eq!(explorer_data.current_collection, "bar");
 
-        // (B) Reference block groups (sample_name IS NULL)
-        let base_names: Vec<_> = explorer_data
-            .reference_block_groups
-            .iter()
-            .map(|(_, name)| name.clone())
-            .collect();
-        assert_eq!(base_names.len(), 2);
-        assert!(base_names.contains(&"BG_ReferenceA".to_string()));
-        assert!(base_names.contains(&"BG_ReferenceB".to_string()));
+        // (B) There are no special reference block groups now
+        assert!(explorer_data.reference_block_groups.is_empty());
 
         // (C) Collection samples
-        // We expect SampleAlpha and SampleBeta
-        assert_eq!(explorer_data.collection_samples.len(), 2);
+        // We expect reference, SampleAlpha, and SampleBeta
+        assert_eq!(explorer_data.collection_samples.len(), 3);
+        assert!(
+            explorer_data
+                .collection_samples
+                .contains(&Sample::DEFAULT_NAME.to_string())
+        );
         assert!(
             explorer_data
                 .collection_samples
@@ -860,6 +849,16 @@ mod tests {
         );
 
         // (D) Sample block groups
+        let reference_bg = explorer_data
+            .sample_block_groups
+            .get(Sample::DEFAULT_NAME)
+            .unwrap();
+        let reference_bg_names: Vec<_> = reference_bg.iter().map(|(_, n)| n.clone()).collect();
+        assert_eq!(
+            reference_bg_names,
+            vec!["BG_ReferenceA".to_string(), "BG_ReferenceB".to_string()]
+        );
+
         // "SampleAlpha"
         let alpha_bg = explorer_data
             .sample_block_groups

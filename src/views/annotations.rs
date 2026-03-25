@@ -334,7 +334,7 @@ pub struct AnnotationFileTrackRequest<'a> {
     pub conn: &'a GraphConnection,
     pub workspace: &'a Workspace,
     pub collection_name: &'a str,
-    pub sample_name: Option<&'a str>,
+    pub sample_name: &'a str,
     pub block_group_name: Option<&'a str>,
     pub query_window: Option<(i64, i64)>,
     pub node_filter: &'a HashSet<HashId>,

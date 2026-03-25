@@ -17,7 +17,7 @@ pub struct Command {
     name: Option<String>,
     /// The name of the sample to update
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
     /// The csv describing changes to make
     #[arg(short, long)]
     csv: String,
@@ -46,7 +46,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path,
         &cmd.csv,
         name,
-        cmd.sample.as_deref(),
+        cmd.sample.as_str(),
         cmd.parent_sample.as_deref(),
     ) {
         conn.execute("ROLLBACK TRANSACTION;", [])?;

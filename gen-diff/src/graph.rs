@@ -351,7 +351,7 @@ mod tests {
         let block_group = BlockGroup {
             id: HashId::pad_str(10),
             collection_name: "collection".to_string(),
-            sample_name: Some("sample".to_string()),
+            sample_name: "sample".to_string(),
             name: "bg".to_string(),
             created_on: 0,
         };

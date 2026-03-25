@@ -28,14 +28,13 @@ CREATE TABLE nodes (
 CREATE TABLE block_groups (
   id BLOB PRIMARY KEY NOT NULL,
   collection_name TEXT NOT NULL,
-  sample_name TEXT,
+  sample_name TEXT NOT NULL,
   name TEXT NOT NULL,
   created_on INTEGER NOT NULL,
   FOREIGN KEY(collection_name) REFERENCES collections(name),
   FOREIGN KEY(sample_name) REFERENCES samples(name)
 ) STRICT;
-CREATE UNIQUE INDEX block_group_uidx ON block_groups(collection_name, sample_name, name) WHERE sample_name is not null;
-CREATE UNIQUE INDEX block_group_null_sample_uidx ON block_groups(collection_name, name) WHERE sample_name is null;
+CREATE UNIQUE INDEX block_group_uidx ON block_groups(collection_name, sample_name, name);
 
 CREATE TABLE paths (
   id BLOB PRIMARY KEY NOT NULL,

@@ -53,7 +53,7 @@ impl From<CombinatorialLibraryCreationError> for UpdateWithLibraryError {
 pub fn update_with_library(
     context: &DbContext,
     collection_name: &str,
-    parent_sample_name: Option<&str>,
+    parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
     start_coordinate: i64,
@@ -87,12 +87,8 @@ pub fn update_with_library(
         });
     }
 
-    let child_block_group = BlockGroup::create(
-        conn,
-        collection_name,
-        Some(new_sample_name),
-        new_sample_name,
-    );
+    let child_block_group =
+        BlockGroup::create(conn, collection_name, new_sample_name, new_sample_name);
 
     let derived_block_group_chunks = derive_chunks(
         context,
@@ -216,7 +212,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -228,7 +224,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            None,
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             7,
@@ -237,7 +233,7 @@ mod tests {
             library_path.to_str().unwrap(),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
@@ -272,7 +268,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -284,7 +280,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            None,
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             7,
@@ -293,7 +289,7 @@ mod tests {
             library_path.to_str().unwrap(),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
@@ -328,7 +324,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -340,7 +336,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            None,
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             7,
@@ -349,7 +345,7 @@ mod tests {
             library_path.to_str().unwrap(),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
         let mut expected_sequences = vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()];
@@ -383,7 +379,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -395,7 +391,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            None,
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             0,
@@ -404,7 +400,7 @@ mod tests {
             library_path.to_str().unwrap(),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
@@ -433,7 +429,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -445,7 +441,7 @@ mod tests {
         let _ = update_with_library(
             &context,
             "test",
-            None,
+            Sample::DEFAULT_NAME,
             "new sample",
             "m123",
             0,
@@ -454,7 +450,7 @@ mod tests {
             library_path.to_str().unwrap(),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", Some("new sample"));
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
         let mut expected_sequences = vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()];

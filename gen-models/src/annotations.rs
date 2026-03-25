@@ -425,7 +425,7 @@ pub fn add_annotation(
     collection: &str,
     name: &str,
     group: Option<&str>,
-    sample: Option<&str>,
+    sample: &str,
     region: &str,
 ) -> Result<Operation, Box<dyn std::error::Error>> {
     let graph_conn = context.graph().conn();
@@ -438,13 +438,7 @@ pub fn add_annotation(
     let block_group = block_groups
         .iter()
         .find(|bg| bg.name == parsed_region.name)
-        .ok_or_else(|| {
-            let sample_label = match sample {
-                Some(name) => format!("sample {name}"),
-                None => "default sample".to_string(),
-            };
-            anyhow!("Graph {} not found for {sample_label}", parsed_region.name)
-        })?;
+        .ok_or_else(|| anyhow!("Graph {} not found for sample {sample}", parsed_region.name))?;
     let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
     let path_length = path.length(graph_conn);
     if start < 0 || end < 0 || start > end || end > path_length {
@@ -461,9 +455,7 @@ pub fn add_annotation(
 
     let annotation_group = group.unwrap_or("default");
     let annotation = Annotation::get_or_create(graph_conn, name, annotation_group, &accession.id)?;
-    if let Some(sample_name) = sample {
-        AnnotationGroupSample::create(graph_conn, &annotation.group, sample_name)?;
-    }
+    AnnotationGroupSample::create(graph_conn, &annotation.group, sample)?;
 
     let operation = end_operation(
         context,
@@ -896,7 +888,7 @@ mod tests {
             "test",
             "gene-a",
             Some("track-1"),
-            None,
+            "test",
             "chr1:1-5",
         )
         .unwrap();

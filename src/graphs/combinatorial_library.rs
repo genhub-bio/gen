@@ -293,8 +293,7 @@ mod tests {
         let collection = "test";
         let sample_name = "test-sample";
         let _sample = Sample::get_or_create(conn, sample_name);
-        let block_group =
-            BlockGroup::create(conn, collection, Some(sample_name), "test-block-group");
+        let block_group = BlockGroup::create(conn, collection, sample_name, "test-block-group");
 
         match create_library(conn, block_group.id, "library", vec![], false) {
             Ok(_) => {

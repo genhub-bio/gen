@@ -23,7 +23,7 @@ pub struct Command {
     name: Option<String>,
     /// A sample name to associate the Genbank file with
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -50,7 +50,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         context,
         &mut reader,
         name.as_ref(),
-        cmd.sample.as_deref(),
+        cmd.sample.as_str(),
         OperationInfo {
             files: vec![OperationFile {
                 file_path: cmd.path.clone(),

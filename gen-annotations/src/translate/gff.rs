@@ -10,10 +10,10 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
 use interavl::IntervalTree;
 use noodles::{core::Position, gff};
 
-pub fn translate_gff<'a, R, W>(
+pub fn translate_gff<R, W>(
     conn: &GraphConnection,
     collection: &str,
-    sample: impl Into<Option<&'a str>>,
+    sample: &str,
     reader: R,
     writer: &mut W,
 ) -> Result<(), Error>
@@ -21,7 +21,6 @@ where
     R: Read + BufRead,
     W: Write,
 {
-    let sample = sample.into();
     let mut gff_reader = gff::io::Reader::new(reader);
     let mut gff_writer = gff::io::Writer::new(writer);
 
@@ -106,7 +105,7 @@ mod tests {
         translate_gff(
             &conn,
             &collection,
-            Some("foo"),
+            "foo",
             BufReader::new(File::open(gff_path.clone()).expect("should open fixture gff")),
             &mut buffer,
         )
@@ -140,11 +139,11 @@ mod tests {
         translate_gff(
             &conn,
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             BufReader::new(File::open(gff_path).expect("should open fixture gff")),
             &mut buffer,
         )
-        .expect("should translate gff for default sample");
+        .expect("should translate gff for reference sample");
         let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
         assert_eq!(
             results,

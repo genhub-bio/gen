@@ -25,7 +25,7 @@ pub fn import_genbank<'a, R>(
     context: &DbContext,
     data: R,
     collection: impl Into<Option<&'a str>>,
-    sample: impl Into<Option<&'a str>>,
+    sample: &str,
     operation_info: OperationInfo,
 ) -> Result<Operation, GenBankError>
 where
@@ -36,11 +36,7 @@ where
     let mut session = start_operation(conn);
     let reader = reader::SeqReader::new(data);
     let collection = Collection::create(conn, collection.into().unwrap_or_default());
-    let sample = sample.into();
-
-    if let Some(sample_name) = sample {
-        Sample::get_or_create(conn, sample_name);
-    }
+    Sample::get_or_create(conn, sample);
 
     let _ = progress_bar.println("Parsing GenBank");
     let bar = progress_bar.add(get_progress_bar(None));
@@ -239,7 +235,7 @@ mod tests {
                 &context,
                 BufReader::new("this is not valid".as_bytes()),
                 None,
-                None,
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -270,7 +266,7 @@ mod tests {
             &context,
             BufReader::new(file),
             None,
-            None,
+            Sample::DEFAULT_NAME,
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -337,7 +333,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -348,7 +344,7 @@ mod tests {
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let block_group_id = BlockGroup::get_id("", None, "insertion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion");
             let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
@@ -375,7 +371,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -399,7 +395,7 @@ mod tests {
         GCTGAACGGTCTGGTTATAGGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTAC
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
-            let block_group_id = BlockGroup::get_id("", None, "deletion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion");
             let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
@@ -430,7 +426,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -457,7 +453,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", None, "deletion_and_insertion"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion"),
                 false,
             );
             assert_eq!(
@@ -491,7 +487,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -518,7 +514,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", None, "substitution"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution"),
                 false,
             );
             assert_eq!(
@@ -550,7 +546,7 @@ mod tests {
                 &context,
                 BufReader::new(file),
                 None,
-                None,
+                Sample::DEFAULT_NAME,
                 OperationInfo {
                     files: vec![OperationFile {
                         file_path: "".to_string(),
@@ -564,7 +560,7 @@ mod tests {
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let sequences: HashSet<String> = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", None, "insertion"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion"),
                 false,
             )
             .iter()

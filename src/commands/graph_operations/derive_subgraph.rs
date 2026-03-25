@@ -27,7 +27,7 @@ pub enum DeriveSubgraphOperationError {
 pub fn derive_subgraph_operation(
     db_context: &DbContext,
     name: Option<String>,
-    sample: Option<String>,
+    sample: String,
     new_sample: String,
     region: String,
     backbone: Option<String>,
@@ -62,7 +62,7 @@ pub fn derive_subgraph_operation(
     if let Err(err) = derive_chunks(
         db_context,
         collection_name,
-        sample_name.as_deref(),
+        sample_name.as_str(),
         &new_sample_name,
         &parsed_region.name.to_string(),
         backbone.as_deref(),

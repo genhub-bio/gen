@@ -44,25 +44,21 @@ impl From<CombinatorialLibraryCreationError> for LibraryImportError {
     }
 }
 
-pub fn import_library<'a>(
+pub fn import_library(
     context: &DbContext,
     collection_name: &str,
-    sample: impl Into<Option<&'a str>>,
+    sample: &str,
     parts_file_path: &str,
     library_file_path: &str,
     library_name: &str,
 ) -> Result<Operation, LibraryImportError> {
     let conn = context.graph().conn();
     let mut session = session_operations::start_operation(conn);
-
     if !Collection::exists(conn, collection_name) {
         Collection::create(conn, collection_name);
     }
 
-    let sample = sample.into();
-    if let Some(sample_name) = sample {
-        Sample::get_or_create(conn, sample_name);
-    }
+    Sample::get_or_create(conn, sample);
     let new_block_group = BlockGroup::create(conn, collection_name, sample, library_name);
 
     let parts_list = parse_library(parts_file_path, library_file_path)?;
@@ -120,13 +116,13 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-            None,
+            Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
             "library graph",
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, None);
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = HashSet::new();
@@ -171,13 +167,13 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-            None,
+            Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
             "m123",
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, None);
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
@@ -207,13 +203,13 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-            None,
+            Sample::DEFAULT_NAME,
             parts_path.to_str().unwrap(),
             library_path.to_str().unwrap(),
             "m123",
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, None);
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = vec![];

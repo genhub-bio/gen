@@ -14,9 +14,7 @@ mod tests {
     use petgraph::visit::Dfs;
 
     use crate::{
-        imports::gfa::import_gfa,
-        test_helpers::{get_connection, get_operation_connection, setup_gen_dir},
-        track_database,
+        imports::gfa::import_gfa, test_helpers::setup_gen, track_database,
         views::gen_graph_widget::GenGraphNodeSizer,
     };
 
@@ -25,9 +23,9 @@ mod tests {
     #[test]
     fn test_source_to_sink_connectivity() {
         // Setup environment and database
-        setup_gen_dir();
-        let conn = get_connection(None).expect("could not connect to main db");
-        let op_conn = &get_operation_connection(None).expect("could not connect to operations db");
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
 
         // Load Anderson GFA file
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");
@@ -39,24 +37,11 @@ mod tests {
         let collection_name = "/";
 
         // Track the database before starting operations
-        track_database(&conn, op_conn).expect("Failed to track database");
+        track_database(conn, op_conn).expect("Failed to track database");
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
+            .expect("GFA import failed");
 
-        conn.execute("BEGIN TRANSACTION", []).unwrap();
-        op_conn.execute("BEGIN TRANSACTION", []).unwrap();
-
-        match import_gfa(&gfa_path, collection_name, None, &conn, op_conn) {
-            Ok(_) => {
-                conn.execute("END TRANSACTION", []).unwrap();
-                op_conn.execute("END TRANSACTION", []).unwrap();
-            }
-            Err(e) => {
-                conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                op_conn.execute("ROLLBACK TRANSACTION", []).unwrap();
-                panic!("GFA import failed: {:?}", e);
-            }
-        }
-
-        let gen_graph = Sample::get_graph(&conn, collection_name, None);
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
 
         // Test with small partitions to force inter-partition edges
         let config = GraphConfig {

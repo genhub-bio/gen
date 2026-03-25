@@ -1,6 +1,8 @@
 use std::{fs::File, path::PathBuf};
 
-use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
+use gen_models::{
+    block_group::BlockGroup, collection::Collection, db::GraphConnection, sample::Sample,
+};
 use noodles::fasta;
 use thiserror::Error;
 
@@ -16,7 +18,11 @@ pub fn export_fasta(
     sample_name: Option<&str>,
     filename: &PathBuf,
 ) -> Result<(), FastaExportError> {
-    let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
+    let block_groups = if let Some(sample_name) = sample_name {
+        Sample::get_block_groups(conn, collection_name, sample_name)
+    } else {
+        Collection::get_block_groups(conn, collection_name)
+    };
 
     let file = File::create(filename)?;
     let mut writer = fasta::io::Writer::new(file);
@@ -66,7 +72,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -115,14 +121,14 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
         let _ = update_with_fasta(
             &context,
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             "child sample",
             "m123",
             2,

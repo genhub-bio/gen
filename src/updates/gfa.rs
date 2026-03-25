@@ -26,7 +26,7 @@ use crate::{
 pub fn update_with_gfa(
     context: &DbContext,
     collection_name: &str,
-    parent_sample_name: Option<&str>,
+    parent_sample_name: &str,
     new_sample_name: &str,
     gfa_path: &str,
 ) -> io::Result<()> {
@@ -43,9 +43,13 @@ pub fn update_with_gfa(
     let conn = context.graph().conn();
     let mut session = session_operations::start_operation(conn);
 
-    let _new_sample =
-        Sample::get_or_create_child(conn, collection_name, new_sample_name, parent_sample_name);
-    let block_groups = Sample::get_block_groups(conn, collection_name, Some(new_sample_name));
+    let _new_sample = Sample::get_or_create_child(
+        conn,
+        collection_name,
+        new_sample_name,
+        Some(parent_sample_name),
+    );
+    let block_groups = Sample::get_block_groups(conn, collection_name, new_sample_name);
 
     // NOTE: Only getting the current path for each block group because it's the most likely one to
     // be the basis for an update
@@ -493,7 +497,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -504,7 +508,7 @@ mod tests {
         let _ = update_with_gfa(
             &context,
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             "applied diff",
             gfa_update_path.to_str().unwrap(),
         );
@@ -545,7 +549,7 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             false,
         )
         .unwrap();
@@ -556,7 +560,7 @@ mod tests {
         let _ = update_with_gfa(
             &context,
             &collection,
-            None,
+            Sample::DEFAULT_NAME,
             "applied diff",
             gfa_update_path.to_str().unwrap(),
         );

@@ -19,6 +19,7 @@ use crate::{
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
+    sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
 };
@@ -90,7 +91,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         .save(conn);
     let g_node_id = Node::create(conn, &g_seq.hash, &HashId::convert_str("test-g-node"));
     let _collection = Collection::create(conn, "test");
-    let block_group = BlockGroup::create(conn, "test", None, "chr1");
+    Sample::get_or_create(conn, "test");
+    let block_group = BlockGroup::create(conn, "test", "test", "chr1");
     let edge0 = Edge::create(
         conn,
         PATH_START_NODE_ID,

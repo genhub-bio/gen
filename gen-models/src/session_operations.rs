@@ -370,7 +370,7 @@ mod tests {
             block_group: vec![BlockGroup {
                 id: HashId::pad_str(1),
                 collection_name: "test_collection".to_string(),
-                sample_name: Some("test_sample".to_string()),
+                sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: 0,
             }],

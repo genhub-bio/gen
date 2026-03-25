@@ -20,7 +20,7 @@ pub struct Command {
     name: Option<String>,
     /// A sample name to associate the GFA file with
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -41,7 +41,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         context,
         &PathBuf::from(cmd.path.clone()),
         name,
-        cmd.sample.as_deref(),
+        cmd.sample.as_str(),
     ) {
         Ok(_) => {
             println!("GFA imported.");

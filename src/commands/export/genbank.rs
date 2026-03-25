@@ -19,7 +19,7 @@ pub struct Command {
     name: Option<String>,
     /// The name of the sample for exporting
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -37,12 +37,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
-    export_genbank(
-        conn,
-        name,
-        cmd.sample.clone().as_deref(),
-        &PathBuf::from(cmd.path),
-    )?;
+    export_genbank(conn, name, cmd.sample.as_str(), &PathBuf::from(cmd.path))?;
 
     conn.execute("END TRANSACTION", [])?;
     operation_conn.execute("END TRANSACTION", [])?;

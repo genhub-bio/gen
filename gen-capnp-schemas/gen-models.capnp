@@ -61,12 +61,9 @@ struct Sample {
 struct BlockGroup {
   id @0 :List(UInt8);
   collectionName @1 :Text;
-  sampleName :union {
-    none @2 :Void;
-    some @3 :Text;
-  }
-  name @4 :Text;
-  createdOn @5 :Int64;
+  sampleName @2 :Text;
+  name @3 :Text;
+  createdOn @4 :Int64;
 }
 
 struct BlockGroupEdge {

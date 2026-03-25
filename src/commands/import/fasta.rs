@@ -22,7 +22,7 @@ pub struct Command {
     name: Option<String>,
     /// A sample name to associate the fasta file with
     #[arg(short, long)]
-    sample: Option<String>,
+    sample: String,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -43,7 +43,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         context,
         &cmd.path.clone(),
         name,
-        cmd.sample.as_deref(),
+        cmd.sample.as_str(),
         cmd.shallow,
     ) {
         Ok(_) => {

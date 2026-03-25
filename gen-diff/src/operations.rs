@@ -244,9 +244,7 @@ fn build_block_group_diffs(
             if let Some(bg) = &a.block_group {
                 (
                     bg.collection_name.clone(),
-                    bg.sample_name
-                        .clone()
-                        .unwrap_or_else(|| "Reference".to_string()),
+                    bg.sample_name.clone(),
                     bg.name.clone(),
                     format!("{id}", id = a.id),
                 )
@@ -409,7 +407,7 @@ mod tests {
         let block_group = BlockGroup {
             id: HashId::pad_str(3),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "bg".to_string(),
             created_on: 0,
         };
@@ -459,7 +457,7 @@ mod tests {
         let block_group = BlockGroup {
             id: HashId::pad_str(3),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "bg".to_string(),
             created_on: 0,
         };
@@ -502,7 +500,7 @@ mod tests {
         let bg_one = BlockGroup {
             id: HashId::pad_str(3),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "bg1".to_string(),
             created_on: 0,
         };
@@ -531,7 +529,7 @@ mod tests {
         let bg_two = BlockGroup {
             id: HashId::pad_str(4),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "bg2".to_string(),
             created_on: 0,
         };
@@ -589,7 +587,7 @@ mod tests {
         let main_block_group = BlockGroup {
             id: HashId::pad_str(20),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "main".to_string(),
             created_on: 0,
         };
@@ -627,7 +625,7 @@ mod tests {
         let feature_block_group = BlockGroup {
             id: HashId::pad_str(30),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "feature".to_string(),
             created_on: 0,
         };
@@ -689,7 +687,7 @@ mod tests {
         let block_group_one = BlockGroup {
             id: HashId::pad_str(40),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "db-one".to_string(),
             created_on: 0,
         };
@@ -723,7 +721,7 @@ mod tests {
         let block_group_two = BlockGroup {
             id: HashId::pad_str(50),
             collection_name: "c".to_string(),
-            sample_name: Some("s".to_string()),
+            sample_name: "s".to_string(),
             name: "db-two".to_string(),
             created_on: 0,
         };
