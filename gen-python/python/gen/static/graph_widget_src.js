@@ -1,24 +1,24 @@
 // graph_widget_src.js — pre-bundle source for the gen Jupyter widget.
 //
 // This file is NOT loaded directly by the browser.  build_bundle.py reads it,
-// prepends the wasm-pack-generated glue + the WASM binary (base64-encoded),
-// and writes the combined self-contained bundle to static/graph_widget.js.
+// prepends the wasm-bindgen-generated glue + the WASM binary (base64-encoded),
+// and writes the combined self-contained bundle to static/widget.js.
 //
 // The bundle is then inlined by anywidget via _esm = Path("static/widget.js"),
 // which creates a blob URL from the file contents and imports it as an ES
 // module — no Jupyter server extension or separate asset serving required.
 
-// These names are injected by build_bundle.py:
-//   __GEN_WASM_INIT__  — the default export (init function) from the
-//                        wasm-pack-generated glue (gen_wasm_widget.js)
-//   mount_app          — the named export from the same glue
+// These names come from the wasm-bindgen glue prepended by build_bundle.py:
+//   __wbg_init         — init function (accepts a BufferSource or URL)
+//   mount_app          — named export from the glue
+// This constant is injected by build_bundle.py:
 //   __GEN_WASM_BYTES__ — Uint8Array containing the raw .wasm bytes
 
 async function render({ model, el }) {
   // Initialise the WASM module from the inlined bytes.
   // Passing a BufferSource to init() bypasses any fetch / import.meta.url
   // resolution, so the bundle is fully self-contained.
-  await __GEN_WASM_INIT__(__GEN_WASM_BYTES__.buffer);
+  await __wbg_init(__GEN_WASM_BYTES__.buffer);
 
   // Create a sized container for the ratzilla terminal.
   const uid = "gen-" + crypto.randomUUID();
@@ -83,4 +83,4 @@ async function render({ model, el }) {
   };
 }
 
-export default { render };
+export { render };
