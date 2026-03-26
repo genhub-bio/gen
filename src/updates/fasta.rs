@@ -44,7 +44,7 @@ pub fn update_with_fasta(
             collection_name,
             new_sample_name,
             &block_group.name,
-            Some(parent_sample_name),
+            vec![parent_sample_name.to_string()],
         )?;
 
         if block_group.name == region_name {

@@ -54,20 +54,43 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
     fn parent_id(&self) -> &Self::Id;
     fn child_id(&self) -> &Self::Id;
 
-    fn get_ancestors(conn: &Connection, child_id: &Self::Id) -> Vec<Self::Id> {
+    fn get_ancestors(
+        conn: &Connection,
+        child_id: &Self::Id,
+        max_depth: Option<usize>,
+    ) -> Vec<Self::Id> {
+        let max_depth = max_depth.map(|depth| depth as i64);
         let query = format!(
-            "WITH RECURSIVE ancestors(id) AS (
-                SELECT lineage.{parent_column}
+            "WITH RECURSIVE ancestors(id, depth, visited) AS (
+                SELECT
+                    lineage.{parent_column},
+                    1,
+                    printf('|%s|', hex(lineage.{parent_column}))
                 FROM {table_name} lineage
                 WHERE lineage.{child_column} = ?1
-                UNION
-                SELECT lineage.{parent_column}
+                UNION ALL
+                SELECT
+                    lineage.{parent_column},
+                    ancestors.depth + 1,
+                    ancestors.visited || hex(lineage.{parent_column}) || '|'
                 FROM {table_name} lineage
                 JOIN ancestors ON lineage.{child_column} = ancestors.id
+                WHERE instr(
+                    ancestors.visited,
+                    printf('|%s|', hex(lineage.{parent_column}))
+                ) = 0
+                AND (?2 IS NULL OR ancestors.depth < ?2)
+            ),
+            ranked_ancestors(id, depth) AS (
+                SELECT id, MIN(depth)
+                FROM ancestors
+                GROUP BY id
             )
             SELECT parent.{parent_id_column}
             FROM {parent_table_name} parent
-            JOIN ancestors ON parent.{parent_id_column} = ancestors.id;",
+            JOIN ranked_ancestors ancestors ON parent.{parent_id_column} = ancestors.id
+            WHERE ?2 IS NULL OR ancestors.depth <= ?2
+            ORDER BY ancestors.depth, parent.{parent_id_column};",
             table_name = Self::TABLE_NAME,
             parent_column = Self::PARENT_COLUMN,
             child_column = Self::CHILD_COLUMN,
@@ -76,26 +99,49 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
         );
 
         let mut stmt = conn.prepare(&query).unwrap();
-        stmt.query_map(params![child_id], |row| row.get(0))
+        stmt.query_map(params![child_id, max_depth], |row| row.get(0))
             .unwrap()
             .map(|value| value.unwrap())
             .collect()
     }
 
-    fn get_descendants(conn: &Connection, parent_id: &Self::Id) -> Vec<Self::Id> {
+    fn get_descendants(
+        conn: &Connection,
+        parent_id: &Self::Id,
+        max_depth: Option<usize>,
+    ) -> Vec<Self::Id> {
+        let max_depth = max_depth.map(|depth| depth as i64);
         let query = format!(
-            "WITH RECURSIVE descendants(id) AS (
-                SELECT lineage.{child_column}
+            "WITH RECURSIVE descendants(id, depth, visited) AS (
+                SELECT
+                    lineage.{child_column},
+                    1,
+                    printf('|%s|', hex(lineage.{child_column}))
                 FROM {table_name} lineage
                 WHERE lineage.{parent_column} = ?1
-                UNION
-                SELECT lineage.{child_column}
+                UNION ALL
+                SELECT
+                    lineage.{child_column},
+                    descendants.depth + 1,
+                    descendants.visited || hex(lineage.{child_column}) || '|'
                 FROM {table_name} lineage
                 JOIN descendants ON lineage.{parent_column} = descendants.id
+                WHERE instr(
+                    descendants.visited,
+                    printf('|%s|', hex(lineage.{child_column}))
+                ) = 0
+                AND (?2 IS NULL OR descendants.depth < ?2)
+            ),
+            ranked_descendants(id, depth) AS (
+                SELECT id, MIN(depth)
+                FROM descendants
+                GROUP BY id
             )
             SELECT child.{child_id_column}
             FROM {child_table_name} child
-            JOIN descendants ON child.{child_id_column} = descendants.id;",
+            JOIN ranked_descendants descendants ON child.{child_id_column} = descendants.id
+            WHERE ?2 IS NULL OR descendants.depth <= ?2
+            ORDER BY descendants.depth, child.{child_id_column};",
             table_name = Self::TABLE_NAME,
             parent_column = Self::PARENT_COLUMN,
             child_column = Self::CHILD_COLUMN,
@@ -104,7 +150,7 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
         );
 
         let mut stmt = conn.prepare(&query).unwrap();
-        stmt.query_map(params![parent_id], |row| row.get(0))
+        stmt.query_map(params![parent_id, max_depth], |row| row.get(0))
             .unwrap()
             .map(|value| value.unwrap())
             .collect()

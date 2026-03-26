@@ -327,8 +327,12 @@ mod tests {
         let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
         // Set up child
-        let _child_sample =
-            Sample::get_or_create_child(conn, collection_name, "child", Some(Sample::DEFAULT_NAME));
+        let _child_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "child",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        );
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -403,8 +407,12 @@ mod tests {
         );
 
         // Set up grandchild
-        let _grandchild_sample =
-            Sample::get_or_create_child(conn, collection_name, "grandchild", Some("child"));
+        let _grandchild_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "grandchild",
+            vec!["child".to_string()],
+        );
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")
@@ -1058,8 +1066,12 @@ mod tests {
         let _path1 = Path::create(conn, "parent", &block_group.id, &[edge1.id, edge2.id]);
 
         // Set up child
-        let _child_sample =
-            Sample::get_or_create_child(conn, collection_name, "child", Some(Sample::DEFAULT_NAME));
+        let _child_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "child",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        );
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -1134,8 +1146,12 @@ mod tests {
         );
 
         // Set up grandchild
-        let _grandchild_sample =
-            Sample::get_or_create_child(conn, collection_name, "grandchild", Some("child"));
+        let _grandchild_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "grandchild",
+            vec!["child".to_string()],
+        );
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")

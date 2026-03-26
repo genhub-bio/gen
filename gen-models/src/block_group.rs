@@ -10,7 +10,7 @@ use gen_core::{
     calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp,
 };
 use gen_graph::{
-    GenGraph, GenGraphExt as _, GraphNode, all_intermediate_edges, all_reachable_nodes,
+    GenGraph, GraphNode, MergeGraph as _, all_intermediate_edges, all_reachable_nodes,
     all_simple_paths, flatten_to_interval_tree,
 };
 use intervaltree::IntervalTree;
@@ -274,30 +274,14 @@ impl BlockGroup {
         collection_name: &str,
         sample_name: &str,
         group_name: &str,
-        parent_sample: Option<&str>,
+        parent_samples: Vec<String>,
     ) -> Result<HashId, QueryError> {
-        let parent_samples = parent_sample
-            .map(|parent_sample| vec![parent_sample.to_string()])
-            .unwrap_or_default();
         BlockGroup::get_or_create_sample_block_group_from_parents(
             conn,
             collection_name,
             sample_name,
             group_name,
             &parent_samples,
-        )
-    }
-
-    pub fn find_parent_block_group(
-        conn: &GraphConnection,
-        collection_name: &str,
-        group_name: &str,
-        parent_samples: &[String],
-    ) -> Result<Option<BlockGroup>, QueryError> {
-        Ok(
-            BlockGroup::find_parent_block_groups(conn, collection_name, group_name, parent_samples)
-                .into_iter()
-                .next(),
         )
     }
 
@@ -346,7 +330,7 @@ impl BlockGroup {
         }
     }
 
-    fn find_parent_block_groups(
+    pub fn find_parent_block_groups(
         conn: &GraphConnection,
         collection_name: &str,
         group_name: &str,
@@ -1295,7 +1279,7 @@ mod tests {
             "test",
             "sample",
             "hg19",
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
         )
         .unwrap();
         assert_eq!(
@@ -1438,7 +1422,7 @@ mod tests {
             "test",
             "sample2",
             "chr1",
-            Some("test"),
+            vec!["test".to_string()],
         )
         .unwrap();
         assert_eq!(
@@ -2410,7 +2394,7 @@ mod tests {
             "test",
             "child",
             "chr1",
-            Some("test"),
+            vec!["test".to_string()],
         )
         .unwrap();
         let new_path = Path::query(
@@ -2587,7 +2571,7 @@ mod tests {
             "test",
             "child",
             "chr1",
-            Some("test"),
+            vec!["test".to_string()],
         )
         .unwrap();
         let new_path = Path::query(
@@ -2636,7 +2620,7 @@ mod tests {
             "test",
             "grandchild",
             "chr1",
-            Some("child"),
+            vec!["child".to_string()],
         )
         .unwrap();
         let new_path = Path::query(
@@ -2687,7 +2671,7 @@ mod tests {
             "test",
             "child",
             "chr1",
-            Some("test"),
+            vec!["test".to_string()],
         )
         .unwrap();
         let new_path = Path::query(
@@ -2739,7 +2723,7 @@ mod tests {
             "test",
             "grandchild",
             "chr1",
-            Some("child"),
+            vec!["child".to_string()],
         )
         .unwrap();
         let new_path = Path::query(
@@ -2805,7 +2789,7 @@ mod tests {
             "test",
             "child",
             "chr1",
-            Some("test"),
+            vec!["test".to_string()],
         )
         .unwrap();
         let new_path = Path::query(
@@ -2859,7 +2843,7 @@ mod tests {
             "test",
             "grandchild",
             "chr1",
-            Some("child"),
+            vec!["child".to_string()],
         )
         .unwrap();
         let new_path = Path::query(

@@ -159,9 +159,16 @@ mod tests {
         SampleLineage::create(&conn, "right", "leaf").unwrap();
         SampleLineage::create(&conn, "right", "sibling").unwrap();
 
-        let mut ancestors = SampleLineage::get_ancestors(&conn, &"leaf".to_string());
-        ancestors.sort();
+        let ancestors = SampleLineage::get_ancestors(&conn, &"leaf".to_string(), None);
         assert_eq!(ancestors, vec!["left", "right", "root"]);
+        assert_eq!(
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(1)),
+            vec!["left", "right"]
+        );
+        assert_eq!(
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(0)),
+            Vec::<String>::new()
+        );
 
         assert_eq!(
             SampleLineage::get_parents(&conn, "leaf"),
@@ -172,9 +179,16 @@ mod tests {
             vec!["leaf".to_string(), "sibling".to_string()]
         );
 
-        let mut descendants = SampleLineage::get_descendants(&conn, &"root".to_string());
-        descendants.sort();
-        assert_eq!(descendants, vec!["leaf", "left", "right", "sibling"]);
+        let descendants = SampleLineage::get_descendants(&conn, &"root".to_string(), None);
+        assert_eq!(descendants, vec!["left", "right", "leaf", "sibling"]);
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(1)),
+            vec!["left", "right"]
+        );
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(0)),
+            Vec::<String>::new()
+        );
 
         let mut graph = SampleLineage::get_graph(&conn);
         graph.sort_by(|left, right| {
@@ -229,6 +243,38 @@ mod tests {
                     child_sample_name: "sibling".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn test_lineage_depth_limit() {
+        let conn = get_connection(None).unwrap();
+
+        for sample in ["root", "left", "right", "leaf", "sibling"] {
+            Sample::get_or_create(&conn, sample);
+        }
+
+        SampleLineage::create(&conn, "root", "left").unwrap();
+        SampleLineage::create(&conn, "root", "right").unwrap();
+        SampleLineage::create(&conn, "left", "leaf").unwrap();
+        SampleLineage::create(&conn, "right", "leaf").unwrap();
+        SampleLineage::create(&conn, "right", "sibling").unwrap();
+
+        assert_eq!(
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(1)),
+            vec!["left", "right"]
+        );
+        assert_eq!(
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(2)),
+            vec!["left", "right", "root"]
+        );
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(1)),
+            vec!["left", "right"]
+        );
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(2)),
+            vec!["left", "right", "leaf", "sibling"]
         );
     }
 

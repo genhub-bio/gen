@@ -47,7 +47,7 @@ pub fn update_with_gfa(
         conn,
         collection_name,
         new_sample_name,
-        Some(parent_sample_name),
+        vec![parent_sample_name.to_string()],
     );
     let block_groups = Sample::get_block_groups(conn, collection_name, new_sample_name);
 

@@ -102,8 +102,11 @@ where
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
+    let parent_samples = parent_sample
+        .map(|parent_sample| vec![parent_sample.to_string()])
+        .unwrap_or_default();
     let sample_name =
-        Sample::get_or_create_child(conn, collection_name, sample_name, parent_sample).name;
+        Sample::get_or_create_child(conn, collection_name, sample_name, parent_samples).name;
 
     let mut node_lengths: HashMap<String, (HashId, i64)> = HashMap::new();
 

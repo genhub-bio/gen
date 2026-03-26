@@ -23,6 +23,9 @@ use petgraph::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod traits;
+pub use traits::MergeGraph;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct GraphNode {
     pub node_id: HashId,
@@ -57,30 +60,6 @@ pub struct GraphEdge {
     pub chromosome_index: i64,
     pub phased: i64,
     pub created_on: i64,
-}
-
-pub trait GenGraphExt {
-    fn merge_graph(&mut self, other: &GenGraph);
-}
-
-impl GenGraphExt for GenGraph {
-    fn merge_graph(&mut self, other: &GenGraph) {
-        for node in other.nodes() {
-            self.add_node(node);
-        }
-
-        for (source, target, edges) in other.all_edges() {
-            if let Some(existing_edges) = self.edge_weight_mut(source, target) {
-                for edge in edges.iter().copied() {
-                    if !existing_edges.contains(&edge) {
-                        existing_edges.push(edge);
-                    }
-                }
-            } else {
-                self.add_edge(source, target, edges.clone());
-            }
-        }
-    }
 }
 
 // #[derive(Debug)]

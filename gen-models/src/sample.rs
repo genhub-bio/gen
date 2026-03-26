@@ -1,8 +1,8 @@
-use std::fmt::*;
+use std::{fmt::*, rc::Rc};
 
 use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
-use rusqlite::{Result as SQLResult, Row, params};
+use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -52,11 +52,12 @@ impl Sample {
     pub fn resolve_parent_names(
         conn: &GraphConnection,
         sample_name: &str,
-        parent_sample: Option<&str>,
+        parent_samples: Vec<String>,
     ) -> Vec<String> {
-        match parent_sample {
-            Some(parent_sample) => vec![parent_sample.to_string()],
-            None => Sample::get_parent_names(conn, sample_name),
+        if parent_samples.is_empty() {
+            Sample::get_parent_names(conn, sample_name)
+        } else {
+            parent_samples
         }
     }
 
@@ -114,28 +115,45 @@ impl Sample {
         conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
-        parent_sample: Option<&str>,
+        parent_samples: Vec<String>,
     ) -> Sample {
         match Sample::create(conn, sample_name) {
             Ok(new_sample) => {
-                if let Some(parent) = parent_sample {
-                    let bgs = BlockGroup::query(
+                if !parent_samples.is_empty() {
+                    let mut group_names = BlockGroup::query(
                         conn,
-                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2",
-                        params!(collection_name, parent),
-                    );
-                    for bg in bgs.iter() {
+                        "select * from block_groups where collection_name = ?1 AND sample_name IN rarray(?2) ORDER BY name, sample_name",
+                        params![
+                            collection_name,
+                            Rc::new(
+                                parent_samples
+                                    .iter()
+                                    .cloned()
+                                    .map(SQLValue::from)
+                                    .collect::<Vec<_>>()
+                            ),
+                        ],
+                    )
+                    .into_iter()
+                    .map(|bg| bg.name)
+                    .collect::<Vec<_>>();
+                    group_names.dedup();
+
+                    for group_name in group_names.iter() {
                         BlockGroup::get_or_create_sample_block_group(
                             conn,
                             collection_name,
                             &new_sample.name,
-                            &bg.name,
-                            parent_sample,
+                            group_name,
+                            parent_samples.clone(),
                         )
                         .expect("failed to get or create blockgroup clone.");
                     }
-                    SampleLineage::create(conn, parent, &new_sample.name)
-                        .expect("failed to create sample lineage");
+
+                    for parent_sample in parent_samples {
+                        SampleLineage::create(conn, &parent_sample, &new_sample.name)
+                            .expect("failed to create sample lineage");
+                    }
                 }
 
                 new_sample
@@ -224,7 +242,7 @@ mod tests {
         Sample::get_or_create(conn, "parent");
         Sample::get_or_create(conn, "child");
 
-        Sample::get_or_create_child(conn, "test", "child", Some("parent"));
+        Sample::get_or_create_child(conn, "test", "child", vec!["parent".to_string()]);
 
         assert!(SampleLineage::get_parents(conn, "child").is_empty());
     }

@@ -109,14 +109,15 @@ pub fn setup_test_data(conn: &GraphConnection) {
     );
 
     Sample::get_or_create(conn, "foo");
-    let _ = Sample::get_or_create_child(conn, "test", "foo", Some(Sample::DEFAULT_NAME));
+    let _ =
+        Sample::get_or_create_child(conn, "test", "foo", vec![Sample::DEFAULT_NAME.to_string()]);
 
     let sample_bg_id = BlockGroup::get_or_create_sample_block_group(
         conn,
         "test",
         "foo",
         "m123",
-        Some(Sample::DEFAULT_NAME),
+        vec![Sample::DEFAULT_NAME.to_string()],
     )
     .expect("should create child block group");
     let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);

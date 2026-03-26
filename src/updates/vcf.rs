@@ -199,6 +199,9 @@ pub fn update_with_vcf<'a>(
     let progress_bar = get_handler();
     let fixed_sample = fixed_sample.into();
     let parent_sample = parent_sample.into();
+    let explicit_parent_samples = parent_sample
+        .map(|parent_sample| vec![parent_sample.to_string()])
+        .unwrap_or_default();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
 
     let mut session = start_operation(conn);
@@ -221,7 +224,7 @@ pub fn update_with_vcf<'a>(
 
     let mut changes: HashMap<(Path, String), Vec<PathChange>> = HashMap::new();
 
-    let mut parent_block_groups: HashMap<HashId, HashId> = HashMap::new();
+    let mut node_source_paths: HashMap<HashId, HashId> = HashMap::new();
     let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
     let mut created_samples: HashSet<&str> = HashSet::new();
 
@@ -259,14 +262,20 @@ pub fn update_with_vcf<'a>(
         if let Some(fixed_sample) = fixed_sample.filter(|_| !genotype.is_empty()) {
             let parent_samples = resolved_parent_samples
                 .entry(fixed_sample.to_string())
-                .or_insert_with(|| Sample::resolve_parent_names(conn, fixed_sample, parent_sample))
+                .or_insert_with(|| {
+                    Sample::resolve_parent_names(
+                        conn,
+                        fixed_sample,
+                        explicit_parent_samples.clone(),
+                    )
+                })
                 .clone();
             if !created_samples.contains(fixed_sample) {
                 Sample::get_or_create_child(
                     conn,
                     collection_name,
                     fixed_sample,
-                    parent_sample.or_else(|| parent_samples.first().map(String::as_str)),
+                    parent_samples.clone(),
                 );
                 created_samples.insert(fixed_sample);
             }
@@ -361,7 +370,11 @@ pub fn update_with_vcf<'a>(
                 let parent_samples = resolved_parent_samples
                     .entry(sample_name.to_string())
                     .or_insert_with(|| {
-                        Sample::resolve_parent_names(conn, sample_name, parent_sample)
+                        Sample::resolve_parent_names(
+                            conn,
+                            sample_name,
+                            explicit_parent_samples.clone(),
+                        )
                     })
                     .clone();
                 if !created_samples.contains(sample_name) {
@@ -369,7 +382,7 @@ pub fn update_with_vcf<'a>(
                         conn,
                         collection_name,
                         sample_name,
-                        parent_sample.or_else(|| parent_samples.first().map(String::as_str)),
+                        parent_samples.clone(),
                     );
                     created_samples.insert(sample_name);
                 }
@@ -493,40 +506,38 @@ pub fn update_with_vcf<'a>(
                 SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string());
             let sequence_string = sequence.get_sequence(None, None);
 
-            let parent_path_id =
-                parent_block_groups
-                    .entry(vcf_entry.path.id)
-                    .or_insert_with(|| {
-                        let parent_samples = resolved_parent_samples
-                            .get(&vcf_entry.sample_name)
-                            .cloned()
-                            .unwrap_or_default();
+            let source_path_id = node_source_paths
+                .entry(vcf_entry.path.id)
+                .or_insert_with(|| {
+                    let parent_samples = resolved_parent_samples
+                        .get(&vcf_entry.sample_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let parent_block_groups = BlockGroup::find_parent_block_groups(
+                        conn,
+                        collection_name,
+                        &vcf_entry.path.name,
+                        &parent_samples,
+                    );
 
-                        match BlockGroup::find_parent_block_group(
-                            conn,
-                            collection_name,
-                            &vcf_entry.path.name,
-                            &parent_samples,
-                        ) {
-                            Ok(Some(parent_bg)) => {
-                                let parent_path = PathCache::lookup(
-                                    &mut path_cache,
-                                    &parent_bg.id,
-                                    vcf_entry.path.name.clone(),
-                                );
-                                parent_path.id
-                            }
-                            Ok(None) => vcf_entry.path.id,
-                            Err(err) => panic!("failed to resolve parent block group: {err}"),
-                        }
-                    });
+                    if parent_block_groups.len() == 1 {
+                        let parent_path = PathCache::lookup(
+                            &mut path_cache,
+                            &parent_block_groups[0].id,
+                            vcf_entry.path.name.clone(),
+                        );
+                        parent_path.id
+                    } else {
+                        vcf_entry.path.id
+                    }
+                });
 
             let node_id = Node::create(
                 conn,
                 &sequence.hash,
                 &HashId::convert_str(&format!(
                     "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                    path_id = parent_path_id,
+                    path_id = source_path_id,
                     sequence_hash = sequence.hash
                 )),
             );
@@ -1372,8 +1383,8 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create_child(conn, &collection, "parent-a", Some("reference"));
-        Sample::get_or_create_child(conn, &collection, "parent-b", Some("reference"));
+        Sample::get_or_create_child(conn, &collection, "parent-a", vec!["reference".to_string()]);
+        Sample::get_or_create_child(conn, &collection, "parent-b", vec!["reference".to_string()]);
         Sample::get_or_create(conn, "child");
         SampleLineage::create(conn, "parent-a", "child").unwrap();
         SampleLineage::create(conn, "parent-b", "child").unwrap();

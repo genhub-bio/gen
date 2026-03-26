@@ -199,15 +199,19 @@ mod tests {
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
         Sample::get_or_create(conn, "child sample");
-        let _ =
-            Sample::get_or_create_child(conn, "test", "child sample", Some(Sample::DEFAULT_NAME));
+        let _ = Sample::get_or_create_child(
+            conn,
+            "test",
+            "child sample",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        );
 
         let sample_bg_id = BlockGroup::get_or_create_sample_block_group(
             conn,
             "test",
             "child sample",
             "m123",
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
         )
         .expect("should create child block group");
         let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
