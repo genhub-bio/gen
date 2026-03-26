@@ -124,17 +124,7 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-<<<<<<< HEAD
             Sample::DEFAULT_NAME,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
-||||||| parent of 299dc86 (Add in-memory python call for import library)
-            None,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
-=======
-            None,
->>>>>>> 299dc86 (Add in-memory python call for import library)
             "library graph",
             parts_list,
             Some(parts_path),
@@ -193,17 +183,7 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-<<<<<<< HEAD
             Sample::DEFAULT_NAME,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
-||||||| parent of 299dc86 (Add in-memory python call for import library)
-            None,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
-=======
-            None,
->>>>>>> 299dc86 (Add in-memory python call for import library)
             "m123",
             parts_list,
             Some(parts_path),
@@ -247,17 +227,7 @@ mod tests {
         let _ = import_library(
             &context,
             collection,
-<<<<<<< HEAD
             Sample::DEFAULT_NAME,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
-||||||| parent of 299dc86 (Add in-memory python call for import library)
-            None,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
-=======
-            None,
->>>>>>> 299dc86 (Add in-memory python call for import library)
             "m123",
             parts_list,
             Some(parts_path),
