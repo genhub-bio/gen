@@ -6098,7 +6098,17 @@ dependencies = [
  "atomic",
  "getrandom 0.4.2",
  "js-sys",
+ "uuid-rng-internal",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "uuid-rng-internal"
+version = "1.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02b76dc0e3c64be846ad2fd1378656e7de2120530d1e83d8f20ca6a0cdba01de"
+dependencies = [
+ "getrandom 0.4.2",
 ]
 
 [[package]]

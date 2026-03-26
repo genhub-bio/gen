@@ -1,6 +1,8 @@
 use std::fmt;
 
+#[cfg(feature = "gff")]
 use noodles::gff::feature::record::Strand as GFFStrand;
+#[cfg(feature = "sqlite")]
 use rusqlite::{
     ToSql,
     types::{FromSql, FromSqlResult, ToSqlOutput, Value, ValueRef},
@@ -30,6 +32,7 @@ impl Strand {
 }
 
 // example https://docs.rs/rusqlite/latest/rusqlite/types/index.html
+#[cfg(feature = "sqlite")]
 impl ToSql for Strand {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         let result = match self {
@@ -42,6 +45,7 @@ impl ToSql for Strand {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl From<Strand> for Value {
     fn from(value: Strand) -> Value {
         let result = match value {
@@ -54,6 +58,7 @@ impl From<Strand> for Value {
     }
 }
 
+#[cfg(feature = "gff")]
 impl From<GFFStrand> for Strand {
     fn from(value: GFFStrand) -> Strand {
         match value {
@@ -65,6 +70,7 @@ impl From<GFFStrand> for Strand {
     }
 }
 
+#[cfg(feature = "gff")]
 impl From<Strand> for GFFStrand {
     fn from(value: Strand) -> GFFStrand {
         match value {
@@ -76,6 +82,7 @@ impl From<Strand> for GFFStrand {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl FromSql for Strand {
     fn column_result(value: ValueRef) -> FromSqlResult<Self> {
         let result = match value.as_str() {
@@ -151,6 +158,7 @@ mod tests {
         assert_eq!(format!("{v}", v = Strand::Unknown), ".");
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn test_column_conversion() {
         assert_eq!(

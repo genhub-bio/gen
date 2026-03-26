@@ -7,8 +7,13 @@ repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
+[features]
+default = ["sqlite", "gff"]
+sqlite = ["gen-core/sqlite"]
+gff = ["gen-core/gff"]
+
 [dependencies]
-gen-core = { path = "../gen-core", version = "0.1.30" }
+gen-core = { path = "../gen-core", version = "0.1.30", default-features = false }
 interavl = "0.3.0"
 intervaltree = "0.2.7"
 petgraph = { version = "0.6.5", features = ["serde-1"] }

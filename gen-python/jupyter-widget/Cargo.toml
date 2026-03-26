@@ -13,7 +13,8 @@ crate-type = ["cdylib"]
 wasm-bindgen = "0.2"
 ratatui = { version = "0.30.0", default-features = false }
 ratzilla = "0.3.0"
-petgraph = { version = "0.6.5", features = ["serde-1"] }
+gen-core = { path = "../../gen-core", default-features = false }
+gen-graph = { path = "../../gen-graph", default-features = false }
 gen-tui = { path = "../../gen-tui", default-features = false }
 log = "0.4.26"
 getrandom = { version = "0.3", features = ["wasm_js"] }
@@ -29,4 +30,3 @@ web-sys = { version = "0.3", features = [
 js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-hex = "0.4"

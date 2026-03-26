@@ -1,5 +1,7 @@
-use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
+use gen_core::{is_end_node, is_start_node};
+use gen_graph::{GenGraph, GraphNode};
 use gen_tui::{
     LineStyle,
     geometry::WorldRect,
@@ -10,7 +12,6 @@ use gen_tui::{
     theme::Theme,
 };
 use js_sys::Function;
-use petgraph::graphmap::DiGraphMap;
 use ratatui::{
     Frame, Terminal,
     layout::{Alignment, Constraint, Direction, Layout},
@@ -22,135 +23,10 @@ use ratzilla::{
     backend::webgl2::{FontAtlasData, WebGl2BackendOptions},
     event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind},
 };
-use serde::{
-    Deserialize, Serialize, Serializer,
-    de::{self, Visitor},
-};
+use serde::Deserialize;
 use serde_json::from_str as json_from_str;
 use wasm_bindgen::prelude::*;
 use web_time::Instant;
-
-// ---------------------------------------------------------------------------
-// PATH_START / PATH_END sentinel bytes (mirrors gen-core)
-// ---------------------------------------------------------------------------
-
-const PATH_START_BYTES: [u8; 32] = [
-    0x84, 0xd6, 0xad, 0xbd, 0x53, 0x95, 0x28, 0x19, 0x33, 0xfe, 0x41, 0xe8, 0x77, 0xd3, 0xa7, 0xf0,
-    0x2a, 0x3b, 0x19, 0x90, 0xa6, 0x5b, 0xe1, 0x90, 0x1b, 0x2c, 0x91, 0xfc, 0x68, 0x5e, 0x08, 0x3b,
-];
-
-const PATH_END_BYTES: [u8; 32] = [
-    0x1c, 0x7d, 0xfc, 0x64, 0x97, 0x7b, 0x08, 0x38, 0xaf, 0x07, 0x62, 0xd7, 0x33, 0x3d, 0xcb, 0x64,
-    0xc1, 0x75, 0xb1, 0x5e, 0x65, 0xa7, 0x00, 0x99, 0xec, 0x38, 0xf4, 0x6b, 0xf1, 0xa1, 0x5e, 0xa3,
-];
-
-// ---------------------------------------------------------------------------
-// HashId — 32-byte hash, serializes as 64-char hex string
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct HashId(pub [u8; 32]);
-
-impl HashId {
-    pub fn is_start(&self) -> bool {
-        self.0 == PATH_START_BYTES
-    }
-
-    pub fn is_end(&self) -> bool {
-        self.0 == PATH_END_BYTES
-    }
-}
-
-impl fmt::Display for HashId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
-    }
-}
-
-impl fmt::Debug for HashId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "HashId({})", hex::encode(&self.0[..4]))
-    }
-}
-
-impl Serialize for HashId {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hex::encode(self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for HashId {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct HexVisitor;
-        impl<'de> Visitor<'de> for HexVisitor {
-            type Value = HashId;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a 64-character hex string")
-            }
-
-            fn visit_str<E: de::Error>(self, v: &str) -> Result<HashId, E> {
-                let bytes = hex::decode(v).map_err(de::Error::custom)?;
-                let arr: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| de::Error::custom("expected 32 bytes (64 hex chars)"))?;
-                Ok(HashId(arr))
-            }
-        }
-        d.deserialize_str(HexVisitor)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GraphNode
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct GraphNode {
-    pub block_id: i64,
-    pub node_id: HashId,
-    pub sequence_start: i64,
-    pub sequence_end: i64,
-}
-
-impl GraphNode {
-    pub fn sequence_len(&self) -> i64 {
-        (self.sequence_end - self.sequence_start).max(0)
-    }
-
-    /// Returns the canonical spec string used as the sequence request key.
-    /// Format: "node_id_hex:sequence_start-sequence_end"
-    pub fn spec(&self) -> String {
-        format!(
-            "{}:{}-{}",
-            self.node_id, self.sequence_start, self.sequence_end
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Strand / GraphEdge — mirrors of gen-core / gen-graph types
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub enum Strand {
-    Forward,
-    Reverse,
-    Unknown,
-    ImportantButUnknown,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize)]
-pub struct GraphEdge {
-    edge_id: HashId,
-    source_strand: Strand,
-    target_strand: Strand,
-    chromosome_index: i64,
-    phased: i64,
-    created_on: i64,
-}
-
-pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
 
 // ---------------------------------------------------------------------------
 // WidgetPalette — Catppuccin colour slots used by the widget.
@@ -208,13 +84,13 @@ struct WidgetNodeSizer;
 
 impl NodeSizer<&GenGraph> for WidgetNodeSizer {
     fn get_node_size(&self, node: &GraphNode, detail_level: VisualDetail) -> (u64, u64) {
-        if node.node_id.is_start() {
+        if is_start_node(node.node_id) {
             return (8, 1);
         }
-        if node.node_id.is_end() {
+        if is_end_node(node.node_id) {
             return (7, 1);
         }
-        let len = node.sequence_len() as u64;
+        let len = node.length().max(0) as u64;
         match detail_level {
             VisualDetail::Minimal => (1, 1),
             VisualDetail::Truncated => (len.min(12).max(1), 1),
@@ -255,7 +131,7 @@ impl WidgetNodeRenderer {
     }
 
     fn request_sequence(&self, node: &GraphNode) {
-        let spec = node.spec();
+        let spec = format!("{}:{}-{}", node.node_id, node.sequence_start, node.sequence_end);
         if self.pending.borrow().contains(&spec) {
             return;
         }
@@ -287,11 +163,11 @@ impl NodeRenderer<&GenGraph> for WidgetNodeRenderer {
             .bg(self.palette.canvas_bg);
         buffer.fill_rect(area, ' ');
 
-        if node.node_id.is_start() {
+        if is_start_node(node.node_id) {
             buffer.set_string_styled(area.left_center(), " Start >", canvas_style);
             return;
         }
-        if node.node_id.is_end() {
+        if is_end_node(node.node_id) {
             buffer.set_string_styled(area.left_center(), "> End ", canvas_style);
             return;
         }
@@ -302,7 +178,7 @@ impl NodeRenderer<&GenGraph> for WidgetNodeRenderer {
             }
             VisualDetail::Truncated | VisualDetail::Full => {
                 let max_width = (area.max.x - area.min.x + 1) as usize;
-                let spec = node.spec();
+                let spec = format!("{}:{}-{}", node.node_id, node.sequence_start, node.sequence_end);
                 let cached = self.cache.borrow().get(&spec).cloned();
                 if let Some(seq) = cached {
                     let truncated = inner_truncation(&seq, max_width as u32);
