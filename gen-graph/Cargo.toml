@@ -11,6 +11,6 @@ license = "Apache-2.0"
 gen-core = { path = "../gen-core", version = "0.1.30" }
 interavl = "0.3.0"
 intervaltree = "0.2.7"
-petgraph = "0.6.5"
+petgraph = { version = "0.6.5", features = ["serde-1"] }
 serde = { version = "1.0.219", features = ["derive"] }
 thiserror = "2.0.12"

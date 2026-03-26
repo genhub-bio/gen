@@ -5,7 +5,7 @@ use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GraphNode, project_path};
 use gen_models::{block_group::BlockGroup, node::Node, path::Path, traits::Query};
 use pyo3::prelude::*;
-use serde_json::{json, to_string as json_to_string};
+use serde_json::to_string;
 
 use super::{hash_id::PyHashId, repository::PyRepository};
 
@@ -93,13 +93,7 @@ impl PyBlockGroup {
         }
     }
 
-    /// Serializes the block group topology to a JSON string matching the
-    /// `TopologyResponse` schema expected by the WASM widget.
-    ///
-    /// Format: `{"nodes": [...], "edges": [[src, dst], ...]}`
-    ///
-    /// Avoids any Python dict construction — the entire graph traversal and
-    /// serialization happens in Rust.
+    /// Serializes the block group topology to a JSON string for the WASM widget.
     pub fn to_widget_json(&self, py: Python<'_>) -> PyResult<String> {
         let repo = self.repository.as_ref().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -109,13 +103,7 @@ impl PyBlockGroup {
         let bg_id = self.id;
         repo.borrow(py).with_connection(|conn| {
             let graph = BlockGroup::get_graph(conn, &bg_id);
-            let nodes: Vec<GraphNode> = graph.nodes().collect();
-            let edges: Vec<[GraphNode; 2]> = graph
-                .all_edges()
-                .map(|(src, dst, _)| [src, dst])
-                .collect();
-            let topology = json!({ "nodes": nodes, "edges": edges });
-            json_to_string(&topology)
+            to_string(&graph)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })
     }
@@ -156,7 +144,7 @@ impl PyBlockGroup {
                 })
                 .collect();
 
-            json_to_string(&nodes)
+            to_string(&nodes)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })
     }
@@ -218,7 +206,7 @@ impl PyBlockGroup {
                 }
             }
 
-            json_to_string(&result)
+            to_string(&result)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })
     }

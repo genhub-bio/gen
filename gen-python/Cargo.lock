@@ -1292,6 +1292,7 @@ dependencies = [
  "pyo3",
  "pyo3-build-config 0.26.0",
  "rusqlite",
+ "serde",
  "serde_json",
 ]
 

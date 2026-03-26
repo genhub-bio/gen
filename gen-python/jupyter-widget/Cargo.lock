@@ -555,26 +555,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "graph-widget-wasm"
-version = "0.1.0"
-dependencies = [
- "console_error_panic_hook",
- "gen-tui",
- "getrandom 0.3.4",
- "hex",
- "js-sys",
- "log",
- "petgraph",
- "ratatui",
- "ratzilla",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "web-sys",
- "web-time",
-]
-
-[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -694,6 +674,26 @@ checksum = "b49715b7073f385ba4bc528e5747d02e66cb39c6146efb66b781f131f0fb399c"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jupyter-widget"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "gen-tui",
+ "getrandom 0.3.4",
+ "hex",
+ "js-sys",
+ "log",
+ "petgraph",
+ "ratatui",
+ "ratzilla",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]

@@ -45,13 +45,13 @@ const PATH_END_BYTES: [u8; 32] = [
 ];
 
 // ---------------------------------------------------------------------------
-// NodeId — 32-byte hash, serializes as 64-char hex string
+// HashId — 32-byte hash, serializes as 64-char hex string
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct NodeId(pub [u8; 32]);
+pub struct HashId(pub [u8; 32]);
 
-impl NodeId {
+impl HashId {
     pub fn is_start(&self) -> bool {
         self.0 == PATH_START_BYTES
     }
@@ -61,40 +61,40 @@ impl NodeId {
     }
 }
 
-impl fmt::Display for NodeId {
+impl fmt::Display for HashId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", hex::encode(self.0))
     }
 }
 
-impl fmt::Debug for NodeId {
+impl fmt::Debug for HashId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NodeId({})", hex::encode(&self.0[..4]))
+        write!(f, "HashId({})", hex::encode(&self.0[..4]))
     }
 }
 
-impl Serialize for NodeId {
+impl Serialize for HashId {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&hex::encode(self.0))
     }
 }
 
-impl<'de> Deserialize<'de> for NodeId {
+impl<'de> Deserialize<'de> for HashId {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct HexVisitor;
         impl<'de> Visitor<'de> for HexVisitor {
-            type Value = NodeId;
+            type Value = HashId;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a 64-character hex string")
             }
 
-            fn visit_str<E: de::Error>(self, v: &str) -> Result<NodeId, E> {
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<HashId, E> {
                 let bytes = hex::decode(v).map_err(de::Error::custom)?;
                 let arr: [u8; 32] = bytes
                     .try_into()
                     .map_err(|_| de::Error::custom("expected 32 bytes (64 hex chars)"))?;
-                Ok(NodeId(arr))
+                Ok(HashId(arr))
             }
         }
         d.deserialize_str(HexVisitor)
@@ -108,7 +108,7 @@ impl<'de> Deserialize<'de> for NodeId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct GraphNode {
     pub block_id: i64,
-    pub node_id: NodeId,
+    pub node_id: HashId,
     pub sequence_start: i64,
     pub sequence_end: i64,
 }
@@ -129,16 +129,28 @@ impl GraphNode {
 }
 
 // ---------------------------------------------------------------------------
-// Topology — the JSON payload sent from Python
+// Strand / GraphEdge — mirrors of gen-core / gen-graph types
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-pub struct TopologyResponse {
-    pub nodes: Vec<GraphNode>,
-    pub edges: Vec<(GraphNode, GraphNode)>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+pub enum Strand {
+    Forward,
+    Reverse,
+    Unknown,
+    ImportantButUnknown,
 }
 
-pub type WidgetGraph = DiGraphMap<GraphNode, ()>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize)]
+pub struct GraphEdge {
+    edge_id: HashId,
+    source_strand: Strand,
+    target_strand: Strand,
+    chromosome_index: i64,
+    phased: i64,
+    created_on: i64,
+}
+
+pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
 
 // ---------------------------------------------------------------------------
 // WidgetPalette — Catppuccin colour slots used by the widget.
@@ -194,7 +206,7 @@ impl From<PaletteHex> for WidgetPalette {
 #[derive(Clone)]
 struct WidgetNodeSizer;
 
-impl NodeSizer<&WidgetGraph> for WidgetNodeSizer {
+impl NodeSizer<&GenGraph> for WidgetNodeSizer {
     fn get_node_size(&self, node: &GraphNode, detail_level: VisualDetail) -> (u64, u64) {
         if node.node_id.is_start() {
             return (8, 1);
@@ -259,7 +271,7 @@ impl WidgetNodeRenderer {
     }
 }
 
-impl NodeRenderer<&WidgetGraph> for WidgetNodeRenderer {
+impl NodeRenderer<&GenGraph> for WidgetNodeRenderer {
     fn render_node(
         &mut self,
         buffer: &mut WorldBuffer,
@@ -364,7 +376,7 @@ impl AppHandle {
 // App — internal render-loop state (not exported to JS)
 // ---------------------------------------------------------------------------
 
-type WidgetController = GraphController<&'static WidgetGraph, WidgetNodeSizer>;
+type WidgetController = GraphController<&'static GenGraph, WidgetNodeSizer>;
 
 struct App {
     controller: WidgetController,
@@ -603,33 +615,21 @@ fn inner_truncation(s: &str, target_length: u32) -> String {
 // mount_app — the main entry point exported to JS
 // ---------------------------------------------------------------------------
 
-/// Mount the gen-tui graph widget into `container_id` using the provided topology JSON.
+/// Mount the gen-tui graph widget into `container_id` using the provided input data.
 ///
 /// Returns an `AppHandle` that the widget host uses to deliver sequences on demand.
-/// The topology JSON must match the `TopologyResponse` schema:
-/// `{"nodes": [...], "edges": [[src, dst], ...]}`.
 #[wasm_bindgen]
 pub fn mount_app(
     container_id: &str,
-    topology_json: &str,
+    graph_json: &str,
     palette_json: &str,
     path_nodes_json: &str,
 ) -> Result<AppHandle, JsValue> {
     console_error_panic_hook::set_once();
 
-    // Parse topology
-    let topology: TopologyResponse = serde_json::from_str(topology_json)
+    let graph: GenGraph = serde_json::from_str(graph_json)
         .map_err(|e| JsValue::from_str(&format!("topology parse error: {e}")))?;
-
-    // Build graph
-    let mut graph = WidgetGraph::new();
-    for node in topology.nodes {
-        graph.add_node(node);
-    }
-    for (from, to) in topology.edges {
-        graph.add_edge(from, to, ());
-    }
-    let graph: &'static WidgetGraph = Box::leak(Box::new(graph));
+    let graph: &'static GenGraph = Box::leak(Box::new(graph));
 
     // Build terminal mounted to the container element
     let (terminal, cell_size) = build_terminal(container_id)?;
