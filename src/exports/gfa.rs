@@ -473,8 +473,8 @@ mod tests {
         assert!(matches!(
             result,
             Err(GfaExportError::MissingBlockGroups {
-                collection_name,
-                sample_name,
+                collection_name: _,
+                sample_name: _,
             })
         ));
     }
