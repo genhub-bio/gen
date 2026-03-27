@@ -144,7 +144,6 @@ pub fn setup_test_data(conn: &GraphConnection) {
         start: 3,
         end: 4,
         block: PathBlock {
-            id: 0,
             node_id,
             block_sequence: alt_seq.to_string(),
             sequence_start: 0,

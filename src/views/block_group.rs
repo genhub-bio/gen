@@ -47,7 +47,6 @@ enum PanelMode {
 fn get_empty_graph() -> GenGraph {
     let mut g = GenGraph::new();
     g.add_node(GraphNode {
-        block_id: -1,
         node_id: PATH_START_NODE_ID,
         sequence_start: 0,
         sequence_end: 0,

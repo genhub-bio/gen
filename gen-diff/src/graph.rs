@@ -107,7 +107,6 @@ pub fn get_diff_graph(
         let mut block_graph = DiffGenGraph::new();
         block_graph.add_node(DiffGraphNode {
             node: GraphNode {
-                block_id: -1,
                 node_id: start_node.id,
                 sequence_start: 0,
                 sequence_end: 0,
@@ -116,7 +115,6 @@ pub fn get_diff_graph(
         });
         block_graph.add_node(DiffGraphNode {
             node: GraphNode {
-                block_id: -1,
                 node_id: end_node.id,
                 sequence_start: 0,
                 sequence_end: 0,
@@ -178,7 +176,6 @@ pub fn get_diff_graph(
             for (i, j) in block_starts.iter().zip(block_ends.iter()) {
                 let node = DiffGraphNode {
                     node: GraphNode {
-                        block_id: -1,
                         node_id: node,
                         sequence_start: *i,
                         sequence_end: *j,
@@ -301,7 +298,6 @@ mod tests {
     fn diff_graph_to_gen_graph_maps_nodes_and_edges() {
         let node_a = DiffGraphNode {
             node: GraphNode {
-                block_id: 1,
                 node_id: HashId::pad_str(1),
                 sequence_start: 0,
                 sequence_end: 5,
@@ -310,7 +306,6 @@ mod tests {
         };
         let node_b = DiffGraphNode {
             node: GraphNode {
-                block_id: 2,
                 node_id: HashId::pad_str(2),
                 sequence_start: 5,
                 sequence_end: 10,

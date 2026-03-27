@@ -80,7 +80,6 @@ pub fn update_with_fasta(
             // values for them are arbitrary), which flags that it's a deletion
             // to the logic in BlockGroup::insert_change.
             let path_block = PathBlock {
-                id: -1,
                 node_id,
                 block_sequence: sequence,
                 sequence_start: 0,
@@ -126,7 +125,6 @@ pub fn update_with_fasta(
             );
 
             let path_block = PathBlock {
-                id: -1,
                 node_id,
                 block_sequence: sequence,
                 sequence_start: 0,

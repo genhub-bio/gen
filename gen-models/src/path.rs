@@ -259,7 +259,6 @@ impl Path {
 
     pub fn edge_pairs_to_block(
         &self,
-        block_id: i64,
         into: Edge,
         out_of: Edge,
         sequences_by_node_id: &HashMap<HashId, Sequence>,
@@ -279,7 +278,6 @@ impl Path {
         };
 
         PathBlock {
-            id: block_id,
             node_id: into.target_node_id,
             block_sequence,
             sequence_start: start,
@@ -314,7 +312,6 @@ impl Path {
         // to 0 makes interval tree lookups work better.  If the point being looked up is -1 (or
         // below), it will return this block.
         blocks.push(PathBlock {
-            id: -1,
             node_id: PATH_START_NODE_ID,
             block_sequence: "".to_string(),
             sequence_start: 0,
@@ -324,14 +321,8 @@ impl Path {
             strand: Strand::Forward,
         });
 
-        for (index, (into, out_of)) in edges.into_iter().tuple_windows().enumerate() {
-            let block = self.edge_pairs_to_block(
-                index as i64,
-                into,
-                out_of,
-                &sequences_by_node_id,
-                path_length,
-            );
+        for (into, out_of) in edges.into_iter().tuple_windows() {
+            let block = self.edge_pairs_to_block(into, out_of, &sequences_by_node_id, path_length);
             path_length += block.block_sequence.len() as i64;
             blocks.push(block);
         }
@@ -340,7 +331,6 @@ impl Path {
         // length to i64::MAX makes interval tree lookups work better.  If the point being looked up
         // is the path length (or higher), it will return this block.
         blocks.push(PathBlock {
-            id: -2,
             node_id: PATH_END_NODE_ID,
             block_sequence: "".to_string(),
             sequence_start: 0,
@@ -361,7 +351,6 @@ impl Path {
                 (
                     block.path_start..block.path_end,
                     NodeIntervalBlock {
-                        block_id: block.id,
                         node_id: block.node_id,
                         start: block.path_start,
                         end: block.path_end,
@@ -772,7 +761,6 @@ impl Path {
         };
 
         let mut consolidated_block = NodeIntervalBlock {
-            block_id: 0,
             node_id: node_blocks[0].node_id,
             start: node_blocks[0].start + start_offset,
             end: node_blocks[0].end,
@@ -787,7 +775,6 @@ impl Path {
                 // If the current block is immediately adjacent to the previous one (as recorded
                 // in the consolidated block), extend the consolidated block
                 consolidated_block = NodeIntervalBlock {
-                    block_id: consolidated_block.block_id,
                     node_id: consolidated_block.node_id,
                     start: consolidated_block.start,
                     end: block.end,
@@ -808,7 +795,6 @@ impl Path {
         };
 
         result_node_blocks.push(NodeIntervalBlock {
-            block_id: consolidated_block.block_id,
             node_id: consolidated_block.node_id,
             start: consolidated_block.start,
             end: consolidated_block.end - end_offset,
@@ -3686,7 +3672,6 @@ mod tests {
 
         let node_blocks1 = path.node_blocks_for_range(&intervaltree, 0, 8);
         let expected_node_blocks1 = vec![NodeIntervalBlock {
-            block_id: 0,
             node_id: node1_id,
             start: 0,
             end: 8,
@@ -3698,7 +3683,6 @@ mod tests {
 
         let node_blocks2 = path.node_blocks_for_range(&intervaltree, 0, 4);
         let expected_node_blocks2 = vec![NodeIntervalBlock {
-            block_id: 0,
             node_id: node1_id,
             start: 0,
             end: 4,
@@ -3710,7 +3694,6 @@ mod tests {
 
         let node_blocks3 = path.node_blocks_for_range(&intervaltree, 2, 6);
         let expected_node_blocks3 = vec![NodeIntervalBlock {
-            block_id: 0,
             node_id: node1_id,
             start: 2,
             end: 6,
@@ -3722,7 +3705,6 @@ mod tests {
 
         let node_blocks4 = path.node_blocks_for_range(&intervaltree, 3, 8);
         let expected_node_blocks4 = vec![NodeIntervalBlock {
-            block_id: 0,
             node_id: node1_id,
             start: 3,
             end: 8,
@@ -3735,7 +3717,6 @@ mod tests {
         let node_blocks5 = path.node_blocks_for_range(&intervaltree, 6, 10);
         let expected_node_blocks5 = vec![
             NodeIntervalBlock {
-                block_id: 0,
                 node_id: node1_id,
                 start: 6,
                 end: 8,
@@ -3744,7 +3725,6 @@ mod tests {
                 strand: Strand::Forward,
             },
             NodeIntervalBlock {
-                block_id: 1,
                 node_id: node2_id,
                 start: 8,
                 end: 10,
@@ -3757,7 +3737,6 @@ mod tests {
 
         let node_blocks6 = path.node_blocks_for_range(&intervaltree, 12, 16);
         let expected_node_blocks6 = vec![NodeIntervalBlock {
-            block_id: 0,
             node_id: node2_id,
             start: 12,
             end: 16,
@@ -3840,7 +3819,6 @@ mod tests {
 
         let node_blocks1 = path1.node_blocks_for_range(&intervaltree1, 0, 8);
         let expected_node_blocks1 = vec![NodeIntervalBlock {
-            block_id: 0,
             node_id: node1_id,
             start: 0,
             end: 8,
@@ -3855,7 +3833,6 @@ mod tests {
         let node_blocks2 = path2.node_blocks_for_range(&intervaltree2, 0, 8);
         let expected_node_blocks2 = vec![
             NodeIntervalBlock {
-                block_id: 0,
                 node_id: node1_id,
                 start: 0,
                 end: 5,
@@ -3864,7 +3841,6 @@ mod tests {
                 strand: Strand::Forward,
             },
             NodeIntervalBlock {
-                block_id: 1,
                 node_id: node2_id,
                 start: 5,
                 end: 8,
@@ -3878,7 +3854,6 @@ mod tests {
         let node_blocks3 = path2.node_blocks_for_range(&intervaltree2, 4, 14);
         let expected_node_blocks3 = vec![
             NodeIntervalBlock {
-                block_id: 0,
                 node_id: node1_id,
                 start: 4,
                 end: 5,
@@ -3887,7 +3862,6 @@ mod tests {
                 strand: Strand::Forward,
             },
             NodeIntervalBlock {
-                block_id: 1,
                 node_id: node2_id,
                 start: 5,
                 end: 13,
@@ -3896,7 +3870,6 @@ mod tests {
                 strand: Strand::Forward,
             },
             NodeIntervalBlock {
-                block_id: 2,
                 node_id: node1_id,
                 start: 13,
                 end: 14,

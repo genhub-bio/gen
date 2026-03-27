@@ -66,7 +66,6 @@ pub fn update_with_sequence(
         // values for them are arbitrary), which flags that it's a deletion
         // to the logic in BlockGroup::insert_change.
         let path_block = PathBlock {
-            id: -1,
             node_id,
             block_sequence: sequence.to_string(),
             sequence_start: 0,
@@ -108,7 +107,6 @@ pub fn update_with_sequence(
         );
 
         let path_block = PathBlock {
-            id: -1,
             node_id,
             block_sequence: sequence.to_string(),
             sequence_start: 0,

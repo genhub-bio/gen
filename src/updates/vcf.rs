@@ -148,7 +148,6 @@ fn prepare_change(
 ) -> PathChange {
     // TODO: new sequence may not be real and be <DEL> or some sort. Handle these.
     let new_block = PathBlock {
-        id: 0,
         node_id,
         block_sequence,
         sequence_start: 0,

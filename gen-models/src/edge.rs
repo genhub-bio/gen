@@ -392,47 +392,40 @@ impl Edge {
         edges: &Vec<AugmentedEdge>,
         blocks: &Vec<GroupBlock>,
     ) -> (GenGraph, HashMap<(i64, i64), Edge>) {
+        let graph_node_for_block = |block: &GroupBlock| GraphNode {
+            node_id: block.node_id,
+            sequence_start: block.start,
+            sequence_end: block.end,
+        };
         let blocks_by_start = blocks
-            .clone()
-            .into_iter()
+            .iter()
             .map(|block| {
                 (
                     BlockKey {
                         node_id: block.node_id,
                         coordinate: block.start,
                     },
-                    block.id,
+                    block,
                 )
             })
-            .collect::<HashMap<BlockKey, i64>>();
+            .collect::<HashMap<BlockKey, &GroupBlock>>();
         let blocks_by_end = blocks
-            .clone()
-            .into_iter()
+            .iter()
             .map(|block| {
                 (
                     BlockKey {
                         node_id: block.node_id,
                         coordinate: block.end,
                     },
-                    block.id,
+                    block,
                 )
             })
-            .collect::<HashMap<BlockKey, i64>>();
-        let block_coordinates = blocks
-            .clone()
-            .into_iter()
-            .map(|block| (block.id, (block.start, block.end)))
-            .collect::<HashMap<i64, (i64, i64)>>();
+            .collect::<HashMap<BlockKey, &GroupBlock>>();
 
         let mut graph = GenGraph::new();
         let mut edges_by_node_pair = HashMap::new();
         for block in blocks {
-            graph.add_node(GraphNode {
-                block_id: block.id,
-                node_id: block.node_id,
-                sequence_start: block.start,
-                sequence_end: block.end,
-            });
+            graph.add_node(graph_node_for_block(block));
         }
         for augmented_edge in edges {
             let edge = &augmented_edge.edge;
@@ -447,21 +440,11 @@ impl Edge {
             };
             let target_id = blocks_by_start.get(&target_key);
 
-            if let Some(source_id_value) = source_id
-                && let Some(target_id_value) = target_id
+            if let Some(source_block) = source_id
+                && let Some(target_block) = target_id
             {
-                let source_node = GraphNode {
-                    block_id: *source_id_value,
-                    node_id: edge.source_node_id,
-                    sequence_start: block_coordinates[source_id_value].0,
-                    sequence_end: block_coordinates[source_id_value].1,
-                };
-                let target_node = GraphNode {
-                    block_id: *target_id_value,
-                    node_id: edge.target_node_id,
-                    sequence_start: block_coordinates[target_id_value].0,
-                    sequence_end: block_coordinates[target_id_value].1,
-                };
+                let source_node = graph_node_for_block(source_block);
+                let target_node = graph_node_for_block(target_block);
                 let graph_edge = GraphEdge {
                     edge_id: edge.id,
                     source_strand: edge.source_strand,
@@ -475,7 +458,7 @@ impl Edge {
                 } else {
                     graph.add_edge(source_node, target_node, vec![graph_edge]);
                 }
-                edges_by_node_pair.insert((*source_id_value, *target_id_value), edge.clone());
+                edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
             }
         }
 
@@ -726,7 +709,6 @@ mod tests {
             .save(&conn);
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
-            id: 0,
             node_id: insert_node_id,
             block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
             sequence_start: 0,

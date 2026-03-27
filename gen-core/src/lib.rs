@@ -252,7 +252,6 @@ impl HashId {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct NodeIntervalBlock {
-    pub block_id: i64,
     pub node_id: HashId,
     pub start: i64,
     pub end: i64,

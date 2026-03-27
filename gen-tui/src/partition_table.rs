@@ -1265,7 +1265,6 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .map(|id| GraphNode {
-                    block_id: id as i64,
                     node_id: HashId::pad_str(id),
                     sequence_start: 0,
                     sequence_end: 10,
@@ -1275,8 +1274,14 @@ mod tests {
 
         DiGraphMap::from_edges(edges.iter().map(|(s, t)| {
             (
-                *nodes.iter().find(|gn| gn.block_id == *s as i64).unwrap(),
-                *nodes.iter().find(|gn| gn.block_id == *t as i64).unwrap(),
+                *nodes
+                    .iter()
+                    .find(|gn| gn.node_id == HashId::pad_str(*s))
+                    .unwrap(),
+                *nodes
+                    .iter()
+                    .find(|gn| gn.node_id == HashId::pad_str(*t))
+                    .unwrap(),
             )
         }))
     }
@@ -1291,7 +1296,6 @@ mod tests {
     #[test]
     fn test_calculate_node_ranks_single_node() {
         let node = GraphNode {
-            block_id: 0,
             node_id: HashId::pad_str(0),
             sequence_start: 0,
             sequence_end: 10,

@@ -378,7 +378,6 @@ mod tests {
 
         // Add a simple test node
         let node = GraphNode {
-            block_id: 1,
             node_id: HashId::pad_str(1),
             sequence_start: 0,
             sequence_end: 10,

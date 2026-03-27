@@ -678,7 +678,6 @@ mod tests {
             .save(conn);
         let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
-            id: 0,
             node_id: insert_node_id,
             block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
             sequence_start: 0,
