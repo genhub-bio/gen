@@ -1,5 +1,5 @@
 use r#gen::graphs::combinatorial_library::{SequencePart, parse_library};
-use gen_models::errors::OperationError;
+use gen_models::{errors::OperationError, operations::Defaults, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use crate::{PyDbContext, python_api::sequence_part::PySequencePart};
@@ -32,7 +32,8 @@ pub fn update_with_fasta(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     let no_reference_path_update = false;
 
@@ -86,7 +87,8 @@ pub fn update_with_gfa(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     match r#gen::updates::gfa::update_with_gfa(context, &name, &sample, &new_sample, &filename) {
         Ok(_) => {
@@ -124,7 +126,8 @@ pub fn update_with_gaf(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     if let Err(err) = r#gen::updates::gaf::update_with_gaf(
         context,
@@ -168,7 +171,8 @@ pub fn update_with_vcf(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     match r#gen::updates::vcf::update_with_vcf(
         context,
@@ -220,7 +224,9 @@ pub fn update_with_genbank(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
+
     let file = std::fs::File::open(&filename)
         .map_err(|err| PyRuntimeError::new_err(format!("Failed to open GenBank file: {err}")))?;
 
@@ -287,7 +293,8 @@ pub fn update_with_library_files(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     if let Err(err) = r#gen::updates::library::update_with_library(
         context,
@@ -340,8 +347,8 @@ pub fn update_with_library(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let collection_name =
-        name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let collection_name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     let rust_parts_list = parts_list
         .iter()
@@ -357,10 +364,16 @@ pub fn update_with_library(
         })
         .collect();
 
+    let sample_name = if let Some(sample) = sample {
+        &sample.clone()
+    } else {
+        Sample::DEFAULT_NAME
+    };
+
     if let Err(err) = r#gen::updates::library::update_with_library(
         context,
         &collection_name,
-        sample.as_deref(),
+        sample_name,
         &new_sample_name,
         &path_name,
         start,
@@ -409,7 +422,8 @@ pub fn update_with_sequence(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     if let Err(err) = r#gen::updates::sequence::update_with_sequence(
         context,

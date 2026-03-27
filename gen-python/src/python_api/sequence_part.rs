@@ -12,11 +12,11 @@ pub struct PySequencePart {
 #[pymethods]
 impl PySequencePart {
     #[new]
-    fn new(name: String, sequence: String, sequence_length: i64) -> Self {
+    fn new(name: String, sequence: String) -> Self {
         PySequencePart {
             name,
-            sequence,
-            sequence_length,
+            sequence: sequence.clone(),
+            sequence_length: sequence.len() as i64,
         }
     }
 }

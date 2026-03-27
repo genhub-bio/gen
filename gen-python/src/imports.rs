@@ -4,7 +4,8 @@ use r#gen::graphs::combinatorial_library::{SequencePart, parse_library};
 use gen_models::{
     errors::OperationError,
     file_types::FileTypes,
-    operations::{OperationFile, OperationInfo},
+    operations::{Defaults, OperationFile, OperationInfo},
+    sample::Sample,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -31,7 +32,8 @@ pub fn import_fasta(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     match r#gen::imports::fasta::import_fasta(context, &filename, &name, &sample, shallow) {
         Ok(_) => {
@@ -72,7 +74,8 @@ pub fn import_gfa(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     match r#gen::imports::gfa::import_gfa(context, &PathBuf::from(filename), &name, &sample) {
         Ok(_) => {
@@ -113,7 +116,9 @@ pub fn import_genbank(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
+
     let mut reader: Box<dyn std::io::Read> = if filename.ends_with(".gz") {
         let file = File::open(&filename).map_err(|err| {
             PyRuntimeError::new_err(format!("Failed to open GenBank file: {err}"))
@@ -182,7 +187,8 @@ pub fn import_library_files(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     match r#gen::imports::library::import_library(
         context,
@@ -236,7 +242,8 @@ pub fn import_library(
     conn.execute("BEGIN TRANSACTION", []).unwrap();
     operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     let rust_parts_list = parts_list
         .iter()
@@ -252,10 +259,16 @@ pub fn import_library(
         })
         .collect();
 
+    let sample_name = if let Some(sample) = sample {
+        &sample.clone()
+    } else {
+        Sample::DEFAULT_NAME
+    };
+
     match r#gen::imports::library::import_library(
         context,
         &name,
-        sample.as_deref(),
+        sample_name,
         &library_name,
         rust_parts_list,
         None,
