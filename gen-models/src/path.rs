@@ -618,29 +618,46 @@ impl Path {
             .iter()
             .map(|edge| ((edge.target_node_id, edge.target_coordinate), edge))
             .collect::<HashMap<(_, i64), &Edge>>();
-        let edge_before_new_node = edges_by_target
-            .get(&(block_with_start.node_id, block_with_start.sequence_start))
-            .unwrap();
-        let edge_after_new_node = edges_by_source
-            .get(&(block_with_end.node_id, block_with_end.sequence_end))
-            .unwrap();
+
+        let edge_before_new_node = if edge_to_new_node.source_node_id == PATH_START_NODE_ID {
+            None
+        } else {
+            let edge = edges_by_target
+                .get(&(block_with_start.node_id, block_with_start.sequence_start))
+                .unwrap();
+            Some(edge)
+        };
+        let edge_after_new_node = if edge_from_new_node.target_node_id == PATH_END_NODE_ID {
+            None
+        } else {
+            let edge = edges_by_source
+                .get(&(block_with_end.node_id, block_with_end.sequence_end))
+                .unwrap();
+            Some(edge)
+        };
 
         let mut new_edge_ids = vec![];
-        let mut before_new_node = true;
-        let mut after_new_node = false;
-        for edge in &edges {
-            if before_new_node {
+        if let Some(edge_before_new_node) = edge_before_new_node {
+            for edge in &edges {
                 new_edge_ids.push(edge.id);
                 if edge.id == edge_before_new_node.id {
-                    before_new_node = false;
-                    new_edge_ids.push(edge_to_new_node.id);
-                    new_edge_ids.push(edge_from_new_node.id);
+                    break;
                 }
-            } else if after_new_node {
-                new_edge_ids.push(edge.id);
-            } else if edge.id == edge_after_new_node.id {
-                after_new_node = true;
-                new_edge_ids.push(edge.id);
+            }
+        }
+
+        new_edge_ids.push(edge_to_new_node.id);
+        new_edge_ids.push(edge_from_new_node.id);
+
+        if let Some(edge_after_new_node) = edge_after_new_node {
+            let mut after_new_node = false;
+            for edge in &edges {
+                if edge.id == edge_after_new_node.id {
+                    after_new_node = true;
+                }
+                if after_new_node {
+                    new_edge_ids.push(edge.id);
+                }
             }
         }
 
