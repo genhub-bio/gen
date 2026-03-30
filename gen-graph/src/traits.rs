@@ -48,16 +48,16 @@ mod tests {
             sequence_start: 0,
             sequence_end: 0,
         };
-        let edge_a = GraphEdge {
-            edge_id: HashId::convert_str("merge-edge-a"),
+        let chrom_index0_edge = GraphEdge {
+            edge_id: HashId::convert_str("merge-edge-ci0"),
             source_strand: Strand::Forward,
             target_strand: Strand::Forward,
             chromosome_index: 0,
             phased: 0,
             created_on: 1,
         };
-        let edge_b = GraphEdge {
-            edge_id: HashId::convert_str("merge-edge-b"),
+        let chrom_index1_edge = GraphEdge {
+            edge_id: HashId::convert_str("merge-edge-ci1"),
             source_strand: Strand::Forward,
             target_strand: Strand::Forward,
             chromosome_index: 1,
@@ -66,28 +66,22 @@ mod tests {
         };
 
         let mut graph_a = GenGraph::new();
-        graph_a.add_edge(start, middle, vec![edge_a]);
+        graph_a.add_edge(start, middle, vec![chrom_index0_edge]);
 
         let mut graph_b = GenGraph::new();
-        graph_b.add_edge(start, middle, vec![edge_b]);
-        graph_b.add_edge(middle, end, vec![edge_a]);
+        graph_b.add_edge(start, middle, vec![chrom_index1_edge]);
+        graph_b.add_edge(middle, end, vec![chrom_index0_edge]);
 
         graph_a.merge_graph(&graph_b);
 
         assert_eq!(graph_a.edge_weight(start, middle).unwrap().len(), 2);
-        assert!(
-            graph_a
-                .edge_weight(start, middle)
-                .unwrap()
-                .contains(&edge_a)
+        let graph_a_edges = graph_a.edge_weight(start, middle).unwrap();
+        assert!(graph_a_edges.contains(&chrom_index0_edge));
+        assert!(graph_a_edges.contains(&chrom_index1_edge));
+        assert_eq!(
+            graph_a.edge_weight(middle, end).unwrap(),
+            &vec![chrom_index0_edge]
         );
-        assert!(
-            graph_a
-                .edge_weight(start, middle)
-                .unwrap()
-                .contains(&edge_b)
-        );
-        assert_eq!(graph_a.edge_weight(middle, end).unwrap(), &vec![edge_a]);
     }
 
     #[test]
@@ -124,6 +118,8 @@ mod tests {
 
     #[test]
     fn merges_gen_graphs_by_graph_node_value() {
+        // Ensure when merging the same graph into itself, it dedupes nodes but will keep multiple edges between identical nodes
+        // between graphs
         let source_a = GraphNode {
             node_id: HashId::convert_str("shared-node"),
             sequence_start: 0,
@@ -157,7 +153,7 @@ mod tests {
             source_strand: Strand::Forward,
             target_strand: Strand::Forward,
             chromosome_index: 1,
-            phased: 1,
+            phased: 0,
             created_on: 2,
         };
 

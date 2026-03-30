@@ -204,12 +204,6 @@ impl BlockGroup {
     }
 
     pub fn duplicate(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
-        let existing_paths = Path::query(
-            conn,
-            "SELECT * from paths where block_group_id = ?1;",
-            params![self.id],
-        );
-
         let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &self.id);
         let edge_ids = augmented_edges
             .iter()
@@ -226,16 +220,28 @@ impl BlockGroup {
             })
             .collect::<Vec<_>>();
         BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
+        self.copy_paths_and_accessions_into(conn, target_block_group_id);
+    }
+
+    fn copy_paths_and_accessions_into(
+        &self,
+        conn: &GraphConnection,
+        target_block_group_id: &HashId,
+    ) {
+        let existing_paths = Path::query(
+            conn,
+            "SELECT * from paths where block_group_id = ?1;",
+            params![self.id],
+        );
 
         let mut path_map = HashMap::new();
-
-        for path in existing_paths.iter() {
+        for path in &existing_paths {
             let edge_ids = PathEdge::edges_for_path(conn, &path.id)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
             let new_path = Path::create(conn, &path.name, target_block_group_id, &edge_ids);
-            path_map.insert(&path.id, new_path.id);
+            path_map.insert(path.id, new_path.id);
         }
 
         for accession in Accession::query(
@@ -253,14 +259,13 @@ impl BlockGroup {
                 "Select * from accession_paths where accession_id = ?1 order by index_in_path ASC;",
                 rusqlite::params!(SQLValue::from(accession.id)),
             );
-            let new_path_id = &path_map[&accession.path_id];
-            let obj = Accession::create(
+            let new_path_id = path_map.get(&accession.path_id).unwrap();
+            let obj = Accession::get_or_create(
                 conn,
                 &accession.name,
                 new_path_id,
                 accession.parent_accession_id.as_ref(),
-            )
-            .expect("Unable to create accession in clone.");
+            );
             AccessionPath::create(
                 conn,
                 &obj.id,
@@ -342,7 +347,7 @@ impl BlockGroup {
 
         BlockGroup::query(
             conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name IN rarray(?2) AND name = ?3 order by sample_name",
+            "select * from block_groups where collection_name = ?1 AND sample_name IN rarray(?2) AND name = ?3 order by collection_name, sample_name, name",
             params![
                 collection_name,
                 Rc::new(
@@ -374,6 +379,7 @@ impl BlockGroup {
             })
             .collect::<Vec<_>>();
         BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
+        self.copy_paths_and_accessions_into(conn, target_block_group_id);
     }
 
     pub fn get_id(collection_name: &str, sample_name: &str, group_name: &str) -> HashId {
@@ -1393,6 +1399,194 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(merged_node_ids, HashSet::from([node_a, node_b]));
+    }
+
+    #[test]
+    fn test_blockgroup_merge_from_multiple_parents_preserves_paths_and_accessions() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test");
+        Sample::get_or_create(conn, "parent_a");
+        Sample::get_or_create(conn, "parent_b");
+        Sample::get_or_create(conn, "child");
+
+        let parent_a_bg = BlockGroup::create(conn, "test", "parent_a", "chr1");
+        let parent_b_bg = BlockGroup::create(conn, "test", "parent_b", "chr1");
+
+        let seq_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAA")
+            .save(conn);
+        let seq_b = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCCC")
+            .save(conn);
+        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("metadata-parent-a"));
+        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("metadata-parent-b"));
+
+        let parent_a_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_a,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_a,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+        let parent_b_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_b,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_b,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_a_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_a_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_b_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_b_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let parent_a_path = Path::create(
+            conn,
+            "chr1",
+            &parent_a_bg.id,
+            &parent_a_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+        );
+        let parent_b_path = Path::create(
+            conn,
+            "chr1",
+            &parent_b_bg.id,
+            &parent_b_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+        );
+        let parent_b_alt_path = Path::create(
+            conn,
+            "chr1-alt",
+            &parent_b_bg.id,
+            &parent_b_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+        );
+
+        let mut path_cache = PathCache::new(conn);
+        let _ = PathCache::lookup(&mut path_cache, &parent_a_bg.id, parent_a_path.name.clone());
+        let _ = PathCache::lookup(&mut path_cache, &parent_b_bg.id, parent_b_path.name.clone());
+        let _ = PathCache::lookup(
+            &mut path_cache,
+            &parent_b_bg.id,
+            parent_b_alt_path.name.clone(),
+        );
+        let parent_a_path_len = parent_a_path.length(conn);
+        let parent_b_path_len = parent_b_path.length(conn);
+        let parent_b_alt_path_len = parent_b_alt_path.length(conn);
+        BlockGroup::add_accession(
+            conn,
+            &parent_a_path,
+            "parent-a-acc",
+            0,
+            parent_a_path_len,
+            &mut path_cache,
+        );
+        BlockGroup::add_accession(
+            conn,
+            &parent_b_path,
+            "parent-b-acc",
+            0,
+            parent_b_path_len,
+            &mut path_cache,
+        );
+        BlockGroup::add_accession(
+            conn,
+            &parent_b_alt_path,
+            "parent-b-alt-acc",
+            0,
+            parent_b_alt_path_len,
+            &mut path_cache,
+        );
+
+        let merged_bg_id = BlockGroup::get_or_create_sample_block_group_from_parents(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            &["parent_a".to_string(), "parent_b".to_string()],
+        )
+        .unwrap();
+
+        let merged_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name",
+            params![merged_bg_id],
+        );
+        assert_eq!(
+            merged_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chr1", "chr1-alt"]
+        );
+
+        let merged_accessions = Accession::query(
+            conn,
+            "select accessions.* from accessions join paths on accessions.path_id = paths.id where paths.block_group_id = ?1 order by accessions.name",
+            params![merged_bg_id],
+        );
+        assert_eq!(
+            merged_accessions
+                .iter()
+                .map(|accession| accession.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent-a-acc", "parent-b-acc", "parent-b-alt-acc"]
+        );
     }
 
     #[test]
