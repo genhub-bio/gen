@@ -9,7 +9,7 @@ license = "Apache-2.0"
 publish = false
 
 [lib]
-name = "gen"
+name = "gen_python"
 crate-type = ["cdylib"]
 
 [features]
