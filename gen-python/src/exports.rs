@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use gen_models::operations::Defaults;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use crate::PyDbContext;
@@ -20,11 +21,12 @@ pub fn export_fasta(
         panic!("Error tracking database: {err}");
     }
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let collection_name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
     if let Err(err) = r#gen::exports::fasta::export_fasta(
         conn,
-        &name,
+        &collection_name,
         sample.clone().as_deref(),
         &PathBuf::from(filename),
     ) {
@@ -52,11 +54,16 @@ pub fn export_gfa(
         panic!("Error tracking database: {err}");
     }
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let collection_name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
-    if let Err(err) =
-        r#gen::exports::gfa::export_gfa(conn, &name, &PathBuf::from(filename), &sample, node_max)
-    {
+    if let Err(err) = r#gen::exports::gfa::export_gfa(
+        conn,
+        &collection_name,
+        &PathBuf::from(filename),
+        &sample,
+        node_max,
+    ) {
         return Err(PyRuntimeError::new_err(format!("GFA export failed: {err}")));
     }
     Ok(())
@@ -78,11 +85,15 @@ pub fn export_genbank(
         panic!("Error tracking database: {err}");
     }
 
-    let name = name.unwrap_or_else(|| r#gen::commands::get_default_collection(operation_conn));
+    let defaults = Defaults::get(operation_conn).unwrap();
+    let collection_name = name.unwrap_or_else(|| defaults.collection_name.unwrap());
 
-    if let Err(err) =
-        r#gen::exports::genbank::export_genbank(conn, &name, &sample, &PathBuf::from(filename))
-    {
+    if let Err(err) = r#gen::exports::genbank::export_genbank(
+        conn,
+        &collection_name,
+        &sample,
+        &PathBuf::from(filename),
+    ) {
         return Err(PyRuntimeError::new_err(format!(
             "GenBank export failed: {err}"
         )));
