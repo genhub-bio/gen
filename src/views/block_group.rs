@@ -612,7 +612,6 @@ pub fn view_block_group(
                 if !explorer_state.is_annotation_file_active(&id) {
                     continue;
                 }
-
                 if !annotation_file_index_available
                     .get(&id)
                     .copied()
