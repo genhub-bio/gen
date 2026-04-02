@@ -8,6 +8,7 @@ homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [dependencies]
+anyhow = "1.0.100"
 gen-core = { path = "../gen-core", version = "0.1.30" }
 gen-graph = { path = "../gen-graph", version = "0.1.30" }
 gen-models = { path = "../gen-models", version = "0.1.30" }

@@ -177,6 +177,7 @@ pub fn view_block_group(
     collection_name: &str,
     position: Option<String>, // Node ID and offset
 ) -> Result<(), Box<dyn Error>> {
+    println!("here0");
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Loading block group");
@@ -588,6 +589,11 @@ pub fn view_block_group(
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
+                println!("here01");
+                println!(
+                    "annotation file tracks count: {}",
+                    annotation_file_tracks.len()
+                );
                 annotation_file_tracks.retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_file_index_available
                     .retain(|id, _| explorer_state.is_annotation_file_active(id));
@@ -612,6 +618,7 @@ pub fn view_block_group(
                 if !explorer_state.is_annotation_file_active(&id) {
                     continue;
                 }
+
                 if !annotation_file_index_available
                     .get(&id)
                     .copied()
@@ -643,6 +650,11 @@ pub fn view_block_group(
                 };
                 match load_annotation_file_track(&request) {
                     Ok(load) => {
+                        println!("here02");
+                        println!(
+                            "annotation file tracks count: {}",
+                            annotation_file_tracks.len()
+                        );
                         annotation_file_tracks.insert(id, load.track);
                         if let Some(window) = load.loaded_window {
                             annotation_file_loaded_windows.insert(id, window);
@@ -655,6 +667,11 @@ pub fn view_block_group(
                         messages.push_warn(format!("{err}"));
                         explorer_state.deactivate_annotation_file(&id);
                         annotation_file_tracks.remove(&id);
+                        println!("here03");
+                        println!(
+                            "annotation file tracks count: {}",
+                            annotation_file_tracks.len()
+                        );
                         annotation_file_index_available.remove(&id);
                         annotation_file_loaded_windows.remove(&id);
                     }
@@ -1092,6 +1109,7 @@ pub fn view_block_group(
                         node_filter: &node_filter,
                         entry,
                     };
+                    println!("here05");
                     match load_annotation_file_track(&request) {
                         Ok(load) => {
                             annotation_file_tracks.insert(id, load.track);

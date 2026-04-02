@@ -14,6 +14,7 @@ use gen_models::{
     db::GraphConnection,
     file_types::FileTypes,
     operations::FileAddition,
+    reference_alias::ReferenceAlias,
 };
 use noodles::{bed, core::Region, gff, tabix};
 
@@ -145,6 +146,7 @@ fn parse_translated_gff<R: BufRead>(
     reader: R,
     node_filter: &HashSet<HashId>,
     track_label: &str,
+    reference_aliases: HashMap<String, String>,
 ) -> Vec<AnnotationSpan> {
     let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
     let mut reader = gff::io::Reader::new(reader);
@@ -153,10 +155,19 @@ fn parse_translated_gff<R: BufRead>(
             Ok(record) => record,
             Err(_) => continue,
         };
-        let ref_name = record.reference_sequence_name().to_string();
-        let node_id = match HashId::try_from(ref_name) {
+        let ref_name = record.reference_sequence_name();
+        let node_id = match HashId::try_from(ref_name.to_string()) {
             Ok(id) => id,
-            Err(_) => continue,
+            Err(_) => {
+                if let Some(ref_alias) = reference_aliases.get(&ref_name.to_string()) {
+                    match HashId::try_from(ref_alias.to_string()) {
+                        Ok(id) => id,
+                        Err(_) => continue,
+                    }
+                } else {
+                    continue;
+                }
+            }
         };
         if !node_filter.contains(&node_id) {
             continue;
@@ -418,6 +429,7 @@ pub fn load_annotation_file_track(
     }
     let spans = match request.entry.file_addition.file_type {
         FileTypes::Gff3 => {
+            let reference_aliases = ReferenceAlias::load_all(request.conn)?;
             if buffer.is_empty() {
                 let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
                 {
@@ -425,12 +437,18 @@ pub fn load_annotation_file_track(
                 } else {
                     Box::new(BufReader::new(File::open(&file_path)?))
                 };
-                parse_translated_gff(reader, request.node_filter, &request.entry.display_name)
+                parse_translated_gff(
+                    reader,
+                    request.node_filter,
+                    &request.entry.display_name,
+                    reference_aliases,
+                )
             } else {
                 parse_translated_gff(
                     Cursor::new(buffer),
                     request.node_filter,
                     &request.entry.display_name,
+                    reference_aliases,
                 )
             }
         }

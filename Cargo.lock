@@ -1431,6 +1431,7 @@ dependencies = [
 name = "gen-annotations"
 version = "0.1.30"
 dependencies = [
+ "anyhow",
  "gen-core",
  "gen-graph",
  "gen-models",

@@ -1,12 +1,15 @@
 use std::{
     cmp::{max, min},
     collections::HashMap,
-    io::{BufRead, Error, Read, Write},
+    io::{BufRead, Read, Write},
 };
 
+use anyhow::Result;
 use gen_core::{HashId, Strand, is_terminal};
 use gen_graph::{GraphNode, project_path};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
+use gen_models::{
+    block_group::BlockGroup, db::GraphConnection, reference_alias::ReferenceAlias, sample::Sample,
+};
 use interavl::IntervalTree;
 use noodles::{core::Position, gff};
 
@@ -16,7 +19,7 @@ pub fn translate_gff<R, W>(
     sample: &str,
     reader: R,
     writer: &mut W,
-) -> Result<(), Error>
+) -> Result<()>
 where
     R: Read + BufRead,
     W: Write,
@@ -30,6 +33,17 @@ where
             .map(|bg| (bg.name.clone(), bg))
             .collect::<Vec<(String, &BlockGroup)>>(),
     );
+
+    // Load all reference alias objects, and create a hashmap that maps from genbank accession id to refseq accession id
+    let reference_aliases = ReferenceAlias::load_all(conn)?;
+    let mut all_sample_bgs: HashMap<String, &BlockGroup> = HashMap::new();
+    for name in sample_bgs.keys() {
+        all_sample_bgs.insert(name.clone(), sample_bgs.get(name).unwrap());
+        if let Some(reference_alias) = reference_aliases.get(name) {
+            all_sample_bgs.insert(reference_alias.clone(), sample_bgs.get(name).unwrap());
+        }
+    }
+
     let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
 
     for result in gff_reader.record_bufs() {
@@ -37,7 +51,7 @@ where
         let ref_name = record.reference_sequence_name().to_string();
         let start = record.start().get() as i64;
         let end = record.end().get() as i64;
-        if let Some(bg) = sample_bgs.get(&ref_name) {
+        if let Some(bg) = all_sample_bgs.get(&ref_name) {
             let projection = paths.entry(bg.id).or_insert_with(|| {
                 let path = BlockGroup::get_current_path(conn, &bg.id);
                 let graph = BlockGroup::get_graph(conn, &bg.id);
