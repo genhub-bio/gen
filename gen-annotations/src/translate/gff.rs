@@ -34,7 +34,8 @@ where
             .collect::<Vec<(String, &BlockGroup)>>(),
     );
 
-    // Load all reference alias objects, and create a hashmap that maps from genbank accession id to refseq accession id
+    // Load all reference alias objects, and create an expanded hashmap from name to block group that includes other
+    // common reference names
     let reference_aliases = ReferenceAlias::load_all(conn)?;
     let mut all_sample_bgs: HashMap<String, &BlockGroup> = HashMap::new();
     for name in sample_bgs.keys() {
