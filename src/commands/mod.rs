@@ -361,6 +361,29 @@ pub enum Commands {
         #[arg(long)]
         new_region: String,
     },
+    AddReferenceAliases {
+        /// The name of the reference to set up aliases for
+        #[arg(long)]
+        reference_name: String,
+        /// The refseq accession ID
+        #[arg(long)]
+        refseq_accession_id: String,
+        /// The genbank ID
+        #[arg(long)]
+        genbank_id: String,
+        /// The ensembl ID
+        #[arg(long)]
+        ensembl_id: String,
+        /// The UCSC ID
+        #[arg(long)]
+        ucsc_id: String,
+        /// A custom ID, can be anything
+        #[arg(long)]
+        custom_id: Option<String>,
+        /// The chromosome number (for cases like Roman numberals, eg 11 if the ensembl ID is XI)
+        #[arg(long)]
+        chromosome: Option<i64>,
+    },
 }
 
 #[derive(Parser)]
