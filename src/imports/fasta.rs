@@ -68,6 +68,8 @@ pub fn import_fasta(
             .unwrap()
             .to_string();
         let name = String::from_utf8(record.name().to_vec()).unwrap();
+        println!("here1");
+        println!("name: {}", name);
         let sequence_length = record.sequence().len() as i64;
         let seq = if shallow {
             Sequence::new()

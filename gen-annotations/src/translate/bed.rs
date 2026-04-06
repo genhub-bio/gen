@@ -39,25 +39,22 @@ where
             .collect::<Vec<(String, &BlockGroup)>>(),
     );
 
-    // Load all reference alias objects, and create an expanded hashmap from name to block group that includes other
-    // common reference names
-    let reference_aliases = ReferenceAlias::load_all(conn)?;
-    let mut all_sample_bgs: HashMap<String, &BlockGroup> = HashMap::new();
-    for name in sample_bgs.keys() {
-        all_sample_bgs.insert(name.clone(), sample_bgs.get(name).unwrap());
-        if let Some(reference_alias) = reference_aliases.get(name) {
-            all_sample_bgs.insert(reference_alias.clone(), sample_bgs.get(name).unwrap());
-        }
-    }
+    // Load all reference aliases, to accommodate alternate reference names in the GFF file
+    let references = sample_bgs.keys().cloned().collect::<Vec<String>>();
+    let references_by_alias = ReferenceAlias::get_references_by_alias(conn, references)?;
 
     let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
 
     while bed_reader.read_record(&mut record)? != 0 {
         let ref_name = record.reference_sequence_name().to_string();
+        let ref_name = references_by_alias
+            .get(&ref_name)
+            .unwrap_or(&ref_name)
+            .to_string();
         // noodles converts to 1 index, keep it 0.
         let start = record.feature_start().unwrap().get() as i64 - 1;
         let end = record.feature_end().unwrap().unwrap().get() as i64;
-        if let Some(bg) = all_sample_bgs.get(&ref_name) {
+        if let Some(bg) = sample_bgs.get(&ref_name) {
             let projection = paths.entry(bg.id).or_insert_with(|| {
                 let path = BlockGroup::get_current_path(conn, &bg.id);
                 let graph = BlockGroup::get_graph(conn, &bg.id);
