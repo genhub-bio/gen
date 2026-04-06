@@ -183,8 +183,17 @@ mod tests {
         setup_test_data(&conn);
 
         // Add a reference alias for the block group used in the fixture gff
-        ReferenceAlias::create(&conn, "alternate contig", "m456", "m123")
-            .expect("should create reference alias");
+        ReferenceAlias::create(
+            &conn,
+            "alternate contig",
+            "m456",
+            "m123",
+            "m789",
+            "chr1",
+            None,
+            None,
+        )
+        .expect("should create reference alias");
 
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("./fixtures/complex-with-reference-alias.gff3");

@@ -160,8 +160,17 @@ mod tests {
         let collection = "test".to_string();
 
         // Add a reference alias for the block group used in the fixture bed
-        ReferenceAlias::create(&conn, "alternate contig", "m456", "m123")
-            .expect("should create reference alias");
+        ReferenceAlias::create(
+            &conn,
+            "alternate contig",
+            "m456",
+            "m123",
+            "m789",
+            "chr1",
+            None,
+            None,
+        )
+        .expect("should create reference alias");
 
         let mut buffer = Vec::new();
         translate_bed(
