@@ -13,6 +13,7 @@ use gen_models::{
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
+    reference_alias::ReferenceAlias,
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
@@ -250,6 +251,14 @@ pub fn update_with_vcf(
 
     let mut path_lengths: HashMap<HashId, i64> = HashMap::new();
 
+    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample.unwrap());
+    let block_group_names = block_groups
+        .iter()
+        .map(|bg| bg.name.clone())
+        .collect::<Vec<String>>();
+    let references_by_alias =
+        ReferenceAlias::get_references_by_alias(conn, block_group_names).unwrap();
+
     let _ = progress_bar.println("Parsing VCF for changes.");
 
     let bar = progress_bar.add(get_progress_bar(None));
@@ -258,6 +267,10 @@ pub fn update_with_vcf(
     for result in reader.records() {
         let record = result.unwrap();
         let seq_name: String = record.reference_sequence_name().to_string();
+        let seq_name = references_by_alias
+            .get(&seq_name)
+            .unwrap_or(&seq_name)
+            .to_string();
         let ref_seq = record.reference_bases();
         // this converts the coordinates to be zero based, start inclusive, end exclusive
         let ref_end = record.variant_end(&header).unwrap().get() as i64;
