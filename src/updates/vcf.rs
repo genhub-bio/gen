@@ -8,7 +8,7 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
     db::{DbContext, GraphConnection},
-    errors::{OperationError, QueryError},
+    errors::{OperationError, QueryError, SampleError},
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -69,12 +69,12 @@ impl<'a> BlockGroupCache<'_> {
         if let Some(block_group_id) = block_group_lookup {
             Ok(*block_group_id)
         } else {
-            let result = BlockGroup::get_or_create_sample_block_group_from_parents(
+            let result = BlockGroup::get_or_create_sample_block_group(
                 block_group_cache.conn,
                 collection_name,
                 sample_name,
                 &name,
-                parent_samples,
+                parent_samples.to_vec(),
             )?;
             block_group_cache.cache.insert(block_group_key, result);
             Ok(result)
@@ -182,6 +182,8 @@ struct VcfEntry {
 pub enum VcfError {
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
+    #[error("Sample Error: {0}")]
+    SampleError(#[from] SampleError),
     #[error("Invalid Record: {0}")]
     InvalidRecord(String),
 }
@@ -263,11 +265,11 @@ pub fn update_with_vcf<'a>(
             let parent_samples = resolved_parent_samples
                 .entry(fixed_sample.to_string())
                 .or_insert_with(|| {
-                    Sample::resolve_parent_names(
-                        conn,
-                        fixed_sample,
-                        explicit_parent_samples.clone(),
-                    )
+                    if explicit_parent_samples.is_empty() {
+                        Sample::get_parent_names(conn, fixed_sample)
+                    } else {
+                        explicit_parent_samples.clone()
+                    }
                 })
                 .clone();
             if !created_samples.contains(fixed_sample) {
@@ -276,7 +278,7 @@ pub fn update_with_vcf<'a>(
                     collection_name,
                     fixed_sample,
                     parent_samples.clone(),
-                );
+                )?;
                 created_samples.insert(fixed_sample);
             }
             let sample_bg_id = BlockGroupCache::lookup(
@@ -370,11 +372,11 @@ pub fn update_with_vcf<'a>(
                 let parent_samples = resolved_parent_samples
                     .entry(sample_name.to_string())
                     .or_insert_with(|| {
-                        Sample::resolve_parent_names(
-                            conn,
-                            sample_name,
-                            explicit_parent_samples.clone(),
-                        )
+                        if explicit_parent_samples.is_empty() {
+                            Sample::get_parent_names(conn, sample_name)
+                        } else {
+                            explicit_parent_samples.clone()
+                        }
                     })
                     .clone();
                 if !created_samples.contains(sample_name) {
@@ -383,7 +385,7 @@ pub fn update_with_vcf<'a>(
                         collection_name,
                         sample_name,
                         parent_samples.clone(),
-                    );
+                    )?;
                     created_samples.insert(sample_name);
                 }
                 let sample_bg_id = BlockGroupCache::lookup(
@@ -1383,8 +1385,10 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create_child(conn, &collection, "parent-a", vec!["reference".to_string()]);
-        Sample::get_or_create_child(conn, &collection, "parent-b", vec!["reference".to_string()]);
+        Sample::get_or_create_child(conn, &collection, "parent-a", vec!["reference".to_string()])
+            .unwrap();
+        Sample::get_or_create_child(conn, &collection, "parent-b", vec!["reference".to_string()])
+            .unwrap();
         Sample::get_or_create(conn, "child");
         SampleLineage::create(conn, "parent-a", "child").unwrap();
         SampleLineage::create(conn, "parent-b", "child").unwrap();

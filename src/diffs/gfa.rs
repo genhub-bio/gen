@@ -332,7 +332,8 @@ mod tests {
             collection_name,
             "child",
             vec![Sample::DEFAULT_NAME.to_string()],
-        );
+        )
+        .unwrap();
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -412,7 +413,8 @@ mod tests {
             collection_name,
             "grandchild",
             vec!["child".to_string()],
-        );
+        )
+        .unwrap();
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")
@@ -1071,7 +1073,8 @@ mod tests {
             collection_name,
             "child",
             vec![Sample::DEFAULT_NAME.to_string()],
-        );
+        )
+        .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -1151,7 +1154,8 @@ mod tests {
             collection_name,
             "grandchild",
             vec!["child".to_string()],
-        );
+        )
+        .unwrap();
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")

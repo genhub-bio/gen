@@ -14,7 +14,7 @@ use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
     edge::{Edge, EdgeData},
-    errors::OperationError,
+    errors::{OperationError, SampleError},
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo},
@@ -48,6 +48,8 @@ pub enum GafUpdateError {
     Io(#[from] std::io::Error),
     #[error("Operation error: {0}")]
     Operation(#[from] OperationError),
+    #[error("Sample error: {0}")]
+    Sample(#[from] SampleError),
     #[error("Failed to parse expected number in GAF file: {0}")]
     ParseInt(#[from] ParseIntError),
     #[error("Line did not match expected GAF format: {0}")]
@@ -106,7 +108,7 @@ where
         .map(|parent_sample| vec![parent_sample.to_string()])
         .unwrap_or_default();
     let sample_name =
-        Sample::get_or_create_child(conn, collection_name, sample_name, parent_samples).name;
+        Sample::get_or_create_child(conn, collection_name, sample_name, parent_samples)?.name;
 
     let mut node_lengths: HashMap<String, (HashId, i64)> = HashMap::new();
 

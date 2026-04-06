@@ -103,11 +103,10 @@ impl SampleLineage {
         let mut stmt = conn.prepare(query).unwrap();
         stmt.execute(params![parent_sample_name, child_sample_name])?;
 
-        SampleLineage::get(
-            conn,
-            "SELECT * FROM sample_lineage WHERE parent_sample_name = ?1 AND child_sample_name = ?2;",
-            params![parent_sample_name, child_sample_name],
-        )
+        Ok(SampleLineage {
+            parent_sample_name: parent_sample_name.to_string(),
+            child_sample_name: child_sample_name.to_string(),
+        })
     }
 
     pub fn delete(

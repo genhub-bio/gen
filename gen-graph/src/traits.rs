@@ -26,6 +26,8 @@ impl MergeGraph for GenGraph {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use gen_core::{HashId, Strand};
 
     use super::*;
@@ -74,10 +76,16 @@ mod tests {
 
         graph_a.merge_graph(&graph_b);
 
-        assert_eq!(graph_a.edge_weight(start, middle).unwrap().len(), 2);
-        let graph_a_edges = graph_a.edge_weight(start, middle).unwrap();
-        assert!(graph_a_edges.contains(&chrom_index0_edge));
-        assert!(graph_a_edges.contains(&chrom_index1_edge));
+        let graph_a_edges = graph_a
+            .edge_weight(start, middle)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            graph_a_edges,
+            HashSet::from([chrom_index0_edge, chrom_index1_edge])
+        );
         assert_eq!(
             graph_a.edge_weight(middle, end).unwrap(),
             &vec![chrom_index0_edge]
@@ -165,9 +173,14 @@ mod tests {
 
         graph_a.merge_graph(&graph_b);
 
-        assert_eq!(graph_a.nodes().count(), 2);
-        assert!(graph_a.nodes().any(|node| node == source_a));
-        assert!(graph_a.nodes().any(|node| node == target_a));
-        assert_eq!(graph_a.edge_weight(source_a, target_a).unwrap().len(), 2);
+        let nodes = graph_a.nodes().collect::<Vec<_>>();
+        let edges = graph_a
+            .edge_weight(source_a, target_a)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert_eq!(nodes, vec![source_a, target_a]);
+        assert_eq!(edges, HashSet::from([edge_a, edge_b]));
     }
 }

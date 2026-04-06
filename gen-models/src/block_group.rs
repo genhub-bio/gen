@@ -203,26 +203,6 @@ impl BlockGroup {
         }
     }
 
-    pub fn duplicate(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &self.id);
-        let edge_ids = augmented_edges
-            .iter()
-            .map(|edge| edge.edge.id)
-            .collect::<Vec<_>>();
-        let new_block_group_edges = edge_ids
-            .iter()
-            .enumerate()
-            .map(|(i, edge_id)| BlockGroupEdgeData {
-                block_group_id: *target_block_group_id,
-                edge_id: *edge_id,
-                chromosome_index: augmented_edges[i].chromosome_index,
-                phased: augmented_edges[i].phased,
-            })
-            .collect::<Vec<_>>();
-        BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-        self.copy_paths_and_accessions_into(conn, target_block_group_id);
-    }
-
     fn copy_paths_and_accessions_into(
         &self,
         conn: &GraphConnection,
@@ -281,22 +261,6 @@ impl BlockGroup {
         group_name: &str,
         parent_samples: Vec<String>,
     ) -> Result<HashId, QueryError> {
-        BlockGroup::get_or_create_sample_block_group_from_parents(
-            conn,
-            collection_name,
-            sample_name,
-            group_name,
-            &parent_samples,
-        )
-    }
-
-    pub fn get_or_create_sample_block_group_from_parents(
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-        group_name: &str,
-        parent_samples: &[String],
-    ) -> Result<HashId, QueryError> {
         let binding = BlockGroup::query(
             conn,
             "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
@@ -308,17 +272,21 @@ impl BlockGroup {
             return Ok(block_group.id);
         }
 
-        let parent_block_groups =
-            BlockGroup::find_parent_block_groups(conn, collection_name, group_name, parent_samples);
+        let parent_block_groups = BlockGroup::find_parent_block_groups(
+            conn,
+            collection_name,
+            group_name,
+            &parent_samples,
+        );
 
         if let Some(parent_block_group) = parent_block_groups.first() {
             let new_block_group =
                 BlockGroup::create(conn, collection_name, sample_name, group_name);
+            let mut merged_graph = GenGraph::new();
 
-            // clone parent blocks/edges/path
-            parent_block_group.duplicate(conn, &new_block_group.id);
+            new_block_group.merge_from(conn, parent_block_group, &mut merged_graph);
             for parent_block_group in parent_block_groups.iter().skip(1) {
-                parent_block_group.merge_into(conn, &new_block_group.id);
+                new_block_group.merge_from(conn, parent_block_group, &mut merged_graph);
             }
 
             Ok(new_block_group.id)
@@ -362,24 +330,27 @@ impl BlockGroup {
         )
     }
 
-    fn merge_into(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
-        let mut merged_graph = BlockGroup::get_graph(conn, target_block_group_id);
-        let parent_graph = BlockGroup::get_graph(conn, &self.id);
-        merged_graph.merge_graph(&parent_graph);
+    fn merge_from(
+        &self,
+        conn: &GraphConnection,
+        source_block_group: &BlockGroup,
+        merged_graph: &mut GenGraph,
+    ) {
+        let source_graph = BlockGroup::get_graph(conn, &source_block_group.id);
+        merged_graph.merge_graph(&source_graph);
 
-        let new_block_group_edges = merged_graph
-            .all_edges()
-            .flat_map(|(_source, _target, edges)| {
-                edges.iter().map(|edge| BlockGroupEdgeData {
-                    block_group_id: *target_block_group_id,
-                    edge_id: edge.edge_id,
+        let new_block_group_edges =
+            BlockGroupEdge::edges_for_block_group(conn, &source_block_group.id)
+                .into_iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: self.id,
+                    edge_id: edge.edge.id,
                     chromosome_index: edge.chromosome_index,
                     phased: edge.phased,
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>();
         BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-        self.copy_paths_and_accessions_into(conn, target_block_group_id);
+        source_block_group.copy_paths_and_accessions_into(conn, &self.id);
     }
 
     pub fn get_id(collection_name: &str, sample_name: &str, group_name: &str) -> HashId {
@@ -1382,12 +1353,12 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
-        let merged_bg_id = BlockGroup::get_or_create_sample_block_group_from_parents(
+        let merged_bg_id = BlockGroup::get_or_create_sample_block_group(
             conn,
             "test",
             "child",
             "chr1",
-            &["parent_a".to_string(), "parent_b".to_string()],
+            vec!["parent_a".to_string(), "parent_b".to_string()],
         )
         .unwrap();
 
@@ -1553,12 +1524,12 @@ mod tests {
             &mut path_cache,
         );
 
-        let merged_bg_id = BlockGroup::get_or_create_sample_block_group_from_parents(
+        let merged_bg_id = BlockGroup::get_or_create_sample_block_group(
             conn,
             "test",
             "child",
             "chr1",
-            &["parent_a".to_string(), "parent_b".to_string()],
+            vec!["parent_a".to_string(), "parent_b".to_string()],
         )
         .unwrap();
 
