@@ -144,14 +144,14 @@ pub fn update_with_gaf(
     Ok("Updated with GAF.".to_string())
 }
 
-#[pyfunction]
+#[pyfunction(signature = (context, filename, name = None, genotype = None, sample = None, parent_samples = Vec::<String>::new(), in_place = false))]
 pub fn update_with_vcf(
     context: PyRef<'_, PyDbContext>,
     filename: String,
     name: Option<String>,
     genotype: Option<String>,
     sample: Option<String>,
-    parent_sample: Option<String>,
+    parent_samples: Vec<String>,
     in_place: bool,
 ) -> PyResult<String> {
     println!("Update with VCF called");
@@ -175,7 +175,7 @@ pub fn update_with_vcf(
         &name,
         genotype.unwrap_or_default(),
         sample.as_deref(),
-        parent_sample.as_deref(),
+        parent_samples,
         in_place,
     ) {
         Ok(_) => {

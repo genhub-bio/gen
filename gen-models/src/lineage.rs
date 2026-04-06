@@ -28,267 +28,6 @@ fn decode_hex_bytes(token: &str) -> Vec<u8> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use rusqlite::{Connection, Row, params};
-
-    use super::*;
-
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct NumericLineage {
-        parent_id: i64,
-        child_id: i64,
-    }
-
-    impl Query for NumericLineage {
-        type Model = NumericLineage;
-
-        const PRIMARY_KEY: &'static str = "parent_id";
-        const TABLE_NAME: &'static str = "numeric_lineage";
-
-        fn process_row(row: &Row) -> Self::Model {
-            NumericLineage {
-                parent_id: row.get(0).unwrap(),
-                child_id: row.get(1).unwrap(),
-            }
-        }
-    }
-
-    impl SqlLineage for NumericLineage {
-        type Id = i64;
-
-        const CHILD_COLUMN: &'static str = "child_id";
-        const CHILD_ID_COLUMN: &'static str = "id";
-        const CHILD_TABLE_NAME: &'static str = "numeric_nodes";
-        const PARENT_COLUMN: &'static str = "parent_id";
-        const PARENT_ID_COLUMN: &'static str = "id";
-        const PARENT_TABLE_NAME: &'static str = "numeric_nodes";
-
-        fn parent_id(&self) -> &Self::Id {
-            &self.parent_id
-        }
-
-        fn child_id(&self) -> &Self::Id {
-            &self.child_id
-        }
-    }
-
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct HashLineage {
-        parent_id: HashId,
-        child_id: HashId,
-    }
-
-    impl Query for HashLineage {
-        type Model = HashLineage;
-
-        const PRIMARY_KEY: &'static str = "parent_id";
-        const TABLE_NAME: &'static str = "hash_lineage";
-
-        fn process_row(row: &Row) -> Self::Model {
-            HashLineage {
-                parent_id: row.get(0).unwrap(),
-                child_id: row.get(1).unwrap(),
-            }
-        }
-    }
-
-    impl SqlLineage for HashLineage {
-        type Id = HashId;
-
-        const CHILD_COLUMN: &'static str = "child_id";
-        const CHILD_ID_COLUMN: &'static str = "id";
-        const CHILD_TABLE_NAME: &'static str = "hash_nodes";
-        const PARENT_COLUMN: &'static str = "parent_id";
-        const PARENT_ID_COLUMN: &'static str = "id";
-        const PARENT_TABLE_NAME: &'static str = "hash_nodes";
-
-        fn parent_id(&self) -> &Self::Id {
-            &self.parent_id
-        }
-
-        fn child_id(&self) -> &Self::Id {
-            &self.child_id
-        }
-    }
-
-    fn setup_numeric_lineage_connection() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE numeric_nodes (id INTEGER PRIMARY KEY);
-            CREATE TABLE numeric_lineage (
-                parent_id INTEGER NOT NULL,
-                child_id INTEGER NOT NULL
-            );
-            ",
-        )
-        .unwrap();
-
-        for id in [1_i64, 2, 3, 4, 5, 6] {
-            conn.execute("INSERT INTO numeric_nodes (id) VALUES (?1);", params![id])
-                .unwrap();
-        }
-
-        for (parent_id, child_id) in [(1_i64, 2_i64), (2, 3), (3, 4), (2, 5)] {
-            conn.execute(
-                "INSERT INTO numeric_lineage (parent_id, child_id) VALUES (?1, ?2);",
-                params![parent_id, child_id],
-            )
-            .unwrap();
-        }
-
-        conn
-    }
-
-    fn setup_hash_lineage_connection() -> (Connection, HashId, HashId, HashId, HashId) {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE hash_nodes (id BLOB PRIMARY KEY);
-            CREATE TABLE hash_lineage (
-                parent_id BLOB NOT NULL,
-                child_id BLOB NOT NULL
-            );
-            ",
-        )
-        .unwrap();
-
-        let root = HashId::convert_str("lineage-root");
-        let middle = HashId::convert_str("lineage-middle");
-        let leaf = HashId::convert_str("lineage-leaf");
-        let other = HashId::convert_str("lineage-other");
-
-        for id in [root, middle, leaf, other] {
-            conn.execute("INSERT INTO hash_nodes (id) VALUES (?1);", params![id])
-                .unwrap();
-        }
-
-        for (parent_id, child_id) in [(root, middle), (middle, leaf)] {
-            conn.execute(
-                "INSERT INTO hash_lineage (parent_id, child_id) VALUES (?1, ?2);",
-                params![parent_id, child_id],
-            )
-            .unwrap();
-        }
-
-        (conn, root, middle, leaf, other)
-    }
-
-    #[test]
-    fn test_sql_lineage_queries_with_numeric_ids() {
-        let conn = setup_numeric_lineage_connection();
-
-        assert_eq!(
-            NumericLineage::get_ancestors(&conn, &4, None),
-            vec![3, 2, 1]
-        );
-        assert_eq!(
-            NumericLineage::get_ancestors(&conn, &4, Some(2)),
-            vec![3, 2]
-        );
-        assert_eq!(
-            NumericLineage::get_descendants(&conn, &1, None),
-            vec![2, 3, 5, 4]
-        );
-        assert_eq!(
-            NumericLineage::get_descendants(&conn, &1, Some(2)),
-            vec![2, 3, 5]
-        );
-        assert_eq!(
-            NumericLineage::get_path_between(&conn, &1, &4),
-            vec![1, 2, 3, 4]
-        );
-        assert_eq!(
-            NumericLineage::get_path_edges_between(&conn, &1, &4),
-            vec![
-                NumericLineage {
-                    parent_id: 1,
-                    child_id: 2,
-                },
-                NumericLineage {
-                    parent_id: 2,
-                    child_id: 3,
-                },
-                NumericLineage {
-                    parent_id: 3,
-                    child_id: 4,
-                },
-            ]
-        );
-
-        let mut graph = NumericLineage::get_graph(&conn);
-        graph.sort_by(|left, right| {
-            left.parent_id
-                .cmp(&right.parent_id)
-                .then(left.child_id.cmp(&right.child_id))
-        });
-        assert_eq!(
-            graph,
-            vec![
-                NumericLineage {
-                    parent_id: 1,
-                    child_id: 2,
-                },
-                NumericLineage {
-                    parent_id: 2,
-                    child_id: 3,
-                },
-                NumericLineage {
-                    parent_id: 2,
-                    child_id: 5,
-                },
-                NumericLineage {
-                    parent_id: 3,
-                    child_id: 4,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn test_sql_lineage_path_between_handles_same_and_disconnected_numeric_ids() {
-        let conn = setup_numeric_lineage_connection();
-
-        assert_eq!(NumericLineage::get_path_between(&conn, &3, &3), vec![3]);
-        assert_eq!(
-            NumericLineage::get_path_between(&conn, &1, &6),
-            Vec::<i64>::new()
-        );
-        assert_eq!(
-            NumericLineage::get_path_edges_between(&conn, &1, &6),
-            Vec::<NumericLineage>::new()
-        );
-    }
-
-    #[test]
-    fn test_sql_lineage_hash_id_paths_decode_hex_tokens() {
-        let (conn, root, middle, leaf, other) = setup_hash_lineage_connection();
-
-        assert_eq!(
-            HashLineage::get_path_between(&conn, &root, &leaf),
-            vec![root, middle, leaf]
-        );
-        assert_eq!(
-            HashLineage::get_path_edges_between(&conn, &root, &leaf),
-            vec![
-                HashLineage {
-                    parent_id: root,
-                    child_id: middle,
-                },
-                HashLineage {
-                    parent_id: middle,
-                    child_id: leaf,
-                },
-            ]
-        );
-        assert_eq!(
-            HashLineage::get_path_between(&conn, &root, &other),
-            Vec::<HashId>::new()
-        );
-    }
-}
-
 impl LineageId for String {
     fn decode_hex_token(token: &str) -> Self {
         String::from_utf8(decode_hex_bytes(token)).expect("lineage token should decode to utf-8")
@@ -554,5 +293,266 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
             }
         }
         edges
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, Row, params};
+
+    use super::*;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct NumericLineage {
+        parent_id: i64,
+        child_id: i64,
+    }
+
+    impl Query for NumericLineage {
+        type Model = NumericLineage;
+
+        const PRIMARY_KEY: &'static str = "parent_id";
+        const TABLE_NAME: &'static str = "numeric_lineage";
+
+        fn process_row(row: &Row) -> Self::Model {
+            NumericLineage {
+                parent_id: row.get(0).unwrap(),
+                child_id: row.get(1).unwrap(),
+            }
+        }
+    }
+
+    impl SqlLineage for NumericLineage {
+        type Id = i64;
+
+        const CHILD_COLUMN: &'static str = "child_id";
+        const CHILD_ID_COLUMN: &'static str = "id";
+        const CHILD_TABLE_NAME: &'static str = "numeric_nodes";
+        const PARENT_COLUMN: &'static str = "parent_id";
+        const PARENT_ID_COLUMN: &'static str = "id";
+        const PARENT_TABLE_NAME: &'static str = "numeric_nodes";
+
+        fn parent_id(&self) -> &Self::Id {
+            &self.parent_id
+        }
+
+        fn child_id(&self) -> &Self::Id {
+            &self.child_id
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct HashLineage {
+        parent_id: HashId,
+        child_id: HashId,
+    }
+
+    impl Query for HashLineage {
+        type Model = HashLineage;
+
+        const PRIMARY_KEY: &'static str = "parent_id";
+        const TABLE_NAME: &'static str = "hash_lineage";
+
+        fn process_row(row: &Row) -> Self::Model {
+            HashLineage {
+                parent_id: row.get(0).unwrap(),
+                child_id: row.get(1).unwrap(),
+            }
+        }
+    }
+
+    impl SqlLineage for HashLineage {
+        type Id = HashId;
+
+        const CHILD_COLUMN: &'static str = "child_id";
+        const CHILD_ID_COLUMN: &'static str = "id";
+        const CHILD_TABLE_NAME: &'static str = "hash_nodes";
+        const PARENT_COLUMN: &'static str = "parent_id";
+        const PARENT_ID_COLUMN: &'static str = "id";
+        const PARENT_TABLE_NAME: &'static str = "hash_nodes";
+
+        fn parent_id(&self) -> &Self::Id {
+            &self.parent_id
+        }
+
+        fn child_id(&self) -> &Self::Id {
+            &self.child_id
+        }
+    }
+
+    fn setup_numeric_lineage_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE numeric_nodes (id INTEGER PRIMARY KEY);
+            CREATE TABLE numeric_lineage (
+                parent_id INTEGER NOT NULL,
+                child_id INTEGER NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+
+        for id in [1_i64, 2, 3, 4, 5, 6] {
+            conn.execute("INSERT INTO numeric_nodes (id) VALUES (?1);", params![id])
+                .unwrap();
+        }
+
+        for (parent_id, child_id) in [(1_i64, 2_i64), (2, 3), (3, 4), (2, 5)] {
+            conn.execute(
+                "INSERT INTO numeric_lineage (parent_id, child_id) VALUES (?1, ?2);",
+                params![parent_id, child_id],
+            )
+            .unwrap();
+        }
+
+        conn
+    }
+
+    fn setup_hash_lineage_connection() -> (Connection, HashId, HashId, HashId, HashId) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE hash_nodes (id BLOB PRIMARY KEY);
+            CREATE TABLE hash_lineage (
+                parent_id BLOB NOT NULL,
+                child_id BLOB NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+
+        let root = HashId::convert_str("lineage-root");
+        let middle = HashId::convert_str("lineage-middle");
+        let leaf = HashId::convert_str("lineage-leaf");
+        let other = HashId::convert_str("lineage-other");
+
+        for id in [root, middle, leaf, other] {
+            conn.execute("INSERT INTO hash_nodes (id) VALUES (?1);", params![id])
+                .unwrap();
+        }
+
+        for (parent_id, child_id) in [(root, middle), (middle, leaf)] {
+            conn.execute(
+                "INSERT INTO hash_lineage (parent_id, child_id) VALUES (?1, ?2);",
+                params![parent_id, child_id],
+            )
+            .unwrap();
+        }
+
+        (conn, root, middle, leaf, other)
+    }
+
+    #[test]
+    fn test_sql_lineage_queries_with_numeric_ids() {
+        let conn = setup_numeric_lineage_connection();
+
+        assert_eq!(
+            NumericLineage::get_ancestors(&conn, &4, None),
+            vec![3, 2, 1]
+        );
+        assert_eq!(
+            NumericLineage::get_ancestors(&conn, &4, Some(2)),
+            vec![3, 2]
+        );
+        assert_eq!(
+            NumericLineage::get_descendants(&conn, &1, None),
+            vec![2, 3, 5, 4]
+        );
+        assert_eq!(
+            NumericLineage::get_descendants(&conn, &1, Some(2)),
+            vec![2, 3, 5]
+        );
+        assert_eq!(
+            NumericLineage::get_path_between(&conn, &1, &4),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            NumericLineage::get_path_edges_between(&conn, &1, &4),
+            vec![
+                NumericLineage {
+                    parent_id: 1,
+                    child_id: 2,
+                },
+                NumericLineage {
+                    parent_id: 2,
+                    child_id: 3,
+                },
+                NumericLineage {
+                    parent_id: 3,
+                    child_id: 4,
+                },
+            ]
+        );
+
+        let mut graph = NumericLineage::get_graph(&conn);
+        graph.sort_by(|left, right| {
+            left.parent_id
+                .cmp(&right.parent_id)
+                .then(left.child_id.cmp(&right.child_id))
+        });
+        assert_eq!(
+            graph,
+            vec![
+                NumericLineage {
+                    parent_id: 1,
+                    child_id: 2,
+                },
+                NumericLineage {
+                    parent_id: 2,
+                    child_id: 3,
+                },
+                NumericLineage {
+                    parent_id: 2,
+                    child_id: 5,
+                },
+                NumericLineage {
+                    parent_id: 3,
+                    child_id: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_sql_lineage_path_between_handles_same_and_disconnected_numeric_ids() {
+        let conn = setup_numeric_lineage_connection();
+
+        assert_eq!(NumericLineage::get_path_between(&conn, &3, &3), vec![3]);
+        assert_eq!(
+            NumericLineage::get_path_between(&conn, &1, &6),
+            Vec::<i64>::new()
+        );
+        assert_eq!(
+            NumericLineage::get_path_edges_between(&conn, &1, &6),
+            Vec::<NumericLineage>::new()
+        );
+    }
+
+    #[test]
+    fn test_sql_lineage_hash_id_paths_decode_hex_tokens() {
+        let (conn, root, middle, leaf, other) = setup_hash_lineage_connection();
+
+        assert_eq!(
+            HashLineage::get_path_between(&conn, &root, &leaf),
+            vec![root, middle, leaf]
+        );
+        assert_eq!(
+            HashLineage::get_path_edges_between(&conn, &root, &leaf),
+            vec![
+                HashLineage {
+                    parent_id: root,
+                    child_id: middle,
+                },
+                HashLineage {
+                    parent_id: middle,
+                    child_id: leaf,
+                },
+            ]
+        );
+        assert_eq!(
+            HashLineage::get_path_between(&conn, &root, &other),
+            Vec::<HashId>::new()
+        );
     }
 }

@@ -135,10 +135,15 @@ impl<'a> PathCache<'a> {
     }
 
     pub fn get_intervaltree<'b>(
-        path_cache: &'b PathCache<'_>,
+        path_cache: &'b mut PathCache<'_>,
         path: &Path,
-    ) -> Option<&'b IntervalTree<i64, NodeIntervalBlock>> {
-        path_cache.intervaltree_cache.get(path)
+    ) -> &'b IntervalTree<i64, NodeIntervalBlock> {
+        if !path_cache.intervaltree_cache.contains_key(path) {
+            let tree = path.intervaltree(path_cache.conn);
+            path_cache.intervaltree_cache.insert(path.clone(), tree);
+        }
+
+        path_cache.intervaltree_cache.get(path).unwrap()
     }
 }
 
@@ -492,7 +497,7 @@ impl BlockGroup {
         end: i64,
         cache: &mut PathCache,
     ) -> Accession {
-        let tree = PathCache::get_intervaltree(cache, path).unwrap();
+        let tree = PathCache::get_intervaltree(cache, path);
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
@@ -578,7 +583,7 @@ impl BlockGroup {
                     BlockGroup::intervaltree_for(conn, &change.block_group_id, true)
                 })
             } else {
-                PathCache::get_intervaltree(cache, &change.path).unwrap()
+                PathCache::get_intervaltree(cache, &change.path)
             };
             let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
             new_augmented_edges_by_block_group
@@ -1362,6 +1367,27 @@ mod tests {
         )
         .unwrap();
 
+        let merged_block_group_edges = BlockGroupEdge::query(
+            conn,
+            "select * from block_group_edges where block_group_id = ?1",
+            params![merged_bg_id],
+        );
+        assert_eq!(
+            merged_block_group_edges.len(),
+            parent_a_edges.len() + parent_b_edges.len()
+        );
+        assert_eq!(
+            merged_block_group_edges
+                .iter()
+                .map(|edge| edge.edge_id)
+                .collect::<HashSet<_>>(),
+            parent_a_edges
+                .iter()
+                .chain(parent_b_edges.iter())
+                .map(|edge| edge.id)
+                .collect::<HashSet<_>>()
+        );
+
         let merged_graph = BlockGroup::get_graph(conn, &merged_bg_id);
         let merged_node_ids = merged_graph
             .nodes()
@@ -1489,13 +1515,6 @@ mod tests {
         );
 
         let mut path_cache = PathCache::new(conn);
-        let _ = PathCache::lookup(&mut path_cache, &parent_a_bg.id, parent_a_path.name.clone());
-        let _ = PathCache::lookup(&mut path_cache, &parent_b_bg.id, parent_b_path.name.clone());
-        let _ = PathCache::lookup(
-            &mut path_cache,
-            &parent_b_bg.id,
-            parent_b_alt_path.name.clone(),
-        );
         let parent_a_path_len = parent_a_path.length(conn);
         let parent_b_path_len = parent_b_path.length(conn);
         let parent_b_alt_path_len = parent_b_alt_path.length(conn);
@@ -1563,9 +1582,8 @@ mod tests {
     #[test]
     fn test_blockgroup_clone_passes_accessions() {
         let conn = &get_connection(None).unwrap();
-        let (bg_1, path) = setup_block_group(conn);
+        let (_bg_1, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);
-        PathCache::lookup(&mut path_cache, &bg_1, path.name.clone());
         let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache);
         assert_eq!(
             Accession::query(

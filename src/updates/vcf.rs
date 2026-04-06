@@ -188,22 +188,17 @@ pub enum VcfError {
     InvalidRecord(String),
 }
 
-pub fn update_with_vcf<'a>(
+pub fn update_with_vcf(
     context: &DbContext,
     vcf_path: &String,
-    collection_name: &'a str,
+    collection_name: &str,
     fixed_genotype: String,
-    fixed_sample: impl Into<Option<&'a str>>,
-    parent_sample: impl Into<Option<&'a str>>,
+    fixed_sample: Option<&str>,
+    parent_samples: Vec<String>,
     in_place: bool,
 ) -> Result<Operation, VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let fixed_sample = fixed_sample.into();
-    let parent_sample = parent_sample.into();
-    let explicit_parent_samples = parent_sample
-        .map(|parent_sample| vec![parent_sample.to_string()])
-        .unwrap_or_default();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
 
     let mut session = start_operation(conn);
@@ -265,10 +260,10 @@ pub fn update_with_vcf<'a>(
             let parent_samples = resolved_parent_samples
                 .entry(fixed_sample.to_string())
                 .or_insert_with(|| {
-                    if explicit_parent_samples.is_empty() {
+                    if parent_samples.is_empty() {
                         Sample::get_parent_names(conn, fixed_sample)
                     } else {
-                        explicit_parent_samples.clone()
+                        parent_samples.clone()
                     }
                 })
                 .clone();
@@ -372,10 +367,10 @@ pub fn update_with_vcf<'a>(
                 let parent_samples = resolved_parent_samples
                     .entry(sample_name.to_string())
                     .or_insert_with(|| {
-                        if explicit_parent_samples.is_empty() {
+                        if parent_samples.is_empty() {
                             Sample::get_parent_names(conn, sample_name)
                         } else {
-                            explicit_parent_samples.clone()
+                            parent_samples.clone()
                         }
                     })
                     .clone();
@@ -639,7 +634,6 @@ mod tests {
         test_helpers::{get_sample_bg, setup_gen},
         track_database,
     };
-
     #[test]
     fn test_update_fasta_with_vcf() {
         let context = setup_gen();
@@ -668,7 +662,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -718,7 +712,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -775,7 +769,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("sample 1"),
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -833,7 +827,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("sample 1"),
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
@@ -866,7 +860,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -912,7 +906,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -953,7 +947,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -996,7 +990,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Sample::DEFAULT_NAME,
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1010,7 +1004,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Sample::DEFAULT_NAME,
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
         assert!(matches!(
@@ -1055,7 +1049,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1069,7 +1063,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
         assert!(matches!(
@@ -1113,7 +1107,7 @@ mod tests {
             &collection,
             "0|1".to_string(),
             Some("test"),
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1154,7 +1148,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1209,7 +1203,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1234,7 +1228,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1272,7 +1266,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Sample::DEFAULT_NAME,
+            vec![Sample::DEFAULT_NAME.to_string()],
             true,
         )
         .unwrap();
@@ -1283,7 +1277,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            "f1",
+            vec!["f1".to_string()],
             true,
         )
         .unwrap();
@@ -1294,7 +1288,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            "f2",
+            vec!["f2".to_string()],
             true,
         )
         .unwrap();
@@ -1351,7 +1345,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("child"),
-            None,
+            vec![],
             false,
         )
         .unwrap();
@@ -1399,7 +1393,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("child"),
-            None,
+            vec![],
             false,
         )
         .unwrap();
@@ -1441,7 +1435,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("child"),
-            Some("reference"),
+            vec!["reference".to_string()],
             false,
         )
         .unwrap();

@@ -1694,7 +1694,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1813,7 +1813,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1846,7 +1846,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
 
@@ -1946,7 +1946,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1994,7 +1994,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();

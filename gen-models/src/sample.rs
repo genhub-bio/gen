@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::*, rc::Rc};
+use std::{collections::BTreeMap, rc::Rc};
 
 use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     block_group::BlockGroup, db::GraphConnection, errors::SampleError, gen_models_capnp::sample,
-    sample_lineage::SampleLineage, traits::*,
+    sample_lineage::SampleLineage, traits::Query,
 };
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -104,7 +104,7 @@ impl Sample {
         collection_name: &str,
         sample_name: &str,
         parent_samples: Vec<String>,
-    ) -> std::result::Result<Sample, SampleError> {
+    ) -> Result<Sample, SampleError> {
         match Sample::create(conn, sample_name) {
             Ok(new_sample) => {
                 if !parent_samples.is_empty() {
