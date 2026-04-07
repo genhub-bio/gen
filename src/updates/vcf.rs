@@ -1367,11 +1367,20 @@ mod tests {
             &get_sample_bg(conn, &collection, "child").id,
             true,
         );
-        assert!(child_sequences.contains("ATCGATCGATCGATCGATCGGGAACACACAGAGA"));
+        assert_eq!(
+            child_sequences,
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCGATCGATAGACGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATAGACGATCGATCGGGAACACACAGAGA".to_string()
+            ])
+        );
     }
 
     #[test]
-    fn test_update_vcf_uses_merged_lineage_parents_when_names_overlap() {
+    fn test_update_vcf_with_parents_having_same_reference_names() {
+        // Ensure if we have a child sample with multiple parents with the same contig names it works
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -1386,18 +1395,19 @@ mod tests {
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
-            "reference",
+            "parent-a",
             false,
         )
         .unwrap();
 
-        Sample::get_or_create_child(conn, &collection, "parent-a", vec!["reference".to_string()])
-            .unwrap();
-        Sample::get_or_create_child(conn, &collection, "parent-b", vec!["reference".to_string()])
-            .unwrap();
-        Sample::get_or_create(conn, "child");
-        SampleLineage::create(conn, "parent-a", "child").unwrap();
-        SampleLineage::create(conn, "parent-b", "child").unwrap();
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "parent-b",
+            false,
+        )
+        .unwrap();
 
         update_with_vcf(
             &context,
@@ -1405,7 +1415,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("child"),
-            vec![],
+            vec!["parent-a".to_string(), "parent-b".to_string()],
             false,
         )
         .unwrap();
@@ -1415,11 +1425,19 @@ mod tests {
             &get_sample_bg(conn, &collection, "child").id,
             true,
         );
-        assert!(child_sequences.contains("ATCGATCGATCGATCGATCGGGAACACACAGAGA"));
+        assert_eq!(
+            child_sequences,
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCGATCGATAGACGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATAGACGATCGATCGGGAACACACAGAGA".to_string()
+            ])
+        );
     }
 
     #[test]
-    fn test_update_vcf_does_not_persist_parent_lineage_for_existing_sample() {
+    fn test_update_vcf_does_not_overwrite_parent_lineage_for_existing_sample() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
