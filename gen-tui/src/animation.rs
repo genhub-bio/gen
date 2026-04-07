@@ -6,7 +6,7 @@ use tachyonfx::{Interpolatable, Interpolation};
 use crate::geometry::ViewportPos;
 use crate::{
     cursor::Cursor,
-    geometry::{WorldPos, clamp_to_bounds},
+    geometry::{clamp_to_bounds, WorldPos},
     graph_controller::ViewportState,
     viewport_graph::CroppedGraph,
 };
@@ -118,8 +118,8 @@ impl ViewportState {
             }
         }
 
-        // 3. Only if no camera animation is underway and not panning, apply three-zone following
-        if self.camera_anim.is_none() && !self.panning {
+        // 3. Only apply three-zone cursor-following when no animation is running and cursor is visible.
+        if self.camera_anim.is_none() && cursor.is_visible() {
             // Use the authoritative viewport bounds from state, not the parameter
             let width = self.viewport_bounds.width;
             let height = self.viewport_bounds.height;

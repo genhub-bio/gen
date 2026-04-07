@@ -3,14 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{self, KeyCode, KeyEventKind};
+use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use log::{info, warn};
 use ratatui::{
-    layout::{Constraint, Direction, HorizontalAlignment, Layout, Rect},
+    layout::{Constraint, Direction, HorizontalAlignment, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Padding, Paragraph, Wrap},
@@ -262,10 +262,11 @@ pub fn view_block_group(
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     let terminal = session.terminal_mut();
 
     // Basic event loop
-    let tick_rate = Duration::from_millis(100);
+    let tick_rate = Duration::from_millis(16); // ~60fps
     let mut last_tick = Instant::now();
     let mut last_frame_time = Instant::now();
     let mut show_panel = false;
@@ -273,15 +274,313 @@ pub fn view_block_group(
     let show_sidebar = true;
     let mut tui_layout_change = false;
 
+    // Mouse drag state
+    let mut mouse_last_pos: Option<(u16, u16)> = None;
+    let mut mouse_is_dragging = false;
+    let mut last_sidebar_area = Rect::default();
+
     // Track the last selected block group to detect changes
     let mut last_selected_block_group_id = block_group_id;
     // Track if we're loading a new block group
     let mut is_loading = false;
     let mut last_refresh = Instant::now();
+    let mut should_quit = false;
     loop {
-        // Refresh explorer data and force reload on change
+        // Drain ALL pending input events before doing any work
+        while crossterm::event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                event::Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Any keyboard navigation shows the cursor.
+                    if !graph_controller.is_cursor_visible()
+                        && matches!(
+                            key.code,
+                            KeyCode::Left
+                                | KeyCode::Right
+                                | KeyCode::Up
+                                | KeyCode::Down
+                                | KeyCode::Char('h' | 'j' | 'k' | 'l')
+                        )
+                    {
+                        graph_controller.show_cursor();
+                    }
+
+                    // Global handlers
+                    match key.code {
+                        KeyCode::Char('q') => {
+                            should_quit = true;
+                            break;
+                        }
+                        KeyCode::Char('m') => {
+                            if show_panel && panel_mode == PanelMode::Messages {
+                                show_panel = false;
+                                focus_zone = FocusZone::Canvas;
+                            } else {
+                                show_panel = true;
+                                panel_mode = PanelMode::Messages;
+                                focus_zone = FocusZone::Panel;
+                            }
+                            tui_layout_change = true;
+                        }
+                        KeyCode::Tab => {
+                            // Tab - cycle forwards
+                            focus_zone = match focus_zone {
+                                FocusZone::Canvas => {
+                                    if show_panel {
+                                        FocusZone::Panel
+                                    } else {
+                                        FocusZone::Sidebar
+                                    }
+                                }
+                                FocusZone::Sidebar => FocusZone::Canvas,
+                                FocusZone::Panel => FocusZone::Sidebar,
+                            }
+                        }
+                        KeyCode::BackTab => {
+                            // Shift+Tab - cycle backwards
+                            focus_zone = match focus_zone {
+                                FocusZone::Canvas => FocusZone::Sidebar,
+                                FocusZone::Sidebar => {
+                                    if show_panel {
+                                        FocusZone::Panel
+                                    } else {
+                                        FocusZone::Canvas
+                                    }
+                                }
+                                FocusZone::Panel => FocusZone::Canvas,
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // Focus-specific handlers
+                    match focus_zone {
+                        FocusZone::Canvas => match key.code {
+                            KeyCode::Enter => {
+                                if graph_controller.cursor.is_coarse_mode() {
+                                    graph_controller.cursor.set_coarse_mode(false);
+                                } else {
+                                    // TODO: Node selection not yet supported, always show panel for now
+                                    show_panel = true;
+                                    panel_mode = PanelMode::Details;
+                                    focus_zone = FocusZone::Panel;
+                                    tui_layout_change = true;
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if !graph_controller.is_cursor_visible() {
+                                    graph_controller.show_cursor();
+                                } else if !graph_controller.cursor.is_coarse_mode() {
+                                    graph_controller.cursor.set_coarse_mode(true);
+                                } else if !show_panel {
+                                    focus_zone = FocusZone::Sidebar;
+                                }
+                            }
+                            KeyCode::Char('p') => {
+                                if let Some(ref block_group_id) =
+                                    explorer_state.selected_block_group_id
+                                {
+                                    match toggle_path_highlight(
+                                        conn,
+                                        &mut graph_controller,
+                                        block_group_id,
+                                        Color::Red,
+                                    ) {
+                                        Ok(highlighting_enabled) => {
+                                            if highlighting_enabled {
+                                                info!(
+                                                    "Path highlighting enabled for block group {}",
+                                                    block_group_id
+                                                );
+                                            } else {
+                                                info!("Path highlighting disabled");
+                                            }
+                                        }
+                                        Err(err) => {
+                                            warn!("Failed to toggle path highlighting: {}", err);
+                                        }
+                                    }
+                                } else {
+                                    warn!("No block group selected for path highlighting");
+                                }
+                            }
+                            _ => {
+                                graph_controller.handle_key_event(key).ok();
+                            }
+                        },
+                        FocusZone::Panel => match key.code {
+                            KeyCode::Esc => {
+                                show_panel = false;
+                                focus_zone = FocusZone::Canvas;
+                                tui_layout_change = true;
+                            }
+                            KeyCode::Char('c') => {
+                                if panel_mode == PanelMode::Messages {
+                                    messages.clear();
+                                }
+                            }
+                            _ => {}
+                        },
+                        FocusZone::Sidebar => {
+                            explorer.handle_input(&mut explorer_state, key);
+                            // Check if focus change was requested by the explorer
+                            if let Some(requested_zone) = explorer_state.focus_change_requested {
+                                focus_zone = requested_zone;
+                                explorer_state.focus_change_requested = None;
+                            }
+                            // Handle annotation file toggle requests
+                            if let Some(toggled_id) =
+                                explorer_state.annotation_file_toggle_requested.take()
+                            {
+                                if explorer_state.is_annotation_file_active(&toggled_id) {
+                                    if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
+                                        && let Some(bg) = current_block_group.as_ref()
+                                    {
+                                        let query_window =
+                                            current_view_coordinate_window(&graph_controller)
+                                                .map(expand_query_window);
+                                        let node_filter: std::collections::HashSet<HashId> =
+                                            block_graph.nodes().map(|node| node.node_id).collect();
+                                        let request = AnnotationFileTrackRequest {
+                                            conn,
+                                            workspace,
+                                            collection_name,
+                                            sample_name: bg.sample_name.as_deref(),
+                                            block_group_name: Some(&bg.name),
+                                            query_window,
+                                            node_filter: &node_filter,
+                                            entry,
+                                        };
+                                        match load_annotation_file_track(&request) {
+                                            Ok(load) => {
+                                                annotation_file_tracks
+                                                    .insert(toggled_id, load.track);
+                                                annotation_file_index_available
+                                                    .insert(toggled_id, load.index_available);
+                                                if let Some(window) = load.loaded_window {
+                                                    annotation_file_loaded_windows
+                                                        .insert(toggled_id, window);
+                                                } else {
+                                                    annotation_file_loaded_windows
+                                                        .remove(&toggled_id);
+                                                }
+                                            }
+                                            Err(err) => {
+                                                messages.push_warn(format!("{err}"));
+                                                explorer_state
+                                                    .deactivate_annotation_file(&toggled_id);
+                                                annotation_file_tracks.remove(&toggled_id);
+                                                annotation_file_index_available.remove(&toggled_id);
+                                                annotation_file_loaded_windows.remove(&toggled_id);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    annotation_file_tracks.remove(&toggled_id);
+                                    annotation_file_index_available.remove(&toggled_id);
+                                    annotation_file_loaded_windows.remove(&toggled_id);
+                                }
+                            }
+                            // Handle annotation group toggle requests
+                            if let Some(toggled_group) =
+                                explorer_state.annotation_group_toggle_requested.take()
+                            {
+                                if explorer_state.is_annotation_group_active(&toggled_group) {
+                                    if current_block_group.is_some() {
+                                        let visible_node_ranges =
+                                            visible_ranges_by_node(&block_graph);
+                                        let spans = match load_annotations_for_group(
+                                            conn,
+                                            &toggled_group,
+                                            &visible_node_ranges,
+                                        ) {
+                                            Ok(spans) => spans,
+                                            Err(err) => {
+                                                messages.push_warn(format!(
+                                                    "Failed to load annotations for group {}: {err}",
+                                                    toggled_group
+                                                ));
+                                                Vec::new()
+                                            }
+                                        };
+                                        if spans.is_empty() {
+                                            explorer_state
+                                                .deactivate_annotation_group(&toggled_group);
+                                        } else {
+                                            annotation_group_tracks.insert(
+                                                toggled_group.clone(),
+                                                AnnotationTrack::new(toggled_group, spans),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    annotation_group_tracks.remove(&toggled_group);
+                                }
+                            }
+                        }
+                    }
+                }
+                event::Event::Mouse(mouse)
+                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                        && last_sidebar_area.contains(Position {
+                            x: mouse.column,
+                            y: mouse.row,
+                        }) =>
+                {
+                    focus_zone = FocusZone::Sidebar;
+                    explorer.handle_mouse(&mut explorer_state, mouse.column, mouse.row);
+                    if let Some(requested_zone) = explorer_state.focus_change_requested {
+                        focus_zone = requested_zone;
+                        explorer_state.focus_change_requested = None;
+                    }
+                }
+                event::Event::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        mouse_last_pos = Some((mouse.column, mouse.row));
+                        mouse_is_dragging = false;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some((lx, ly)) = mouse_last_pos {
+                            let dx = mouse.column as i16 - lx as i16;
+                            let dy = mouse.row as i16 - ly as i16;
+                            graph_controller.move_by_terminal(dx, dy);
+                            graph_controller.sync_cursor_to_closest_node();
+                            mouse_is_dragging = true;
+                        }
+                        mouse_last_pos = Some((mouse.column, mouse.row));
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if !mouse_is_dragging {
+                            graph_controller.handle_click(mouse.column, mouse.row);
+                        }
+                        mouse_last_pos = None;
+                        mouse_is_dragging = false;
+                    }
+                    MouseEventKind::ScrollUp => {
+                        graph_controller.zoom_in();
+                    }
+                    MouseEventKind::ScrollDown => {
+                        graph_controller.zoom_out();
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        if should_quit {
+            break;
+        }
+
+        // Trigger reload if selection changed to a new block group
+        if explorer_state.selected_block_group_id != last_selected_block_group_id {
+            is_loading = true;
+            last_selected_block_group_id = explorer_state.selected_block_group_id;
+        }
+
+        // Refresh explorer data and force reload on change.
+        // Skipped when loading — we want the draw to happen first so the loading
+        // indicator is shown without any extra latency.
         // I do this every REFRESH_INTERVAL seconds.
-        if last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
+        if !is_loading && last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
             let selected_sample = current_block_group
                 .as_ref()
                 .map(|bg| bg.sample_name.as_str());
@@ -298,12 +597,6 @@ pub fn view_block_group(
                     .retain(|name, _| explorer_state.is_annotation_group_active(name));
             }
             last_refresh = Instant::now();
-        }
-
-        // Trigger reload if selection changed to a new block group
-        if explorer_state.selected_block_group_id != last_selected_block_group_id {
-            is_loading = true;
-            last_selected_block_group_id = explorer_state.selected_block_group_id;
         }
 
         // Reload indexed annotation file tracks when the user scrolls past the loaded window
@@ -422,6 +715,7 @@ pub fn view_block_group(
                 .constraints(vec![Constraint::Percentage(20), Constraint::Percentage(80)])
                 .split(outer_layout[0]);
             let sidebar_area = sidebar_layout[0];
+            last_sidebar_area = sidebar_area;
             let viewer_root_area = sidebar_layout[1];
 
             // Split viewer area between graph and annotation panels
@@ -503,7 +797,10 @@ pub fn view_block_group(
             // Status bar
             let mut status_message = match focus_zone {
                 FocusZone::Canvas => {
-                    if graph_controller.cursor.is_coarse_mode() {
+                    if !graph_controller.is_cursor_visible() {
+                        "*drag*: pan | *click node*: select | *scroll*: zoom | *arrows*: keyboard nav"
+                            .to_string()
+                    } else if graph_controller.cursor.is_coarse_mode() {
                         "*←→↑↓* move | *enter* fine nav | *+/-* zoom | *p* path | *esc* sidebar"
                             .to_string()
                     } else {
@@ -522,9 +819,8 @@ pub fn view_block_group(
 
             // Canvas area
             if is_loading {
-                // Draw loading message in canvas area
                 let loading_text = Text::styled(
-                    "Loading...",
+                    "Loading…",
                     Style::default()
                         .fg(get_theme_color("text").unwrap())
                         .add_modifier(Modifier::BOLD),
@@ -704,7 +1000,9 @@ pub fn view_block_group(
             }
         })?;
 
-        // After drawing, update the graph controller if needed
+        // Update the graph controller if a new block group was selected.
+        // This runs after terminal.draw() so the loading indicator is visible
+        // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
@@ -788,221 +1086,23 @@ pub fn view_block_group(
             is_loading = false;
         }
 
-        // Handle input
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-        if crossterm::event::poll(timeout)?
-            && let event::Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            // Global handlers
-            match key.code {
-                KeyCode::Char('q') => break,
-                KeyCode::Char('m') => {
-                    if show_panel && panel_mode == PanelMode::Messages {
-                        show_panel = false;
-                        focus_zone = FocusZone::Canvas;
-                    } else {
-                        show_panel = true;
-                        panel_mode = PanelMode::Messages;
-                        focus_zone = FocusZone::Panel;
-                    }
-                    tui_layout_change = true;
-                }
-                KeyCode::Tab => {
-                    // Tab - cycle forwards
-                    focus_zone = match focus_zone {
-                        FocusZone::Canvas => {
-                            if show_panel {
-                                FocusZone::Panel
-                            } else {
-                                FocusZone::Sidebar
-                            }
-                        }
-                        FocusZone::Sidebar => FocusZone::Canvas,
-                        FocusZone::Panel => FocusZone::Sidebar,
-                    }
-                }
-                KeyCode::BackTab => {
-                    // Shift+Tab - cycle backwards
-                    focus_zone = match focus_zone {
-                        FocusZone::Canvas => FocusZone::Sidebar,
-                        FocusZone::Sidebar => {
-                            if show_panel {
-                                FocusZone::Panel
-                            } else {
-                                FocusZone::Canvas
-                            }
-                        }
-                        FocusZone::Panel => FocusZone::Canvas,
-                    }
-                }
-                _ => {}
-            }
+        // If an animation is running, wake up after tick_rate to advance it.
+        // If the display is idle, block indefinitely — the next input event will wake us.
+        let wait = if graph_controller.is_animating() {
+            tick_rate
+                .checked_sub(last_tick.elapsed())
+                .unwrap_or(Duration::ZERO)
+        } else {
+            Duration::from_secs(3600)
+        };
+        let _ = crossterm::event::poll(wait);
 
-            // Focus-specific handlers
-            match focus_zone {
-                FocusZone::Canvas => match key.code {
-                    KeyCode::Enter => {
-                        if graph_controller.cursor.is_coarse_mode() {
-                            graph_controller.cursor.set_coarse_mode(false);
-                        } else {
-                            // TODO: Node selection not yet supported, always show panel for now
-                            show_panel = true;
-                            panel_mode = PanelMode::Details;
-                            focus_zone = FocusZone::Panel;
-                            tui_layout_change = true;
-                        }
-                    }
-                    KeyCode::Esc => {
-                        if !graph_controller.cursor.is_coarse_mode() {
-                            graph_controller.cursor.set_coarse_mode(true);
-                        } else if !show_panel {
-                            focus_zone = FocusZone::Sidebar;
-                        }
-                    }
-                    KeyCode::Char('p') => {
-                        if let Some(ref block_group_id) = explorer_state.selected_block_group_id {
-                            match toggle_path_highlight(
-                                conn,
-                                &mut graph_controller,
-                                block_group_id,
-                                Color::Red,
-                            ) {
-                                Ok(highlighting_enabled) => {
-                                    if highlighting_enabled {
-                                        info!(
-                                            "Path highlighting enabled for block group {}",
-                                            block_group_id
-                                        );
-                                    } else {
-                                        info!("Path highlighting disabled");
-                                    }
-                                }
-                                Err(err) => {
-                                    warn!("Failed to toggle path highlighting: {}", err);
-                                }
-                            }
-                        } else {
-                            warn!("No block group selected for path highlighting");
-                        }
-                    }
-                    _ => {
-                        graph_controller.handle_key_event(key).ok();
-                    }
-                },
-                FocusZone::Panel => match key.code {
-                    KeyCode::Esc => {
-                        show_panel = false;
-                        focus_zone = FocusZone::Canvas;
-                        tui_layout_change = true;
-                    }
-                    KeyCode::Char('c') => {
-                        if panel_mode == PanelMode::Messages {
-                            messages.clear();
-                        }
-                    }
-                    _ => {}
-                },
-                FocusZone::Sidebar => {
-                    explorer.handle_input(&mut explorer_state, key);
-                    // Check if focus change was requested by the explorer
-                    if let Some(requested_zone) = explorer_state.focus_change_requested {
-                        focus_zone = requested_zone;
-                        explorer_state.focus_change_requested = None;
-                    }
-                    // Handle annotation file toggle requests
-                    if let Some(toggled_id) = explorer_state.annotation_file_toggle_requested.take()
-                    {
-                        if explorer_state.is_annotation_file_active(&toggled_id) {
-                            if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
-                                && let Some(bg) = current_block_group.as_ref()
-                            {
-                                let query_window =
-                                    current_view_coordinate_window(&graph_controller)
-                                        .map(expand_query_window);
-                                let node_filter: std::collections::HashSet<HashId> =
-                                    block_graph.nodes().map(|node| node.node_id).collect();
-                                let request = AnnotationFileTrackRequest {
-                                    conn,
-                                    workspace,
-                                    collection_name,
-                                    sample_name: bg.sample_name.as_str(),
-                                    block_group_name: Some(&bg.name),
-                                    query_window,
-                                    node_filter: &node_filter,
-                                    entry,
-                                };
-                                match load_annotation_file_track(&request) {
-                                    Ok(load) => {
-                                        annotation_file_tracks.insert(toggled_id, load.track);
-                                        annotation_file_index_available
-                                            .insert(toggled_id, load.index_available);
-                                        if let Some(window) = load.loaded_window {
-                                            annotation_file_loaded_windows
-                                                .insert(toggled_id, window);
-                                        } else {
-                                            annotation_file_loaded_windows.remove(&toggled_id);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        messages.push_warn(format!("{err}"));
-                                        explorer_state.deactivate_annotation_file(&toggled_id);
-                                        annotation_file_tracks.remove(&toggled_id);
-                                        annotation_file_index_available.remove(&toggled_id);
-                                        annotation_file_loaded_windows.remove(&toggled_id);
-                                    }
-                                }
-                            }
-                        } else {
-                            annotation_file_tracks.remove(&toggled_id);
-                            annotation_file_index_available.remove(&toggled_id);
-                            annotation_file_loaded_windows.remove(&toggled_id);
-                        }
-                    }
-                    // Handle annotation group toggle requests
-                    if let Some(toggled_group) =
-                        explorer_state.annotation_group_toggle_requested.take()
-                    {
-                        if explorer_state.is_annotation_group_active(&toggled_group) {
-                            if current_block_group.is_some() {
-                                let visible_node_ranges = visible_ranges_by_node(&block_graph);
-                                let spans = match load_annotations_for_group(
-                                    conn,
-                                    &toggled_group,
-                                    &visible_node_ranges,
-                                ) {
-                                    Ok(spans) => spans,
-                                    Err(err) => {
-                                        messages.push_warn(format!(
-                                            "Failed to load annotations for group {}: {err}",
-                                            toggled_group
-                                        ));
-                                        Vec::new()
-                                    }
-                                };
-                                if spans.is_empty() {
-                                    explorer_state.deactivate_annotation_group(&toggled_group);
-                                } else {
-                                    annotation_group_tracks.insert(
-                                        toggled_group.clone(),
-                                        AnnotationTrack::new(toggled_group, spans),
-                                    );
-                                }
-                            }
-                        } else {
-                            annotation_group_tracks.remove(&toggled_group);
-                        }
-                    }
-                }
-            }
-        }
         // Update tick
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
         }
     }
 
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture).ok();
     Ok(())
 }

@@ -65,6 +65,9 @@ where
     last_rebuild_camera_center: WorldPos,
     /// Flag indicating that the viewport graph needs to be rebuilt
     rebuild_needed: bool,
+    /// Flag indicating that the layout changed (zoom, spacing) and the camera
+    /// should be repositioned to keep the cursor at its current viewport position.
+    layout_changed: bool,
 
     /// Persistent requested highlights in domain terms
     pub highlights: Vec<(HighlightKind<G::NodeId>, PathStyle)>,
@@ -150,7 +153,8 @@ where
             partition_controller,
             viewport_graph: CroppedGraph::empty(),
             last_rebuild_camera_center: WorldPos::ZERO,
-            rebuild_needed: true, // Start with a rebuild required
+            rebuild_needed: true,
+            layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
             theme: Self::default_theme(),
         };
@@ -220,6 +224,7 @@ where
         self.detail_level = detail_level;
         self.partition_controller.set_detail_level(detail_level);
         self.rebuild_needed = true;
+        self.layout_changed = true;
     }
 
     /// Get the current level of detail
@@ -462,6 +467,11 @@ where
 
     /// Increase vertex spacing and refresh layouts
     pub fn disperse(&mut self) {
+        // Cap at ~5 zoom levels above default to prevent runaway layout recomputes
+        const MAX_VERTEX_SPACING: f64 = VERTEX_SPACING_DEFAULT + 10.0;
+        if self.partition_controller.get_vertex_spacing() >= MAX_VERTEX_SPACING {
+            return;
+        }
         // Increase vertex spacing
         self.partition_controller.adjust_vertex_spacing(2.0);
         trace!(
@@ -472,6 +482,7 @@ where
         // Clear all layouts to force complete recalculation with new spacing
         self.partition_controller.clear_all_layouts();
         self.rebuild_needed = true;
+        self.layout_changed = true;
     }
 
     /// Decrease vertex spacing and refresh layouts
@@ -491,6 +502,7 @@ where
         // Clear all layouts to force complete recalculation with new spacing
         self.partition_controller.clear_all_layouts();
         self.rebuild_needed = true;
+        self.layout_changed = true;
     }
 
     /// Get current vertex spacing from partition controller
@@ -589,6 +601,22 @@ where
             KeyCode::Char('r') => {
                 self.trigger_rebuild();
             }
+
+            // Block cursor movement while a camera animation is running.
+            // The three-zone logic (in ViewportState::update) is gated on camera_anim.is_none(),
+            // so moves during an animation accumulate without camera correction. In coarse mode
+            // this can jump the cursor to nodes outside the CroppedGraph, causing to_world_pos()
+            // to return None and the zone logic to fall back to a stale viewport position —
+            // effectively losing the cursor until a rebuild happens.
+            KeyCode::Left
+            | KeyCode::Char('h')
+            | KeyCode::Right
+            | KeyCode::Char('l')
+            | KeyCode::Up
+            | KeyCode::Char('k')
+            | KeyCode::Down
+            | KeyCode::Char('j')
+                if self.viewport_state.camera_anim.is_some() => {}
 
             // Graph navigation controls - move cursor with node awareness
             KeyCode::Left | KeyCode::Char('h') => {
@@ -782,21 +810,26 @@ where
         let half_width = (viewport_bounds_snapshot.width as i64 - 1) / 2;
         let half_height = (viewport_bounds_snapshot.height as i64 - 1) / 2;
 
-        // Step 6: Position the camera so that the cursor stays in the same position on the screen
-        // even if its world position is completely different.
+        // Step 6: Position the camera.
         //
         // # Coordinate System
         // - Camera represents the CENTER of the viewport in world coordinates
         // - Viewport origin (top-left) = camera - (width/2, height/2)
         // - Transformation: viewport_pos = world_pos - camera + (width/2, height/2)
         // - Inverse: camera = world_pos - viewport_pos + (width/2, height/2)
-        let camera = WorldPos::new(
-            cursor_world.x - cursor_viewport.x as i64 + half_width,
-            cursor_world.y - cursor_viewport.y as i64 + half_height,
-        );
-
-        self.viewport_state.camera_current = camera;
-        self.viewport_state.camera_target = camera;
+        //
+        // Reposition the camera only when the layout changed (zoom, spacing).
+        // Motion-triggered rebuilds just load new partitions — no reason to snap.
+        let layout_changed = self.layout_changed;
+        self.layout_changed = false;
+        if layout_changed {
+            let cam = WorldPos::new(
+                cursor_world.x - cursor_viewport.x as i64 + half_width,
+                cursor_world.y - cursor_viewport.y as i64 + half_height,
+            );
+            self.viewport_state.camera_current = cam;
+            self.viewport_state.camera_target = cam;
+        }
 
         // Step 7: Compute camera rect with buffer (2x) and load partitions
         let camera_rect = self.viewport_state.camera_rect();
@@ -903,9 +936,139 @@ where
             .update(delta, &mut self.cursor, &self.viewport_graph);
     }
 
-    /// Enable cursor rendering
+    /// Returns true if any animation is currently in flight (camera easing).
+    /// Callers can use this to decide whether to redraw at a fixed rate or block
+    /// indefinitely waiting for the next input event.
+    pub fn is_animating(&self) -> bool {
+        self.viewport_state.camera_anim.is_some()
+    }
+
+    // ==================== Mouse / Panning Mode ====================
+
+    /// Returns true when the cursor is visible (keyboard-driven mode).
+    pub fn is_cursor_visible(&self) -> bool {
+        self.cursor.is_visible()
+    }
+
+    /// Hide the cursor and let the camera move freely.
+    /// The cursor still tracks the closest node so it is ready when switching back.
+    pub fn hide_cursor(&mut self) {
+        self.cursor.set_visibility(false);
+    }
+
+    /// Show the cursor and enable camera-following.
     pub fn show_cursor(&mut self) {
         self.cursor.set_visibility(true);
+    }
+
+    /// Pan the camera by a drag delta expressed in terminal coordinates.
+    ///
+    /// The Y-axis flip (world Y+ is up, terminal Y+ is down) is handled here so
+    /// callers can pass raw terminal deltas directly.
+    ///
+    /// Panning is applied immediately with no animation so the canvas tracks the
+    /// pointer without lag.
+    pub fn move_by_terminal(&mut self, terminal_dx: i16, terminal_dy: i16) {
+        // X: drag right → camera moves left (negate)
+        // Y: drag down (+terminal_dy) → camera moves down → camera_y increases because world Y+ is up
+        let world_dx = -(terminal_dx as i64);
+        let world_dy = terminal_dy as i64;
+
+        self.hide_cursor();
+        let new = WorldPos::new(
+            self.viewport_state.camera_target.x + world_dx,
+            self.viewport_state.camera_target.y + world_dy,
+        );
+        self.viewport_state.camera_current = new;
+        self.viewport_state.camera_target = new;
+        self.viewport_state.camera_anim = None;
+    }
+
+    /// Handle a click at the given terminal coordinates.
+    ///
+    /// - If a data node occupies the clicked cell: places the cursor on that node,
+    ///   switches to cursor-anchored mode, and returns `true`.
+    /// - Otherwise: switches to free-camera mode and returns `false`.
+    pub fn handle_click(&mut self, terminal_x: u16, terminal_y: u16) -> bool {
+        let Some(click_world) = self
+            .viewport_state
+            .terminal_to_world(terminal_x, terminal_y)
+        else {
+            self.hide_cursor();
+            return false;
+        };
+
+        // Collect the hit result before any mutable borrow to satisfy the borrow checker.
+        let hit =
+            self.viewport_graph
+                .data_nodes()
+                .find_map(|(node_center, domain_idx, layout_node)| {
+                    let rect = BigRect::from_center_and_size(node_center, layout_node.size);
+                    if rect.contains(click_world) {
+                        let frac_x = ((click_world.x - rect.left()) as f64
+                            / layout_node.size.0.max(1) as f64)
+                            .clamp(0.0, 1.0);
+                        let frac_y = ((click_world.y - rect.bottom()) as f64
+                            / layout_node.size.1.max(1) as f64)
+                            .clamp(0.0, 1.0);
+                        Some((domain_idx, (frac_x, frac_y)))
+                    } else {
+                        None
+                    }
+                });
+
+        if let Some((domain_idx, frac)) = hit {
+            self.cursor.set_node(domain_idx, frac);
+            self.show_cursor();
+            true
+        } else {
+            self.hide_cursor();
+            false
+        }
+    }
+
+    /// In free-camera mode, keep the cursor on the cell of the visible node closest to
+    /// the camera center, and update the cursor's viewport position to match.
+    ///
+    /// Both are updated on every drag move so that when the user zooms (layout changes),
+    /// `rebuild_viewport_graph` honours the contract: the anchor cell will be at the
+    /// exact same viewport position before and after the zoom.
+    pub fn sync_cursor_to_closest_node(&mut self) {
+        let center = self.viewport_state.camera_current;
+
+        // Find the node whose bounding rect is closest to the camera center.
+        let best = self.viewport_graph.data_nodes().min_by_key(|(pos, _, layout_node)| {
+            let rect = BigRect::from_center_and_size(*pos, layout_node.size);
+            let closest_x = center.x.clamp(rect.left(), rect.right());
+            let closest_y = center.y.clamp(rect.bottom(), rect.top());
+            let dx = closest_x - center.x;
+            let dy = closest_y - center.y;
+            dx * dx + dy * dy
+        });
+
+        if let Some((node_center, domain_idx, layout_node)) = best {
+            let rect = BigRect::from_center_and_size(node_center, layout_node.size);
+
+            // Closest cell within the node rect to the camera center.
+            let closest_x = center.x.clamp(rect.left(), rect.right());
+            let closest_y = center.y.clamp(rect.bottom(), rect.top());
+
+            let (width, height) = layout_node.size;
+            let frac_x = ((closest_x - rect.left()) as f64 / width.max(1) as f64).clamp(0.0, 1.0);
+            let frac_y =
+                ((closest_y - rect.bottom()) as f64 / height.max(1) as f64).clamp(0.0, 1.0);
+
+            self.cursor.set_node(domain_idx, (frac_x, frac_y));
+
+            // Keep the cursor's viewport position in sync with where that cell currently
+            // appears on screen.  The zoom formula uses this:
+            //   camera = cursor_world - cursor_viewport + half_viewport
+            // so cursor_viewport must be the *current* screen position of the anchor cell.
+            let closest_cell = WorldPos::new(closest_x, closest_y);
+            if let Some(vp) = self.viewport_state.world_to_viewport(closest_cell) {
+                self.cursor.set_viewport_pos(vp);
+            }
+        }
     }
 }
 

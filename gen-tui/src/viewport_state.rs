@@ -31,9 +31,6 @@ pub struct ViewportState {
 
     /// Whether this viewport has input focus; only then do scroll events move the camera.
     pub has_focus: bool,
-
-    /// Whether we are currently panning; when true, multizone cursor/camera pushing is disabled
-    pub panning: bool,
 }
 
 impl Default for ViewportState {
@@ -65,7 +62,6 @@ impl ViewportState {
             camera_anim: None,
             has_focus: true, // Enable focus by default for keyboard input
             viewport_bounds: Rect::new(0, 0, 0, 0), // Will be set during rendering
-            panning: false,
         }
     }
 
@@ -88,8 +84,6 @@ impl ViewportState {
         if !self.has_focus {
             return;
         }
-        // Enable panning mode when scrolling
-        self.panning = true;
         let new_target = WorldPos::new(self.camera_target.x + dx, self.camera_target.y + dy);
         self.move_camera_to(new_target, duration);
     }
@@ -218,11 +212,6 @@ impl ViewportState {
     /// Remove input focus. Scroll events are ignored.
     pub fn blur(&mut self) {
         self.has_focus = false;
-    }
-
-    /// Disable panning mode and reactivate multizone cursor/camera behavior
-    pub fn stop_panning(&mut self) {
-        self.panning = false;
     }
 
     /// Set the hard zone as number of cells from the viewport edge.
@@ -499,23 +488,14 @@ mod tests {
         state.set_hard_zone_edge_cells(2);
         state.set_soft_zone_edge_cells(4);
 
-        assert!(!state.panning);
-
         // Simulate scroll event
         state.handle_mouse_scroll(5, 3, Duration::from_millis(100));
-
-        // Should enable panning mode
-        assert!(state.panning);
 
         // Test that scroll is ignored when not focused
         state.blur();
         let old_target = state.camera_target;
         state.handle_mouse_scroll(10, 10, Duration::from_millis(100));
         assert_eq!(state.camera_target, old_target);
-
-        // Stop panning
-        state.stop_panning();
-        assert!(!state.panning);
     }
 
     #[test]
