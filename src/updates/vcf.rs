@@ -527,10 +527,12 @@ pub fn update_with_vcf(
                         &sample_parent_samples,
                     );
 
-                    if parent_block_groups.len() == 1 {
+                    if let Some(parent_block_group) = parent_block_groups.first() {
+                        // TODO: Use the default parent path here once multi-parent samples have
+                        // default paths.
                         let parent_path = PathCache::lookup(
                             &mut path_cache,
-                            &parent_block_groups[0].id,
+                            &parent_block_group.id,
                             vcf_entry.path.name.clone(),
                         );
                         parent_path.id
