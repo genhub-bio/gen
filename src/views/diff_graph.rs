@@ -22,7 +22,7 @@ pub struct DiffGraphComponent {
 
 /// Apply diff highlights (nodes and edges) to a graph controller.
 pub fn apply_diff_highlights(
-    controller: &mut GraphController<&GenGraph, GenGraphNodeSizer>,
+    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
     component: &DiffGraphComponent,
 ) {
     let style = PathStyle::new(component.highlight_color)

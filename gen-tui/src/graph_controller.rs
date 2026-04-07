@@ -44,9 +44,6 @@ where
     G: GraphBase + Clone,
     S: NodeSizer<G>,
 {
-    /// The original graph used for node lookups and rendering
-    pub graph: G,
-
     /// Viewport state managing camera, animations, and viewport bounds
     pub viewport_state: ViewportState,
 
@@ -89,18 +86,13 @@ pub enum HighlightKind<N> {
 
 impl<G, S> GraphController<G, S>
 where
-    G: GraphBase
-        + Clone
-        + EdgeIndexable
-        + NodeIndexable
-        + NodeCount
-        + Visitable
-        + IntoNodeIdentifiers
-        + IntoEdgeReferences
-        + IntoNeighborsDirected,
+    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
-    for<'b> &'b G: IntoNodeIdentifiers + IntoEdgeReferences + IntoNeighborsDirected,
+    for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNodeIdentifiers<NodeId = G::NodeId>
+        + IntoEdgeReferences<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNeighborsDirected<NodeId = G::NodeId>,
     for<'b> &'b G::NodeId: Hash + Ord,
     for<'b> &'b G::EdgeId: Clone,
     S: NodeSizer<G>,
@@ -138,15 +130,18 @@ where
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
-        let partition_controller = PartitionController::new_with_config(
+        let mut partition_controller = PartitionController::new_with_config(
             graph,
             node_sizer,
             config.partition,
             config.controller,
         );
 
-        let mut controller = Self {
-            graph,
+        if let Err(e) = partition_controller.set_anchor_partition(0) {
+            eprintln!("Warning: Failed to initialize reference partition: {}", e);
+        }
+
+        Self {
             viewport_state: ViewportState::new(),
             cursor: Cursor::default(),
             detail_level: VisualDetail::Truncated, // Default detail level
@@ -157,13 +152,7 @@ where
             layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
             theme: Self::default_theme(),
-        };
-
-        if let Err(e) = controller.partition_controller.set_anchor_partition(0) {
-            eprintln!("Warning: Failed to initialize reference partition: {}", e);
         }
-
-        controller
     }
 
     pub fn get_layout(&self, partition_idx: usize) -> Option<&PartitionLayout> {
@@ -178,10 +167,19 @@ where
         crate::dot_export::export_to_dot(&self.viewport_graph, filename)
     }
 
+    /// Get a reference to the original domain graph
+    pub fn graph(&self) -> &G {
+        &self.partition_controller.graph
+    }
+
+    /// Set the anchor partition and reset coordinate system
+    pub fn set_anchor_partition(&mut self, partition_idx: usize) -> Result<(), String> {
+        self.partition_controller.set_anchor_partition(partition_idx)
+    }
+
     /// Ensure a partition is loaded for rendering
     pub fn ensure_partition_loaded(&mut self, partition_idx: usize) -> Result<(), String> {
-        self.partition_controller
-            .ensure_partition_loaded(partition_idx)
+        self.partition_controller.ensure_partition_loaded(partition_idx)
     }
 
     /// Check camera movement and viewport bounds changes to determine if a rebuild is needed
@@ -303,14 +301,16 @@ where
 
     /// Set a node highlight
     pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
-        Self::apply_node_highlight(&mut self.viewport_graph, &self.graph, node_id, style);
+        let graph = &self.partition_controller.graph;
+        Self::apply_node_highlight(&mut self.viewport_graph, graph, node_id, style);
         let kind = HighlightKind::Node(node_id);
         self.highlights.push((kind, style));
     }
 
     /// Set an edge highlight
     pub fn set_edge_highlight(&mut self, edge: (G::NodeId, G::NodeId), style: PathStyle) {
-        Self::apply_edge_highlight(&mut self.viewport_graph, &self.graph, edge.0, edge.1, style);
+        let graph = &self.partition_controller.graph;
+        Self::apply_edge_highlight(&mut self.viewport_graph, graph, edge.0, edge.1, style);
         let kind = HighlightKind::Edge(edge.0, edge.1);
         self.highlights.push((kind, style));
     }
@@ -321,7 +321,8 @@ where
     /// - style: PathStyle for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
     pub fn set_path_highlight(&mut self, style: PathStyle, path_nodes: Vec<G::NodeId>) {
-        Self::apply_path_highlight(&mut self.viewport_graph, &self.graph, &path_nodes, style);
+        let graph = &self.partition_controller.graph;
+        Self::apply_path_highlight(&mut self.viewport_graph, graph, &path_nodes, style);
         let kind = HighlightKind::Path(path_nodes);
         self.highlights.push((kind, style));
     }
@@ -396,8 +397,7 @@ where
     pub fn ensure_camera_coverage(&mut self) -> Result<Vec<usize>, String> {
         let buffer_factor = 2.0;
         let camera_rect = self.viewport_state.camera_rect().resize(buffer_factor);
-        self.partition_controller
-            .load_partitions_for_rect(camera_rect)
+        self.partition_controller.load_partitions_for_rect(camera_rect)
     }
 
     /// Find a domain node's world position in the new layout system after layout changes
@@ -732,7 +732,10 @@ where
 
         // Step 2: Find which partition the cursor's node belongs to
         let cursor_partition = if let Some(node_idx) = self.cursor.node_idx() {
-            let node_id = <G as NodeIndexable>::from_index(&self.graph, node_idx.index());
+            let node_id = <G as NodeIndexable>::from_index(
+                &self.partition_controller.graph,
+                node_idx.index(),
+            );
             self.partition_controller
                 .partition_table
                 .node_map
@@ -750,10 +753,7 @@ where
         // Step 3: Inactivate any running animations and set cursor partition as anchor
         self.viewport_state.camera_anim = None;
 
-        if let Err(e) = self
-            .partition_controller
-            .set_anchor_partition(cursor_partition)
-        {
+        if let Err(e) = self.partition_controller.set_anchor_partition(cursor_partition) {
             return Err(format!("Failed to set anchor partition: {}", e));
         }
 
@@ -853,7 +853,7 @@ where
                 HighlightKind::Node(node_id) => {
                     Self::apply_node_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         *node_id,
                         *style,
                     );
@@ -861,7 +861,7 @@ where
                 HighlightKind::Edge(src, tgt) => {
                     Self::apply_edge_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         *src,
                         *tgt,
                         *style,
@@ -870,7 +870,7 @@ where
                 HighlightKind::Path(nodes) => {
                     Self::apply_path_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         nodes,
                         *style,
                     );
@@ -1277,7 +1277,7 @@ mod tests {
         #[derive(Clone)]
         struct TestNodeSizer;
 
-        impl NodeSizer<&MockDomainGraph> for TestNodeSizer {
+        impl NodeSizer<MockDomainGraph> for TestNodeSizer {
             fn get_node_size(&self, _node: &NodeIndex, _scale: VisualDetail) -> (u64, u64) {
                 (1, 1)
             }
@@ -1295,8 +1295,7 @@ mod tests {
 
         let node_sizer = TestNodeSizer;
 
-        // Create GraphController with the test graph (use reference)
-        let mut controller = GraphController::new(&domain_graph, node_sizer);
+        let mut controller = GraphController::new(domain_graph.clone(), node_sizer);
 
         // Set up viewport bounds
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 20, 10);

@@ -177,7 +177,7 @@ pub fn draw_annotations_panel(
     frame: &mut ratatui::Frame,
     area: Rect,
     track: &AnnotationTrack,
-    controller: &GraphController<&GenGraph, GenGraphNodeSizer>,
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
 ) {
     if area.height < 2 {
         return;
@@ -229,7 +229,7 @@ pub fn draw_annotations_panel(
         track,
         controller.get_viewport_graph(),
         &controller.viewport_state,
-        controller.graph,
+        controller.graph(),
     );
     if visible_indices.is_empty() {
         return;

@@ -63,12 +63,13 @@ impl CroppedGraph {
             + petgraph::visit::EdgeIndexable
             + petgraph::visit::NodeIndexable
             + petgraph::visit::NodeCount
-            + petgraph::visit::Visitable
-            + petgraph::visit::IntoEdgeReferences
-            + petgraph::visit::IntoNeighborsDirected
-            + petgraph::visit::IntoNodeIdentifiers,
+            + petgraph::visit::Visitable,
         G::NodeId: Copy + Eq + std::hash::Hash + Ord,
         G::EdgeId: Clone,
+        for<'b> &'b G: petgraph::visit::GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + petgraph::visit::IntoEdgeReferences<NodeId = G::NodeId, EdgeId = G::EdgeId>
+            + petgraph::visit::IntoNeighborsDirected<NodeId = G::NodeId>
+            + petgraph::visit::IntoNodeIdentifiers<NodeId = G::NodeId>,
     {
         debug!(
             "[DEBUG_TRACE_LAYOUT] new CroppedGraph: viewport=BigRect{{min={{x={}, y={}}}, max={{x={}, y={}}}}}, detail_level={:?}, covered_partitions={:?}",

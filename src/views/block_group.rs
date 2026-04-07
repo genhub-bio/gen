@@ -100,7 +100,7 @@ fn get_block_group_path_nodes(
 /// Toggle path highlighting for a block group
 fn toggle_path_highlight(
     conn: &GraphConnection,
-    controller: &mut GraphController<&GenGraph, GenGraphNodeSizer>,
+    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
 ) -> Result<bool, String> {
@@ -113,7 +113,7 @@ fn toggle_path_highlight(
         Ok(false)
     } else {
         // Get the path nodes for this block group
-        let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph)?;
+        let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph())?;
 
         // Set the path highlight using GraphNodes directly
         controller.set_path_highlight(style, path_nodes);
@@ -141,13 +141,13 @@ fn visible_ranges_by_node(
 /// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
 /// in the current viewport, using the graph controller's viewport graph.
 fn current_view_coordinate_window(
-    controller: &GraphController<&GenGraph, GenGraphNodeSizer>,
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
 ) -> Option<(i64, i64)> {
     use gen_core::{is_end_node, is_start_node};
     use petgraph::visit::NodeIndexable;
 
     let viewport_graph = controller.get_viewport_graph();
-    let graph = controller.graph;
+    let graph = controller.graph();
     let mut start = i64::MAX;
     let mut end = i64::MIN;
 
@@ -251,7 +251,7 @@ pub fn view_block_group(
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
-    let mut graph_controller = create_gen_graph_controller(&block_graph);
+    let mut graph_controller = create_gen_graph_controller(block_graph.clone());
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if origin.is_some() {
@@ -1007,7 +1007,7 @@ pub fn view_block_group(
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
             // Update the graph controller
-            graph_controller = create_gen_graph_controller(&block_graph);
+            graph_controller = create_gen_graph_controller(block_graph.clone());
             current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
             let selected_sample = current_block_group
                 .as_ref()

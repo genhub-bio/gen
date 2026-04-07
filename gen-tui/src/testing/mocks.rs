@@ -411,16 +411,6 @@ impl NodeSizer<MockDomainGraph> for FixedNodeSizer {
     }
 }
 
-// Also implement for domain graph reference
-impl NodeSizer<&MockDomainGraph> for FixedNodeSizer {
-    fn get_node_size(
-        &self,
-        _node: &petgraph::stable_graph::NodeIndex,
-        _scale: VisualDetail,
-    ) -> (u64, u64) {
-        (self.width, self.height)
-    }
-}
 
 /// Scale-aware node sizer that changes size based on selected level of detail (scale)
 #[derive(Debug, Clone)]
@@ -482,20 +472,6 @@ impl NodeSizer<MockDomainGraph> for ScaleAwareNodeSizer {
     }
 }
 
-// Also implement for domain graph reference
-impl NodeSizer<&MockDomainGraph> for ScaleAwareNodeSizer {
-    fn get_node_size(
-        &self,
-        _node: &petgraph::stable_graph::NodeIndex,
-        scale: VisualDetail,
-    ) -> (u64, u64) {
-        match scale {
-            VisualDetail::Minimal => self.base_size,
-            VisualDetail::Full => self.full_multiplier,
-            VisualDetail::Truncated => self.truncated_size,
-        }
-    }
-}
 
 /// Variable node sizer that returns different sizes based on node index
 #[derive(Debug, Clone)]
@@ -612,34 +588,6 @@ impl NodeRenderer<MockDomainGraph> for DebugNodeRenderer {
     }
 }
 
-// Also implement for domain graph reference
-impl NodeRenderer<&MockDomainGraph> for DebugNodeRenderer {
-    fn render_node(
-        &mut self,
-        buffer: &mut WorldBuffer,
-        area: WorldRect,
-        node_id: &NodeIndex<u32>,
-        _scale: VisualDetail,
-    ) {
-        // Fill background
-        for y in area.min.y..=area.max.y {
-            for x in area.min.x..=area.max.x {
-                buffer.set_char_styled(
-                    crate::geometry::WorldPos::new(x, y),
-                    self.background_char,
-                    self.bg_style,
-                );
-            }
-        }
-
-        // Render node index in center
-        let label = format!("N{}", node_id.index());
-        let center = area.center();
-        let label_start =
-            crate::geometry::WorldPos::new(center.x - (label.len() as i64) / 2, center.y);
-        buffer.set_string_styled(label_start, &label, self.text_style);
-    }
-}
 
 /// Minimal renderer that just shows a single character
 #[derive(Debug, Clone)]

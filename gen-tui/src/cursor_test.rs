@@ -15,7 +15,7 @@ mod tests {
     fn test_cursor_intra_node_movement() {
         // Create a simple test graph with larger nodes
         struct LargeNodeSizer;
-        impl NodeSizer<&MockDomainGraph> for LargeNodeSizer {
+        impl NodeSizer<MockDomainGraph> for LargeNodeSizer {
             fn get_node_size(&self, _node: &NodeIndex, _scale: VisualDetail) -> (u64, u64) {
                 (10, 5) // 10 wide, 5 tall nodes
             }
@@ -33,7 +33,7 @@ mod tests {
         domain_graph.add_edge(b, c, ());
 
         let node_sizer = LargeNodeSizer;
-        let mut controller = GraphController::new(&domain_graph, node_sizer);
+        let mut controller = GraphController::new(domain_graph.clone(), node_sizer);
 
         // Set up viewport
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 100, 50);
@@ -81,7 +81,7 @@ mod tests {
         domain_graph.add_edge(b, c, ());
 
         let node_sizer = TestNodeSizers::fixed_1x1(); // Small 1x1 nodes
-        let mut controller = GraphController::new(&domain_graph, node_sizer);
+        let mut controller = GraphController::new(domain_graph.clone(), node_sizer);
 
         // Set up viewport
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 100, 50);
@@ -114,7 +114,7 @@ mod tests {
     fn test_cursor_vertical_movement_within_node() {
         // Create a test graph with tall nodes
         struct TallNodeSizer;
-        impl NodeSizer<&MockDomainGraph> for TallNodeSizer {
+        impl NodeSizer<MockDomainGraph> for TallNodeSizer {
             fn get_node_size(&self, _node: &NodeIndex, _scale: VisualDetail) -> (u64, u64) {
                 (5, 10) // 5 wide, 10 tall nodes
             }
@@ -130,7 +130,7 @@ mod tests {
         domain_graph.add_edge(a, b, ());
 
         let node_sizer = TallNodeSizer;
-        let mut controller = GraphController::new(&domain_graph, node_sizer);
+        let mut controller = GraphController::new(domain_graph.clone(), node_sizer);
 
         // Set up viewport
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 100, 50);

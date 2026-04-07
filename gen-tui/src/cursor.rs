@@ -589,7 +589,7 @@ mod tests {
         let node_sizer = TestNodeSizers::fixed_5x3(); // width=5, height=3
 
         let config = GraphConfig::default();
-        let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
         // Set viewport bounds
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
@@ -793,11 +793,6 @@ mod tests {
         // Custom node sizer for large node
         #[derive(Clone)]
         struct LargeNodeSizer;
-        impl crate::plotter::NodeSizer<&MockDomainGraph> for LargeNodeSizer {
-            fn get_node_size(&self, _: &NodeIndex, _: VisualDetail) -> (u64, u64) {
-                (100, 50) // Very large node
-            }
-        }
         impl crate::plotter::NodeSizer<MockDomainGraph> for LargeNodeSizer {
             fn get_node_size(&self, _: &NodeIndex, _: VisualDetail) -> (u64, u64) {
                 (100, 50)
@@ -806,7 +801,7 @@ mod tests {
 
         let config = GraphConfig::default();
         let mut controller =
-            GraphController::new_with_config(&domain_graph, LargeNodeSizer, config);
+            GraphController::new_with_config(domain_graph.clone(), LargeNodeSizer, config);
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 200, 100);
         controller.set_detail_level(VisualDetail::Full);
@@ -899,7 +894,7 @@ mod tests {
         let node_sizer = TestNodeSizers::fixed_5x3();
 
         let config = GraphConfig::default();
-        let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);
@@ -957,7 +952,7 @@ mod tests {
         config.partition.layer_count = usize::MAX;
         config.partition.node_count = usize::MAX;
 
-        let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.rebuild_viewport_graph().unwrap();
         let viewport_graph = controller.get_viewport_graph();
@@ -1008,7 +1003,7 @@ mod tests {
         let node_sizer = TestNodeSizers::fixed_5x3();
 
         let config = GraphConfig::default();
-        let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);

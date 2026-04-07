@@ -192,20 +192,16 @@ where
 ///     - If the maximum partition size is reached, forcibly close out the current subgraph.
 impl<G> PartitionTable<G>
 where
-    G: GraphBase
-        + Clone
-        + EdgeIndexable
-        + NodeIndexable
-        + NodeCount
-        + Visitable
-        + IntoEdgeReferences
-        + IntoNodeIdentifiers
-        + IntoNeighborsDirected,
+    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
+    for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNodeIdentifiers<NodeId = G::NodeId>
+        + IntoEdgeReferences<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNeighborsDirected<NodeId = G::NodeId>,
 {
     /// Create a new PartitionTable from a generic graph (e.g. StableDiGraph or DiGraphMap)
-    pub fn new(graph: G) -> Self
+    pub fn new(graph: &G) -> Self
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
@@ -214,7 +210,7 @@ where
     }
 
     /// Create a new PartitionTable from a generic graph (e.g. StableDiGraph or DiGraphMap)
-    pub fn new_with_config(graph: G, min_width: usize, max_nodes: usize) -> Self
+    pub fn new_with_config(graph: &G, min_width: usize, max_nodes: usize) -> Self
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
@@ -226,7 +222,7 @@ where
         // (G:NodeId has Copy, so this copies the value into the hashmap)
         let mut node_map: HashMap<G::NodeId, (PartitionIndex, NodeIndex<u32>)> = HashMap::new();
 
-        let articulation_points = find_articulation_points(&graph);
+        let articulation_points = find_articulation_points(graph);
         log::trace!(
             "Found {} articulation points: {:?}",
             articulation_points.len(),
@@ -234,13 +230,13 @@ where
         );
 
         let node_ranks =
-            compute_all_ranks(&graph).expect("Could not compute ranks for graph layout");
+            compute_all_ranks(graph).expect("Could not compute ranks for graph layout");
 
         let mut min_rank = 0; // The minimum rank of the current partition
         let mut prev_rank = 0; // Rank of previous node evaluated
         for (node, rank) in node_ranks {
             // Convert the original node identifier to a NodeIndex, regardless of the graph type
-            let node_idx_usize = <G as NodeIndexable>::to_index(&graph, node);
+            let node_idx_usize = <G as NodeIndexable>::to_index(graph, node);
             let node_idx = NodeIndex::new(node_idx_usize);
             let can_close_out = rank - min_rank >= min_width;
             let must_close_out = current_partition.graph.node_count() >= max_nodes;
@@ -284,8 +280,8 @@ where
             Vec<(NodeIndex<u32>, NodeIndex<u32>, EdgeIndex<u32>)>,
         > = HashMap::new();
 
-        for edge in (&graph).edge_references() {
-            let edge_idx_usize = <G as EdgeIndexable>::to_index(&graph, edge.id());
+        for edge in graph.edge_references() {
+            let edge_idx_usize = <G as EdgeIndexable>::to_index(graph, edge.id());
             let edge_idx = EdgeIndex::new(edge_idx_usize);
             let source = edge.source();
             let target = edge.target();
@@ -299,8 +295,8 @@ where
                 .copied()
                 .expect("Encountered edge with unknown target node");
 
-            let source_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(&graph, source));
-            let target_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(&graph, target));
+            let source_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, source));
+            let target_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, target));
 
             if source_partition_idx == target_partition_idx {
                 // Same partition -> add it to the graph
@@ -1869,7 +1865,7 @@ mod tests {
         let detail_level = VisualDetail::Minimal;
 
         struct SimpleSizer;
-        impl NodeSizer<&DiGraphMap<TestNode, ()>> for SimpleSizer {
+        impl NodeSizer<DiGraphMap<TestNode, ()>> for SimpleSizer {
             fn get_node_size(&self, _node: &TestNode, _detail_level: VisualDetail) -> (u64, u64) {
                 (10, 5) // Fixed size for testing
             }
@@ -1882,7 +1878,7 @@ mod tests {
 
         // First call to compute_partition_layouts
         table
-            .compute_partition_layouts(0, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
+            .compute_partition_layouts(0, &sizer, &graph, VERTEX_SPACING_DEFAULT)
             .unwrap();
 
         let first_width = table.metrics[detail_level.as_index()]
@@ -1896,7 +1892,7 @@ mod tests {
 
         // Second call should not change the values
         table
-            .compute_partition_layouts(0, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
+            .compute_partition_layouts(0, &sizer, &graph, VERTEX_SPACING_DEFAULT)
             .unwrap();
 
         let second_width = table.metrics[detail_level.as_index()]
@@ -1914,7 +1910,7 @@ mod tests {
 
         // Third call for good measure
         table
-            .compute_partition_layouts(0, &sizer, &&graph, VERTEX_SPACING_DEFAULT)
+            .compute_partition_layouts(0, &sizer, &graph, VERTEX_SPACING_DEFAULT)
             .unwrap();
 
         let third_width = table.metrics[detail_level.as_index()]

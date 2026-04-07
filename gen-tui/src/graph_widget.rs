@@ -181,18 +181,13 @@ where
 
 impl<G, S, R> StatefulWidget for GraphWidget<'_, G, S, R>
 where
-    G: GraphBase
-        + Clone
-        + EdgeIndexable
-        + NodeIndexable
-        + NodeCount
-        + Visitable
-        + IntoNodeIdentifiers
-        + IntoEdgeReferences
-        + IntoNeighborsDirected,
+    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
-    for<'a> &'a G: IntoNodeIdentifiers + IntoEdgeReferences + IntoNeighborsDirected,
+    for<'a> &'a G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNodeIdentifiers<NodeId = G::NodeId>
+        + IntoEdgeReferences<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNeighborsDirected<NodeId = G::NodeId>,
     for<'a> &'a G::NodeId: Hash + Ord,
     for<'a> &'a G::EdgeId: Clone,
     S: NodeSizer<G>,
@@ -261,7 +256,7 @@ where
             viewport_graph,
             &mut world_buffer,
             &mut self.renderer,
-            &controller.graph,
+            controller.graph(),
             detail_level,
             node_highlights,
             edge_highlights,
