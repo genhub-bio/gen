@@ -188,6 +188,24 @@ pub enum VcfError {
     InvalidRecord(String),
 }
 
+fn resolve_parent_samples(
+    conn: &GraphConnection,
+    sample_name: &str,
+    explicit_parent_samples: &[String],
+    resolved_parent_samples: &mut HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    resolved_parent_samples
+        .entry(sample_name.to_string())
+        .or_insert_with(|| {
+            if explicit_parent_samples.is_empty() {
+                Sample::get_parent_names(conn, sample_name)
+            } else {
+                explicit_parent_samples.to_vec()
+            }
+        })
+        .clone()
+}
+
 pub fn update_with_vcf(
     context: &DbContext,
     vcf_path: &String,
@@ -257,22 +275,18 @@ pub fn update_with_vcf(
         };
 
         if let Some(fixed_sample) = fixed_sample.filter(|_| !genotype.is_empty()) {
-            let parent_samples = resolved_parent_samples
-                .entry(fixed_sample.to_string())
-                .or_insert_with(|| {
-                    if parent_samples.is_empty() {
-                        Sample::get_parent_names(conn, fixed_sample)
-                    } else {
-                        parent_samples.clone()
-                    }
-                })
-                .clone();
+            let sample_parent_samples = resolve_parent_samples(
+                conn,
+                fixed_sample,
+                &parent_samples,
+                &mut resolved_parent_samples,
+            );
             if !created_samples.contains(fixed_sample) {
                 Sample::get_or_create_child(
                     conn,
                     collection_name,
                     fixed_sample,
-                    parent_samples.clone(),
+                    sample_parent_samples.clone(),
                 )?;
                 created_samples.insert(fixed_sample);
             }
@@ -281,7 +295,7 @@ pub fn update_with_vcf(
                 collection_name,
                 fixed_sample,
                 seq_name.clone(),
-                &parent_samples,
+                &sample_parent_samples,
             )
             .expect("can't find sample bg....check this out more");
             let has_ref = genotype.iter().any(|gt| {
@@ -364,22 +378,18 @@ pub fn update_with_vcf(
         } else {
             for (sample_index, sample) in record.samples().iter().enumerate() {
                 let sample_name: &str = sample_names[sample_index].as_ref();
-                let parent_samples = resolved_parent_samples
-                    .entry(sample_name.to_string())
-                    .or_insert_with(|| {
-                        if parent_samples.is_empty() {
-                            Sample::get_parent_names(conn, sample_name)
-                        } else {
-                            parent_samples.clone()
-                        }
-                    })
-                    .clone();
+                let sample_parent_samples = resolve_parent_samples(
+                    conn,
+                    sample_name,
+                    &parent_samples,
+                    &mut resolved_parent_samples,
+                );
                 if !created_samples.contains(sample_name) {
                     Sample::get_or_create_child(
                         conn,
                         collection_name,
                         sample_name,
-                        parent_samples.clone(),
+                        sample_parent_samples.clone(),
                     )?;
                     created_samples.insert(sample_name);
                 }
@@ -388,7 +398,7 @@ pub fn update_with_vcf(
                     collection_name,
                     sample_name,
                     seq_name.clone(),
-                    &parent_samples,
+                    &sample_parent_samples,
                 )
                 .expect("can't find sample bg....check this out more");
                 let genotype = sample.get(&header, "GT");
@@ -506,7 +516,7 @@ pub fn update_with_vcf(
             let source_path_id = node_source_paths
                 .entry(vcf_entry.path.id)
                 .or_insert_with(|| {
-                    let parent_samples = resolved_parent_samples
+                    let sample_parent_samples = resolved_parent_samples
                         .get(&vcf_entry.sample_name)
                         .cloned()
                         .unwrap_or_default();
@@ -514,7 +524,7 @@ pub fn update_with_vcf(
                         conn,
                         collection_name,
                         &vcf_entry.path.name,
-                        &parent_samples,
+                        &sample_parent_samples,
                     );
 
                     if parent_block_groups.len() == 1 {
