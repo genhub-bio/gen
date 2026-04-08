@@ -1396,6 +1396,11 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(merged_node_ids, HashSet::from([node_a, node_b]));
+        let all_sequences = BlockGroup::get_all_sequences(conn, &merged_bg_id, false);
+        assert_eq!(
+            all_sequences,
+            HashSet::from_iter(vec!["AAAA".to_string(), "CCCC".to_string()])
+        );
     }
 
     #[test]
