@@ -526,8 +526,6 @@ fn viewport_visual_regression_bridge_position_with_variable_node_widths() {
         }
     }
 
-
-
     let node_sizer = VariableWidthSizer;
     let renderer = TestRenderers::debug();
 
@@ -862,8 +860,6 @@ fn viewport_even_width_node_spacing() {
             (1, 1)
         }
     }
-
-
 
     let node_sizer = OddEvenSizer;
     let renderer = TestRenderers::debug();

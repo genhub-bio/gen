@@ -6,6 +6,7 @@ build-backend = "maturin"
 name = "gen"
 version = "0.1.30"
 requires-python = ">=3.8"
+dependencies = []
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -17,6 +18,9 @@ classifiers = [
 ]
 description = "Python bindings for the Gen graph database"
 readme = "README.md"
+
+[project.optional-dependencies]
+jupyter = ["anywidget", "traitlets"]
 
 [tool.maturin]
 manifest-path = "gen-python/Cargo.toml"

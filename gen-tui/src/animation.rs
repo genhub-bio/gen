@@ -6,7 +6,7 @@ use tachyonfx::{Interpolatable, Interpolation};
 use crate::geometry::ViewportPos;
 use crate::{
     cursor::Cursor,
-    geometry::{clamp_to_bounds, WorldPos},
+    geometry::{WorldPos, clamp_to_bounds},
     graph_controller::ViewportState,
     viewport_graph::CroppedGraph,
 };
@@ -118,8 +118,8 @@ impl ViewportState {
             }
         }
 
-        // 3. Only apply three-zone cursor-following when no animation is running and cursor is visible.
-        if self.camera_anim.is_none() && cursor.is_visible() {
+        // 3. Apply three-zone cursor-following when cursor is visible.
+        if cursor.is_visible() {
             // Use the authoritative viewport bounds from state, not the parameter
             let width = self.viewport_bounds.width;
             let height = self.viewport_bounds.height;
@@ -187,9 +187,9 @@ impl ViewportState {
 
             if in_dead_zone {
                 // Cursor is in dead zone - no camera adjustment needed
-            } else if in_soft_zone {
-                // Cursor is in soft zone (outside dead, inside soft boundary)
-                // Smooth follow: calculate exact amount to move cursor to dead zone edge
+            } else if in_soft_zone && self.camera_anim.is_none() {
+                // Cursor is in soft zone and no animation is running.
+                // Smooth follow: bring cursor exactly to the dead zone edge.
 
                 // Handle X-axis
                 if cursor_vp_x < dead_zone.x as i64 {
@@ -260,6 +260,7 @@ impl ViewportState {
 
                 if needs_snap {
                     // Hard zone - immediate snap (no animation)
+                    self.camera_anim = None;
                     self.camera_current = clamped;
                     self.camera_target = clamped;
                 } else {
@@ -425,6 +426,7 @@ mod tests {
         state.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
 
         let mut cursor = Cursor::new();
+        cursor.set_visibility(true);
 
         // Viewport center in screen coords: (5, 5) == (0, 0) in world coords
         // Hard zone: 2 cells from edge = radius 3 from center, so hard zone outer is (2,2) to (8,8) in screen coords
@@ -455,6 +457,7 @@ mod tests {
         state.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
 
         let mut cursor = Cursor::new();
+        cursor.set_visibility(true);
 
         // Place cursor outside hard zone (beyond outer boundary)
         // Hard zone outer is (2,2) to (8,8) in screen coords
@@ -486,6 +489,7 @@ mod tests {
         state.viewport_bounds = Rect::new(0, 0, viewport_size.0, viewport_size.1);
 
         let mut cursor = Cursor::new();
+        cursor.set_visibility(true);
 
         // Place cursor outside of soft zone, inside hard zone: viewport (7, 5)
         cursor.set_viewport_pos(ViewportPos::new(7, 5));

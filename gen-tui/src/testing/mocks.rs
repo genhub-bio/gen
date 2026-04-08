@@ -411,7 +411,6 @@ impl NodeSizer<MockDomainGraph> for FixedNodeSizer {
     }
 }
 
-
 /// Scale-aware node sizer that changes size based on selected level of detail (scale)
 #[derive(Debug, Clone)]
 pub struct ScaleAwareNodeSizer {
@@ -471,7 +470,6 @@ impl NodeSizer<MockDomainGraph> for ScaleAwareNodeSizer {
         }
     }
 }
-
 
 /// Variable node sizer that returns different sizes based on node index
 #[derive(Debug, Clone)]
@@ -587,7 +585,6 @@ impl NodeRenderer<MockDomainGraph> for DebugNodeRenderer {
         buffer.set_string_styled(label_start, &label, self.text_style);
     }
 }
-
 
 /// Minimal renderer that just shows a single character
 #[derive(Debug, Clone)]

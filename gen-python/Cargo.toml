@@ -22,8 +22,12 @@ gen = { path = "..", version = "0.1.23" }
 gen-core = { path = "../gen-core", version = "0.1.23", features = ["python-bindings"] }
 gen-graph = { path = "../gen-graph", version = "0.1.23" }
 gen-models = { path = "../gen-models", version = "0.1.23" }
+gen-tui = { path = "../gen-tui", version = "0.1.30", default-features = false }
 log = "0.4.26"
+ratatui = { version = "0.30.0", default-features = false }
 rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
 
 [dependencies.pyo3]
 version = "0.25.1"

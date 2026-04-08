@@ -188,7 +188,8 @@ mod tests {
         let mut config = GraphConfig::default();
         config.partition.layer_count = 2;
 
-        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+        let mut controller =
+            GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 200, 50);
         controller.set_detail_level(VisualDetail::Full);
         controller

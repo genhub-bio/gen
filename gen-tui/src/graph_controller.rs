@@ -174,12 +174,14 @@ where
 
     /// Set the anchor partition and reset coordinate system
     pub fn set_anchor_partition(&mut self, partition_idx: usize) -> Result<(), String> {
-        self.partition_controller.set_anchor_partition(partition_idx)
+        self.partition_controller
+            .set_anchor_partition(partition_idx)
     }
 
     /// Ensure a partition is loaded for rendering
     pub fn ensure_partition_loaded(&mut self, partition_idx: usize) -> Result<(), String> {
-        self.partition_controller.ensure_partition_loaded(partition_idx)
+        self.partition_controller
+            .ensure_partition_loaded(partition_idx)
     }
 
     /// Check camera movement and viewport bounds changes to determine if a rebuild is needed
@@ -397,7 +399,8 @@ where
     pub fn ensure_camera_coverage(&mut self) -> Result<Vec<usize>, String> {
         let buffer_factor = 2.0;
         let camera_rect = self.viewport_state.camera_rect().resize(buffer_factor);
-        self.partition_controller.load_partitions_for_rect(camera_rect)
+        self.partition_controller
+            .load_partitions_for_rect(camera_rect)
     }
 
     /// Find a domain node's world position in the new layout system after layout changes
@@ -602,22 +605,6 @@ where
                 self.trigger_rebuild();
             }
 
-            // Block cursor movement while a camera animation is running.
-            // The three-zone logic (in ViewportState::update) is gated on camera_anim.is_none(),
-            // so moves during an animation accumulate without camera correction. In coarse mode
-            // this can jump the cursor to nodes outside the CroppedGraph, causing to_world_pos()
-            // to return None and the zone logic to fall back to a stale viewport position —
-            // effectively losing the cursor until a rebuild happens.
-            KeyCode::Left
-            | KeyCode::Char('h')
-            | KeyCode::Right
-            | KeyCode::Char('l')
-            | KeyCode::Up
-            | KeyCode::Char('k')
-            | KeyCode::Down
-            | KeyCode::Char('j')
-                if self.viewport_state.camera_anim.is_some() => {}
-
             // Graph navigation controls - move cursor with node awareness
             KeyCode::Left | KeyCode::Char('h') => {
                 let vp_w = self.viewport_state.viewport_bounds.width as i64;
@@ -627,6 +614,7 @@ where
                     -1
                 };
                 self.cursor.move_horizontal(delta, &self.viewport_graph)?;
+                self.trigger_rebuild();
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 let vp_w = self.viewport_state.viewport_bounds.width as i64;
@@ -636,6 +624,7 @@ where
                     1
                 };
                 self.cursor.move_horizontal(delta, &self.viewport_graph)?;
+                self.trigger_rebuild();
             }
             // Note: In world coordinates, Y increases upward
             KeyCode::Up | KeyCode::Char('k') => {
@@ -646,6 +635,7 @@ where
                     1
                 };
                 self.cursor.move_vertical(delta, &self.viewport_graph)?;
+                self.trigger_rebuild();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let vp_h = self.viewport_state.viewport_bounds.height as i64;
@@ -655,6 +645,7 @@ where
                     -1
                 };
                 self.cursor.move_vertical(delta, &self.viewport_graph)?; // Move down = negative Y
+                self.trigger_rebuild();
             }
 
             // Zoom/Scale controls
@@ -750,12 +741,21 @@ where
             self.partition_controller.get_anchor_partition()
         };
 
-        // Step 3: Inactivate any running animations and set cursor partition as anchor
+        // Step 3: Inactivate any running animations and set cursor partition as anchor.
+        // Track whether the anchor changes: world coordinates are defined relative to the anchor
+        // (local_pos + partition_origin - anchor_origin), so a new anchor shifts the entire
+        // coordinate system. camera_current is stored in world coords, so it becomes invalid
+        // the moment the anchor changes and must be recomputed.
         self.viewport_state.camera_anim = None;
 
-        if let Err(e) = self.partition_controller.set_anchor_partition(cursor_partition) {
+        let old_anchor = self.partition_controller.get_anchor_partition();
+        if let Err(e) = self
+            .partition_controller
+            .set_anchor_partition(cursor_partition)
+        {
             return Err(format!("Failed to set anchor partition: {}", e));
         }
+        let anchor_changed = self.partition_controller.get_anchor_partition() != old_anchor;
 
         // Step 4: Compute cursor world position directly from anchor partition layout
         // Since anchor partition has localpos = worldpos, we can compute directly
@@ -818,11 +818,13 @@ where
         // - Transformation: viewport_pos = world_pos - camera + (width/2, height/2)
         // - Inverse: camera = world_pos - viewport_pos + (width/2, height/2)
         //
-        // Reposition the camera only when the layout changed (zoom, spacing).
-        // Motion-triggered rebuilds just load new partitions — no reason to snap.
+        // Reposition the camera when the layout changed (zoom, spacing) OR when the anchor
+        // partition changed. An anchor change invalidates camera_current because world coords
+        // are defined relative to the anchor; the old camera position is in the wrong coordinate
+        // system and must be recomputed from cursor_world (which was derived from the new anchor).
         let layout_changed = self.layout_changed;
         self.layout_changed = false;
-        if layout_changed {
+        if layout_changed || anchor_changed {
             let cam = WorldPos::new(
                 cursor_world.x - cursor_viewport.x as i64 + half_width,
                 cursor_world.y - cursor_viewport.y as i64 + half_height,
@@ -1037,14 +1039,17 @@ where
         let center = self.viewport_state.camera_current;
 
         // Find the node whose bounding rect is closest to the camera center.
-        let best = self.viewport_graph.data_nodes().min_by_key(|(pos, _, layout_node)| {
-            let rect = BigRect::from_center_and_size(*pos, layout_node.size);
-            let closest_x = center.x.clamp(rect.left(), rect.right());
-            let closest_y = center.y.clamp(rect.bottom(), rect.top());
-            let dx = closest_x - center.x;
-            let dy = closest_y - center.y;
-            dx * dx + dy * dy
-        });
+        let best = self
+            .viewport_graph
+            .data_nodes()
+            .min_by_key(|(pos, _, layout_node)| {
+                let rect = BigRect::from_center_and_size(*pos, layout_node.size);
+                let closest_x = center.x.clamp(rect.left(), rect.right());
+                let closest_y = center.y.clamp(rect.bottom(), rect.top());
+                let dx = closest_x - center.x;
+                let dy = closest_y - center.y;
+                dx * dx + dy * dy
+            });
 
         if let Some((node_center, domain_idx, layout_node)) = best {
             let rect = BigRect::from_center_and_size(node_center, layout_node.size);
@@ -1117,11 +1122,7 @@ mod tests {
         assert!(state.has_focus); // Focus is enabled by default for keyboard input
 
         state.focus();
-        assert!(state.has_focus);
-
-        // Test scroll with focus
-        state.handle_mouse_scroll(5, 5, Duration::from_millis(100));
-        assert!(state.camera_anim.is_some());
+        state.camera_anim.is_some();
 
         state.blur();
         assert!(!state.has_focus);

@@ -287,14 +287,15 @@ impl Cursor {
         camera_rect: crate::geometry::BigRect<i64>,
     ) {
         // Convert world position to viewport coordinates: viewport = world - camera_origin
-        // Use i64 for calculation to avoid wrapping, then clamp to u16 range
+        // Use i64 for calculation to avoid wrapping, then clamp to viewport dimensions.
         let relative_x = world_pos.x - camera_rect.min.x;
         let relative_y = world_pos.y - camera_rect.min.y;
 
-        // We use saturating casts/clamps to prevent wrapping artifacts (e.g. negative -> huge positive)
-        let viewport_x = relative_x.clamp(0, u16::MAX as i64) as u16;
-        let viewport_y = relative_y.clamp(0, u16::MAX as i64) as u16;
+        let max_x = (camera_rect.max.x - camera_rect.min.x - 1).max(0);
+        let max_y = (camera_rect.max.y - camera_rect.min.y - 1).max(0);
 
+        let viewport_x = relative_x.clamp(0, max_x) as u16;
+        let viewport_y = relative_y.clamp(0, max_y) as u16;
         self.viewport_pos = crate::geometry::ViewportPos::new(viewport_x, viewport_y);
     }
 
@@ -589,7 +590,8 @@ mod tests {
         let node_sizer = TestNodeSizers::fixed_5x3(); // width=5, height=3
 
         let config = GraphConfig::default();
-        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+        let mut controller =
+            GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
         // Set viewport bounds
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
@@ -894,7 +896,8 @@ mod tests {
         let node_sizer = TestNodeSizers::fixed_5x3();
 
         let config = GraphConfig::default();
-        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+        let mut controller =
+            GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);
@@ -952,7 +955,8 @@ mod tests {
         config.partition.layer_count = usize::MAX;
         config.partition.node_count = usize::MAX;
 
-        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+        let mut controller =
+            GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.rebuild_viewport_graph().unwrap();
         let viewport_graph = controller.get_viewport_graph();
@@ -1003,7 +1007,8 @@ mod tests {
         let node_sizer = TestNodeSizers::fixed_5x3();
 
         let config = GraphConfig::default();
-        let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+        let mut controller =
+            GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
         controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 100, 50);
         controller.set_detail_level(VisualDetail::Full);

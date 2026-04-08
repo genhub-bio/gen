@@ -933,33 +933,58 @@ pub fn view_block_group(
 
                 let panel_text = match panel_mode {
                     PanelMode::Details => {
-                        // TODO: Node selection not yet supported in GenGraphWidget
-                        vec![
-                            Line::from(vec![
+                        use gen_tui::layout::VisualDetail;
+                        use petgraph::visit::NodeIndexable;
+
+                        let mut lines = vec![];
+
+                        if let Some(node_idx) = graph_controller.cursor.node_idx() {
+                            let graph_node = <&GenGraph as NodeIndexable>::from_index(
+                                &graph_controller.graph(),
+                                node_idx.index(),
+                            );
+                            let node_id_short =
+                                graph_node.node_id.to_string().chars().take(12).collect::<String>();
+                            let block_spec = if graph_controller.get_detail_level()
+                                == VisualDetail::Full
+                            {
+                                let (frac_x, _) = graph_controller.cursor.fractional_pos();
+                                let block_width =
+                                    graph_node.sequence_end - graph_node.sequence_start;
+                                let pos_on_node = graph_node.sequence_start
+                                    + (frac_x * block_width as f64).round() as i64;
+                                format!(
+                                    "{}:{}-{} (cursor at {})",
+                                    node_id_short,
+                                    graph_node.sequence_start,
+                                    graph_node.sequence_end,
+                                    pos_on_node
+                                )
+                            } else {
+                                format!(
+                                    "{}:{}-{}",
+                                    node_id_short,
+                                    graph_node.sequence_start,
+                                    graph_node.sequence_end
+                                )
+                            };
+                            lines.push(Line::from(vec![
                                 Span::styled(
-                                    "Camera Position: ",
+                                    "Block: ",
                                     Style::default().add_modifier(Modifier::BOLD),
                                 ),
-                                Span::raw(format!(
-                                    "({}, {})",
-                                    graph_controller.viewport_state.camera_current.x,
-                                    graph_controller.viewport_state.camera_current.y
-                                )),
-                            ]),
-                            Line::from(vec![
-                                Span::styled(
-                                    "Detail Level: ",
-                                    Style::default().add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(format!("{:?}", graph_controller.get_detail_level())),
-                            ]),
-                            Line::from(vec![Span::styled(
-                                "Node selection not yet supported",
+                                Span::raw(block_spec),
+                            ]));
+                        } else {
+                            lines.push(Line::from(Span::styled(
+                                "No node selected",
                                 Style::default()
-                                    .fg(get_theme_color("text").unwrap())
+                                    .fg(get_theme_color("text_muted").unwrap_or(Color::DarkGray))
                                     .add_modifier(Modifier::ITALIC),
-                            )]),
-                        ]
+                            )));
+                        }
+
+                        lines
                     }
                     PanelMode::Messages => {
                         if messages.is_empty() {
