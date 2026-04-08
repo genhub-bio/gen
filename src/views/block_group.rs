@@ -444,7 +444,7 @@ pub fn view_block_group(
                                             conn,
                                             workspace,
                                             collection_name,
-                                            sample_name: bg.sample_name.as_deref(),
+                                            sample_name: bg.sample_name.as_str(),
                                             block_group_name: Some(&bg.name),
                                             query_window,
                                             node_filter: &node_filter,
