@@ -4,11 +4,13 @@ use std::{
     io::{Read, Write},
 };
 
-use anyhow::Result;
 use gen_core::{HashId, Strand, is_terminal};
 use gen_graph::{GraphNode, project_path};
 use gen_models::{
-    block_group::BlockGroup, db::GraphConnection, reference_alias::ReferenceAlias, sample::Sample,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    reference_alias::{ReferenceAlias, ReferenceAliasError},
+    sample::Sample,
 };
 use interavl::IntervalTree;
 use noodles::{
@@ -16,6 +18,15 @@ use noodles::{
     bed::feature::record_buf::{OtherFields, other_fields::Value},
     core::Position,
 };
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum BedError {
+    #[error("Couldn't translate BED entry: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Error loading reference aliases: {0}")]
+    ReferenceAliasError(#[from] ReferenceAliasError),
+}
 
 pub fn translate_bed<R, W>(
     conn: &GraphConnection,
@@ -23,7 +34,7 @@ pub fn translate_bed<R, W>(
     sample: &str,
     reader: R,
     writer: &mut W,
-) -> Result<()>
+) -> Result<(), BedError>
 where
     R: Read,
     W: Write,

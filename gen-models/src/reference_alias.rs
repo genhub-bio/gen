@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
-use rusqlite::Row;
+use rusqlite::{Result, Row};
+use thiserror::Error;
 
 use crate::{db::GraphConnection, traits::*};
 
@@ -14,6 +14,12 @@ pub struct ReferenceAlias {
     pub ensembl_id: String,
     pub custom_id: Option<String>,
     pub chromosome: Option<i64>,
+}
+
+#[derive(Debug, Error)]
+pub enum ReferenceAliasError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
 }
 
 impl Query for ReferenceAlias {
@@ -45,32 +51,21 @@ impl ReferenceAlias {
         ensembl_id: &str,
         custom_id: Option<String>,
         chromosome: Option<i64>,
-    ) -> Result<()> {
+    ) -> rusqlite::Result<ReferenceAlias, ReferenceAliasError> {
         conn.execute(
             "INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id, custom_id, chromosome) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id, custom_id, chromosome],
         )?;
-        Ok(())
-    }
 
-    pub fn load_all(conn: &GraphConnection) -> Result<Vec<ReferenceAlias>> {
-        let mut stmt = conn.prepare("SELECT reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id, custom_id, chromosome FROM reference_aliases")?;
-        let reference_alias_iter = stmt.query_map([], |row| {
-            Ok(ReferenceAlias {
-                reference_name: row.get(0)?,
-                refseq_accession_id: row.get(1)?,
-                genbank_accession_id: row.get(2)?,
-                ucsc_id: row.get(3)?,
-                ensembl_id: row.get(4)?,
-                custom_id: row.get(5)?,
-                chromosome: row.get(6)?,
-            })
-        })?;
-
-        let reference_aliases = reference_alias_iter
-            .map(|reference_alias| reference_alias.unwrap())
-            .collect();
-        Ok(reference_aliases)
+        Ok(ReferenceAlias {
+            reference_name: reference_name.to_string(),
+            refseq_accession_id: refseq_accession_id.to_string(),
+            genbank_accession_id: genbank_accession_id.to_string(),
+            ucsc_id: ucsc_id.to_string(),
+            ensembl_id: ensembl_id.to_string(),
+            custom_id,
+            chromosome,
+        })
     }
 
     fn compute_aliases(reference_alias: ReferenceAlias) -> HashSet<String> {
@@ -127,9 +122,9 @@ impl ReferenceAlias {
     pub fn get_references_by_alias(
         conn: &GraphConnection,
         references: Vec<String>,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<HashMap<String, String>, ReferenceAliasError> {
         let mut references_by_alias = HashMap::new();
-        let reference_aliases = ReferenceAlias::load_all(conn)?;
+        let reference_aliases = ReferenceAlias::all(conn);
         for reference_alias in reference_aliases {
             let aliases = ReferenceAlias::compute_aliases(reference_alias);
             for reference in &references {
@@ -187,7 +182,7 @@ mod tests {
     #[test]
     fn test_prepopulated_aliases() {
         let conn = &mut get_connection(None).unwrap();
-        let reference_aliases = ReferenceAlias::load_all(conn).unwrap();
+        let reference_aliases = ReferenceAlias::all(conn);
         assert_eq!(reference_aliases.len(), 107);
         let first_e_coli_reference = reference_aliases
             .iter()
