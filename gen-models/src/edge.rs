@@ -12,6 +12,7 @@ use indexmap::IndexSet;
 use itertools::Itertools;
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     block_group_edge::AugmentedEdge,
@@ -191,6 +192,12 @@ impl Query for Edge {
     }
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum EdgeError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+}
+
 impl Edge {
     #[allow(clippy::too_many_arguments)]
     pub fn create(
@@ -201,13 +208,13 @@ impl Edge {
         target_node_id: HashId,
         target_coordinate: i64,
         target_strand: Strand,
-    ) -> Edge {
+    ) -> Result<Edge, EdgeError> {
         let hash = HashId(calculate_hash(&format!(
             "{source_node_id}:{source_coordinate}:{source_strand}:{target_node_id}:{target_coordinate}:{target_strand}"
         )));
         let query = "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
         let mut stmt = conn.prepare(query).unwrap();
-        match stmt.execute(params![
+        stmt.execute(params![
             hash,
             source_node_id,
             source_coordinate,
@@ -215,18 +222,8 @@ impl Edge {
             target_node_id,
             target_coordinate,
             target_strand
-        ]) {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code != rusqlite::ErrorCode::ConstraintViolation {
-                    panic!("something bad happened querying the database")
-                }
-            }
-            Err(_) => {
-                panic!("something bad happened querying the database")
-            }
-        }
-        Edge {
+        ])?;
+        Ok(Edge {
             id: hash,
             source_node_id,
             source_coordinate,
@@ -234,7 +231,7 @@ impl Edge {
             target_node_id,
             target_coordinate,
             target_strand,
-        }
+        })
     }
 
     pub fn bulk_create(conn: &GraphConnection, edges: &[EdgeData]) -> Vec<HashId> {
@@ -481,7 +478,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_group::{BlockGroup, PathChange},
+        block_group::{BlockGroup, BlockGroupError, PathChange},
         block_group_edge::BlockGroupEdge,
         collection::Collection,
         sequence::Sequence,
@@ -610,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bulk_create_with_existing_edge() {
+    fn test_bulk_create_with_existing_edge() -> Result<(), EdgeError> {
         let conn = &mut get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let sequence1 = Sequence::new()
@@ -627,7 +624,7 @@ mod tests {
             node1_id,
             1,
             Strand::Forward,
-        );
+        )?;
         assert_eq!(existing_edge.source_node_id, PATH_START_NODE_ID);
         assert_eq!(existing_edge.source_coordinate, -1);
         assert_eq!(existing_edge.target_node_id, node1_id);
@@ -688,12 +685,14 @@ mod tests {
         assert_eq!(edge_result3.source_coordinate, 4);
         assert_eq!(edge_result3.target_node_id, PATH_END_NODE_ID);
         assert_eq!(edge_result3.target_coordinate, -1);
+
+        Ok(())
     }
 
     #[test]
-    fn test_blocks_from_edges() {
+    fn test_blocks_from_edges() -> Result<(), BlockGroupError> {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn);
+        let (block_group_id, path) = setup_block_group(&conn)?;
 
         let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
         let blocks = Edge::blocks_from_edges(&conn, &edges);
@@ -751,10 +750,12 @@ mod tests {
         // 2 terminal node blocks (start/end)
         // 9 total
         assert_eq!(blocks.len(), 9);
+
+        Ok(())
     }
 
     #[test]
-    fn test_get_block_boundaries() {
+    fn test_get_block_boundaries() -> Result<(), EdgeError> {
         let conn = get_connection(None).unwrap();
         let template_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -777,7 +778,7 @@ mod tests {
             insert_node_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             &conn,
             insert_node_id,
@@ -786,14 +787,16 @@ mod tests {
             template_node_id,
             3,
             Strand::Forward,
-        );
+        )?;
 
         let boundaries = Edge::get_block_boundaries(Some(&vec![&edge1]), Some(&vec![&edge2]));
         assert_eq!(boundaries, vec![2, 3]);
+
+        Ok(())
     }
 
     #[test]
-    fn test_get_block_boundaries_with_two_original_sequences() {
+    fn test_get_block_boundaries_with_two_original_sequences() -> Result<(), EdgeError> {
         let conn = get_connection(None).unwrap();
         let template_sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -823,7 +826,7 @@ mod tests {
             insert_node_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             &conn,
             insert_node_id,
@@ -832,12 +835,14 @@ mod tests {
             template2_node_id,
             3,
             Strand::Forward,
-        );
+        )?;
 
         let outgoing_boundaries = Edge::get_block_boundaries(Some(&vec![&edge1]), None);
         assert_eq!(outgoing_boundaries, vec![2]);
         let incoming_boundaries = Edge::get_block_boundaries(None, Some(&vec![&edge2]));
         assert_eq!(incoming_boundaries, vec![3]);
+
+        Ok(())
     }
 
     #[test]

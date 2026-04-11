@@ -289,7 +289,7 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
     use gen_models::{
-        block_group::{BlockGroup, PathChange},
+        block_group::{BlockGroup, BlockGroupError, PathChange},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
         node::Node,
@@ -306,7 +306,7 @@ mod tests {
     };
 
     #[test]
-    fn test_simple_export() {
+    fn test_simple_export() -> Result<(), BlockGroupError> {
         // Sets up a basic graph and then exports it to a GFA file
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -354,7 +354,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -363,7 +363,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -372,7 +372,7 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge4 = Edge::create(
             conn,
             node3_id,
@@ -381,7 +381,7 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node4_id,
@@ -390,7 +390,7 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )?;
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
@@ -458,6 +458,8 @@ mod tests {
         let paths = Path::query_for_collection(conn, "test collection 2");
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].sequence(conn), "AAAATTTTGGGGCCCC");
+
+        Ok(())
     }
 
     #[test]
@@ -483,14 +485,14 @@ mod tests {
     }
 
     #[test]
-    fn test_splits_nodes() {
+    fn test_splits_nodes() -> Result<(), BlockGroupError> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
 
         track_database(conn, op_conn).unwrap();
 
-        let (bg_id, _path) = setup_block_group(conn);
+        let (bg_id, _path) = setup_block_group(conn)?;
         let all_sequences = BlockGroup::get_all_sequences(conn, &bg_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -532,6 +534,8 @@ mod tests {
                 l = sequence.length
             );
         }
+
+        Ok(())
     }
 
     #[test]
@@ -664,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequence_is_split_into_multiple_segments() {
+    fn test_sequence_is_split_into_multiple_segments() -> Result<(), BlockGroupError> {
         // Confirm that if edges are added to or from a sequence, that results in the sequence being
         // split into multiple segments in the exported GFA, and that the multiple segments are
         // re-imported as multiple sequences
@@ -674,7 +678,7 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        let (block_group_id, path) = setup_block_group(conn);
+        let (block_group_id, path) = setup_block_group(conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -789,5 +793,7 @@ mod tests {
         // The 10-length A and T sequences have now been split in two, but since the T sequences was
         // split in half, there's just one new TTTTT sequence shared by 2 nodes
         assert_eq!(node_hashes2.len(), 6);
+
+        Ok(())
     }
 }

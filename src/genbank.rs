@@ -9,7 +9,7 @@ use gen_models::{
     annotations::{
         AnnotationError, AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier,
     },
-    errors::OperationError,
+    block_group::BlockGroupError, edge::EdgeError, errors::OperationError,
 };
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
@@ -32,6 +32,10 @@ pub enum GenBankError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Regex Error: {0}")]
     Regex(#[from] RegexError),
+    #[error("Block group write error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
+    #[error("Edge write error: {0}")]
+    EdgeError(#[from] EdgeError),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

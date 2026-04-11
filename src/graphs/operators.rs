@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::Edge,
@@ -29,6 +29,8 @@ pub enum GraphOperationError {
     PathNotFound(String),
     #[error("Graph error: {0}")]
     GraphError(#[from] GraphError),
+    #[error("Error deriving subgraph: {0}")]
+    DeriveSubgraphError(#[from] BlockGroupError),
 }
 
 pub fn get_path(
@@ -153,7 +155,7 @@ pub fn derive_chunks(
             end_node_coordinate,
             &child_block_group_id,
             create_block_group,
-        );
+        )?;
 
         let child_block_group_edges =
             BlockGroupEdge::edges_for_block_group(conn, &child_block_group_id);
@@ -425,8 +427,8 @@ mod tests {
 
     use gen_core::Strand;
     use gen_models::{
-        block_group_edge::BlockGroupEdgeData, collection::Collection, edge::Edge, node::Node,
-        sequence::Sequence,
+        block_group::BlockGroupError, block_group_edge::BlockGroupEdgeData, collection::Collection,
+        edge::Edge, node::Node, sequence::Sequence,
     };
 
     use super::*;
@@ -438,7 +440,7 @@ mod tests {
     };
 
     #[test]
-    fn test_derive_chunks_one_insertion() {
+    fn test_derive_chunks_one_insertion() -> Result<(), BlockGroupError> {
         /*
         AAAAAAAAAA -> TTTTTTTTTT -> CCCCCCCCCC -> GGGGGGGGGG
                           \-> AAAAAAAA ->/
@@ -452,7 +454,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         Collection::create(conn, "test");
-        let (block_group1_id, original_path) = setup_block_group(conn);
+        let (block_group1_id, original_path) = setup_block_group(conn)?;
 
         let intervaltree = original_path.intervaltree(conn);
         let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
@@ -475,7 +477,7 @@ mod tests {
             insert_node_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge_out_of_insert = Edge::create(
             conn,
             insert_node_id,
@@ -484,7 +486,7 @@ mod tests {
             insert_end_node_id,
             4,
             Strand::Forward,
-        );
+        )?;
         let ref_heal_1 = Edge::create(
             conn,
             insert_start_node_id,
@@ -493,7 +495,7 @@ mod tests {
             insert_start_node_id,
             6,
             Strand::Forward,
-        );
+        )?;
         let ref_heal_2 = Edge::create(
             conn,
             insert_end_node_id,
@@ -502,7 +504,7 @@ mod tests {
             insert_end_node_id,
             4,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [
             edge_into_insert.id,
@@ -562,6 +564,8 @@ mod tests {
 
         let new_path = BlockGroup::get_current_path(conn, &block_group2.id);
         assert_eq!(new_path.sequence(conn), "TAAAAAAAAC");
+
+        Ok(())
     }
 
     #[test]

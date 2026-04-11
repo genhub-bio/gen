@@ -552,7 +552,7 @@ where
                     wt_node_id,
                     0,
                     Strand::Forward,
-                );
+                )?;
                 let edge_out_of = Edge::create(
                     conn,
                     wt_node_id,
@@ -561,7 +561,7 @@ where
                     PATH_END_NODE_ID,
                     0,
                     Strand::Forward,
-                );
+                )?;
                 BlockGroupEdge::bulk_create(
                     conn,
                     &[

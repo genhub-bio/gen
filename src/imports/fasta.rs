@@ -108,7 +108,7 @@ pub fn import_fasta(
             node_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge_out_of = Edge::create(
             conn,
             node_id,
@@ -117,7 +117,7 @@ pub fn import_fasta(
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )?;
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {

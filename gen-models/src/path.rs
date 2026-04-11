@@ -866,6 +866,7 @@ mod tests {
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
+        edge::EdgeError, test_helpers::get_connection,
         test_helpers::get_connection,
     };
 
@@ -899,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn test_path_delete() {
+    fn test_path_delete() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -918,7 +919,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -927,7 +928,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids1 = vec![edge1.id, edge2.id];
         let block_group_edges1 = edge_ids1
@@ -957,7 +958,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge4 = Edge::create(
             conn,
             node2_id,
@@ -966,7 +967,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids2 = vec![edge3.id, edge4.id];
         let block_group_edges2 = edge_ids2
@@ -990,10 +991,12 @@ mod tests {
         let paths_after = Path::query_for_collection(conn, "test collection");
         assert_eq!(paths_after.len(), 1);
         assert_eq!(paths_after[0], path2);
+
+        Ok(())
     }
 
     #[test]
-    fn test_gets_sequence() {
+    fn test_gets_sequence() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -1010,7 +1013,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -1024,7 +1027,7 @@ mod tests {
             node2_id,
             1,
             Strand::Forward,
-        );
+        )?;
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
@@ -1038,7 +1041,7 @@ mod tests {
             node3_id,
             1,
             Strand::Forward,
-        );
+        )?;
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
@@ -1052,7 +1055,7 @@ mod tests {
             node4_id,
             1,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node4_id,
@@ -1061,7 +1064,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id, edge3.id, edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -1077,10 +1080,12 @@ mod tests {
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids);
         assert_eq!(path.sequence(conn), "ATCGATCGAAAAAAACCCCCCCGGGGGGG");
+
+        Ok(())
     }
 
     #[test]
-    fn test_gets_sequence_with_rc() {
+    fn test_gets_sequence_with_rc() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -1097,7 +1102,7 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Reverse,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -1111,7 +1116,7 @@ mod tests {
             node1_id,
             0,
             Strand::Reverse,
-        );
+        )?;
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
@@ -1125,7 +1130,7 @@ mod tests {
             node2_id,
             0,
             Strand::Reverse,
-        );
+        )?;
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
@@ -1139,7 +1144,7 @@ mod tests {
             node3_id,
             0,
             Strand::Reverse,
-        );
+        )?;
         let edge1 = Edge::create(
             conn,
             PATH_START_NODE_ID,
@@ -1148,7 +1153,7 @@ mod tests {
             node4_id,
             0,
             Strand::Reverse,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id, edge3.id, edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -1164,6 +1169,8 @@ mod tests {
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids);
         assert_eq!(path.sequence(conn), "CCCCCCCGGGGGGGTTTTTTTCGATCGAT");
+
+        Ok(())
     }
 
     #[test]
@@ -1174,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn test_intervaltree() {
+    fn test_intervaltree() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -1191,7 +1198,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -1205,7 +1212,7 @@ mod tests {
             node2_id,
             1,
             Strand::Forward,
-        );
+        )?;
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
@@ -1219,7 +1226,7 @@ mod tests {
             node3_id,
             1,
             Strand::Forward,
-        );
+        )?;
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
@@ -1233,7 +1240,7 @@ mod tests {
             node4_id,
             1,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node4_id,
@@ -1242,7 +1249,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id, edge3.id, edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -1287,10 +1294,12 @@ mod tests {
         assert_eq!(block4.start, 22);
         assert_eq!(block4.end, 29);
         assert_eq!(block4.strand, Strand::Forward);
+
+        Ok(())
     }
 
     #[test]
-    fn test_gets_sequence_with_edges_into_node_middles() {
+    fn test_gets_sequence_with_edges_into_node_middles() -> Result<(), EdgeError> {
         // Tests that if the edge from the virtual start node goes into the middle of the first
         // node, and the edge to the virtual end node comes from the middle of the last node, the
         // sequence is correctly generated
@@ -1310,7 +1319,7 @@ mod tests {
             node1_id,
             4,
             Strand::Forward,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -1324,7 +1333,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
@@ -1338,7 +1347,7 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
@@ -1352,7 +1361,7 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node4_id,
@@ -1361,7 +1370,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id, edge3.id, edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -1408,10 +1417,12 @@ mod tests {
         assert_eq!(block4.strand, Strand::Forward);
 
         assert_eq!(path.sequence(conn), "ATCGAAAAAAAACCCCCCCCGGGG");
+
+        Ok(())
     }
 
     #[test]
-    fn test_full_block_mapping() {
+    fn test_full_block_mapping() -> Result<(), EdgeError> {
         /*
             |--------| path: 1 sequence, (0, 8)
             |ATCGATCG|
@@ -1435,7 +1446,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1444,7 +1455,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1468,10 +1479,12 @@ mod tests {
         assert_eq!(mapping.source_range.end, 8);
         assert_eq!(mapping.target_range.start, 0);
         assert_eq!(mapping.target_range.end, 8);
+
+        Ok(())
     }
 
     #[test]
-    fn test_no_block_mapping_overlap() {
+    fn test_no_block_mapping_overlap() -> Result<(), EdgeError> {
         /*
             |--------| -> path 1 (one node)
             |ATCGATCG| -> sequence
@@ -1497,7 +1510,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1506,7 +1519,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1534,7 +1547,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge4 = Edge::create(
             conn,
             node2_id,
@@ -1543,7 +1556,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge3.id, edge4.id];
         let block_group_edges = edge_ids
@@ -1561,10 +1574,12 @@ mod tests {
 
         let mappings = path1.find_block_mappings(conn, &path2);
         assert_eq!(mappings.len(), 0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_partial_overlap_block_mapping() {
+    fn test_partial_overlap_block_mapping() -> Result<(), EdgeError> {
         /*
             path 1 (one node/sequence):
             |--------|
@@ -1594,7 +1609,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1603,7 +1618,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1632,7 +1647,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge4 = Edge::create(
             conn,
             node1_id,
@@ -1641,7 +1656,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -1650,7 +1665,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge3.id, edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -1676,10 +1691,12 @@ mod tests {
         assert_eq!(mapping.source_range.end, 4);
         assert_eq!(mapping.target_range.start, 0);
         assert_eq!(mapping.target_range.end, 4);
+
+        Ok(())
     }
 
     #[test]
-    fn test_insertion_block_mapping() {
+    fn test_insertion_block_mapping() -> Result<(), EdgeError> {
         /*
             path 1 (one node/sequence):
             |ATCGATCG| -> sequence (0, 8)
@@ -1709,7 +1726,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1718,7 +1735,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1747,7 +1764,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -1756,7 +1773,7 @@ mod tests {
             node1_id,
             4,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -1793,10 +1810,12 @@ mod tests {
         assert_eq!(mapping2.source_range.end, 8);
         assert_eq!(mapping2.target_range.start, 12);
         assert_eq!(mapping2.target_range.end, 16);
+
+        Ok(())
     }
 
     #[test]
-    fn test_replacement_block_mapping() {
+    fn test_replacement_block_mapping() -> Result<(), EdgeError> {
         /*
             path 1 (one node/sequence):
             |ATCGATCG| -> sequence (0, 8)
@@ -1826,7 +1845,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1835,7 +1854,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1864,7 +1883,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -1873,7 +1892,7 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -1910,10 +1929,12 @@ mod tests {
         assert_eq!(mapping2.source_range.end, 8);
         assert_eq!(mapping2.target_range.start, 10);
         assert_eq!(mapping2.target_range.end, 12);
+
+        Ok(())
     }
 
     #[test]
-    fn test_deletion_block_mapping() {
+    fn test_deletion_block_mapping() -> Result<(), EdgeError> {
         /*
             path 1 (one node/sequence):
             |ATCGATCG| -> sequence (0, 8)
@@ -1942,7 +1963,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1951,7 +1972,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1975,7 +1996,7 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id];
         let block_group_edges = edge_ids
@@ -2012,10 +2033,12 @@ mod tests {
         assert_eq!(mapping2.source_range.end, 8);
         assert_eq!(mapping2.target_range.start, 2);
         assert_eq!(mapping2.target_range.end, 4);
+
+        Ok(())
     }
 
     #[test]
-    fn test_two_block_insertion_mapping() {
+    fn test_two_block_insertion_mapping() -> Result<(), EdgeError> {
         /*
             path 1 (two nodes/sequences):
             |ATCGATCG| -> sequence (0, 8)
@@ -2051,7 +2074,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2060,7 +2083,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -2069,7 +2092,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -2098,7 +2121,7 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -2107,7 +2130,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -2144,10 +2167,12 @@ mod tests {
         assert_eq!(mapping2.source_range.end, 16);
         assert_eq!(mapping2.target_range.start, 16);
         assert_eq!(mapping2.target_range.end, 24);
+
+        Ok(())
     }
 
     #[test]
-    fn test_two_block_replacement_mapping() {
+    fn test_two_block_replacement_mapping() -> Result<(), EdgeError> {
         /*
             path 1 (two nodes/sequences):
             |ATCGATCG| -> sequence (0, 8)
@@ -2183,7 +2208,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2192,7 +2217,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -2201,7 +2226,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -2230,7 +2255,7 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -2239,7 +2264,7 @@ mod tests {
             node2_id,
             4,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -2276,10 +2301,12 @@ mod tests {
         assert_eq!(mapping2.source_range.end, 16);
         assert_eq!(mapping2.target_range.start, 12);
         assert_eq!(mapping2.target_range.end, 16);
+
+        Ok(())
     }
 
     #[test]
-    fn test_two_block_deletion_mapping() {
+    fn test_two_block_deletion_mapping() -> Result<(), EdgeError> {
         /*
             path 1 (two nodes/sequences):
             |ATCGATCG| -> sequence (0, 8)
@@ -2314,7 +2341,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2323,7 +2350,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -2332,7 +2359,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -2356,7 +2383,7 @@ mod tests {
             node2_id,
             4,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id];
         let block_group_edges = edge_ids
@@ -2393,10 +2420,12 @@ mod tests {
         assert_eq!(mapping2.source_range.end, 16);
         assert_eq!(mapping2.target_range.start, 4);
         assert_eq!(mapping2.target_range.end, 8);
+
+        Ok(())
     }
 
     #[test]
-    fn test_annotation_propagation_full_overlap() {
+    fn test_annotation_propagation_full_overlap() -> Result<(), EdgeError> {
         /*
             |--------| path: 1 sequence, (0, 8)
             |ATCGATCG|
@@ -2420,7 +2449,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2429,7 +2458,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -2456,10 +2485,12 @@ mod tests {
         assert_eq!(result_annotation.name, "foo");
         assert_eq!(result_annotation.start, 0);
         assert_eq!(result_annotation.end, 8);
+
+        Ok(())
     }
 
     #[test]
-    fn test_propagate_annotations_no_overlap() {
+    fn test_propagate_annotations_no_overlap() -> Result<(), EdgeError> {
         /*
             |--------| -> path 1 (one node)
             |ATCGATCG| -> sequence
@@ -2485,7 +2516,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2494,7 +2525,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -2523,7 +2554,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge4 = Edge::create(
             conn,
             node2_id,
@@ -2532,7 +2563,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge3.id, edge4.id];
         let block_group_edges = edge_ids
@@ -2555,10 +2586,12 @@ mod tests {
         };
         let annotations = path1.propagate_annotations(conn, &path2, vec![annotation]);
         assert_eq!(annotations.len(), 0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_propagate_annotations_partial_overlap() {
+    fn test_propagate_annotations_partial_overlap() -> Result<(), EdgeError> {
         /*
             path 1 (one node/sequence):
             |--------|
@@ -2588,7 +2621,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2597,7 +2630,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -2626,7 +2659,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge4 = Edge::create(
             conn,
             node1_id,
@@ -2635,7 +2668,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -2644,7 +2677,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge3.id, edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -2673,10 +2706,12 @@ mod tests {
         assert_eq!(result_annotation.name, "foo");
         assert_eq!(result_annotation.start, 0);
         assert_eq!(result_annotation.end, 4);
+
+        Ok(())
     }
 
     #[test]
-    fn test_propagate_annotations_with_insertion() {
+    fn test_propagate_annotations_with_insertion() -> Result<(), EdgeError> {
         /*
             path 1 (one node/sequence):
             |ATCGATCG| -> sequence (0, 8)
@@ -2706,7 +2741,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2715,7 +2750,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -2744,7 +2779,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -2753,7 +2788,7 @@ mod tests {
             node1_id,
             4,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -2791,10 +2826,12 @@ mod tests {
         assert_eq!(result_annotation.name, "foo");
         assert_eq!(result_annotation.start, 0);
         assert_eq!(result_annotation.end, 16);
+
+        Ok(())
     }
 
     #[test]
-    fn test_propagate_annotations_with_replacement() {
+    fn test_propagate_annotations_with_replacement() -> Result<(), EdgeError> {
         /*
             path 1 (one node/sequence):
             |ATCGATCG| -> sequence (0, 8)
@@ -2824,7 +2861,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2833,7 +2870,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -2862,7 +2899,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -2871,7 +2908,7 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -2908,10 +2945,12 @@ mod tests {
         assert_eq!(result_annotation.name, "foo");
         assert_eq!(result_annotation.start, 0);
         assert_eq!(result_annotation.end, 2);
+
+        Ok(())
     }
 
     #[test]
-    fn test_propagate_annotations_with_insertion_across_two_blocks() {
+    fn test_propagate_annotations_with_insertion_across_two_blocks() -> Result<(), EdgeError> {
         /*
             path 1 (two nodes/sequences):
             |ATCGATCG| -> sequence (0, 8)
@@ -2947,7 +2986,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -2956,7 +2995,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -2965,7 +3004,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -2994,7 +3033,7 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -3003,7 +3042,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -3041,10 +3080,12 @@ mod tests {
         assert_eq!(result_annotation.name, "foo");
         assert_eq!(result_annotation.start, 0);
         assert_eq!(result_annotation.end, 24);
+
+        Ok(())
     }
 
     #[test]
-    fn test_propagate_annotations_with_deletion_across_two_blocks() {
+    fn test_propagate_annotations_with_deletion_across_two_blocks() -> Result<(), EdgeError> {
         /*
             path 1 (two nodes/sequences):
             |ATCGATCG| -> sequence (0, 8)
@@ -3079,7 +3120,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -3088,7 +3129,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -3097,7 +3138,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -3121,7 +3162,7 @@ mod tests {
             node2_id,
             4,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id];
         let block_group_edges = edge_ids
@@ -3158,10 +3199,12 @@ mod tests {
         assert_eq!(result_annotation.name, "foo");
         assert_eq!(result_annotation.start, 0);
         assert_eq!(result_annotation.end, 4);
+
+        Ok(())
     }
 
     #[test]
-    fn test_new_path_with() {
+    fn test_new_path_with() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -3178,7 +3221,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -3192,7 +3235,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -3201,7 +3244,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -3231,7 +3274,7 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -3240,7 +3283,7 @@ mod tests {
             node2_id,
             3,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge4.id, edge5.id];
         let block_group_edges = edge_ids
@@ -3265,7 +3308,7 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge7 = Edge::create(
             conn,
             node3_id,
@@ -3274,7 +3317,7 @@ mod tests {
             node1_id,
             7,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge6.id, edge7.id];
         let block_group_edges = edge_ids
@@ -3290,10 +3333,12 @@ mod tests {
 
         let path3 = path1.new_path_with(conn, 4, 7, &edge6, &edge7);
         assert_eq!(path3.sequence(conn), "ATCGCCCCCCCCGAAAAAAAA");
+
+        Ok(())
     }
 
     #[test]
-    fn test_new_path_with_deletion() {
+    fn test_new_path_with_deletion() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -3310,7 +3355,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -3324,7 +3369,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -3333,7 +3378,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -3358,7 +3403,7 @@ mod tests {
             node2_id,
             3,
             Strand::Forward,
-        );
+        )?;
 
         let block_group_edge = BlockGroupEdgeData {
             block_group_id: block_group.id,
@@ -3371,10 +3416,12 @@ mod tests {
 
         let path2 = path1.new_path_with_deletion(conn, 4, 11).unwrap();
         assert_eq!(path2.sequence(conn), "ATCGAAAAA");
+
+        Ok(())
     }
 
     #[test]
-    fn test_duplicate_edge_warning() {
+    fn test_duplicate_edge_warning() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -3391,7 +3438,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -3400,7 +3447,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -3416,6 +3463,8 @@ mod tests {
 
         // Should print a warning that there are duplicate edges, but continue
         let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids);
+
+        Ok(())
     }
 
     #[test]
@@ -3437,7 +3486,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -3446,7 +3496,8 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id];
         let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids);
@@ -3472,7 +3523,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -3486,7 +3538,8 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let block_group_edges = vec![
             BlockGroupEdgeData {
@@ -3529,7 +3582,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -3543,7 +3597,8 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Reverse,
-        );
+        )
+        .unwrap();
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -3581,7 +3636,8 @@ mod tests {
             node1_id,
             4,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -3596,7 +3652,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = vec![edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -3614,7 +3671,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_blocks_for_range() {
+    fn test_node_blocks_for_range() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -3631,7 +3688,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -3645,7 +3702,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -3654,7 +3711,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = vec![edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -3747,10 +3804,12 @@ mod tests {
             strand: Strand::Forward,
         }];
         assert_eq!(node_blocks6, expected_node_blocks6);
+
+        Ok(())
     }
 
     #[test]
-    fn test_node_blocks_for_range_with_node_parts() {
+    fn test_node_blocks_for_range_with_node_parts() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection");
         let block_group = create_test_block_group(conn);
@@ -3767,7 +3826,7 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
@@ -3781,7 +3840,7 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -3790,7 +3849,7 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        );
+        )?;
         let edge4 = Edge::create(
             conn,
             node1_id,
@@ -3799,7 +3858,7 @@ mod tests {
             PATH_END_NODE_ID,
             -1,
             Strand::Forward,
-        );
+        )?;
 
         let edge_ids = &[edge1.id, edge2.id, edge3.id, edge4.id];
         let block_group_edges = edge_ids
@@ -3880,5 +3939,7 @@ mod tests {
             },
         ];
         assert_eq!(node_blocks3, expected_node_blocks3);
+
+        Ok(())
     }
 }

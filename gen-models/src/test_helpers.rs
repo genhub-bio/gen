@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use tempfile::tempdir;
 
 use crate::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::{DbContext, GraphConnection, OperationsConnection},
@@ -86,7 +86,7 @@ pub fn setup_gen() -> DbContext {
     DbContext::new(workspace, graph_conn, operation_conn)
 }
 
-pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
+pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), BlockGroupError> {
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
@@ -118,7 +118,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         a_node_id,
         0,
         Strand::Forward,
-    );
+    )?;
     let edge1 = Edge::create(
         conn,
         a_node_id,
@@ -127,7 +127,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         t_node_id,
         0,
         Strand::Forward,
-    );
+    )?;
     let edge2 = Edge::create(
         conn,
         t_node_id,
@@ -136,7 +136,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         c_node_id,
         0,
         Strand::Forward,
-    );
+    )?;
     let edge3 = Edge::create(
         conn,
         c_node_id,
@@ -145,7 +145,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         g_node_id,
         0,
         Strand::Forward,
-    );
+    )?;
     let edge4 = Edge::create(
         conn,
         g_node_id,
@@ -154,7 +154,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         PATH_END_NODE_ID,
         0,
         Strand::Forward,
-    );
+    )?;
 
     let block_group_edges = vec![
         BlockGroupEdgeData {
@@ -196,7 +196,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         &block_group.id,
         &[edge0.id, edge1.id, edge2.id, edge3.id, edge4.id],
     );
-    (block_group.id, path)
+    Ok((block_group.id, path))
 }
 
 pub fn interval_tree_verify<K, V>(tree: &IntervalTree<K, V>, i: K, expected: &[V])

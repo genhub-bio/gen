@@ -1,6 +1,10 @@
 use std::io::Error as IOError;
 
-use gen_models::errors::{OperationError, QueryError};
+use gen_models::{
+    block_group::BlockGroupError,
+    edge::EdgeError,
+    errors::{OperationError, QueryError},
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -11,4 +15,8 @@ pub enum FastaError {
     IOError(#[from] IOError),
     #[error("SQL query Error: {0}")]
     SQLQueryError(#[from] QueryError),
+    #[error("Block group write error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
+    #[error("Edge write error: {0}")]
+    EdgeError(#[from] EdgeError),
 }
