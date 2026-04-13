@@ -41,7 +41,7 @@ pub struct GraphConfig {
 /// graph loading and layout computation, then used by widgets during rendering.
 pub struct GraphController<G, S>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
 {
     /// Viewport state managing camera, animations, and viewport bounds
@@ -86,7 +86,7 @@ pub enum HighlightKind<N> {
 
 impl<G, S> GraphController<G, S>
 where
-    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
+    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
     for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>

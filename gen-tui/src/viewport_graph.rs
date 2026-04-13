@@ -59,7 +59,6 @@ impl CroppedGraph {
     ) -> Self
     where
         G: petgraph::visit::GraphBase
-            + Clone
             + petgraph::visit::EdgeIndexable
             + petgraph::visit::NodeIndexable
             + petgraph::visit::NodeCount

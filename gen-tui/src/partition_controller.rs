@@ -45,7 +45,7 @@ impl Default for ControllerConfig {
 /// - Handles scale (level of detail) changes and layout computation
 pub struct PartitionController<G, S>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
 {
     pub graph: G,
@@ -63,7 +63,7 @@ where
 
 impl<G, S> PartitionController<G, S>
 where
-    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
+    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
     for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>

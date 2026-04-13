@@ -61,7 +61,7 @@ pub type DefaultGraphWidget<'a, G, S> = GraphWidget<'a, G, S, DefaultNodeRendere
 /// A reusable Ratatui widget that renders a "world-space" viewport into a terminal area.
 pub struct GraphWidget<'a, G, S, R>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
     R: NodeRenderer<G>,
 {
@@ -91,7 +91,7 @@ where
 // Implementation for default renderer case
 impl<'a, G, S> GraphWidget<'a, G, S, DefaultNodeRenderer>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
 {
     /// Create a new Graph widget with default renderer.
@@ -111,7 +111,7 @@ where
 // Implementation for any renderer type
 impl<'a, G, S, R> GraphWidget<'a, G, S, R>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
     R: NodeRenderer<G>,
 {
@@ -171,7 +171,7 @@ where
 
 impl<G, S> Default for GraphWidget<'_, G, S, DefaultNodeRenderer>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
 {
     fn default() -> Self {
@@ -181,7 +181,7 @@ where
 
 impl<G, S, R> StatefulWidget for GraphWidget<'_, G, S, R>
 where
-    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
+    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
     for<'a> &'a G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>

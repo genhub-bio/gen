@@ -192,7 +192,7 @@ where
 ///     - If the maximum partition size is reached, forcibly close out the current subgraph.
 impl<G> PartitionTable<G>
 where
-    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
+    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
     for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>

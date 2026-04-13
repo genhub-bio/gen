@@ -544,7 +544,7 @@ pub fn plot_graph_to_string<G, S, R>(
     size: Option<(i64, i64)>,
 ) -> Result<(String, u16, u16), String>
 where
-    G: GraphBase + Clone + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
+    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
     for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
