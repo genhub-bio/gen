@@ -252,6 +252,7 @@ where
         let detail_level = controller.get_detail_level();
         let node_highlights = controller.get_node_highlights();
         let edge_highlights = controller.get_edge_highlights();
+        let cell_highlights = controller.get_cell_highlights();
         plot_viewport_graph_with_highlights(
             viewport_graph,
             &mut world_buffer,
@@ -260,6 +261,7 @@ where
             detail_level,
             node_highlights,
             edge_highlights,
+            cell_highlights,
             &controller.theme,
         );
 

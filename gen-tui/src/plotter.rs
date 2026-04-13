@@ -256,6 +256,7 @@ pub fn plot_viewport_graph<R, G>(
         detail_level,
         &[],
         &[],
+        &[],
         theme,
     )
 }
@@ -276,7 +277,7 @@ pub fn plot_viewport_graph<R, G>(
 /// - `node_highlights`: List of node positions to highlight with their styles
 /// - `edge_highlights`: List of edge segments to highlight with their styles
 /// - `theme`: Theme colors for rendering
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn plot_viewport_graph_with_highlights<R, G>(
     viewport_graph: &CroppedGraph,
     buffer: &mut WorldBuffer<'_>,
@@ -285,6 +286,12 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     detail_level: VisualDetail,
     node_highlights: &[(WorldPos, PathStyle)],
     edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
+    cell_highlights: &[(
+        petgraph::prelude::NodeIndex,
+        (i64, i64),
+        (i64, i64),
+        PathStyle,
+    )],
     theme: &Theme,
 ) where
     R: NodeRenderer<G>,
@@ -304,13 +311,13 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             let edge_color = match style.color {
                 Color::Reset => {
                     // Brighten the edge color instead of tinting
-                    let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.2);
+                    let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.4);
                     brightened
                 }
                 _ => {
                     // Compute tinted colors as they would be applied to nodes
                     let (_, tinted_bg) =
-                        tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
+                        tint_colors(theme.node_fg, theme.node_bg, style.color, 0.8);
                     // Use the tinted bg as the edge fg color
                     tinted_bg
                 }
@@ -347,6 +354,42 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 if let Some(path_style) = highlighted_style {
                     for y in world_rect.min.y..=world_rect.max.y {
                         for x in world_rect.min.x..=world_rect.max.x {
+                            let pos = WorldPos::new(x, y);
+                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
+                                let fg = style.fg.unwrap_or(Color::Reset);
+                                let bg = style.bg.unwrap_or(Color::Reset);
+                                let (new_fg, new_bg) = if ch == NODE_GLYPH {
+                                    let new_fg = match path_style.color {
+                                        Color::Reset => brighten_colors(fg, bg, 0.2).0,
+                                        color => color,
+                                    };
+                                    (new_fg, bg)
+                                } else {
+                                    match path_style.color {
+                                        Color::Reset => brighten_colors(fg, bg, 0.2),
+                                        _ => tint_colors(fg, bg, path_style.color, 0.4),
+                                    }
+                                };
+                                let new_style = style.fg(new_fg).bg(new_bg);
+                                buffer.set_char_styled(pos, ch, new_style);
+                            }
+                        }
+                    }
+                }
+
+                // Sub-rect highlight pass: tint only the matched column/row range.
+                // tl/br are node-local (col, row) offsets from world_rect.min, both inclusive.
+                if let Some((_, tl, br, path_style)) = cell_highlights
+                    .iter()
+                    .filter(|(idx, ..)| idx == domain_idx)
+                    .next_back()
+                {
+                    let x0 = (world_rect.min.x + tl.0).max(world_rect.min.x);
+                    let x1 = (world_rect.min.x + br.0).min(world_rect.max.x);
+                    let y0 = (world_rect.min.y + tl.1).max(world_rect.min.y);
+                    let y1 = (world_rect.min.y + br.1).min(world_rect.max.y);
+                    for y in y0..=y1 {
+                        for x in x0..=x1 {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let fg = style.fg.unwrap_or(Color::Reset);

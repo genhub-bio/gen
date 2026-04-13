@@ -8,12 +8,13 @@ use gen_tui::{
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
-    plotter::{NodeRenderer, NodeSizer},
+    plotter::{NodeRenderer, NodeSizer, PathStyle},
     theme::Theme,
 };
+use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::style::{Color, Style};
 
-use crate::config::get_theme_color;
+use crate::{config::get_theme_color, graphs::graph_search::GraphLocus};
 
 /// Labels for special start/end nodes
 pub mod label {
@@ -218,6 +219,82 @@ pub fn create_gen_graph_controller(
     controller.set_detail_level(VisualDetail::Truncated);
     controller.hide_cursor();
     controller
+}
+
+/// Center the graph controller on a specific graph node at a given fractional offset.
+///
+/// The caller must supply the full `GraphNode` key (node_id + sequence_start +
+/// sequence_end), because multiple graph nodes can share the same underlying
+/// `node_id` when they represent different sub-ranges of the same sequence.
+/// The offset `(0.5, 0.5)` centers on the middle of the node.
+///
+/// # Arguments
+/// * `controller` — the graph controller to position
+/// * `node`       — the exact `GraphNode` key to center on
+/// * `offset`     — fractional `(x, y)` position within the node (0.0–1.0)
+pub fn center_on_node_offset(
+    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+    node: GraphNode,
+    offset: (f64, f64),
+) {
+    // Find which partition owns this node.
+    let (partition_idx, _) = match controller
+        .partition_controller
+        .partition_table
+        .find_node(&node)
+    {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    // Ensure the partition is loaded and set it as the anchor.
+    let _ = controller.ensure_partition_loaded(partition_idx);
+    let _ = controller.set_anchor_partition(partition_idx);
+
+    // Resolve the domain NodeIndex from the node key.
+    let domain_idx = NodeIndex::new(NodeIndexable::to_index(controller.graph(), node));
+
+    // Look up the node's world position (available once the partition is loaded).
+    let world_pos = match controller.find_domain_node_world_position(domain_idx) {
+        Some(w) => w,
+        None => return,
+    };
+
+    // Snap the camera directly to the node's world position.
+    controller.viewport_state.camera_current = world_pos;
+    controller.viewport_state.camera_target = world_pos;
+    controller.viewport_state.camera_anim = None;
+
+    // Place the cursor on the node at the requested fractional offset.
+    controller.cursor.set_node(domain_idx, offset);
+
+    controller.trigger_rebuild();
+}
+
+/// Highlight only the matched bytes of a `GraphLocus`, using sub-rect tinting.
+///
+/// - Start node: tinted from `start_offset` to its right edge.
+/// - Middle nodes: fully tinted.
+/// - End node: tinted from its left edge to `end_offset` (exclusive).
+pub fn highlight_match_range(
+    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+    m: &GraphLocus,
+    style: PathStyle,
+) {
+    let path_len = m.nodes.len();
+    for (i, &node) in m.nodes.iter().enumerate() {
+        let col_start = if i == 0 { m.start_offset as i64 } else { 0 };
+        // br is inclusive, so end_offset (exclusive) - 1; saturate to avoid underflow on empty match
+        let col_end = if i == path_len - 1 {
+            m.end_offset.saturating_sub(1) as i64
+        } else {
+            node.length() - 1
+        };
+        controller.set_cell_highlight(node, (col_start, 0), (col_end, 0), style);
+    }
+    for (&src, &dst) in m.nodes.iter().zip(m.nodes.iter().skip(1)) {
+        controller.set_edge_highlight((src, dst), style);
+    }
 }
 
 #[cfg(test)]
