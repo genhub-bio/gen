@@ -146,6 +146,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.69.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1137,6 +1146,7 @@ version = "0.1.30"
 dependencies = [
  "anyhow",
  "base64",
+ "bincode",
  "capnp",
  "clap",
  "convert_case 0.8.0",
@@ -1283,6 +1293,7 @@ dependencies = [
 name = "gen-python"
 version = "0.1.30"
 dependencies = [
+ "bincode",
  "flate2",
  "gen",
  "gen-core",
@@ -1296,6 +1307,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

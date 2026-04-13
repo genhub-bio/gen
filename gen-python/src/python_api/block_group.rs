@@ -1,6 +1,10 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
-use r#gen::{core::HashId, get_connection};
+use r#gen::{
+    core::HashId,
+    get_connection,
+    graphs::graph_search::{GenGraphMatcher, SeedIndex},
+};
 use gen_models::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -127,6 +131,68 @@ impl PyBlockGroup {
         // plot() already calls IPython.display.display() internally; just
         // delegate and ignore errors (e.g. db_path unset, anywidget missing).
         let _ = slf.call_method0("plot");
+        Ok(())
+    }
+
+    /// Build a junction-aware k-mer seed index for this block group.
+    ///
+    /// Saves the index to `.gen/search_index/{id}.bin` so that subsequent
+    /// calls to `Repository.search()` load it automatically.
+    ///
+    /// Raises ``RuntimeError`` if this block group was not created via a
+    /// ``Repository`` (i.e. ``db_path`` is unset).
+    ///
+    /// Parameters
+    /// ----------
+    /// k : int, optional
+    ///     k-mer size. Defaults to 16.
+    #[pyo3(signature = (k=16))]
+    pub fn build_index(&self, k: usize) -> PyResult<()> {
+        let db_path = self.db_path.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "build_index() requires a db_path; obtain BlockGroup via Repository",
+            )
+        })?;
+        let gen_dir = db_path.parent().ok_or_else(|| {
+            PyRuntimeError::new_err("Cannot determine .gen directory from db_path")
+        })?;
+        let index_dir = gen_dir.join("search_index");
+        fs::create_dir_all(&index_dir)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
+        let conn = get_connection(db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let graph = BlockGroup::get_graph(&conn, &self.id);
+        let matcher = GenGraphMatcher::new(&conn, graph);
+        let index = SeedIndex::build(&matcher, k);
+        let path = index_dir.join(format!("{}.bin", self.id));
+        let bytes = postcard::to_allocvec(&index)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to serialize index: {e}")))?;
+        fs::write(&path, bytes)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to write index: {e}")))?;
+        Ok(())
+    }
+
+    /// Clear the search index for this block group.
+    ///
+    /// Removes `.gen/search_index/{id}.bin` if it exists.
+    ///
+    /// Raises ``RuntimeError`` if this block group was not created via a
+    /// ``Repository`` (i.e. ``db_path`` is unset).
+    pub fn clear_index(&self) -> PyResult<()> {
+        let db_path = self.db_path.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "clear_index() requires a db_path; obtain BlockGroup via Repository",
+            )
+        })?;
+        let gen_dir = db_path.parent().ok_or_else(|| {
+            PyRuntimeError::new_err("Cannot determine .gen directory from db_path")
+        })?;
+        let path = gen_dir
+            .join("search_index")
+            .join(format!("{}.bin", self.id));
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to delete index: {e}")))?;
+        }
         Ok(())
     }
 }

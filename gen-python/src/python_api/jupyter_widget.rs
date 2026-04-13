@@ -2,13 +2,15 @@ use std::{path::PathBuf, sync::Mutex};
 
 use r#gen::{
     get_connection,
-    views::gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer},
+    views::gen_graph_widget::{
+        GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
+    },
 };
 use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
-    graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    theme::Theme,
+    LineStyle::Bold, graph_controller::GraphController, graph_widget::GraphWidget,
+    layout::VisualDetail, plotter::PathStyle, theme::Theme,
 };
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -18,7 +20,11 @@ use pyo3::{
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use serde::Serialize;
 
-use crate::python_api::{block_group::PyBlockGroup, repository::PyRepository};
+use crate::python_api::{
+    block_group::PyBlockGroup,
+    graph_search::{PyGraphLocus, PyGraphPos},
+    repository::PyRepository,
+};
 
 /// Convert a ratatui `Color` to a CSS hex string.
 fn color_to_hex(color: Option<ratatui::style::Color>, default_hex: &str) -> String {
@@ -153,8 +159,14 @@ impl PyGraphController {
         block_group: &PyBlockGroup,
     ) -> PyResult<Self> {
         let bg_id = block_group.id;
-        let graph = repo.with_connection(|conn| BlockGroup::get_graph(conn, &bg_id));
-        Ok(Self::new(repo.db_path.clone(), graph))
+        let graph = BlockGroup::get_graph(repo.context.graph().conn(), &bg_id);
+        let db_path = repo
+            .context
+            .graph()
+            .path()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        Ok(Self::new(db_path, graph))
     }
 
     /// Set the level of node detail.
@@ -211,6 +223,77 @@ impl PyGraphController {
     fn move_by(&mut self, dx: i16, dy: i16) {
         self.controller.move_by_terminal(dx, dy);
         self.controller.sync_cursor_to_closest_node();
+    }
+
+    /// Center the view on the position described by `pos`.
+    ///
+    /// Forces full detail level and makes the cursor visible so the user can
+    /// see the exact position within the node.  The fractional x-offset is
+    /// computed from `pos.offset / node.length()` so the camera lands on the
+    /// exact byte; y is always centered (0.5).
+    /// This is the Rust-side counterpart to `GenGraphWidget.go_to()`.
+    fn go_to_pos(&mut self, pos: &PyGraphPos) {
+        self.controller.set_detail_level(VisualDetail::Full);
+        let node = pos.inner.node;
+        let node_len = node.length();
+        let frac_x = if node_len > 0 {
+            pos.inner.offset as f64 / node_len as f64
+        } else {
+            0.5
+        };
+        center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
+        // Fine mode: single-cell cursor at the exact byte, not a full-node overlay
+        // that would overwrite any subsequent rect highlights.
+        self.controller.show_cursor();
+        self.controller.cursor.set_coarse_mode(false);
+    }
+
+    /// Highlight the path of nodes covered by `match_obj` in the given colour.
+    ///
+    /// `color` must be a CSS hex string like `"#ffff00"` or one of the named
+    /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  Defaults to
+    /// bright cyan when omitted.
+    fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
+        use ratatui::style::Color;
+        let c = match color {
+            None => Color::Cyan,
+            Some(s) => match s {
+                "red" => Color::Red,
+                "green" => Color::Green,
+                "yellow" => Color::Yellow,
+                "blue" => Color::Blue,
+                "magenta" => Color::Magenta,
+                "cyan" => Color::Cyan,
+                "white" => Color::White,
+                hex if hex.starts_with('#') && hex.len() == 7 => {
+                    let r = u8::from_str_radix(&hex[1..3], 16)
+                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+                    let g = u8::from_str_radix(&hex[3..5], 16)
+                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+                    let b = u8::from_str_radix(&hex[5..7], 16)
+                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+                    Color::Rgb(r, g, b)
+                }
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown color {other:?}"
+                    )));
+                }
+            },
+        };
+        highlight_match_range(
+            &mut self.controller,
+            &locus.inner,
+            PathStyle::new(c)
+                .with_line_style(Bold)
+                .with_merge_glyphs(true),
+        );
+        Ok(())
+    }
+
+    /// Remove all highlights from the graph.
+    fn clear_highlights(&mut self) {
+        self.controller.clear_all_highlights();
     }
 }
 

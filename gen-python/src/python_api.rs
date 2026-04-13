@@ -3,6 +3,7 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 // Define modules for Python API components
 pub mod block_group;
 pub mod factory;
+pub mod graph_search;
 pub mod hash_id;
 pub mod jupyter_widget;
 pub mod node_key;
@@ -18,8 +19,13 @@ use crate::{
     imports::{import_fasta, import_genbank, import_gfa, import_library, import_library_files},
     init,
     python_api::{
-        block_group::PyBlockGroup, hash_id::PyHashId, jupyter_widget::PyGraphController,
-        node_key::PyNodeKey, repository::PyRepository, sequence_part::PySequencePart,
+        block_group::PyBlockGroup,
+        graph_search::{PyGraphLocus, PyGraphPos},
+        hash_id::PyHashId,
+        jupyter_widget::PyGraphController,
+        node_key::PyBlock,
+        repository::PyRepository,
+        sequence_part::PySequencePart,
         utils::get_gen_dir_py,
     },
     updates::{
@@ -59,7 +65,9 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBlockGroup>()?;
     m.add_class::<PyHashId>()?;
-    m.add_class::<PyNodeKey>()?;
+    m.add_class::<PyBlock>()?;
+    m.add_class::<PyGraphPos>()?;
+    m.add_class::<PyGraphLocus>()?;
     m.add_class::<PySequencePart>()?;
     m.add_class::<PyGraphController>()?;
 

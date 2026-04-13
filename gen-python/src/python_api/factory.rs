@@ -5,7 +5,7 @@ use gen_graph::GraphNode;
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use pyo3::{prelude::*, types::PyDict};
 
-use super::node_key::PyNodeKey;
+use super::node_key::PyBlock;
 
 // Private factory struct for BlockGroup transformations
 // Not exposed to Python, only used internally by the Repository
@@ -33,7 +33,7 @@ impl Factory {
                 node_dict.set_item("sequence_start", node.sequence_start)?;
                 node_dict.set_item("sequence_end", node.sequence_end)?;
 
-                let node_key = PyNodeKey::new(node.node_id, node.sequence_start, node.sequence_end);
+                let node_key = PyBlock::new(node.node_id, node.sequence_start, node.sequence_end);
 
                 nodes.set_item(node_key, node_dict)?;
             }
@@ -53,10 +53,10 @@ impl Factory {
                     weights.push(weight_dict);
                 }
 
-                // Use PyNodeKey without block_id - #[pyclass] objects are automatically converted
-                let src_key = PyNodeKey::new(src.node_id, src.sequence_start, src.sequence_end);
+                // Use PyBlock - #[pyclass] objects are automatically converted
+                let src_key = PyBlock::new(src.node_id, src.sequence_start, src.sequence_end);
 
-                let dst_key = PyNodeKey::new(dst.node_id, dst.sequence_start, dst.sequence_end);
+                let dst_key = PyBlock::new(dst.node_id, dst.sequence_start, dst.sequence_end);
 
                 let edge_key = (src_key, dst_key);
                 edges.set_item(edge_key, weights)?;
@@ -94,8 +94,8 @@ impl Factory {
                 node_data.set_item("sequence_start", node.sequence_start)?;
                 node_data.set_item("sequence_end", node.sequence_end)?;
 
-                // Add PyNodeKey to node data for easier reference
-                let node_key = PyNodeKey::new(node.node_id, node.sequence_start, node.sequence_end);
+                // Add PyBlock to node data for block reference
+                let node_key = PyBlock::new(node.node_id, node.sequence_start, node.sequence_end);
                 node_data.set_item("key", node_key)?;
 
                 // Add the node to the rustworkx graph and store its index
@@ -155,8 +155,8 @@ impl Factory {
                 node_data.set_item("sequence_start", node.sequence_start)?;
                 node_data.set_item("sequence_end", node.sequence_end)?;
 
-                // Create a PyNodeKey for the node (without block_id)
-                let node_key = PyNodeKey::new(node.node_id, node.sequence_start, node.sequence_end);
+                // Create a PyBlock for the node
+                let node_key = PyBlock::new(node.node_id, node.sequence_start, node.sequence_end);
 
                 // Add the node to the NetworkX graph with its attributes
                 let kwargs = PyDict::new(py);
@@ -166,9 +166,9 @@ impl Factory {
 
             // Add edges to the networkx graph
             for (src, dst, edge_weights) in graph.all_edges() {
-                let src_key = PyNodeKey::new(src.node_id, src.sequence_start, src.sequence_end);
+                let src_key = PyBlock::new(src.node_id, src.sequence_start, src.sequence_end);
 
-                let dst_key = PyNodeKey::new(dst.node_id, dst.sequence_start, dst.sequence_end);
+                let dst_key = PyBlock::new(dst.node_id, dst.sequence_start, dst.sequence_end);
 
                 let mut weights: Vec<_> = vec![];
                 for weight in edge_weights {
