@@ -126,6 +126,75 @@ class GenGraphWidget(anywidget.AnyWidget):
         self._controller.move_by(dx, dy)
         self._render()
 
+    def go_to(self, pos) -> None:
+        """Instantly move the camera to a graph position.
+
+        Parameters
+        ----------
+        pos:
+            A ``GraphPos`` obtained from ``locus.start()`` or ``locus.end()``.
+
+        Example
+        -------
+        ::
+
+            matches = repo.search(bg, "ACGT...")
+            widget.go_to(matches[0].start())
+        """
+        self._controller.go_to_pos(pos)
+        self._render()
+
+    def show(self, locus, color: str | None = None) -> None:
+        """Navigate to and highlight a graph locus in one call.
+
+        Parameters
+        ----------
+        locus:
+            A ``GraphLocus`` returned by ``repo.search()``.
+        color:
+            Optional highlight colour.  Accepts named colours
+            (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
+            (``"#ff8800"``).  Defaults to ``"cyan"``.
+
+        Example
+        -------
+        ::
+
+            matches = repo.search(bg, "ACGT...")
+            widget.show(matches[0])
+        """
+        self._controller.go_to_pos(locus.start())
+        self._controller.highlight_match(locus, color)
+        self._render()
+
+    def highlight_match(self, locus, color: str | None = None) -> None:
+        """Highlight the nodes covered by a graph locus.
+
+        Parameters
+        ----------
+        locus:
+            A ``GraphLocus`` returned by ``repo.search()``.
+        color:
+            Optional colour for the highlight.  Accepts named colours
+            (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
+            (``"#ff8800"``).  Defaults to ``"cyan"``.
+
+        Example
+        -------
+        ::
+
+            matches = repo.search(bg, "ACGT...")
+            widget.go_to(matches[0].start())
+            widget.highlight_match(matches[0])
+        """
+        self._controller.highlight_match(locus, color)
+        self._render()
+
+    def clear_highlights(self) -> None:
+        """Remove all highlights from the graph."""
+        self._controller.clear_highlights()
+        self._render()
+
     def refresh(self) -> None:
         """Force a re-render from the current controller state."""
         self._render()

@@ -1,6 +1,10 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
-use r#gen::{core::HashId, get_connection};
+use r#gen::{
+    core::HashId,
+    get_connection,
+    graphs::graph_search::{GenGraphMatcher, SeedIndex},
+};
 use gen_models::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -115,6 +119,7 @@ impl PyBlockGroup {
         let conn = get_connection(&db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let graph = BlockGroup::get_graph(&conn, &bg_id);
         let mut ctrl = PyGraphController::new(db_path, graph);
+        ctrl.block_group_id = Some(bg_id);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
@@ -122,11 +127,121 @@ impl PyBlockGroup {
         build_and_display_widget(py, ctrl, rows, cols)
     }
 
+    /// Search for exact occurrences of `query` in this block group.
+    ///
+    /// Returns a list of `GraphLocus` objects. Each locus exposes:
+    ///   - `.start()` / `.end()` → `GraphPos` (node + byte offset)
+    ///   - `.blocks` → `list[Block]`
+    #[pyo3(signature = (query, case_sensitive=false))]
+    pub fn search(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+    ) -> PyResult<Vec<crate::python_api::graph_search::PyGraphLocus>> {
+        let db_path = self.db_path.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("search() requires a db_path; obtain BlockGroup via Repository")
+        })?;
+        let conn = get_connection(db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let graph = BlockGroup::get_graph(&conn, &self.id);
+        let matcher = GenGraphMatcher::new(&conn, graph, case_sensitive);
+
+        let gen_dir = db_path.parent().ok_or_else(|| {
+            PyRuntimeError::new_err("Cannot determine .gen directory from db_path")
+        })?;
+        let index_path = gen_dir
+            .join("search_index")
+            .join(format!("{}.bin", self.id));
+        let index = fs::read(&index_path)
+            .ok()
+            .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16, case_sensitive).ok());
+
+        let query_bytes = if case_sensitive {
+            query.as_bytes().to_vec()
+        } else {
+            query.to_ascii_uppercase().into_bytes()
+        };
+
+        let matches = match index {
+            Some(idx) => matcher.find_all_with_seed_index(&idx, &query_bytes),
+            None => matcher.find_all(&query_bytes),
+        };
+
+        Ok(matches
+            .into_iter()
+            .map(crate::python_api::graph_search::PyGraphLocus::from_locus)
+            .collect())
+    }
+
     /// IPython display hook — called by `display(block_group)` in Jupyter.
     fn _ipython_display_(slf: &Bound<'_, PyBlockGroup>) -> PyResult<()> {
         // plot() already calls IPython.display.display() internally; just
         // delegate and ignore errors (e.g. db_path unset, anywidget missing).
         let _ = slf.call_method0("plot");
+        Ok(())
+    }
+
+    /// Build a junction-aware k-mer seed index for this block group.
+    ///
+    /// Saves the index to `.gen/search_index/{id}.bin` so that subsequent
+    /// calls to `Repository.search()` load it automatically.
+    ///
+    /// Raises ``RuntimeError`` if this block group was not created via a
+    /// ``Repository`` (i.e. ``db_path`` is unset).
+    ///
+    /// Parameters
+    /// ----------
+    /// case_sensitive : bool, optional
+    ///     Perform case-sensitive search (default: false).
+    /// k : int, optional
+    ///     k-mer size. Defaults to 16.
+    #[pyo3(signature = (case_sensitive=false, k=16))]
+    pub fn build_index(&self, case_sensitive: bool, k: usize) -> PyResult<()> {
+        let db_path = self.db_path.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "build_index() requires a db_path; obtain BlockGroup via Repository",
+            )
+        })?;
+        let gen_dir = db_path.parent().ok_or_else(|| {
+            PyRuntimeError::new_err("Cannot determine .gen directory from db_path")
+        })?;
+        let index_dir = gen_dir.join("search_index");
+        fs::create_dir_all(&index_dir)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
+        let conn = get_connection(db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let graph = BlockGroup::get_graph(&conn, &self.id);
+        let matcher = GenGraphMatcher::new(&conn, graph, case_sensitive);
+        let index = SeedIndex::build(&matcher, k, case_sensitive);
+        let path = index_dir.join(format!("{}.bin", self.id));
+        let bytes = index
+            .to_bytes_with_header(case_sensitive)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to serialize index: {e}")))?;
+        fs::write(&path, bytes)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to write index: {e}")))?;
+        Ok(())
+    }
+
+    /// Clear the search index for this block group.
+    ///
+    /// Removes `.gen/search_index/{id}.bin` if it exists.
+    ///
+    /// Raises ``RuntimeError`` if this block group was not created via a
+    /// ``Repository`` (i.e. ``db_path`` is unset).
+    pub fn clear_index(&self) -> PyResult<()> {
+        let db_path = self.db_path.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "clear_index() requires a db_path; obtain BlockGroup via Repository",
+            )
+        })?;
+        let gen_dir = db_path.parent().ok_or_else(|| {
+            PyRuntimeError::new_err("Cannot determine .gen directory from db_path")
+        })?;
+        let path = gen_dir
+            .join("search_index")
+            .join(format!("{}.bin", self.id));
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to delete index: {e}")))?;
+        }
         Ok(())
     }
 }

@@ -13,10 +13,13 @@ except PackageNotFoundError:
 try:
     # Directly from Rust
     from .gen import (
+        Annotation,
         DbContext,
         PyBlockGroup,
         PyHashId,
-        PyNodeKey,
+        PyBlock,
+        PyGraphPos,
+        PyGraphLocus,
         Repository,
         PySequencePart,
         derive_chunks,
@@ -48,11 +51,14 @@ try:
 
     # Make those classes and functions available at the package level
     __all__ = [
+        "Annotation",
         "DbContext",
         "Repository",
         "PyBlockGroup",
         "PyHashId",
-        "PyNodeKey",
+        "PyBlock",
+        "PyGraphPos",
+        "PyGraphLocus",
         "PySequencePart",
         "GenGraphWidget",
         "derive_chunks",
