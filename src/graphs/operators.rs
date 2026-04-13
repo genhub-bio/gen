@@ -8,7 +8,7 @@ use gen_models::{
     db::{DbContext, GraphConnection},
     edge::Edge,
     errors::OperationError,
-    path::Path,
+    path::{NewPath, Path},
     path_edge::PathEdge,
     sample::Sample,
     traits::Query,
@@ -239,9 +239,11 @@ pub fn derive_chunks(
 
             let _path = Path::create(
                 conn,
-                &current_path.name,
-                &child_block_group_id,
-                &new_path_edge_ids,
+                NewPath {
+                    name: &current_path.name,
+                    block_group_id: &child_block_group_id,
+                    edge_ids: &new_path_edge_ids,
+                },
             );
         }
 
@@ -399,9 +401,11 @@ pub fn make_stitch_from_block_groups(
 
         Path::create(
             conn,
-            new_region_name,
-            &child_block_group_id,
-            &new_path_edge_ids,
+            NewPath {
+                name: new_region_name,
+                block_group_id: &child_block_group_id,
+                edge_ids: &new_path_edge_ids,
+            },
         );
     }
 

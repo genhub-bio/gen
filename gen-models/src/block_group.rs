@@ -25,7 +25,7 @@ use crate::{
     errors::{ChangeError, QueryError},
     gen_models_capnp::block_group,
     node::Node,
-    path::{Path, PathData},
+    path::{NewPath, Path, PathData},
     path_edge::PathEdge,
     sample::Sample,
     traits::*,
@@ -234,7 +234,14 @@ impl BlockGroup {
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
-            let new_path = Path::create(conn, &path.name, target_block_group_id, &edge_ids);
+            let new_path = Path::create(
+                conn,
+                NewPath {
+                    name: &path.name,
+                    block_group_id: target_block_group_id,
+                    edge_ids: &edge_ids,
+                },
+            );
             path_map.insert(&path.id, new_path.id);
         }
 

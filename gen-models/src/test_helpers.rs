@@ -18,7 +18,7 @@ use crate::{
     migrations::{run_migrations, run_operation_migrations},
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
-    path::Path,
+    path::{NewPath, Path},
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
@@ -175,11 +175,29 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
 
     let path = Path::create(
         conn,
-        "chr1",
-        &block_group.id,
-        &[edge0.id, edge1.id, edge2.id, edge3.id, edge4.id],
+        NewPath {
+            name: "chr1",
+            block_group_id: &block_group.id,
+            edge_ids: &[edge0.id, edge1.id, edge2.id, edge3.id, edge4.id],
+        },
     );
     (block_group.id, path)
+}
+
+pub fn create_path(
+    conn: &GraphConnection,
+    name: &str,
+    block_group_id: &HashId,
+    edge_ids: &[HashId],
+) -> Path {
+    Path::create(
+        conn,
+        NewPath {
+            name,
+            block_group_id,
+            edge_ids,
+        },
+    )
 }
 
 pub fn interval_tree_verify<K, V>(tree: &IntervalTree<K, V>, i: K, expected: &[V])

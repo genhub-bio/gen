@@ -10,7 +10,7 @@ use gen_models::{
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
-    path::Path,
+    path::{NewPath, Path},
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
@@ -103,9 +103,11 @@ where
                 );
                 let path = Path::create(
                     conn,
-                    &locus.name,
-                    &block_group.id,
-                    &[edge_into.id, edge_out_of.id],
+                    NewPath {
+                        name: &locus.name,
+                        block_group_id: &block_group.id,
+                        edge_ids: &[edge_into.id, edge_out_of.id],
+                    },
                 );
 
                 for edit in locus.changes_to_wt() {

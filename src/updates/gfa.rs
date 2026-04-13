@@ -12,7 +12,7 @@ use gen_models::{
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo},
-    path::Path,
+    path::{NewPath, Path},
     sample::Sample,
     sequence::Sequence,
     session_operations,
@@ -461,7 +461,14 @@ fn create_new_path_from_existing(
         })
         .collect::<Vec<BlockGroupEdgeData>>();
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
-    Path::create(conn, unmatched_path_name, &block_group_id, &new_edge_ids);
+    Path::create(
+        conn,
+        NewPath {
+            name: unmatched_path_name,
+            block_group_id: &block_group_id,
+            edge_ids: &new_edge_ids,
+        },
+    );
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use crate::{
     gen_models_capnp::{changeset_models, database_changeset},
     node::Node,
     operations::Operation,
-    path::Path,
+    path::{NewPath, Path},
     path_edge::PathEdge,
     sample::Sample,
     sequence::{NewSequence, Sequence},
@@ -817,7 +817,14 @@ pub fn apply_changeset(
     );
 
     for path in dependencies.paths.iter() {
-        Path::create(conn, &path.name, &path.block_group_id, &[]);
+        Path::create(
+            conn,
+            NewPath {
+                name: &path.name,
+                block_group_id: &path.block_group_id,
+                edge_ids: &[],
+            },
+        );
     }
 
     AccessionEdge::bulk_create(
@@ -873,7 +880,14 @@ pub fn apply_changeset(
     );
 
     for path in &changeset.paths {
-        Path::create(conn, &path.name, &path.block_group_id, &[]);
+        Path::create(
+            conn,
+            NewPath {
+                name: &path.name,
+                block_group_id: &path.block_group_id,
+                edge_ids: &[],
+            },
+        );
         let edges = changeset
             .path_edges
             .iter()

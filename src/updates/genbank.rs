@@ -10,7 +10,7 @@ use gen_models::{
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
-    path::Path,
+    path::{NewPath, Path},
     sequence::Sequence,
     session_operations::end_operation,
     traits::Query,
@@ -78,13 +78,10 @@ where
                     }
                     BlockGroup::create(conn, &collection.name, sample_name, &locus.name)
                 };
-                let paths = Path::query(
-                    conn,
-                    "select * from paths where block_group_id = ?1 AND name = ?2",
-                    params![Value::from(block_group.id), Value::from(locus.name.clone())],
-                );
-                let path = if let Some(first) = paths.first() {
-                    first.clone()
+                let path = if let Some(existing_path) =
+                    BlockGroup::get_path_by_name(conn, &block_group.id, &locus.name)
+                {
+                    existing_path
                 } else {
                     if !create_missing {
                         return Err(GenBankError::LookupError(format!(
@@ -129,9 +126,11 @@ where
                     );
                     Path::create(
                         conn,
-                        &locus.name,
-                        &block_group.id,
-                        &[edge_into.id, edge_out_of.id],
+                        NewPath {
+                            name: &locus.name,
+                            block_group_id: &block_group.id,
+                            edge_ids: &[edge_into.id, edge_out_of.id],
+                        },
                     )
                 };
                 for edit in locus.changes_to_wt() {

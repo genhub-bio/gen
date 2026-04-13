@@ -7,7 +7,12 @@ use std::{
 
 use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_models::{db::GraphConnection, node::Node, path::Path, sequence::Sequence};
+use gen_models::{
+    db::GraphConnection,
+    node::Node,
+    path::{NewPath, Path},
+    sequence::Sequence,
+};
 use noodles::fasta;
 use thiserror::Error;
 
@@ -126,14 +131,6 @@ pub fn create_library(
         parts_set.extend(parts);
     }
 
-    let mut cleaned_parts_list = vec![];
-    for parts in &parts_list {
-        let mut unique_parts = HashSet::new();
-        let mut result_parts = parts.clone();
-        result_parts.retain(|part| unique_parts.insert(part.clone()));
-        cleaned_parts_list.push(result_parts);
-    }
-
     let mut sequence_hashes_by_name = HashMap::new();
     for part in parts_set {
         let seq = Sequence::new()
@@ -151,7 +148,7 @@ pub fn create_library(
         sequence_lengths_by_node_id.insert(PATH_START_NODE_ID, 0);
     }
 
-    for (index, parts) in cleaned_parts_list.iter().enumerate() {
+    for (index, parts) in parts_list.iter().enumerate() {
         let mut part_nodes = vec![];
         for part in parts {
             let part_hash = sequence_hashes_by_name.get(&part.name).ok_or_else(|| {
@@ -275,9 +272,11 @@ pub fn create_library(
 
         Path::create(
             conn,
-            format!("{library_name} default path").as_str(),
-            &block_group_id,
-            &path_edge_ids,
+            NewPath {
+                name: format!("{library_name} default path").as_str(),
+                block_group_id: &block_group_id,
+                edge_ids: &path_edge_ids,
+            },
         );
     }
 

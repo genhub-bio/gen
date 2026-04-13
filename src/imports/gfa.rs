@@ -15,7 +15,7 @@ use gen_models::{
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
-    path::Path,
+    path::{NewPath, Path},
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
@@ -255,7 +255,14 @@ pub fn import_gfa(
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, &block_group.id, &path_edge_ids);
+        Path::create(
+            conn,
+            NewPath {
+                name: path_name,
+                block_group_id: &block_group.id,
+                edge_ids: &path_edge_ids,
+            },
+        );
     }
 
     for input_walk in &gfa.walk {
@@ -304,7 +311,14 @@ pub fn import_gfa(
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, &block_group.id, &path_edge_ids);
+        Path::create(
+            conn,
+            NewPath {
+                name: path_name,
+                block_group_id: &block_group.id,
+                edge_ids: &path_edge_ids,
+            },
+        );
     }
 
     // make any block group edges not in paths or walks

@@ -16,7 +16,7 @@ use gen_models::{
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
-    path::Path,
+    path::{NewPath, Path},
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
@@ -129,9 +129,11 @@ pub fn import_fasta(
         BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
         let path = Path::create(
             conn,
-            &name,
-            &block_group.id,
-            &[edge_into.id, edge_out_of.id],
+            NewPath {
+                name: &name,
+                block_group_id: &block_group.id,
+                edge_ids: &[edge_into.id, edge_out_of.id],
+            },
         );
         summary.entry(path.name).or_insert(sequence_length);
         bar.inc(1);
