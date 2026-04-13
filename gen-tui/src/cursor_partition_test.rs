@@ -28,7 +28,7 @@ fn test_cursor_partition_traversal() {
     let mut config = GraphConfig::default();
     config.partition.layer_count = 3; // Very small partitions
 
-    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
     // Set viewport
     controller.viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 120, 30);

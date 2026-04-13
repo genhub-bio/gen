@@ -5,3 +5,4 @@ pyenv-test:
 	PYO3_PYTHON="$(PYENV_PYTHON)" \
 	LD_LIBRARY_PATH="$(PYENV_PREFIX)/lib:$(LD_LIBRARY_PATH)" \
 	cargo t
+

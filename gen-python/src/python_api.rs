@@ -4,6 +4,7 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 pub mod block_group;
 pub mod factory;
 pub mod hash_id;
+pub mod jupyter_widget;
 pub mod node_key;
 pub mod repository;
 pub mod sequence_part;
@@ -17,8 +18,9 @@ use crate::{
     imports::{import_fasta, import_genbank, import_gfa, import_library, import_library_files},
     init,
     python_api::{
-        block_group::PyBlockGroup, hash_id::PyHashId, node_key::PyNodeKey,
-        repository::PyRepository, sequence_part::PySequencePart, utils::get_gen_dir_py,
+        block_group::PyBlockGroup, hash_id::PyHashId, jupyter_widget::PyGraphController,
+        node_key::PyNodeKey, repository::PyRepository, sequence_part::PySequencePart,
+        utils::get_gen_dir_py,
     },
     updates::{
         update_with_fasta, update_with_gaf, update_with_genbank, update_with_gfa,
@@ -30,7 +32,7 @@ use crate::{
 /// Remember to also add them to the __init__.py file
 /// to expose them to the user.
 #[pymodule]
-pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDbContext>()?;
     m.add_function(wrap_pyfunction!(init, m)?)?;
     m.add_function(wrap_pyfunction!(import_fasta, m)?)?;
@@ -59,6 +61,7 @@ pub fn r#gen(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHashId>()?;
     m.add_class::<PyNodeKey>()?;
     m.add_class::<PySequencePart>()?;
+    m.add_class::<PyGraphController>()?;
 
     Ok(())
 }

@@ -40,8 +40,11 @@ try:
         update_with_vcf,
     )
 
-    # Through Python (helpers.py), currently not used
-    # from .helpers import ...
+    # Jupyter widget — only available with `pip install gen[jupyter]`
+    try:
+        from .jupyter_widget import GenGraphWidget
+    except ImportError:
+        GenGraphWidget = None
 
     # Make those classes and functions available at the package level
     __all__ = [
@@ -51,6 +54,7 @@ try:
         "PyHashId",
         "PyNodeKey",
         "PySequencePart",
+        "GenGraphWidget",
         "derive_chunks",
         "derive_subgraph",
         "export_fasta",

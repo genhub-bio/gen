@@ -53,7 +53,7 @@ mod tests {
         };
 
         let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new_with_config(&gen_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         // Load all partitions
         controller.set_anchor_partition(0).unwrap();

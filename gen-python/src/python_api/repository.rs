@@ -8,6 +8,7 @@ use pyo3::{prelude::*, types::PyModule};
 use super::{
     block_group::PyBlockGroup,
     factory::Factory,
+    jupyter_widget::{PyGraphController, build_and_display_widget},
     node_key::PyNodeKey,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
@@ -47,7 +48,7 @@ impl PyRepository {
 impl PyRepository {
     #[new]
     #[pyo3(signature = (path = Option::<String>::None))]
-    fn new(_py: Python, path: Option<String>) -> PyResult<Self> {
+    fn new(path: Option<String>) -> PyResult<Self> {
         // PathBuf instead of Path to avoid borrowing issues
         let gen_dir: PathBuf = match path {
             Some(path_str) => PathBuf::from(path_str),
@@ -104,6 +105,7 @@ impl PyRepository {
                 collection_name: block_group.collection_name,
                 sample_name: block_group.sample_name,
                 name: block_group.name,
+                db_path: Some(self.db_path.clone()),
             })
         })
     }
@@ -116,6 +118,7 @@ impl PyRepository {
         self.with_connection(|conn| {
             let block_groups = BlockGroup::all(conn);
 
+            let db_path = self.db_path.clone();
             let result = block_groups
                 .into_iter()
                 .map(|bg| PyBlockGroup {
@@ -123,6 +126,7 @@ impl PyRepository {
                     collection_name: bg.collection_name,
                     sample_name: bg.sample_name,
                     name: bg.name,
+                    db_path: Some(db_path.clone()),
                 })
                 .collect();
 
@@ -145,6 +149,7 @@ impl PyRepository {
                 rusqlite::params![collection_name],
             );
 
+            let db_path = self.db_path.clone();
             let result = block_groups
                 .into_iter()
                 .map(|bg| PyBlockGroup {
@@ -152,6 +157,7 @@ impl PyRepository {
                     collection_name: bg.collection_name,
                     sample_name: bg.sample_name,
                     name: bg.name,
+                    db_path: Some(db_path.clone()),
                 })
                 .collect();
 
@@ -256,8 +262,54 @@ impl PyRepository {
                 collection_name: block_group.collection_name,
                 sample_name: block_group.sample_name,
                 name: block_group.name,
+                db_path: Some(self.db_path.clone()),
             })
         })
+    }
+
+    /// Plot a BlockGroup's graph as an interactive Jupyter widget.
+    ///
+    /// Displays the widget immediately and returns it for further use.
+    /// Outside of an IPython/Jupyter environment the display call is silently
+    /// skipped and only the widget is returned.
+    ///
+    /// # Example
+    /// ```python
+    /// repo = gen.Repository()
+    /// bg   = repo.get_block_groups()[0]
+    /// w    = repo.plot(bg)   # widget appears immediately
+    /// w.zoom_in()            # further interaction via the handle
+    /// ```
+    ///
+    /// Parameters
+    /// ----------
+    /// block_group : PyBlockGroup
+    ///     The block group to visualise.
+    /// rows : int, optional
+    ///     Initial viewport height in terminal rows.
+    /// cols : int, optional
+    ///     Initial viewport width in terminal columns.
+    /// detail : {"normal", "full", "minimal"}, optional
+    ///     Initial level of node detail.  ``"normal"`` (default) shows
+    ///     truncated labels; ``"full"`` shows complete labels; ``"minimal"``
+    ///     shows the smallest representation.
+    #[pyo3(signature = (block_group, rows=None, cols=None, detail=None))]
+    fn plot(
+        &self,
+        py: Python<'_>,
+        block_group: &PyBlockGroup,
+        rows: Option<u32>,
+        cols: Option<u32>,
+        detail: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let bg_id = block_group.id;
+        let graph = self.with_connection(|conn| BlockGroup::get_graph(conn, &bg_id));
+        let mut ctrl = PyGraphController::new(self.db_path.clone(), graph);
+        if let Some(node_detail) = detail {
+            ctrl.set_detail(node_detail)?;
+        }
+        let ctrl = Py::new(py, ctrl)?;
+        build_and_display_widget(py, ctrl, rows, cols)
     }
 
     /// Gets the sequence for a block specified by a NodeKey

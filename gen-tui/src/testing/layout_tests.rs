@@ -21,8 +21,8 @@ fn make_snapshot_custom<NS, R>(
     mut renderer: R,
 ) -> String
 where
-    NS: for<'a> crate::plotter::NodeSizer<&'a MockDomainGraph>,
-    R: for<'a> crate::plotter::NodeRenderer<&'a MockDomainGraph>,
+    NS: crate::plotter::NodeSizer<MockDomainGraph>,
+    R: crate::plotter::NodeRenderer<MockDomainGraph>,
 {
     use crate::graph_controller::GraphConfig;
 
@@ -36,7 +36,7 @@ where
     let mut config = GraphConfig::default();
     config.partition.layer_count = layer_count;
     config.partition.node_count = node_count;
-    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
     let test_viewport = ratatui::layout::Rect::new(0, 0, viewport_width, viewport_height);
     controller.viewport_state.viewport_bounds = test_viewport;
@@ -80,7 +80,7 @@ where
             viewport_graph,
             &mut buffer,
             &mut renderer,
-            &controller.graph,
+            controller.graph(),
             detail_level,
             &controller.theme,
         );
@@ -355,7 +355,7 @@ fn test_layer_coordinate_alignment_and_ordering() {
     config.partition.layer_count = 2; // Force layer-based partitioning
     config.partition.node_count = 3; // Force node-based partitioning as well
 
-    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
     // Set detail level first
     controller.set_detail_level(VisualDetail::Full);
@@ -507,27 +507,6 @@ fn viewport_visual_regression_bridge_position_with_variable_node_widths() {
     struct VariableWidthSizer;
 
     impl NodeSizer<MockDomainGraph> for VariableWidthSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            _scale: VisualDetail,
-        ) -> (u64, u64) {
-            match node.index() {
-                0 => (4, 1),  // Start node: medium width
-                1 => (15, 2), // Left middle node: very wide
-                2 => (2, 1),  // Right middle node: very narrow
-                3 => (5, 1),  // End node: medium width
-                _ => (3, 1),  // Default
-            }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
-    // Also implement for reference type
-    impl NodeSizer<&MockDomainGraph> for VariableWidthSizer {
         fn get_node_size(
             &self,
             node: &petgraph::stable_graph::NodeIndex<u32>,
@@ -701,7 +680,7 @@ fn viewport_chain_five_partitions_verify_partition_count() {
     config.partition.layer_count = 2;
     config.partition.node_count = 5; // Allow up to 5 nodes per partition
 
-    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
     controller.set_detail_level(VisualDetail::Full);
 
     // Set viewport to cover everything
@@ -784,7 +763,7 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
     config.partition.layer_count = 2;
     config.partition.node_count = 3;
 
-    let mut controller = GraphController::new_with_config(&domain_graph, node_sizer, config);
+    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
     controller.set_detail_level(VisualDetail::Full);
 
@@ -873,27 +852,6 @@ fn viewport_even_width_node_spacing() {
                 1 => (6, 1),
                 2 => (8, 1),
                 3 => (9, 1),
-                _ => (4, 1),
-            }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
-    // Implement for reference type
-    impl NodeSizer<&MockDomainGraph> for OddEvenSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            _scale: VisualDetail,
-        ) -> (u64, u64) {
-            match node.index() {
-                0 => (4, 1),
-                1 => (6, 1),
-                2 => (6, 1),
-                3 => (8, 1),
                 _ => (4, 1),
             }
         }
@@ -1571,33 +1529,10 @@ fn test_large_node_rendering_with_zoom() {
         }
     }
 
-    impl NodeSizer<&MockDomainGraph> for VariableDetailSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            scale: VisualDetail,
-        ) -> (u64, u64) {
-            match scale {
-                VisualDetail::Minimal => (1, 1),
-                VisualDetail::Truncated => (10, 1),
-                VisualDetail::Full => match node.index() {
-                    0 => (5, 1),
-                    1 => (1000, 1),
-                    2 => (5, 1),
-                    _ => (1, 1),
-                },
-            }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
     #[derive(Debug, Clone)]
     struct UltrawideRenderer;
 
-    impl NodeRenderer<&MockDomainGraph> for UltrawideRenderer {
+    impl NodeRenderer<MockDomainGraph> for UltrawideRenderer {
         fn render_node(
             &mut self,
             buffer: &mut WorldBuffer,
@@ -1635,7 +1570,7 @@ fn test_large_node_rendering_with_zoom() {
     config.partition.node_count = usize::MAX;
 
     let mut controller =
-        GraphController::new_with_config(&domain_graph, VariableDetailSizer, config);
+        GraphController::new_with_config(domain_graph.clone(), VariableDetailSizer, config);
 
     // 4. Starts in minimal level-of-detail
     controller.set_detail_level(VisualDetail::Minimal);
@@ -1768,20 +1703,6 @@ fn test_diamond_variable_width_parallel_nodes() {
                 2 => (10, 3), // C - 2 units wide (10 chars = 2 * 5-char units)
                 _ => (5, 3),  // A and D - 1 unit wide (5 chars)
             }
-        }
-
-        fn get_dummy_size(&self) -> (u64, u64) {
-            (1, 1)
-        }
-    }
-
-    impl NodeSizer<&MockDomainGraph> for VariableWidthSizer {
-        fn get_node_size(
-            &self,
-            node: &petgraph::stable_graph::NodeIndex<u32>,
-            scale: VisualDetail,
-        ) -> (u64, u64) {
-            <Self as NodeSizer<MockDomainGraph>>::get_node_size(self, node, scale)
         }
 
         fn get_dummy_size(&self) -> (u64, u64) {
