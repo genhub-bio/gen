@@ -23,7 +23,9 @@ use r#gen::{
         remote::handle_remote_command,
     },
     diffs::gfa::gfa_sample_diff,
-    get_connection, get_operation_connection, operation_management,
+    get_connection, get_operation_connection,
+    graphs::graph_search::{GenGraphMatcher, GraphLocus, SeedIndex},
+    operation_management,
     operation_management::{parse_patch_operations, pull, push},
     patch, track_database,
     updates::gaf::transform_csv_to_fasta,
@@ -39,6 +41,7 @@ use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     annotations::{add_annotation, add_annotation_file},
     block_group::BlockGroup,
+    collection::Collection,
     db::{DbContext, OperationsConnection},
     errors::RemoteError,
     file_types::FileTypes,
@@ -53,6 +56,25 @@ use gen_models::{
 use itertools::Itertools;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
+
+// Format a match's path as "[hash:start-end, ...]" with 12-char node hash prefixes.
+// start/end are the node's own coordinates in the reference sequence.
+fn fmt_match_path(m: &GraphLocus) -> String {
+    let parts: Vec<String> = m
+        .nodes
+        .iter()
+        .map(|node| {
+            let hash = format!("{}", node.node_id);
+            format!(
+                "{}:{}-{}",
+                &hash[..12],
+                node.sequence_start,
+                node.sequence_end
+            )
+        })
+        .collect();
+    format!("[{}]", parts.join(", "))
+}
 
 fn get_default_collection(conn: &OperationsConnection) -> Result<String, rusqlite::Error> {
     let mut stmt = conn.prepare("select collection_name from defaults where id = 1")?;
@@ -616,6 +638,102 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 message.as_deref(),
             )?;
             println!("Annotation file added in operation {}", operation.hash);
+            Ok(())
+        }
+        Some(Commands::BuildIndex {
+            collection,
+            sample,
+            kmer_size,
+        }) => {
+            let collection_name = match collection {
+                Some(c) => c,
+                None => get_default_collection(operation_conn)?,
+            };
+            let block_groups = match sample {
+                Some(ref s) => Sample::get_block_groups(graph_conn, &collection_name, s),
+                None => Collection::get_block_groups(graph_conn, &collection_name),
+            };
+            let index_dir = workspace
+                .find_gen_dir()
+                .ok_or("No .gen directory found. Run 'gen init' first.")?
+                .join("search_index");
+            std::fs::create_dir_all(&index_dir)?;
+            for bg in block_groups {
+                let graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                let matcher = GenGraphMatcher::new(graph_conn, graph);
+                let index = SeedIndex::build(&matcher, kmer_size);
+                let path = index_dir.join(format!("{}.bin", bg.id));
+                index
+                    .save_to_path(&path, false)
+                    .map_err(|e| anyhow!("{e}"))?;
+                println!("indexed {}/{}", bg.sample_name, bg.name);
+            }
+            Ok(())
+        }
+        Some(Commands::ClearIndex { collection, sample }) => {
+            let collection_name = match collection {
+                Some(c) => c,
+                None => get_default_collection(operation_conn)?,
+            };
+            let block_groups = match sample {
+                Some(ref s) => Sample::get_block_groups(graph_conn, &collection_name, s),
+                None => Collection::get_block_groups(graph_conn, &collection_name),
+            };
+            let index_dir = workspace
+                .find_gen_dir()
+                .ok_or("No .gen directory found. Run 'gen init' first.")?
+                .join("search_index");
+            if !index_dir.exists() {
+                println!("No search index cache found.");
+                return Ok(());
+            }
+            for bg in block_groups {
+                let path = index_dir.join(format!("{}.bin", bg.id));
+                if path.exists() {
+                    std::fs::remove_file(&path)?;
+                    println!("cleared {}/{}", bg.sample_name, bg.name);
+                }
+            }
+            Ok(())
+        }
+        Some(Commands::Search {
+            query,
+            sample,
+            collection,
+        }) => {
+            let block_groups = match (collection, sample.as_deref()) {
+                (Some(c), Some(s)) => Sample::get_block_groups(graph_conn, &c, s),
+                (Some(c), None) => Collection::get_block_groups(graph_conn, &c),
+                (None, Some(s)) => BlockGroup::all(graph_conn)
+                    .into_iter()
+                    .filter(|bg| bg.sample_name == s)
+                    .collect(),
+                (None, None) => BlockGroup::all(graph_conn),
+            };
+            let index_dir = workspace.find_gen_dir().map(|d| d.join("search_index"));
+            let query_bytes = query.as_bytes();
+            println!("sample\tgraph\tblocks\toffset");
+            for bg in block_groups {
+                let graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                let matcher = GenGraphMatcher::new(graph_conn, graph);
+                let matches = index_dir
+                    .as_ref()
+                    .and_then(|dir| {
+                        let p = dir.join(format!("{}.bin", bg.id));
+                        SeedIndex::load_from_path(p, false).ok()
+                    })
+                    .map(|idx| matcher.find_all_with_seed_index(&idx, query_bytes))
+                    .unwrap_or_else(|| matcher.find_all(query_bytes));
+                for m in matches {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        bg.sample_name,
+                        bg.name,
+                        fmt_match_path(&m),
+                        m.start_offset
+                    );
+                }
+            }
             Ok(())
         }
         Some(Commands::ListSamples {}) => {

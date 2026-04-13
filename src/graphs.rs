@@ -10,6 +10,7 @@ use gen_models::{
 use thiserror::Error;
 
 pub mod combinatorial_library;
+pub mod graph_search;
 pub mod operators;
 
 // A NodePoint is grouping of the fields that an edge has as a source or a

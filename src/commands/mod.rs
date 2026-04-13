@@ -248,6 +248,47 @@ pub enum Commands {
         #[arg(short, long)]
         message: Option<String>,
     },
+    /// Build a k-mer index for fast sequence search
+    #[command(name = "build-index")]
+    BuildIndex {
+        /// The collection to index (defaults to the configured default)
+        #[arg(short, long)]
+        collection: Option<String>,
+        /// Restrict indexing to a specific sample
+        #[arg(short, long)]
+        sample: Option<String>,
+        /// K-mer size used when building the index
+        #[arg(short, long, default_value = "16")]
+        kmer_size: usize,
+    },
+    /// Clear the search index cache
+    #[command(name = "clear-index")]
+    ClearIndex {
+        /// The collection to clear indices for (defaults to the configured default)
+        #[arg(short, long)]
+        collection: Option<String>,
+        /// Restrict clearing to a specific sample
+        #[arg(short, long)]
+        sample: Option<String>,
+    },
+    /// Search for an exact sequence across all block groups
+    ///
+    /// Each match is reported with a blocks column formatted as [hash:start-end, ...],
+    /// where hash is a 12-character node hash prefix from the original node the block
+    /// was carved from at coordinates start/end. The offset column gives the position
+    /// within the first block where the match begins.
+    #[command(arg_required_else_help(true))]
+    Search {
+        /// The sequence to search for
+        #[clap(index = 1)]
+        query: String,
+        /// Restrict the search to a specific sample
+        #[arg(short, long)]
+        sample: Option<String>,
+        /// The collection to search in
+        #[arg(short, long)]
+        collection: Option<String>,
+    },
     /// List all samples in the current collection
     ListSamples {},
     #[command()]
