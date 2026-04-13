@@ -54,6 +54,7 @@ impl PyDbContext {
 
 #[pyfunction]
 pub fn init() -> PyResult<String> {
+    r#gen::base16::init_theme();
     Workspace::from_current_dir().ensure_gen_dir();
     Ok("Gen repository initialized.".to_string())
 }

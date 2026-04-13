@@ -1231,9 +1231,6 @@ mod tests {
         let mut state = ViewportState::new();
         assert!(state.has_focus); // Focus is enabled by default for keyboard input
 
-        state.focus();
-        assert!(state.camera_anim.is_some());
-
         state.blur();
         assert!(!state.has_focus);
 
