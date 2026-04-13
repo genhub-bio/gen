@@ -79,6 +79,13 @@ pub enum HighlightKind<N> {
     Edge(N, N),
     /// A path consisting of a sequence of nodes
     Path(Vec<N>),
+    /// Tint a sub-rectangle of a single node.
+    /// tl/br are (col, row) offsets from the node's top-left corner; br is exclusive.
+    Cells {
+        node: N,
+        tl: (i64, i64),
+        br: (i64, i64),
+    },
 }
 
 impl<G, S> GraphController<G, S>
@@ -330,6 +337,24 @@ where
         color
     }
 
+    /// Internal helper to apply a node rect highlight to the viewport graph.
+    /// Stores the domain NodeIndex directly — no world-coordinate conversion needed.
+    fn apply_cell_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+        style: PathStyle,
+    ) {
+        let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
+        if viewport_graph.node_positions.contains_key(&node_idx) {
+            viewport_graph
+                .cell_highlights
+                .push((node_idx, tl, br, style));
+        }
+    }
+
     /// Set a node highlight
     pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
         let graph = &self.partition_controller.graph;
@@ -367,6 +392,47 @@ where
         self.set_path_highlight(PathStyle::new(color), path_nodes);
     }
 
+    /// Highlight the rectangle from `tl` to `br` (node-local col/row offsets,
+    /// exclusive end) for a single node.
+    ///
+    /// Example — columns 5..12 on the top row:
+    ///   set_cell_highlight(node_id, (5, 0), (12, 0), style)
+    pub fn set_cell_highlight(
+        &mut self,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+        style: PathStyle,
+    ) {
+        let graph = &self.partition_controller.graph;
+        Self::apply_cell_highlight(&mut self.viewport_graph, graph, node_id, tl, br, style);
+        let kind = HighlightKind::Cells {
+            node: node_id,
+            tl,
+            br,
+        };
+        self.highlights.push((kind, style));
+    }
+
+    /// Highlight a cell rect using the next available theme accent color.
+    /// Returns the color that was chosen.
+    pub fn add_cell_highlight(
+        &mut self,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+    ) -> Color {
+        let color = self.next_accent_color();
+        self.set_cell_highlight(node_id, tl, br, PathStyle::new(color));
+        color
+    }
+
+    /// Get a reference to the node rect highlights in the current viewport
+    #[allow(clippy::type_complexity)]
+    pub fn get_cell_highlights(&self) -> &[(NodeIndex, (i64, i64), (i64, i64), PathStyle)] {
+        &self.viewport_graph.cell_highlights
+    }
+
     /// Check if a specific style has any highlighting
     pub fn has_highlight(&self, style: &PathStyle) -> bool {
         self.highlights.iter().any(|(_, s)| s == style)
@@ -382,6 +448,9 @@ where
         self.viewport_graph
             .edge_highlights
             .retain(|(_, s)| s != style);
+        self.viewport_graph
+            .cell_highlights
+            .retain(|(_, _, _, s)| s != style);
         self.trigger_rebuild();
     }
 
@@ -390,6 +459,7 @@ where
         self.highlights.clear();
         self.viewport_graph.node_highlights.clear();
         self.viewport_graph.edge_highlights.clear();
+        self.viewport_graph.cell_highlights.clear();
         self.trigger_rebuild();
     }
 
@@ -906,6 +976,16 @@ where
                         *style,
                     );
                 }
+                HighlightKind::Cells { node, tl, br } => {
+                    Self::apply_cell_highlight(
+                        &mut self.viewport_graph,
+                        &self.partition_controller.graph,
+                        *node,
+                        *tl,
+                        *br,
+                        *style,
+                    );
+                }
             }
         }
 
@@ -1151,7 +1231,7 @@ mod tests {
         assert!(state.has_focus); // Focus is enabled by default for keyboard input
 
         state.focus();
-        state.camera_anim.is_some();
+        assert!(state.camera_anim.is_some());
 
         state.blur();
         assert!(!state.has_focus);
