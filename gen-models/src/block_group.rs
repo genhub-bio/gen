@@ -120,12 +120,8 @@ impl<'a> PathCache<'a> {
             path.clone()
         } else {
             let conn = path_cache.conn;
-            let new_path = Path::query(
-                conn,
-                "select * from paths where block_group_id = ?1 AND name = ?2",
-                params![block_group_id, name],
-            )[0]
-            .clone();
+            let new_path = BlockGroup::get_path_by_name(conn, block_group_id, &name)
+                .expect("path should exist for cached lookup");
 
             path_cache.cache.insert(path_key, new_path.clone());
             let tree = new_path.intervaltree(conn);
@@ -215,7 +211,7 @@ impl BlockGroup {
     ) {
         let existing_paths = Path::query(
             conn,
-            "SELECT * from paths where block_group_id = ?1;",
+            "SELECT * from paths where block_group_id = ?1 ORDER BY name, created_on DESC;",
             params![self.id],
         );
 
@@ -942,19 +938,13 @@ impl BlockGroup {
         block_group_id: &HashId,
         path_name: &str,
     ) -> Option<Path> {
-        let paths = Path::query(
+        Path::query(
             conn,
-            "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
-            params![block_group_id],
-        );
-
-        for path in &paths {
-            if path.name == path_name {
-                return Some(path.clone());
-            }
-        }
-
-        None
+            "select * from paths where block_group_id = ?1 and name = ?2 order by created_on desc",
+            params![block_group_id, path_name],
+        )
+        .into_iter()
+        .next()
     }
 
     #[allow(clippy::too_many_arguments)]

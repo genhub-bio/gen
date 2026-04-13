@@ -758,6 +758,12 @@ pub fn process_changesetiter(
         }
     }
 
+    for path in Path::query_by_ids(conn, &previous_paths.iter().copied().collect::<Vec<_>>()) {
+        if !created_block_groups_set.contains(&path.block_group_id) {
+            previous_block_groups.insert(path.block_group_id);
+        }
+    }
+
     // Process additional dependencies for edges
     let existing_edges = Edge::query_by_ids(
         conn,
@@ -851,7 +857,7 @@ pub fn apply_changeset(
             .collect::<Vec<_>>(),
     );
 
-    for path in dependencies.paths.iter() {
+    for path in &dependencies.paths {
         Path::create(conn, &path.name, &path.block_group_id, &[]);
     }
 
