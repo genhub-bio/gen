@@ -79,17 +79,25 @@ impl<'a> Capnp<'a> for BlockGroup {
         let sample_name = reader.get_sample_name().unwrap().to_string().unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
         let created_on = reader.get_created_on();
-        let parent_block_group_id = match reader.get_parent_block_group_id().which().unwrap() {
-            block_group::parent_block_group_id::None(()) => None,
-            block_group::parent_block_group_id::Some(parent_block_group_id) => Some(
-                parent_block_group_id
-                    .unwrap()
-                    .as_slice()
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            ),
-        };
+        let parent_block_group_id =
+            reader
+                .get_parent_block_group_id()
+                .which()
+                .ok()
+                .and_then(|parent_block_group_id| match parent_block_group_id {
+                    block_group::parent_block_group_id::None(()) => None,
+                    block_group::parent_block_group_id::Some(parent_block_group_id) => {
+                        if let Ok(parent_block_group_id) = parent_block_group_id {
+                            if let Some(parent_block_group_id) = parent_block_group_id.as_slice() {
+                                parent_block_group_id.try_into().ok()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                });
         let is_default = reader.get_is_default();
 
         BlockGroup {
@@ -1314,6 +1322,23 @@ mod tests {
     }
 
     #[test]
+    fn test_capnp_deserialization_defaults_missing_parent_to_none() {
+        let created_on = Utc::now().timestamp_nanos_opt().unwrap();
+
+        let mut message = TypedBuilder::<block_group::Owned>::new_default();
+        let mut root = message.init_root();
+        root.set_id(&HashId::pad_str(42).0).unwrap();
+        root.set_collection_name("test_collection");
+        root.set_sample_name("test_sample");
+        root.set_name("test_block_group");
+        root.set_created_on(created_on);
+
+        let deserialized = BlockGroup::read_capnp(root.into_reader());
+        assert_eq!(deserialized.parent_block_group_id, None);
+        assert!(!deserialized.is_default);
+    }
+
+    #[test]
     fn test_blockgroup_create() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
@@ -1519,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_create_sample_block_groups_creates_root_block_group() {
+    fn test_get_or_create_sample_block_groups_creates_root_block_group_if_no_parents() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
         Sample::get_or_create(conn, "root_sample");

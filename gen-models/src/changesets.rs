@@ -842,13 +842,7 @@ pub fn apply_changeset(
         }
     }
 
-    let block_groups = dependencies
-        .block_group
-        .iter()
-        .chain(changeset.block_groups.iter())
-        .cloned()
-        .collect::<Vec<_>>();
-    for bg in block_groups_parent_first(&block_groups) {
+    for bg in block_groups_parent_first(&dependencies.block_group) {
         BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -911,6 +905,18 @@ pub fn apply_changeset(
     }
     for sequence in &changeset.sequences {
         NewSequence::from(sequence).save(conn);
+    }
+    for bg in block_groups_parent_first(&changeset.block_groups) {
+        BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &bg.collection_name,
+                sample_name: &bg.sample_name,
+                name: &bg.name,
+                parent_block_group_id: bg.parent_block_group_id.as_ref(),
+                is_default: bg.is_default,
+            },
+        );
     }
     for node in &changeset.nodes {
         Node::create(conn, &node.sequence_hash, &node.id);
@@ -1163,66 +1169,48 @@ pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
     DependencyModels::read_capnp(root)
 }
 
+// This sorts parents first so when creating blockgroups, we don't have foreign key issues when a child is made before a parent.
 fn block_groups_parent_first(block_groups: &[BlockGroup]) -> Vec<&BlockGroup> {
     let by_id = block_groups
         .iter()
         .map(|block_group| (block_group.id, block_group))
         .collect::<HashMap<_, _>>();
-    let mut children_by_parent: HashMap<Option<HashId>, Vec<&BlockGroup>> = HashMap::new();
-    let mut roots = Vec::new();
-    for block_group in block_groups {
-        if let Some(parent_id) = block_group.parent_block_group_id
-            && by_id.contains_key(&parent_id)
-        {
-            children_by_parent
-                .entry(Some(parent_id))
-                .or_default()
-                .push(block_group);
-            continue;
-        }
-        roots.push(block_group);
-    }
 
     fn walk<'a>(
-        parent_id: Option<HashId>,
-        children_by_parent: &HashMap<Option<HashId>, Vec<&'a BlockGroup>>,
+        block_group_id: HashId,
+        by_id: &HashMap<HashId, &'a BlockGroup>,
+        visiting: &mut HashSet<HashId>,
         visited: &mut HashSet<HashId>,
         ordered: &mut Vec<&'a BlockGroup>,
     ) {
-        if let Some(children) = children_by_parent.get(&parent_id) {
-            for block_group in children {
-                if visited.insert(block_group.id) {
-                    ordered.push(block_group);
-                    walk(Some(block_group.id), children_by_parent, visited, ordered);
-                }
-            }
+        if visited.contains(&block_group_id) || !visiting.insert(block_group_id) {
+            return;
+        }
+
+        let block_group = by_id[&block_group_id];
+        if let Some(parent_id) = block_group.parent_block_group_id
+            && by_id.contains_key(&parent_id)
+        {
+            walk(parent_id, by_id, visiting, visited, ordered);
+        }
+
+        visiting.remove(&block_group_id);
+        if visited.insert(block_group_id) {
+            ordered.push(block_group);
         }
     }
 
     let mut ordered = Vec::new();
+    let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
-    for root in roots {
-        if visited.insert(root.id) {
-            ordered.push(root);
-            walk(
-                Some(root.id),
-                &children_by_parent,
-                &mut visited,
-                &mut ordered,
-            );
-        }
-    }
-
     for block_group in block_groups {
-        if visited.insert(block_group.id) {
-            ordered.push(block_group);
-            walk(
-                Some(block_group.id),
-                &children_by_parent,
-                &mut visited,
-                &mut ordered,
-            );
-        }
+        walk(
+            block_group.id,
+            &by_id,
+            &mut visiting,
+            &mut visited,
+            &mut ordered,
+        );
     }
 
     ordered
@@ -1672,6 +1660,68 @@ mod tests {
         let block_groups = [child.clone(), parent.clone()];
         let ordered = block_groups_parent_first(&block_groups);
         assert_eq!(ordered, vec![&parent, &child]);
+    }
+
+    #[test]
+    fn test_block_groups_parent_first_with_three_level_lineage() {
+        let parent = BlockGroup {
+            id: HashId::pad_str(1),
+            collection_name: "test".to_string(),
+            sample_name: "parent".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: None,
+            is_default: false,
+        };
+        let child = BlockGroup {
+            id: HashId::pad_str(2),
+            collection_name: "test".to_string(),
+            sample_name: "child".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(parent.id),
+            is_default: false,
+        };
+        let grandchild = BlockGroup {
+            id: HashId::pad_str(3),
+            collection_name: "test".to_string(),
+            sample_name: "grandchild".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(child.id),
+            is_default: false,
+        };
+
+        let block_groups = [grandchild.clone(), child.clone(), parent.clone()];
+        let ordered = block_groups_parent_first(&block_groups);
+        assert_eq!(ordered, vec![&parent, &child, &grandchild]);
+    }
+
+    #[test]
+    fn test_block_groups_parent_first_when_every_entry_has_a_parent() {
+        let root_id = HashId::pad_str(1);
+        let child = BlockGroup {
+            id: HashId::pad_str(2),
+            collection_name: "test".to_string(),
+            sample_name: "child".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(root_id),
+            is_default: false,
+        };
+        let grandchild = BlockGroup {
+            id: HashId::pad_str(3),
+            collection_name: "test".to_string(),
+            sample_name: "grandchild".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(child.id),
+            is_default: false,
+        };
+
+        let block_groups = [grandchild.clone(), child.clone()];
+        let ordered = block_groups_parent_first(&block_groups);
+        assert_eq!(ordered, vec![&child, &grandchild]);
     }
 
     #[cfg(test)]

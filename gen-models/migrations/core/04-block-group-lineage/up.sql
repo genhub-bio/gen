@@ -14,4 +14,8 @@ ON block_groups(
   IFNULL(hex(parent_block_group_id), '')
 );
 
+CREATE UNIQUE INDEX block_group_default_uidx
+ON block_groups(collection_name, sample_name, name)
+WHERE is_default = 1;
+
 CREATE INDEX block_group_parent_idx ON block_groups(parent_block_group_id);
