@@ -367,16 +367,16 @@ pub enum Commands {
         reference_name: String,
         /// The refseq accession ID
         #[arg(long)]
-        refseq_accession_id: String,
+        refseq_accession_id: Option<String>,
         /// The genbank ID
         #[arg(long)]
-        genbank_id: String,
+        genbank_id: Option<String>,
         /// The ensembl ID
         #[arg(long)]
-        ensembl_id: String,
+        ensembl_id: Option<String>,
         /// The UCSC ID
         #[arg(long)]
-        ucsc_id: String,
+        ucsc_id: Option<String>,
         /// A custom ID, can be anything
         #[arg(long)]
         custom_id: Option<String>,

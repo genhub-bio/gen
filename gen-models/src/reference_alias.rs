@@ -8,10 +8,10 @@ use crate::{db::GraphConnection, traits::*};
 #[derive(Debug, Clone)]
 pub struct ReferenceAlias {
     pub reference_name: String,
-    pub refseq_accession_id: String,
-    pub genbank_accession_id: String,
-    pub ucsc_id: String,
-    pub ensembl_id: String,
+    pub refseq_accession_id: Option<String>,
+    pub genbank_accession_id: Option<String>,
+    pub ucsc_id: Option<String>,
+    pub ensembl_id: Option<String>,
     pub custom_id: Option<String>,
     pub chromosome: Option<i64>,
 }
@@ -45,10 +45,10 @@ impl ReferenceAlias {
     pub fn create(
         conn: &GraphConnection,
         reference_name: &str,
-        refseq_accession_id: &str,
-        genbank_accession_id: &str,
-        ucsc_id: &str,
-        ensembl_id: &str,
+        refseq_accession_id: Option<String>,
+        genbank_accession_id: Option<String>,
+        ucsc_id: Option<String>,
+        ensembl_id: Option<String>,
         custom_id: Option<String>,
         chromosome: Option<i64>,
     ) -> rusqlite::Result<ReferenceAlias, ReferenceAliasError> {
@@ -59,10 +59,10 @@ impl ReferenceAlias {
 
         Ok(ReferenceAlias {
             reference_name: reference_name.to_string(),
-            refseq_accession_id: refseq_accession_id.to_string(),
-            genbank_accession_id: genbank_accession_id.to_string(),
-            ucsc_id: ucsc_id.to_string(),
-            ensembl_id: ensembl_id.to_string(),
+            refseq_accession_id,
+            genbank_accession_id,
+            ucsc_id,
+            ensembl_id,
             custom_id,
             chromosome,
         })
@@ -70,34 +70,34 @@ impl ReferenceAlias {
 
     fn compute_aliases(reference_alias: ReferenceAlias) -> HashSet<String> {
         let mut aliases = HashSet::new();
-        aliases.insert(reference_alias.refseq_accession_id.clone());
-        aliases.insert(format!("ref|{}|", reference_alias.refseq_accession_id));
-        if reference_alias.refseq_accession_id.contains('.') {
-            let refseq_without_version = reference_alias
-                .refseq_accession_id
-                .split('.')
-                .next()
-                .unwrap();
-            aliases.insert(refseq_without_version.to_string());
-            aliases.insert(format!("ref|{}|", refseq_without_version));
+        if let Some(refseq_id) = reference_alias.refseq_accession_id {
+            aliases.insert(refseq_id.clone());
+            aliases.insert(format!("ref|{}|", refseq_id));
+            if refseq_id.contains('.') {
+                let refseq_without_version = refseq_id.split('.').next().unwrap();
+                aliases.insert(refseq_without_version.to_string());
+                aliases.insert(format!("ref|{}|", refseq_without_version));
+            }
         }
-        aliases.insert(reference_alias.genbank_accession_id.clone());
-        if reference_alias.genbank_accession_id.contains('.') {
-            let genbank_without_version = reference_alias
-                .genbank_accession_id
-                .split('.')
-                .next()
-                .unwrap();
-            aliases.insert(genbank_without_version.to_string());
+        if let Some(genbank_id) = reference_alias.genbank_accession_id.clone() {
+            aliases.insert(genbank_id.clone());
+            if genbank_id.contains('.') {
+                let genbank_without_version = genbank_id.split('.').next().unwrap();
+                aliases.insert(genbank_without_version.to_string());
+            }
         }
-        aliases.insert(reference_alias.ucsc_id);
-        aliases.insert(reference_alias.ensembl_id.clone());
-        aliases.insert(format!("chr{}", reference_alias.ensembl_id));
-        aliases.insert(format!("Chr{}", reference_alias.ensembl_id));
-        aliases.insert(format!("chrom{}", reference_alias.ensembl_id));
-        aliases.insert(format!("Chrom{}", reference_alias.ensembl_id));
-        aliases.insert(format!("chromosome{}", reference_alias.ensembl_id));
-        aliases.insert(format!("Chromosome{}", reference_alias.ensembl_id));
+        if let Some(ucsc_id) = reference_alias.ucsc_id.clone() {
+            aliases.insert(ucsc_id.clone());
+        }
+        if let Some(ensembl_id) = reference_alias.ensembl_id.clone() {
+            aliases.insert(ensembl_id.clone());
+            aliases.insert(format!("chr{}", ensembl_id));
+            aliases.insert(format!("Chr{}", ensembl_id));
+            aliases.insert(format!("chrom{}", ensembl_id));
+            aliases.insert(format!("Chrom{}", ensembl_id));
+            aliases.insert(format!("chromosome{}", ensembl_id));
+            aliases.insert(format!("Chromosome{}", ensembl_id));
+        }
         if let Some(custom_id) = reference_alias.custom_id {
             aliases.insert(custom_id.clone());
             aliases.insert(format!("chr{}", custom_id));
@@ -150,10 +150,10 @@ mod tests {
         ReferenceAlias::create(
             conn,
             "Test Reference",
-            "REFSEQ123",
-            "GENBANK123",
-            "UCSC123",
-            "ENSEMBL123",
+            Some("REFSEQ123".to_string()),
+            Some("GENBANK123".to_string()),
+            Some("UCSC123".to_string()),
+            Some("ENSEMBL123".to_string()),
             Some("CUSTOM123".to_string()),
             Some(1),
         )
@@ -176,7 +176,7 @@ mod tests {
 	    )
 	    .unwrap();
         assert_eq!(new_entry.reference_name, "Test Reference");
-        assert_eq!(new_entry.refseq_accession_id, "REFSEQ123");
+        assert_eq!(new_entry.refseq_accession_id, Some("REFSEQ123".to_string()));
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(reference_aliases.len(), 107);
         let first_e_coli_reference = reference_aliases
             .iter()
-            .find(|alias| alias.genbank_accession_id == "U00096.3")
+            .find(|alias| alias.genbank_accession_id == Some("U00096.3".to_string()))
             .unwrap();
         let aliases = ReferenceAlias::compute_aliases(first_e_coli_reference.clone());
         assert!(aliases.contains("NC_000913.3"));
@@ -197,7 +197,7 @@ mod tests {
 
         let first_yeast_reference = reference_aliases
             .iter()
-            .find(|alias| alias.genbank_accession_id == "BK006935.2")
+            .find(|alias| alias.genbank_accession_id == Some("BK006935.2".to_string()))
             .unwrap();
         let aliases = ReferenceAlias::compute_aliases(first_yeast_reference.clone());
         assert!(aliases.contains("BK006935.2"));

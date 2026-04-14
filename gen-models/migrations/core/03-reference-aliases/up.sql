@@ -1,12 +1,13 @@
 CREATE TABLE reference_aliases (
-    reference_name TEXT NOT NULL,
-    refseq_accession_id TEXT,
-    genbank_accession_id TEXT,
-    ucsc_id TEXT,
-    ensembl_id TEXT,
-    custom_id TEXT,
-    chromosome INTEGER
+  reference_name TEXT NOT NULL,
+  refseq_accession_id TEXT,
+  genbank_accession_id TEXT,
+  ucsc_id TEXT,
+  ensembl_id TEXT,
+  custom_id TEXT,
+  chromosome INTEGER
 );
+CREATE UNIQUE INDEX reference_alias_refseq_uidx ON reference_aliases(refseq_accession_id);
 
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('E. coli K-12 MG1655', 'NC_000913.3', 'U00096.3', 'U00096.3', '');
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('E. coli O157:H7 Sakai', 'NC_002695.2', 'BA000007.3', 'BA000007.3', '');

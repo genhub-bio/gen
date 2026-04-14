@@ -779,10 +779,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             match ReferenceAlias::create(
                 graph_conn,
                 &reference_name,
-                &refseq_accession_id,
-                &genbank_id,
-                &ucsc_id,
-                &ensembl_id,
+                refseq_accession_id,
+                genbank_id,
+                ucsc_id,
+                ensembl_id,
                 custom_id,
                 chromosome,
             ) {
