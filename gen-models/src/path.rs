@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
-    calculate_hash,
+    calculate_hash, is_end_node, is_start_node,
     range::{Range, RangeMapping},
     traits::Capnp,
 };
@@ -293,10 +293,10 @@ impl Path {
 
         let mut sequence_node_ids = HashSet::new();
         for edge in &edges {
-            if edge.source_node_id != PATH_START_NODE_ID {
+            if !is_start_node(edge.source_node_id) {
                 sequence_node_ids.insert(edge.source_node_id);
             }
-            if edge.target_node_id != PATH_END_NODE_ID {
+            if !is_end_node(edge.target_node_id) {
                 sequence_node_ids.insert(edge.target_node_id);
             }
         }
