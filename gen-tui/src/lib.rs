@@ -2,7 +2,6 @@
 //! the Gen version control system for graph genome sequences.
 
 pub mod animation;
-pub mod color_utils;
 pub mod cursor;
 pub mod distribute_nodes;
 pub mod dot_export;
@@ -29,5 +28,6 @@ pub use layout::{LayoutEdge, LayoutEngine, LayoutNode, NodeRole, VisualDetail};
 pub use partition::{PartitionEdge, PartitionNode};
 pub use partition_controller::PartitionController;
 pub use plotter::{LineStyle, PathStyle};
+pub use theme::{Theme, current_theme, set_theme};
 pub use viewport_graph::CroppedGraph;
 pub use viewport_state::ViewportState;

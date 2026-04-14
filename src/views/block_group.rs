@@ -7,7 +7,9 @@ use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind}
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
-use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
+use gen_tui::{
+    LineStyle, graph_controller::GraphController, plotter::PathStyle, theme::current_theme,
+};
 use log::{info, warn};
 use ratatui::{
     layout::{Constraint, Direction, HorizontalAlignment, Layout, Position, Rect},
@@ -19,7 +21,6 @@ use rusqlite::params;
 
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
-    theme::get_theme_color,
     views::{
         annotation_track::AnnotationTrack,
         annotations::{
@@ -762,10 +763,9 @@ pub fn view_block_group(
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;
             if show_sidebar {
+                let theme = current_theme();
                 let sidebar_block = Block::default().padding(Padding::new(0, 0, 1, 1)).style(
-                    Style::default()
-                        .bg(get_theme_color("sidebar").unwrap())
-                        .fg(get_theme_color("text").unwrap()),
+                    Style::default().bg(theme[0x00]).fg(theme[0x05]),
                 );
                 let sidebar_content_area = sidebar_block.inner(sidebar_area);
 
@@ -774,7 +774,7 @@ pub fn view_block_group(
 
                 // Draw the vertical separator line at the right edge of the sidebar
                 let line_char = "▕";
-                let line_style = Style::default().fg(get_theme_color("separator").unwrap());
+                let line_style = Style::default().fg(theme[0x02]);
                 let x = sidebar_area.right() - 1;
                 for y in sidebar_area.top()..sidebar_area.bottom() {
                     frame.buffer_mut().set_string(x, y, line_char, line_style);
@@ -786,11 +786,8 @@ pub fn view_block_group(
                 && let Some(msg) = messages.latest()
             {
                 let message_text = Text::from(msg.as_str());
-                let message_bar = Paragraph::new(message_text).style(
-                    Style::default()
-                        .fg(get_theme_color("warning").unwrap_or(Color::Yellow))
-                        .bg(get_theme_color("status_bar").unwrap_or(Color::Black)),
-                );
+                let message_bar = Paragraph::new(message_text)
+                    .style(Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]));
                 frame.render_widget(message_bar, area);
             }
 
@@ -822,7 +819,7 @@ pub fn view_block_group(
                 let loading_text = Text::styled(
                     "Loading…",
                     Style::default()
-                        .fg(get_theme_color("text").unwrap())
+                        .fg(current_theme()[0x05])
                         .add_modifier(Modifier::BOLD),
                 );
                 let loading_para =
@@ -856,7 +853,7 @@ pub fn view_block_group(
                         .map(|&l| {
                             Line::from(Span::styled(
                                 l,
-                                Style::default().fg(get_theme_color("highlight").unwrap()),
+                                Style::default().fg(current_theme()[0x07]),
                             ))
                         })
                         .collect::<Vec<_>>(),
@@ -878,7 +875,7 @@ pub fn view_block_group(
                 render_with_optional_clear(frame, canvas_area, splash_area, true, splash_para);
             } else {
                 graph_controller.viewport_state.focus();
-                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+                let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)
                     .detail_level(graph_controller.get_detail_level())
                     .style(canvas_style)
@@ -918,17 +915,13 @@ pub fn view_block_group(
                 let panel_block = Block::bordered()
                     .padding(Padding::new(2, 2, 1, 1))
                     .title(panel_title)
-                    .style(
-                        Style::default()
-                            .bg(get_theme_color("panel").unwrap())
-                            .fg(get_theme_color("text").unwrap()),
-                    )
+                    .style(Style::default().bg(current_theme()[0x01]).fg(current_theme()[0x05]))
                     .border_style(if focus_zone == FocusZone::Panel {
                         Style::default()
-                            .fg(get_theme_color("highlight").unwrap())
+                            .fg(current_theme()[0x07])
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(get_theme_color("text").unwrap())
+                        Style::default().fg(current_theme()[0x05])
                     });
 
                 let panel_text = match panel_mode {
@@ -979,7 +972,7 @@ pub fn view_block_group(
                             lines.push(Line::from(Span::styled(
                                 "No node selected",
                                 Style::default()
-                                    .fg(get_theme_color("text_muted").unwrap_or(Color::DarkGray))
+                                    .fg(current_theme()[0x04])
                                     .add_modifier(Modifier::ITALIC),
                             )));
                         }
@@ -990,7 +983,7 @@ pub fn view_block_group(
                         if messages.is_empty() {
                             vec![Line::from(vec![Span::styled(
                                 "No messages",
-                                Style::default().fg(get_theme_color("text_muted").unwrap()),
+                                Style::default().fg(current_theme()[0x04]),
                             )])]
                         } else {
                             messages
