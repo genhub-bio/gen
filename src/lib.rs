@@ -19,12 +19,12 @@ pub mod gfa_reader;
 pub mod graphs;
 pub mod imports;
 
+pub mod base16;
 pub mod operation_management;
 pub mod patch;
 mod progress_bar;
 #[cfg(any(test, debug_assertions))]
 pub mod test_helpers;
-pub mod theme;
 pub mod updates;
 pub mod views;
 

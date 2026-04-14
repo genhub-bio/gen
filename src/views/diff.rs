@@ -6,24 +6,21 @@ use gen_diff::{
     operations::{BlockGroupDiff, OperationDiff},
 };
 use gen_models::db::GraphConnection;
+use gen_tui::theme::current_theme;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     widgets::{List, ListItem},
 };
 
-use crate::{
-    theme::get_theme_color,
-    views::{
-        diff_graph::{
-            DiffGraphComponent, apply_diff_highlights, block_group_label,
-            build_diff_graph_component, highlight_color_for_change_label,
-            split_connected_components,
-        },
-        gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
-        panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
-        tui_runtime::TuiSession,
+use crate::views::{
+    diff_graph::{
+        DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
+        highlight_color_for_change_label, split_connected_components,
     },
+    gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
+    panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
+    tui_runtime::TuiSession,
 };
 
 struct DiffComponent {
@@ -168,7 +165,7 @@ pub fn view_diff(
 
             f.render_widget(graph_block, main[1]);
 
-            let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+            let canvas_style = Style::default().bg(current_theme()[0x00]);
             let widget = create_gen_graph_widget(conn)
                 .detail_level(graph_controller.get_detail_level())
                 .style(canvas_style)

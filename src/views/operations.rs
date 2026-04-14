@@ -9,7 +9,7 @@ use gen_models::{
     operations::{Operation, OperationSummary},
     traits::Query,
 };
-use gen_tui::graph_controller::GraphController;
+use gen_tui::{graph_controller::GraphController, theme::current_theme};
 use rat_text::{
     HasScreenCursor,
     text_area::{TextArea, TextAreaState},
@@ -22,20 +22,14 @@ use ratatui::{
 };
 use rusqlite::{params, types::Value};
 
-use crate::{
-    theme::get_theme_color,
-    views::{
-        diff_graph::{
-            DiffGraphComponent, apply_diff_highlights, block_group_label,
-            build_diff_graph_component, highlight_color_for_change_label,
-            split_connected_components,
-        },
-        gen_graph_widget::{
-            GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
-        },
-        panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
-        tui_runtime::TuiSession,
+use crate::views::{
+    diff_graph::{
+        DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
+        highlight_color_for_change_label, split_connected_components,
     },
+    gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget},
+    panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
+    tui_runtime::TuiSession,
 };
 
 fn clip_text(t: &str, limit: usize) -> String {
@@ -428,7 +422,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 graph_controller.viewport_state.viewport_bounds = inner_canvas;
                 graph_controller.update_animations(frame_delta);
 
-                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+                let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)
                     .detail_level(graph_controller.get_detail_level())
                     .style(canvas_style)
