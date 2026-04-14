@@ -38,7 +38,7 @@ function render({ model, el }) {
 
   // ── DOM setup ──────────────────────────────────────────────────────────────
   const wrapper = document.createElement("div");
-  wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
+  wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0; border: 2px solid #45475a;";
 
   const canvas = document.createElement("canvas");
   canvas.style.cssText = "display: block; cursor: grab;";
@@ -123,6 +123,18 @@ function render({ model, el }) {
   paintFrame(model.get("frame"));
   model.on("change:frame", () => paintFrame(model.get("frame")));
 
+  // ── Freeze ─────────────────────────────────────────────────────────────────
+  let frozen = false;
+
+  model.on("msg:custom", (msg) => {
+    if (msg.type !== "freeze") return;
+    frozen = true;
+    wrapper.style.border = "none";
+    canvas.style.cursor = "default";
+    btnContainer.style.display = "none";
+    model.send({ type: "snapshot", data: canvas.toDataURL("image/png") });
+  });
+
   // ── Zoom buttons ───────────────────────────────────────────────────────────
   zoomInBtn.addEventListener("mousedown", (e) => e.preventDefault());
   zoomOutBtn.addEventListener("mousedown", (e) => e.preventDefault());
@@ -147,7 +159,7 @@ function render({ model, el }) {
   let dragRemY = 0;
 
   canvas.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
+    if (frozen || e.button !== 0) return;
     pointerDown = true;
     isDragging = false;
     dragStartX = lastDragX = e.clientX;

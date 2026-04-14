@@ -63,6 +63,8 @@ class GenGraphWidget(anywidget.AnyWidget):
         """
         super().__init__(**kwargs)
         self._controller = controller
+        self._frozen = False
+        self._static_png: str = ""
 
         # Re-render when the viewport size changes.
         self.observe(self._on_resize, names=["cols", "rows"])
@@ -91,6 +93,10 @@ class GenGraphWidget(anywidget.AnyWidget):
         # all the information we need is in msg.
         msg_type = msg.get("type")
 
+        if msg_type == "snapshot":
+            self._static_png = msg.get("data", "")
+            return
+
         if msg_type == "mouse_click":
             self.handle_click(int(msg.get("col", 0)), int(msg.get("row", 0)))
 
@@ -107,24 +113,48 @@ class GenGraphWidget(anywidget.AnyWidget):
 
     def handle_click(self, col: int, row: int) -> bool:
         """Send a mouse click to the controller and re-render. Returns True if a node was hit."""
+        if self._frozen:
+            return False
         hit = self._controller.handle_click(col, row)
         self._render()
         return hit
 
     def zoom_in(self) -> None:
         """Step one zoom level in."""
+        if self._frozen:
+            return
         self._controller.zoom_in()
         self._render()
 
     def zoom_out(self) -> None:
         """Step one zoom level out."""
+        if self._frozen:
+            return
         self._controller.zoom_out()
         self._render()
 
     def move_by(self, dx: int, dy: int) -> None:
         """Move the viewport by dx, dy cells."""
+        if self._frozen:
+            return
         self._controller.move_by(dx, dy)
         self._render()
+
+    def freeze(self) -> None:
+        """Capture current canvas as static PNG, disable interactivity.
+
+        After calling this the widget becomes a static snapshot.  The canvas
+        border indicator is hidden and all interaction methods become no-ops.
+        The captured PNG is embedded in ``_repr_html_`` so the notebook can be
+        distributed to environments without the Python module installed.
+        """
+        self._frozen = True
+        self.send({"type": "freeze"})
+
+    def _repr_html_(self) -> str:
+        if self._static_png:
+            return f'<img src="{self._static_png}" style="display:block;font-family:monospace" />'
+        return "<pre>Call widget.freeze() to generate a static snapshot.</pre>"
 
     def go_to(self, pos) -> None:
         """Instantly move the camera to a graph position.
@@ -141,6 +171,8 @@ class GenGraphWidget(anywidget.AnyWidget):
             matches = repo.search(bg, "ACGT...")
             widget.go_to(matches[0].start())
         """
+        if self._frozen:
+            return
         self._controller.go_to_pos(pos)
         self._render()
 
@@ -154,7 +186,8 @@ class GenGraphWidget(anywidget.AnyWidget):
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
-            (``"#ff8800"``).  Defaults to ``"cyan"``.
+            (``"#ff8800"``).  When omitted the next unused theme accent
+            colour is chosen automatically.
 
         Example
         -------
@@ -163,6 +196,8 @@ class GenGraphWidget(anywidget.AnyWidget):
             matches = repo.search(bg, "ACGT...")
             widget.show(matches[0])
         """
+        if self._frozen:
+            return
         self._controller.go_to_pos(locus.start())
         self._controller.highlight_match(locus, color)
         self._render()
@@ -177,7 +212,9 @@ class GenGraphWidget(anywidget.AnyWidget):
         color:
             Optional colour for the highlight.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
-            (``"#ff8800"``).  Defaults to ``"cyan"``.
+            (``"#ff8800"``).  When omitted the next unused theme accent
+            colour is chosen automatically, so multiple ``highlight_match``
+            calls without an explicit colour each get a distinct colour.
 
         Example
         -------
@@ -187,14 +224,38 @@ class GenGraphWidget(anywidget.AnyWidget):
             widget.go_to(matches[0].start())
             widget.highlight_match(matches[0])
         """
+        if self._frozen:
+            return
         self._controller.highlight_match(locus, color)
         self._render()
 
     def clear_highlights(self) -> None:
         """Remove all highlights from the graph."""
+        if self._frozen:
+            return
         self._controller.clear_highlights()
+        self._render()
+
+    def show_path(self, color: str | None = None) -> None:
+        """Highlight the most recent path for this block group.
+
+        Parameters
+        ----------
+        color:
+            CSS hex colour string, e.g. ``"#ff4444"``.  Defaults to red.
+            Pass ``"reset"`` to use a brightness-boost effect instead of
+            a colour tint.
+        """
+        self._controller.show_path(color)
+        self._render()
+
+    def clear_path(self) -> None:
+        """Remove path highlighting applied by :meth:`show_path`."""
+        self._controller.clear_path()
         self._render()
 
     def refresh(self) -> None:
         """Force a re-render from the current controller state."""
+        if self._frozen:
+            return
         self._render()
