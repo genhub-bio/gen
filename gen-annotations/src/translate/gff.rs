@@ -4,14 +4,25 @@ use std::{
     io::{BufRead, Read, Write},
 };
 
-use anyhow::Result;
 use gen_core::{HashId, Strand, is_terminal};
 use gen_graph::{GraphNode, project_path};
 use gen_models::{
-    block_group::BlockGroup, db::GraphConnection, reference_alias::ReferenceAlias, sample::Sample,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    reference_alias::{ReferenceAlias, ReferenceAliasError},
+    sample::Sample,
 };
 use interavl::IntervalTree;
 use noodles::{core::Position, gff};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum GffError {
+    #[error("Couldn't translate GFF entry: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Error loading reference aliases: {0}")]
+    ReferenceAliasError(#[from] ReferenceAliasError),
+}
 
 pub fn translate_gff<R, W>(
     conn: &GraphConnection,
@@ -19,7 +30,7 @@ pub fn translate_gff<R, W>(
     sample: &str,
     reader: R,
     writer: &mut W,
-) -> Result<()>
+) -> Result<(), GffError>
 where
     R: Read + BufRead,
     W: Write,
