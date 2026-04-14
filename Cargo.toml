@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [workspace]
 members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
-default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas"]
+default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
 exclude = ["gen-python"]
 
 [features]
@@ -57,7 +57,7 @@ tempfile = "3.20.0"
 interavl = "0.3.0"
 regex = "1.11.1"
 flate2 = "1.1.0"
-gb-io = "0.8.0"
+gb-io = "0.9.0"
 thiserror = "2.0.12"
 indicatif = "0.18.3"
 html-escape = "0.2.13"
@@ -75,7 +75,7 @@ serde_with = "3.0"
 once_cell = "1.21.3"
 webbrowser = "1.0.5"
 reqwest = { version = "0.12.23", default-features = false,features = ["blocking", "json", "multipart", "stream", "rustls-tls"] }
-rand = "0.9.2"
+rand = "0.10.1"
 base64 = "0.22.1"
 getrandom = "0.3.3"
 directories = "6.0.0"
@@ -85,7 +85,7 @@ indexmap = "2.11.3"
 anyhow = { version = "1.0.100", features = ["backtrace"] }
 
 [dev-dependencies]
-cargo-llvm-cov = "0.6.16"
+cargo-llvm-cov = "0.8.5"
 cargo-deny = "0.19.0"
 more-asserts = "0.3.1"
 

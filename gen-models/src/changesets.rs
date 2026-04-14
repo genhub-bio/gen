@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     convert::TryInto,
     fs,
     io::Read,
@@ -514,6 +514,7 @@ pub fn process_changesetiter(
                     let sample_name = parse_string(item, 2);
                     let name = parse_string(item, 3);
                     let created_on = parse_number(item, 4);
+                    let parent_block_group_id = parse_maybe_hashid(item, 5);
 
                     created_block_groups.push(BlockGroup {
                         id: bg_pk,
@@ -521,11 +522,16 @@ pub fn process_changesetiter(
                         sample_name: sample_name.clone(),
                         name,
                         created_on,
-                        parent_block_group_id: parse_maybe_hashid(item, 5),
+                        parent_block_group_id,
                         is_default: parse_number(item, 6) != 0,
                     });
 
                     created_block_groups_set.insert(bg_pk);
+                    if let Some(parent_block_group_id) = parent_block_group_id
+                        && !created_block_groups_set.contains(&parent_block_group_id)
+                    {
+                        previous_block_groups.insert(parent_block_group_id);
+                    }
                     if !created_collections_set.contains(&collection) {
                         previous_collections.insert(collection);
                     }
@@ -836,7 +842,13 @@ pub fn apply_changeset(
         }
     }
 
-    for bg in dependencies.block_group.iter() {
+    let block_groups = dependencies
+        .block_group
+        .iter()
+        .chain(changeset.block_groups.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    for bg in block_groups_parent_first(&block_groups) {
         BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -900,19 +912,6 @@ pub fn apply_changeset(
     for sequence in &changeset.sequences {
         NewSequence::from(sequence).save(conn);
     }
-    for bg in &changeset.block_groups {
-        BlockGroup::create(
-            conn,
-            NewBlockGroup {
-                collection_name: &bg.collection_name,
-                sample_name: &bg.sample_name,
-                name: &bg.name,
-                parent_block_group_id: bg.parent_block_group_id.as_ref(),
-                is_default: bg.is_default,
-            },
-        );
-    }
-
     for node in &changeset.nodes {
         Node::create(conn, &node.sequence_hash, &node.id);
     }
@@ -1162,6 +1161,71 @@ pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
         .get_root::<crate::gen_models_capnp::dependency_models::Reader>()
         .unwrap();
     DependencyModels::read_capnp(root)
+}
+
+fn block_groups_parent_first(block_groups: &[BlockGroup]) -> Vec<&BlockGroup> {
+    let by_id = block_groups
+        .iter()
+        .map(|block_group| (block_group.id, block_group))
+        .collect::<HashMap<_, _>>();
+    let mut children_by_parent: HashMap<Option<HashId>, Vec<&BlockGroup>> = HashMap::new();
+    let mut roots = Vec::new();
+    for block_group in block_groups {
+        if let Some(parent_id) = block_group.parent_block_group_id
+            && by_id.contains_key(&parent_id)
+        {
+            children_by_parent
+                .entry(Some(parent_id))
+                .or_default()
+                .push(block_group);
+            continue;
+        }
+        roots.push(block_group);
+    }
+
+    fn walk<'a>(
+        parent_id: Option<HashId>,
+        children_by_parent: &HashMap<Option<HashId>, Vec<&'a BlockGroup>>,
+        visited: &mut HashSet<HashId>,
+        ordered: &mut Vec<&'a BlockGroup>,
+    ) {
+        if let Some(children) = children_by_parent.get(&parent_id) {
+            for block_group in children {
+                if visited.insert(block_group.id) {
+                    ordered.push(block_group);
+                    walk(Some(block_group.id), children_by_parent, visited, ordered);
+                }
+            }
+        }
+    }
+
+    let mut ordered = Vec::new();
+    let mut visited = HashSet::new();
+    for root in roots {
+        if visited.insert(root.id) {
+            ordered.push(root);
+            walk(
+                Some(root.id),
+                &children_by_parent,
+                &mut visited,
+                &mut ordered,
+            );
+        }
+    }
+
+    for block_group in block_groups {
+        if visited.insert(block_group.id) {
+            ordered.push(block_group);
+            walk(
+                Some(block_group.id),
+                &children_by_parent,
+                &mut visited,
+                &mut ordered,
+            );
+        }
+    }
+
+    ordered
 }
 
 pub fn write_changeset(
@@ -1582,6 +1646,32 @@ mod tests {
         let dependencies = operation.get_changeset_dependencies(context.workspace());
         assert_eq!(dependencies.samples.len(), 1);
         assert_eq!(dependencies.samples[0].name, "parent");
+    }
+
+    #[test]
+    fn test_block_groups_parent_first() {
+        let parent = BlockGroup {
+            id: HashId::pad_str(1),
+            collection_name: "test".to_string(),
+            sample_name: "parent".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: None,
+            is_default: false,
+        };
+        let child = BlockGroup {
+            id: HashId::pad_str(2),
+            collection_name: "test".to_string(),
+            sample_name: "child".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(parent.id),
+            is_default: false,
+        };
+
+        let block_groups = [child.clone(), parent.clone()];
+        let ordered = block_groups_parent_first(&block_groups);
+        assert_eq!(ordered, vec![&parent, &child]);
     }
 
     #[cfg(test)]

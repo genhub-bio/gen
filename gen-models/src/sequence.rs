@@ -394,7 +394,7 @@ mod tests {
     use std::time;
     use std::{fs::OpenOptions, io::Write};
 
-    use rand::{self, Rng};
+    use rand::{self, RngExt};
 
     use super::*;
     use crate::test_helpers::get_connection;
