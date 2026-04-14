@@ -13,6 +13,7 @@ use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
     annotations::gff::propagate_gff,
+    base16::init_theme,
     commands::{
         Cli, Commands,
         cli_context::CliContext,
@@ -912,6 +913,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_global_panic_hook();
+    init_theme();
 
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();

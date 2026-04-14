@@ -7,16 +7,16 @@ use petgraph::visit::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     widgets::{Block, StatefulWidget, Widget},
 };
 
 use crate::{
-    color_utils::tint_colors,
     geometry::{BigRect, WorldPos, WorldRect},
     graph_controller::{GraphController, ViewportState, WorldBuffer},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer, plot_viewport_graph_with_highlights},
+    theme::current_theme,
 };
 
 pub const NODE_GLYPH: char = '●'; // changed from '⏺', which renders as an emoji in some fonts;
@@ -245,6 +245,7 @@ where
         }
 
         // Render the graph using the renderer
+        let theme = current_theme();
         let mut world_buffer = WorldBuffer::new(buf, &controller.viewport_state);
 
         // Extract data from controller and render directly via ViewportGraph
@@ -260,7 +261,7 @@ where
             detail_level,
             node_highlights,
             edge_highlights,
-            &controller.theme,
+            &theme,
         );
 
         // Call user supplied closure if provided
@@ -271,6 +272,7 @@ where
 
         if controller.cursor.is_visible() {
             let viewport_graph = controller.get_viewport_graph();
+            let cursor_bg = theme[0x07];
 
             if controller.cursor.is_coarse_mode() {
                 // Highlight the whole node in coarse mode
@@ -281,32 +283,17 @@ where
                     let node_rect = BigRect::from_center_and_size(node_center, node_data.size);
                     let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
 
-                    // Invert every cell in the node that is currently on-screen
                     for y in node_rect.bottom()..=node_rect.top() {
                         for x in node_rect.left()..=node_rect.right() {
                             let pos = WorldPos::new(x, y);
                             if let Some((current_char, current_style)) =
                                 cursor_buffer.get_char_styled(pos)
                             {
-                                let highlight = controller.theme.highlight;
-
-                                // For node glyphs: use highlight color as fg, keep original bg, render as filled square
-                                // For other characters: tint colors and apply reversed modifier
                                 let (char_to_render, new_style) = if current_char == NODE_GLYPH {
-                                    let new_style = current_style.fg(highlight);
-                                    ('■', new_style)
+                                    ('■', current_style.fg(cursor_bg).bg(theme[0x00]))
                                 } else {
-                                    let fg = current_style.fg.unwrap_or(controller.theme.node_fg);
-                                    let bg = current_style.bg.unwrap_or(controller.theme.node_bg);
-                                    let (tinted_fg, tinted_bg) =
-                                        tint_colors(fg, bg, highlight, 0.4);
-                                    let new_style = current_style
-                                        .fg(tinted_fg)
-                                        .bg(tinted_bg)
-                                        .add_modifier(Modifier::REVERSED);
-                                    (current_char, new_style)
+                                    (current_char, current_style.bg(cursor_bg))
                                 };
-
                                 cursor_buffer.set_char_styled(pos, char_to_render, new_style);
                             }
                         }
@@ -314,31 +301,17 @@ where
                 }
             } else {
                 // Single cell cursor in normal mode
-                // Get cursor world position for rendering
                 if let Some(cursor_world_pos) = controller.cursor.to_world_pos(viewport_graph) {
                     let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
 
-                    // Get the current character and style at cursor position
                     if let Some((current_char, current_style)) =
                         cursor_buffer.get_char_styled(cursor_world_pos)
                     {
-                        let highlight = controller.theme.highlight;
-
-                        // Apply the same styling logic as coarse mode, but to a single cell
                         let (char_to_render, new_style) = if current_char == NODE_GLYPH {
-                            let new_style = current_style.fg(highlight);
-                            ('■', new_style)
+                            ('■', current_style.fg(cursor_bg))
                         } else {
-                            let fg = current_style.fg.unwrap_or(ratatui::style::Color::Reset);
-                            let bg = current_style.bg.unwrap_or(ratatui::style::Color::Reset);
-                            let (tinted_fg, tinted_bg) = tint_colors(fg, bg, highlight, 0.4);
-                            let new_style = current_style
-                                .fg(tinted_fg)
-                                .bg(tinted_bg)
-                                .add_modifier(Modifier::REVERSED);
-                            (current_char, new_style)
+                            (current_char, current_style.bg(cursor_bg))
                         };
-
                         cursor_buffer.set_char_styled(cursor_world_pos, char_to_render, new_style);
                     }
                 }

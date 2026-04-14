@@ -6,10 +6,7 @@ use r#gen::{
 };
 use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
-use gen_tui::{
-    graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    theme::Theme,
-};
+use gen_tui::{graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail};
 use pyo3::{
     exceptions::PyRuntimeError,
     prelude::*,
@@ -121,7 +118,7 @@ pub struct PyGraphController {
 impl PyGraphController {
     pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
         let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme::default());
+        let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(VisualDetail::Truncated);
         controller.hide_cursor();
         Self {
