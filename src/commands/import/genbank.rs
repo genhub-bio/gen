@@ -5,6 +5,7 @@ use clap::Args;
 use gen_models::{
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
+    sample::Sample,
 };
 
 use crate::{
@@ -22,7 +23,7 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// A sample name to associate the Genbank file with
-    #[arg(short, long, default_value = "reference")]
+    #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
     sample: String,
 }
 

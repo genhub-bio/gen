@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Args;
+use gen_models::sample::Sample;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -13,7 +14,7 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// The name of the sample to update
-    #[arg(short, long, default_value = "reference")]
+    #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
     sample: String,
     /// A new sample name to associate with the update
     #[arg(long)]
