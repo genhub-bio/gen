@@ -65,6 +65,7 @@ class GenGraphWidget(anywidget.AnyWidget):
         self._controller = controller
         self._frozen = False
         self._static_png: str = ""
+        self._display_handle = None
 
         # Re-render when the viewport size changes.
         self.observe(self._on_resize, names=["cols", "rows"])
@@ -74,6 +75,28 @@ class GenGraphWidget(anywidget.AnyWidget):
 
         # Initial render.
         self._render()
+
+    # ── Display ───────────────────────────────────────────────────────────────
+
+    def _ipython_display_(self, **kwargs):
+        """Display the widget and store a handle so freeze() can replace it."""
+        from IPython.display import display, HTML
+        if self._frozen and self._static_png:
+            display(HTML(
+                f'<img src="{self._static_png}" style="display:block;font-family:monospace" />'
+            ))
+            return
+        # Build the mime bundle manually and pass raw=True to avoid recursion
+        # (display(self, ...) would re-enter this method).
+        data = {
+            'text/plain': repr(self),
+            'application/vnd.jupyter.widget-view+json': {
+                'version_major': 2,
+                'version_minor': 0,
+                'model_id': self._model_id,
+            },
+        }
+        self._display_handle = display(data, raw=True, display_id=True)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -95,6 +118,12 @@ class GenGraphWidget(anywidget.AnyWidget):
 
         if msg_type == "snapshot":
             self._static_png = msg.get("data", "")
+            if self._display_handle is not None:
+                from IPython.display import HTML
+                self._display_handle.update(HTML(
+                    f'<img src="{self._static_png}" style="display:block;font-family:monospace" />'
+                ))
+                self._display_handle = None
             return
 
         if msg_type == "mouse_click":
@@ -145,16 +174,11 @@ class GenGraphWidget(anywidget.AnyWidget):
 
         After calling this the widget becomes a static snapshot.  The canvas
         border indicator is hidden and all interaction methods become no-ops.
-        The captured PNG is embedded in ``_repr_html_`` so the notebook can be
-        distributed to environments without the Python module installed.
+        The captured PNG appears in the cell output as an ``<img>`` tag — it
+        updates in-place once the frontend responds with the snapshot.
         """
         self._frozen = True
         self.send({"type": "freeze"})
-
-    def _repr_html_(self) -> str:
-        if self._static_png:
-            return f'<img src="{self._static_png}" style="display:block;font-family:monospace" />'
-        return "<pre>Call widget.freeze() to generate a static snapshot.</pre>"
 
     def go_to(self, pos) -> None:
         """Instantly move the camera to a graph position.

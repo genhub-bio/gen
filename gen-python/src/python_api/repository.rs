@@ -1,28 +1,28 @@
 use std::{fs, path::PathBuf};
 
-use r#gen::{
-    self,
-    core::HashId,
-    fasta::FastaError,
-    graphs::{
-        combinatorial_library::{SequencePart, parse_library},
-        graph_search::{GenGraphMatcher, SeedIndex},
-    },
-    imports::{gfa::GFAImportError, library::LibraryImportError},
-    updates::vcf::VcfError,
-};
 use gen_core::config::Workspace;
 use gen_models::{
     block_group::BlockGroup, db::DbContext, errors::OperationError, node::Node,
     operations::Defaults, sample::Sample, traits::Query,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyModule};
+use r#gen::{
+    self,
+    core::HashId,
+    fasta::FastaError,
+    graphs::{
+        combinatorial_library::{parse_library, SequencePart},
+        graph_search::{GenGraphMatcher, SeedIndex},
+    },
+    imports::{gfa::GFAImportError, library::LibraryImportError},
+    updates::vcf::VcfError,
+};
 
 use super::{
     block_group::PyBlockGroup,
     factory::Factory,
     graph_search::PyGraphLocus,
-    jupyter_widget::{PyGraphController, build_and_display_widget},
+    jupyter_widget::{build_and_display_widget, PyGraphController},
     node_key::PyBlock,
     sequence_part::PySequencePart,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
@@ -90,9 +90,8 @@ pub struct PyRepository {
 impl PyRepository {
     fn get_default_collection(&self) -> String {
         Defaults::get(self.context.operations().conn())
-            .unwrap()
-            .collection_name
-            .unwrap()
+            .and_then(|d| d.collection_name)
+            .unwrap_or_else(|| "default".to_string())
     }
 }
 
@@ -295,13 +294,15 @@ impl PyRepository {
     // -------------------------------------------------------------------------
 
     fn block_group_to_rustworkx(&self, block_group: &PyBlockGroup) -> PyResult<PyObject> {
-        Python::with_gil(|py| match PyModule::import(py, "rustworkx") {
+        Python::with_gil(|py| {
+            match PyModule::import(py, "rustworkx") {
             Ok(_) => self
                 .factory
                 .to_rustworkx(self.context.graph().conn(), &block_group.id),
             Err(_) => Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "The 'rustworkx' module is not installed. Please install it using 'pip install rustworkx' to use this functionality.",
             )),
+        }
         })
     }
 
@@ -311,13 +312,15 @@ impl PyRepository {
     }
 
     fn block_group_to_networkx(&self, block_group: &PyBlockGroup) -> PyResult<PyObject> {
-        Python::with_gil(|py| match PyModule::import(py, "networkx") {
+        Python::with_gil(|py| {
+            match PyModule::import(py, "networkx") {
             Ok(_) => self
                 .factory
                 .to_networkx(self.context.graph().conn(), &block_group.id),
             Err(_) => Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "The 'networkx' module is not installed. Please install it using 'pip install networkx' to use this functionality.",
             )),
+        }
         })
     }
 
@@ -1055,8 +1058,8 @@ impl PyRepository {
 mod python_tests {
     use std::fs;
 
-    use r#gen::test_helpers::{setup_gen, setup_gen_on_disk};
     use pyo3::{prelude::*, py_run};
+    use r#gen::test_helpers::{setup_gen, setup_gen_on_disk};
     use tempfile::tempdir;
 
     use crate::python_api::{factory::Factory, repository::PyRepository};

@@ -129,10 +129,12 @@ function render({ model, el }) {
   model.on("msg:custom", (msg) => {
     if (msg.type !== "freeze") return;
     frozen = true;
-    wrapper.style.border = "none";
-    canvas.style.cursor = "default";
-    btnContainer.style.display = "none";
-    model.send({ type: "snapshot", data: canvas.toDataURL("image/png") });
+    const dataUrl = canvas.toDataURL("image/png");
+    const img = document.createElement("img");
+    img.src = dataUrl;
+    img.style.cssText = "display:block;font-family:monospace";
+    el.replaceChild(img, wrapper);
+    model.send({ type: "snapshot", data: dataUrl });
   });
 
   // ── Zoom buttons ───────────────────────────────────────────────────────────
