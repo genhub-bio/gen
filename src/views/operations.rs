@@ -22,8 +22,9 @@ use ratatui::{
 };
 use rusqlite::{params, types::Value};
 
+use gen_tui::theme::current_theme;
+
 use crate::{
-    config::get_theme_color,
     views::{
         diff_graph::{
             DiffGraphComponent, apply_diff_highlights, block_group_label,
@@ -428,7 +429,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 graph_controller.viewport_state.viewport_bounds = inner_canvas;
                 graph_controller.update_animations(frame_delta);
 
-                let canvas_style = Style::default().bg(get_theme_color("canvas").unwrap());
+                let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)
                     .detail_level(graph_controller.get_detail_level())
                     .style(canvas_style)

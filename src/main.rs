@@ -22,7 +22,7 @@ use r#gen::{
         },
         remote::handle_remote_command,
     },
-    config,
+    base16::init_theme,
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection,
     graphs::graph_search::{GenGraphMatcher, GraphLocus, SeedIndex},
@@ -890,6 +890,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_global_panic_hook();
+    init_theme();
 
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();

@@ -7,7 +7,6 @@ use std::{
 };
 pub mod base16;
 pub mod commands;
-pub mod config;
 pub mod diffs;
 pub mod errors;
 pub mod exports;

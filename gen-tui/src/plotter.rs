@@ -13,7 +13,6 @@ use ratatui::{
 };
 
 use crate::{
-    color_utils::{brighten_colors, tint_colors},
     geometry::{BigRect, Point, WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
@@ -309,29 +308,17 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
 
         if let Some(style) = highlighted_style {
             let edge_color = match style.color {
-                Color::Reset => {
-                    // Brighten the edge color instead of tinting
-                    let (brightened, _) = brighten_colors(theme.edge_fg, theme.edge_fg, 0.4);
-                    brightened
-                }
-                _ => {
-                    // Compute tinted colors as they would be applied to nodes
-                    let (_, tinted_bg) =
-                        tint_colors(theme.node_fg, theme.node_bg, style.color, 0.8);
-                    // Use the tinted bg as the edge fg color
-                    tinted_bg
-                }
+                Color::Reset => theme[0x07],
+                color => color,
             };
             draw_edge_with_style(buffer, source, target, edge_color, style.line_style);
         } else if !bundle.is_empty() {
             // Normal edge with data
-            let color = theme.edge_fg;
-            draw_edge_with_style(buffer, source, target, color, LineStyle::Normal);
+            draw_edge_with_style(buffer, source, target, theme[0x05], LineStyle::Normal);
         } else {
             // Edges that don't actually represent an original edge
             // (edges to/from terminal source/sink nodes) - draw with dashed lines
-            let color = theme.edge_fg;
-            draw_edge_with_style(buffer, source, target, color, LineStyle::Dashed);
+            draw_edge_with_style(buffer, source, target, theme[0x05], LineStyle::Dashed);
         }
     }
 
@@ -350,40 +337,38 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     .map(|(_, style)| *style)
                     .next_back();
 
-                // If highlighted, either tint with color or brighten (for Color::Reset)
+                // If highlighted, apply color directly (Color::Reset → cursor highlight slot)
                 if let Some(path_style) = highlighted_style {
+                    let hl = match path_style.color {
+                        Color::Reset => theme[0x07],
+                        c => c,
+                    };
                     for y in world_rect.min.y..=world_rect.max.y {
                         for x in world_rect.min.x..=world_rect.max.x {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
-                                let fg = style.fg.unwrap_or(Color::Reset);
-                                let bg = style.bg.unwrap_or(Color::Reset);
-                                let (new_fg, new_bg) = if ch == NODE_GLYPH {
-                                    let new_fg = match path_style.color {
-                                        Color::Reset => brighten_colors(fg, bg, 0.2).0,
-                                        color => color,
-                                    };
-                                    (new_fg, bg)
+                                let new_style = if ch == NODE_GLYPH {
+                                    style.fg(hl).bg(theme[0x00])
                                 } else {
-                                    match path_style.color {
-                                        Color::Reset => brighten_colors(fg, bg, 0.2),
-                                        _ => tint_colors(fg, bg, path_style.color, 0.4),
-                                    }
+                                    style.bg(hl)
                                 };
-                                let new_style = style.fg(new_fg).bg(new_bg);
                                 buffer.set_char_styled(pos, ch, new_style);
                             }
                         }
                     }
                 }
 
-                // Sub-rect highlight pass: tint only the matched column/row range.
+                // Sub-rect highlight pass: apply color to matched column/row range.
                 // tl/br are node-local (col, row) offsets from world_rect.min, both inclusive.
                 if let Some((_, tl, br, path_style)) = cell_highlights
                     .iter()
                     .filter(|(idx, ..)| idx == domain_idx)
                     .next_back()
                 {
+                    let hl = match path_style.color {
+                        Color::Reset => theme[0x07],
+                        c => c,
+                    };
                     let x0 = (world_rect.min.x + tl.0).max(world_rect.min.x);
                     let x1 = (world_rect.min.x + br.0).min(world_rect.max.x);
                     let y0 = (world_rect.min.y + tl.1).max(world_rect.min.y);
@@ -392,21 +377,11 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         for x in x0..=x1 {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
-                                let fg = style.fg.unwrap_or(Color::Reset);
-                                let bg = style.bg.unwrap_or(Color::Reset);
-                                let (new_fg, new_bg) = if ch == NODE_GLYPH {
-                                    let new_fg = match path_style.color {
-                                        Color::Reset => brighten_colors(fg, bg, 0.2).0,
-                                        color => color,
-                                    };
-                                    (new_fg, bg)
+                                let new_style = if ch == NODE_GLYPH {
+                                    style.fg(hl).bg(theme[0x00])
                                 } else {
-                                    match path_style.color {
-                                        Color::Reset => brighten_colors(fg, bg, 0.2),
-                                        _ => tint_colors(fg, bg, path_style.color, 0.4),
-                                    }
+                                    style.bg(hl)
                                 };
-                                let new_style = style.fg(new_fg).bg(new_bg);
                                 buffer.set_char_styled(pos, ch, new_style);
                             }
                         }
@@ -414,7 +389,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 }
             }
             NodeRole::Routing => {
-                let edge_color = theme.edge_fg;
+                let edge_color = theme[0x05];
                 let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
 
                 // Check if this routing node is part of any highlighted edge
@@ -480,18 +455,8 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let fg_color = match highlighted_style {
                     None => edge_color,
                     Some(style) => match style.color {
-                        Color::Reset => {
-                            // Brighten the edge color instead of tinting
-                            let (brightened, _) = brighten_colors(edge_color, edge_color, 0.2);
-                            brightened
-                        }
-                        _ => {
-                            // Compute tinted colors as they would be applied to nodes
-                            let (_, tinted_bg) =
-                                tint_colors(theme.node_fg, theme.node_bg, style.color, 0.4);
-                            // Use the tinted bg as the edge fg color
-                            tinted_bg
-                        }
+                        Color::Reset => theme[0x07],
+                        c => c,
                     },
                 };
                 let style = Style::default().fg(fg_color);

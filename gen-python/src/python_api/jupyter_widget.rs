@@ -10,7 +10,7 @@ use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
     LineStyle::Bold, graph_controller::GraphController, graph_widget::GraphWidget,
-    layout::VisualDetail, plotter::PathStyle, theme::Theme,
+    layout::VisualDetail, plotter::PathStyle,
 };
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -127,7 +127,7 @@ pub struct PyGraphController {
 impl PyGraphController {
     pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
         let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme::default());
+        let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(VisualDetail::Truncated);
         controller.hide_cursor();
         Self {
@@ -251,12 +251,12 @@ impl PyGraphController {
     /// Highlight the path of nodes covered by `match_obj` in the given colour.
     ///
     /// `color` must be a CSS hex string like `"#ffff00"` or one of the named
-    /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  Defaults to
-    /// bright cyan when omitted.
+    /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
+    /// next unused theme accent colour (slots 0x08–0x0F) is chosen automatically.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
         use ratatui::style::Color;
         let c = match color {
-            None => Color::Cyan,
+            None => self.controller.next_accent_color(),
             Some(s) => match s {
                 "red" => Color::Red,
                 "green" => Color::Green,

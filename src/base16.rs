@@ -1,109 +1,66 @@
-use std::{path::PathBuf, str::FromStr};
+use std::str::FromStr;
 
-use figment::{
-    Figment,
-    providers::{Format, Yaml},
-};
 use ratatui::style::Color;
-use serde::{Deserialize, de, de::Deserializer};
-use serde_with::serde_as;
-use thiserror::Error;
+use serde::Deserialize;
 
-#[derive(Error, Debug)]
-#[non_exhaustive]
-pub enum Base16PaletteError {
-    #[error("unable to extract data from file")]
-    ExtractionFailed(#[from] figment::Error),
+use gen_tui::theme::{Theme, set_theme};
+
+#[derive(Deserialize)]
+struct RawPalette {
+    base00: String,
+    base01: String,
+    base02: String,
+    base03: String,
+    base04: String,
+    base05: String,
+    base06: String,
+    base07: String,
+    base08: String,
+    base09: String,
+    base0a: String,
+    base0b: String,
+    base0c: String,
+    base0d: String,
+    base0e: String,
+    base0f: String,
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct Base16Palette {
-    #[serde(skip, alias = "scheme")]
-    pub name: &'static str,
-    #[serde(skip)]
-    pub author: &'static str,
-    #[serde(skip)]
-    pub slug: &'static str,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base00: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base01: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base02: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base03: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base04: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base05: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base06: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base07: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base08: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base09: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base0a: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base0b: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base0c: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base0d: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base0e: Color,
-    #[serde(deserialize_with = "deserialize_from_str")]
-    pub base0f: Color,
-}
-
-impl Default for Base16Palette {
-    fn default() -> Self {
-        Self {
-            name: "Default",
-            author: "Default",
-            slug: "default",
-            base00: Color::Indexed(0),
-            base01: Color::Indexed(1),
-            base02: Color::Indexed(2),
-            base03: Color::Indexed(3),
-            base04: Color::Indexed(4),
-            base05: Color::Indexed(5),
-            base06: Color::Indexed(6),
-            base07: Color::Indexed(7),
-            base08: Color::Indexed(8),
-            base09: Color::Indexed(9),
-            base0a: Color::Indexed(10),
-            base0b: Color::Indexed(11),
-            base0c: Color::Indexed(12),
-            base0d: Color::Indexed(13),
-            base0e: Color::Indexed(14),
-            base0f: Color::Indexed(15),
+impl RawPalette {
+    fn to_theme(&self) -> Theme {
+        fn c(s: &str) -> Color {
+            Color::from_str(s).unwrap_or_else(|_| {
+                Color::from_str(&format!("#{s}")).expect("valid hex color in palette")
+            })
         }
+        Theme([
+            c(&self.base00),
+            c(&self.base01),
+            c(&self.base02),
+            c(&self.base03),
+            c(&self.base04),
+            c(&self.base05),
+            c(&self.base06),
+            c(&self.base07),
+            c(&self.base08),
+            c(&self.base09),
+            c(&self.base0a),
+            c(&self.base0b),
+            c(&self.base0c),
+            c(&self.base0d),
+            c(&self.base0e),
+            c(&self.base0f),
+        ])
     }
 }
 
-impl Base16Palette {
-    #[allow(clippy::result_large_err)]
-    pub fn from_yaml(file: impl Into<PathBuf>) -> Result<Self, Base16PaletteError> {
-        Figment::new()
-            .merge(Yaml::file(file.into()))
-            .extract::<Base16Palette>()
-            .map_err(Base16PaletteError::ExtractionFailed)
-    }
-}
-
-fn deserialize_from_str<'de, D>(deserializer: D) -> Result<Color, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    if s.starts_with('#') {
-        Color::from_str(&s).map_err(de::Error::custom)
-    } else {
-        Color::from_str(&format!("#{s}")).map_err(de::Error::custom)
-    }
+/// Initialize the global theme from bundled JSON palettes.
+///
+/// Reads `GEN_THEME` env var: `"light"` → Catppuccin Latte, anything else → Catppuccin Mocha.
+pub fn init_theme() {
+    let json = match std::env::var("GEN_THEME").ok().as_deref() {
+        Some("light") => include_str!("../themes/latte.json"),
+        _ => include_str!("../themes/mocha.json"),
+    };
+    let raw: RawPalette = serde_json::from_str(json).expect("bundled palette JSON is valid");
+    set_theme(raw.to_theme());
 }

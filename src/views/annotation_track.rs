@@ -9,10 +9,12 @@ use gen_tui::{CroppedGraph, GraphController, ViewportState, VisualDetail, WorldP
 use petgraph::visit::NodeIndexable;
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
 };
 
-use crate::{config::get_theme_color, views::gen_graph_widget::GenGraphNodeSizer};
+use gen_tui::theme::current_theme;
+
+use crate::views::gen_graph_widget::GenGraphNodeSizer;
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSegment {
@@ -183,8 +185,10 @@ pub fn draw_annotations_panel(
         return;
     }
 
+    let theme = current_theme();
+
     // Draw the divider line with track name
-    let divider_style = Style::default().fg(get_theme_color("separator").unwrap());
+    let divider_style = Style::default().fg(theme[0x02]);
     let divider_y = area.y;
     let divider = "─".repeat(area.width as usize);
     frame
@@ -196,7 +200,7 @@ pub fn draw_annotations_panel(
             area.x + 1,
             divider_y,
             &track.name,
-            Style::default().fg(get_theme_color("text_muted").unwrap()),
+            Style::default().fg(theme[0x04]),
         );
     }
 
@@ -212,7 +216,7 @@ pub fn draw_annotations_panel(
     }
 
     // Fill background
-    let bg_color = get_theme_color("canvas").unwrap();
+    let bg_color = theme[0x00];
     let bg_style = Style::default().bg(bg_color);
     for row in inner.y..inner.y + inner.height {
         let blank = " ".repeat(inner.width as usize);
@@ -220,7 +224,7 @@ pub fn draw_annotations_panel(
     }
 
     let zoomed_out = controller.get_detail_level() == VisualDetail::Minimal;
-    let annotation_color = get_theme_color("base0b").unwrap_or(Color::Green);
+    let annotation_color = theme[0x0B];
     let annotation_label_style = Style::default().fg(annotation_color).bg(bg_color);
     let annotation_bar_style = Style::default().bg(annotation_color);
     let annotation_dot_style = Style::default().fg(annotation_color).bg(bg_color);

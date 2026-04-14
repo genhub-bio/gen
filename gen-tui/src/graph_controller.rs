@@ -22,7 +22,7 @@ use crate::{
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
     plotter::{NodeSizer, PathStyle},
-    theme::Theme,
+    theme::current_theme,
     viewport_graph::CroppedGraph,
 };
 
@@ -68,9 +68,6 @@ where
 
     /// Persistent requested highlights in domain terms
     pub highlights: Vec<(HighlightKind<G::NodeId>, PathStyle)>,
-
-    /// Theme colors for rendering
-    pub theme: Theme,
 }
 
 /// Type of element to highlight in the graph
@@ -104,17 +101,6 @@ where
     for<'b> &'b G::EdgeId: Clone,
     S: NodeSizer<G>,
 {
-    /// Get the default theme (Catppuccin Mocha colors)
-    pub fn default_theme() -> Theme {
-        Theme::default()
-    }
-
-    /// Set a custom theme
-    pub fn with_theme(mut self, theme: Theme) -> Self {
-        self.theme = theme;
-        self
-    }
-
     /// Create a new GraphController with a graph and node sizer
     ///
     /// # Parameters
@@ -158,7 +144,6 @@ where
             rebuild_needed: true,
             layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
-            theme: Self::default_theme(),
         }
     }
 
@@ -324,6 +309,63 @@ where
                 .cell_highlights
                 .push((node_idx, tl, br, style));
         }
+    }
+
+    /// Pick the next unused accent color from the theme (slots 0x08–0x0F).
+    ///
+    /// Scans `self.highlights` for colors already in use and returns the first
+    /// accent slot that hasn't been claimed yet.  Wraps around to 0x08 once all
+    /// eight accent slots are occupied.
+    pub fn next_accent_color(&self) -> Color {
+        use std::collections::HashSet;
+        let theme = current_theme();
+        let used: HashSet<Color> = self
+            .highlights
+            .iter()
+            .filter(|(_, s)| s.color != Color::Reset)
+            .map(|(_, s)| s.color)
+            .collect();
+        (0x08..=0x0F)
+            .map(|i| theme[i])
+            .find(|c| !used.contains(c))
+            .unwrap_or(theme[0x08])
+    }
+
+    /// Highlight a node using the next available theme accent color.
+    /// Returns the color that was chosen.
+    pub fn add_node_highlight(&mut self, node_id: G::NodeId) -> Color {
+        let color = self.next_accent_color();
+        self.set_node_highlight(node_id, PathStyle::new(color));
+        color
+    }
+
+    /// Highlight an edge using the next available theme accent color.
+    /// Returns the color that was chosen.
+    pub fn add_edge_highlight(&mut self, edge: (G::NodeId, G::NodeId)) -> Color {
+        let color = self.next_accent_color();
+        self.set_edge_highlight(edge, PathStyle::new(color));
+        color
+    }
+
+    /// Highlight a path using the next available theme accent color.
+    /// Returns the color that was chosen.
+    pub fn add_path_highlight(&mut self, path_nodes: Vec<G::NodeId>) -> Color {
+        let color = self.next_accent_color();
+        self.set_path_highlight(PathStyle::new(color), path_nodes);
+        color
+    }
+
+    /// Highlight a cell rect using the next available theme accent color.
+    /// Returns the color that was chosen.
+    pub fn add_cell_highlight(
+        &mut self,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+    ) -> Color {
+        let color = self.next_accent_color();
+        self.set_cell_highlight(node_id, tl, br, PathStyle::new(color));
+        color
     }
 
     /// Set a node highlight

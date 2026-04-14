@@ -22,8 +22,9 @@ use ratatui::{
 use rusqlite::params;
 use tui_widget_list::{ListBuilder, ListState, ListView, hit_test::Hit};
 
+use gen_tui::theme::current_theme;
+
 use crate::{
-    config::get_theme_color,
     views::{
         annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
         annotation_groups::{AnnotationGroupEntry, load_annotation_group_entries},
@@ -769,14 +770,11 @@ impl StatefulWidget for &CollectionExplorer {
             let item_height = item.line_count(available_width) as u16;
 
             if context.is_selected {
+                let theme = current_theme();
                 let style = if has_focus {
-                    Style::default()
-                        .fg(get_theme_color("text_muted").unwrap())
-                        .bg(get_theme_color("highlight").unwrap())
+                    Style::default().fg(theme[0x04]).bg(theme[0x07])
                 } else {
-                    Style::default()
-                        .fg(get_theme_color("text").unwrap())
-                        .bg(get_theme_color("highlight_muted").unwrap())
+                    Style::default().fg(theme[0x05]).bg(theme[0x03])
                 };
                 (item.style(style), item_height)
             } else {
