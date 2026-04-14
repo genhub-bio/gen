@@ -2,7 +2,12 @@ use std::{path::PathBuf, sync::Mutex};
 
 use r#gen::{core::HashId, get_connection};
 use gen_core::config::Workspace;
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
+use gen_models::{
+    block_group::{BlockGroup, NewBlockGroup},
+    db::GraphConnection,
+    node::Node,
+    traits::Query,
+};
 use pyo3::{prelude::*, types::PyModule};
 
 use super::{
@@ -249,7 +254,15 @@ impl PyRepository {
         sample_name: String,
     ) -> PyResult<PyBlockGroup> {
         self.with_connection(|conn| {
-            let block_group = BlockGroup::create(conn, &collection_name, &sample_name, &name);
+            let block_group = BlockGroup::create(
+                conn,
+                NewBlockGroup {
+                    collection_name: &collection_name,
+                    sample_name: &sample_name,
+                    name: &name,
+                    ..Default::default()
+                },
+            );
 
             Ok(PyBlockGroup {
                 id: block_group.id,
