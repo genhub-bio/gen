@@ -286,8 +286,8 @@ pub struct CollectionExplorerState {
     pub has_focus: bool,
     /// The currently selected block group
     pub selected_block_group_id: Option<HashId>,
-    /// Tracks which samples are expanded/collapsed
-    expanded_samples: HashSet<String>,
+    /// Explicit sample expansion overrides, separate from the default auto-open tree.
+    sample_expansion_overrides: HashMap<String, bool>,
     /// Indicates which focus zone should receive focus (if any)
     pub focus_change_requested: Option<FocusZone>,
     /// Active annotation files
@@ -313,7 +313,7 @@ impl CollectionExplorerState {
             total_items: 0,
             has_focus: false,
             selected_block_group_id: block_group_id,
-            expanded_samples: HashSet::new(),
+            sample_expansion_overrides: HashMap::new(),
             focus_change_requested: None,
             active_annotation_files: HashSet::new(),
             active_annotation_groups: HashSet::new(),
@@ -324,17 +324,24 @@ impl CollectionExplorerState {
     }
 
     /// Toggle expansion state of a sample
-    pub fn toggle_sample(&mut self, sample_name: &str) {
-        if self.expanded_samples.contains(sample_name) {
-            self.expanded_samples.remove(sample_name);
-        } else {
-            self.expanded_samples.insert(sample_name.to_string());
-        }
+    pub fn toggle_sample(&mut self, sample_name: &str, currently_expanded: bool) {
+        let next = !currently_expanded;
+        self.sample_expansion_overrides
+            .insert(sample_name.to_string(), next);
     }
 
     /// Check if a sample is expanded
-    pub fn is_sample_expanded(&self, sample_name: &str) -> bool {
-        self.expanded_samples.contains(sample_name)
+    pub fn is_sample_expanded(&self, sample_name: &str, default_expanded: bool) -> bool {
+        self.sample_expansion_overrides
+            .get(sample_name)
+            .copied()
+            .unwrap_or(default_expanded)
+    }
+
+    /// Force a sample to a specific expansion state.
+    pub fn set_sample_expanded(&mut self, sample_name: &str, expanded: bool) {
+        self.sample_expansion_overrides
+            .insert(sample_name.to_string(), expanded);
     }
 
     /// Toggle an annotation file on/off
@@ -535,7 +542,7 @@ impl CollectionExplorer {
                         items.get(selected_idx)
                     {
                         if *expanded {
-                            state.toggle_sample(name);
+                            state.toggle_sample(name, *expanded);
                         } else if let Some(parent_name) = self
                             .data
                             .sample_parents
@@ -565,7 +572,7 @@ impl CollectionExplorer {
                         && *has_children
                         && !*expanded
                     {
-                        state.toggle_sample(name);
+                        state.toggle_sample(name, *expanded);
                     }
                 }
             }
@@ -731,8 +738,8 @@ impl CollectionExplorer {
     pub fn toggle_sample_expansion(&self, state: &mut CollectionExplorerState) {
         if let Some(selected_idx) = state.list_state.selected {
             let items = self.get_display_items(state);
-            if let Some(ExplorerItem::Sample { name, .. }) = items.get(selected_idx) {
-                state.toggle_sample(name);
+            if let Some(ExplorerItem::Sample { name, expanded, .. }) = items.get(selected_idx) {
+                state.toggle_sample(name, *expanded);
             }
         }
     }
@@ -792,11 +799,11 @@ impl StatefulWidget for &CollectionExplorer {
                     };
 
                     if is_reference {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("   • {}", name))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("  • {}", name))]))
                             .wrap(Wrap { trim: false })
                     } else {
                         Paragraph::new(Line::from(vec![Span::raw(format!(
-                            "{}• {}",
+                            "  {}• {}",
                             "  ".repeat(*depth),
                             name
                         ))]))
@@ -816,7 +823,7 @@ impl StatefulWidget for &CollectionExplorer {
                         "•"
                     };
                     Paragraph::new(Line::from(vec![Span::raw(format!(
-                        "{}{} {}",
+                        "  {}{} {}",
                         "  ".repeat(*depth),
                         marker,
                         name

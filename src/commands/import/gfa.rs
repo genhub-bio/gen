@@ -19,7 +19,7 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// A sample name to associate the GFA file with
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "reference")]
     sample: String,
 }
 

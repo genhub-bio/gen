@@ -13,7 +13,7 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// The name of the sample to update
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "reference")]
     sample: String,
     /// A new sample name to associate with the update
     #[arg(long)]

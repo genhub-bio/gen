@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use crate::views::collection::{CollectionExplorerData, CollectionExplorerState};
 
-const AUTO_UNFURL_LINES: usize = 10;
+const AUTO_EXPAND_ROOTS: usize = 5;
+const AUTO_EXPAND_DEPTH: usize = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SampleTreeEntry {
@@ -40,34 +41,21 @@ impl<'a> SampleTree<'a> {
     pub fn build_entries(&self, state: &CollectionExplorerState) -> Vec<SampleTreeEntry> {
         let mut entries = Vec::new();
         let mut visited = HashSet::new();
-        let mut remaining = AUTO_UNFURL_LINES;
 
         let mut roots = self.data.sample_roots.clone();
         if roots.is_empty() {
             roots = self.data.collection_samples.clone();
         }
 
-        for root in roots {
-            self.push_sample(&root, 0, &mut visited, state, &mut entries, &mut remaining);
-            if remaining == 0 {
-                break;
-            }
-        }
-
-        for sample_name in &self.data.collection_samples {
-            if !visited.contains(sample_name) {
-                self.push_sample(
-                    sample_name,
-                    0,
-                    &mut visited,
-                    state,
-                    &mut entries,
-                    &mut remaining,
-                );
-                if remaining == 0 {
-                    break;
-                }
-            }
+        for (index, root) in roots.iter().enumerate() {
+            self.push_sample(
+                root,
+                0,
+                index < AUTO_EXPAND_ROOTS,
+                &mut visited,
+                state,
+                &mut entries,
+            );
         }
 
         entries
@@ -105,14 +93,11 @@ impl<'a> SampleTree<'a> {
         &self,
         sample_name: &str,
         depth: usize,
+        auto_expand: bool,
         visited: &mut HashSet<String>,
         state: &CollectionExplorerState,
         entries: &mut Vec<SampleTreeEntry>,
-        remaining: &mut usize,
     ) {
-        if *remaining == 0 {
-            return;
-        }
         if !visited.insert(sample_name.to_string()) {
             return;
         }
@@ -129,7 +114,8 @@ impl<'a> SampleTree<'a> {
             .get(sample_name)
             .cloned()
             .unwrap_or_default();
-        let expanded = state.is_sample_expanded(sample_name) || *remaining > 0;
+        let expanded =
+            state.is_sample_expanded(sample_name, auto_expand && depth < AUTO_EXPAND_DEPTH);
 
         entries.push(SampleTreeEntry::Sample {
             name: sample_name.to_string(),
@@ -137,29 +123,21 @@ impl<'a> SampleTree<'a> {
             depth,
             has_children: !children.is_empty() || !block_groups.is_empty(),
         });
-        *remaining = remaining.saturating_sub(1);
 
-        if !expanded || *remaining == 0 {
+        if !expanded {
             return;
         }
 
         for (id, name) in block_groups {
-            if *remaining == 0 {
-                return;
-            }
             entries.push(SampleTreeEntry::BlockGroup {
                 id,
                 name,
                 depth: depth + 1,
             });
-            *remaining = remaining.saturating_sub(1);
         }
 
         for child in children {
-            if *remaining == 0 {
-                return;
-            }
-            self.push_sample(&child, depth + 1, visited, state, entries, remaining);
+            self.push_sample(&child, depth + 1, auto_expand, visited, state, entries);
         }
     }
 }

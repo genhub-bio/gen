@@ -23,7 +23,12 @@ pub struct Command {
     #[arg(short, long)]
     sample: Option<String>,
     /// Use the given samples as the parent samples for changes. Repeat the flag or use commas.
-    #[arg(long = "parent-samples", aliases = ["parent-sample", "ps"], value_delimiter = ',')]
+    #[arg(
+        long = "parent-samples",
+        aliases = ["parent-sample", "ps"],
+        value_delimiter = ',',
+        default_value = "reference"
+    )]
     parent_samples: Vec<String>,
     /// Apply edits in-place instead of using parent sample's reference coordinates
     #[arg(long = "inplace")]

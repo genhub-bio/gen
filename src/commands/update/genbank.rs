@@ -22,7 +22,7 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// The name of the sample to update
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "reference")]
     sample: String,
     /// If a new entity is found, create it as a normal import
     #[arg(long, action, alias = "cm")]

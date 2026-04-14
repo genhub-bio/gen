@@ -16,14 +16,14 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// The name of the sample to update
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "reference")]
     sample: String,
     /// The csv describing changes to make
     #[arg(short, long)]
     csv: String,
     /// If specified, the newly created sample will inherit this sample's existing graph
-    #[arg(short, long)]
-    parent_sample: Option<String>,
+    #[arg(short, long, default_value = "reference")]
+    parent_sample: String,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -47,7 +47,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.csv,
         name,
         cmd.sample.as_str(),
-        cmd.parent_sample.as_deref(),
+        Some(cmd.parent_sample.as_str()),
     ) {
         conn.execute("ROLLBACK TRANSACTION;", [])?;
         operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
