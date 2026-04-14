@@ -242,9 +242,10 @@ class GenGraphWidget(anywidget.AnyWidget):
         Parameters
         ----------
         color:
-            CSS hex colour string, e.g. ``"#ff4444"``.  Defaults to red.
-            Pass ``"reset"`` to use a brightness-boost effect instead of
-            a colour tint.
+            Optional colour for the highlight.  Accepts named colours
+            (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
+            (``"#ff4444"``).  When omitted the next unused theme accent
+            colour is chosen automatically.
         """
         self._controller.show_path(color)
         self._render()

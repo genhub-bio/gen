@@ -6,7 +6,8 @@ use r#gen::{
         GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
     },
 };
-use gen_graph::GenGraph;
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
     LineStyle::Bold, graph_controller::GraphController, graph_widget::GraphWidget,
@@ -76,6 +77,24 @@ fn indexed_to_hex(i: u8) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
+/// Parse a CSS hex colour string like `"#rrggbb"` into a ratatui `Color`.
+fn parse_hex_color(hex: &str) -> PyResult<ratatui::style::Color> {
+    use ratatui::style::Color;
+    if hex.starts_with('#') && hex.len() == 7 {
+        let r = u8::from_str_radix(&hex[1..3], 16)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+        let g = u8::from_str_radix(&hex[3..5], 16)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+        let b = u8::from_str_radix(&hex[5..7], 16)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+        Ok(Color::Rgb(r, g, b))
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid colour {hex:?}; expected a CSS hex string like \"#ff4444\""
+        )))
+    }
+}
+
 /// Format by which the buffer is to be serialized
 #[derive(Serialize)]
 struct RenderedCell {
@@ -120,6 +139,7 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
 #[pyclass]
 pub struct PyGraphController {
     db_path: PathBuf,
+    block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: Mutex<Option<GraphConnection>>,
 }
@@ -132,6 +152,7 @@ impl PyGraphController {
         controller.hide_cursor();
         Self {
             db_path,
+            block_group_id: None,
             controller,
             conn: Mutex::new(None),
         }
@@ -166,7 +187,9 @@ impl PyGraphController {
             .path()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        Ok(Self::new(db_path, graph))
+        let mut ctrl = Self::new(db_path, graph);
+        ctrl.block_group_id = Some(bg_id);
+        Ok(ctrl)
     }
 
     /// Set the level of node detail.
@@ -265,15 +288,7 @@ impl PyGraphController {
                 "magenta" => Color::Magenta,
                 "cyan" => Color::Cyan,
                 "white" => Color::White,
-                hex if hex.starts_with('#') && hex.len() == 7 => {
-                    let r = u8::from_str_radix(&hex[1..3], 16)
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-                    let g = u8::from_str_radix(&hex[3..5], 16)
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-                    let b = u8::from_str_radix(&hex[5..7], 16)
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-                    Color::Rgb(r, g, b)
-                }
+                hex if hex.starts_with('#') => parse_hex_color(hex)?,
                 other => {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "unknown color {other:?}"
@@ -293,6 +308,90 @@ impl PyGraphController {
 
     /// Remove all highlights from the graph.
     fn clear_highlights(&mut self) {
+        self.controller.clear_all_highlights();
+    }
+
+    /// Highlight the most recent path associated with this block group.
+    ///
+    /// Parameters
+    /// ----------
+    /// color : str, optional
+    ///     Colour for the highlight.  Accepts named colours
+    ///     (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
+    ///     (``"#ff4444"``).  When omitted the next unused theme accent
+    ///     colour is chosen automatically.
+    ///
+    /// Raises
+    /// ------
+    /// RuntimeError
+    ///     If no block group is associated with this widget, or if no path
+    ///     exists for the block group.
+    /// ValueError
+    ///     If ``color`` is not a recognised colour name or CSS hex string.
+    #[pyo3(signature = (color=None))]
+    pub fn show_path(&mut self, color: Option<&str>) -> PyResult<()> {
+        let block_group_id = self.block_group_id.ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "show_path() requires a block group; obtain the widget via BlockGroup.plot()",
+            )
+        })?;
+
+        self.ensure_connection()?;
+
+        use ratatui::style::Color;
+        let highlight_color = match color {
+            None => self.controller.next_accent_color(),
+            Some(s) => match s {
+                "red" => Color::Red,
+                "green" => Color::Green,
+                "yellow" => Color::Yellow,
+                "blue" => Color::Blue,
+                "magenta" => Color::Magenta,
+                "cyan" => Color::Cyan,
+                "white" => Color::White,
+                hex if hex.starts_with('#') => parse_hex_color(hex)?,
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown color {other:?}"
+                    )));
+                }
+            },
+        };
+
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+
+        let path = BlockGroup::get_current_path(conn, &block_group_id);
+        let path_blocks = path.blocks(conn);
+        let projected_path = project_path(self.controller.graph(), &path_blocks);
+
+        let path_nodes: Vec<GraphNode> = projected_path
+            .iter()
+            .filter_map(|(node, _)| {
+                if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
+                    Some(*node)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if path_nodes.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "Path nodes not found in current graph state",
+            ));
+        }
+
+        let style = PathStyle::new(highlight_color)
+            .with_line_style(Bold)
+            .with_merge_glyphs(true);
+
+        self.controller.set_path_highlight(style, path_nodes);
+        Ok(())
+    }
+
+    /// Clear path highlighting previously applied by `show_path`.
+    pub fn clear_path(&mut self) {
         self.controller.clear_all_highlights();
     }
 }
