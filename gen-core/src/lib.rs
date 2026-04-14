@@ -1,7 +1,7 @@
 use std::{convert::TryFrom, fmt, hash::Hash};
 
 use hex::FromHex;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 pub mod config;
