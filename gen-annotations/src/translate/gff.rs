@@ -186,10 +186,10 @@ mod tests {
         ReferenceAlias::create(
             &conn,
             "alternate contig",
-            "m456",
-            "m123",
-            "m789",
-            "chr1",
+            Some("m456".to_string()),
+            Some("m123".to_string()),
+            Some("m789".to_string()),
+            Some("chr1".to_string()),
             None,
             None,
         )
