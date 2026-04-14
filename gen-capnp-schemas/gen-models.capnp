@@ -69,6 +69,11 @@ struct BlockGroup {
   sampleName @2 :Text;
   name @3 :Text;
   createdOn @4 :Int64;
+  parentBlockGroupId :union {
+    none @5 :Void;
+    some @6 :List(UInt8);
+  }
+  isDefault @7 :Bool;
 }
 
 struct BlockGroupEdge {

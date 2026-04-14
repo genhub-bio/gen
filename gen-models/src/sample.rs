@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::HashSet, rc::Rc};
 
 use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
@@ -99,6 +99,18 @@ impl Sample {
         sample_graph
     }
 
+    pub fn get_all_sequences(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        prune: bool,
+    ) -> HashSet<String> {
+        Sample::get_block_groups(conn, collection_name, sample_name)
+            .into_iter()
+            .flat_map(|block_group| BlockGroup::get_all_sequences(conn, &block_group.id, prune))
+            .collect()
+    }
+
     pub fn get_or_create_child(
         conn: &GraphConnection,
         collection_name: &str,
@@ -110,7 +122,9 @@ impl Sample {
                 if !parent_samples.is_empty() {
                     let parent_block_groups = BlockGroup::query(
                         conn,
-                        "select * from block_groups where collection_name = ?1 AND sample_name IN rarray(?2) ORDER BY name, sample_name",
+                        "select * from block_groups
+                         where collection_name = ?1 AND sample_name IN rarray(?2)
+                         ORDER BY name, sample_name, created_on, id",
                         params![
                             collection_name,
                             Rc::new(
@@ -122,21 +136,18 @@ impl Sample {
                             ),
                         ],
                     );
-                    let mut parent_samples_by_group_name = BTreeMap::<String, Vec<String>>::new();
-                    for parent_block_group in parent_block_groups {
-                        parent_samples_by_group_name
-                            .entry(parent_block_group.name)
-                            .or_default()
-                            .push(parent_block_group.sample_name);
-                    }
+                    let group_names = parent_block_groups
+                        .into_iter()
+                        .map(|parent_block_group| parent_block_group.name)
+                        .collect::<HashSet<_>>();
 
-                    for (group_name, group_parent_samples) in parent_samples_by_group_name {
-                        BlockGroup::get_or_create_sample_block_group(
+                    for group_name in group_names {
+                        BlockGroup::get_or_create_sample_block_groups(
                             conn,
                             collection_name,
                             &new_sample.name,
                             &group_name,
-                            group_parent_samples,
+                            parent_samples.clone(),
                         )
                         .map_err(SampleError::from)?;
                     }
@@ -195,7 +206,11 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
-    use crate::{collection::Collection, errors::SampleError, test_helpers::get_connection};
+    use crate::{
+        collection::Collection,
+        errors::SampleError,
+        test_helpers::{create_bg, get_connection},
+    };
 
     #[test]
     fn test_capnp_serialization() {
@@ -257,10 +272,10 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
 
-        BlockGroup::create(conn, "test", "parent_a", "chr1");
-        BlockGroup::create(conn, "test", "parent_a", "chr2");
-        BlockGroup::create(conn, "test", "parent_b", "chr2");
-        BlockGroup::create(conn, "test", "parent_c", "chr3");
+        create_bg(conn, "test", "parent_a", "chr1");
+        create_bg(conn, "test", "parent_a", "chr2");
+        create_bg(conn, "test", "parent_b", "chr2");
+        create_bg(conn, "test", "parent_c", "chr3");
 
         let child = Sample::get_or_create_child(
             conn,
@@ -279,7 +294,7 @@ mod tests {
             .map(|block_group| block_group.name)
             .collect::<Vec<_>>();
         block_group_names.sort();
-        assert_eq!(block_group_names, vec!["chr1", "chr2", "chr3"]);
+        assert_eq!(block_group_names, vec!["chr1", "chr2", "chr2", "chr3"]);
         assert_eq!(
             SampleLineage::get_parents(conn, &child.name),
             vec![

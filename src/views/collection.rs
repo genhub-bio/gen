@@ -813,10 +813,42 @@ mod tests {
         let sample_beta = Sample::get_or_create(conn, "SampleBeta");
 
         // Create block groups for three explicit samples
-        BlockGroup::create(conn, "/foo/bar", &sample_reference.name, "BG_ReferenceA");
-        BlockGroup::create(conn, "/foo/bar", &sample_reference.name, "BG_ReferenceB");
-        BlockGroup::create(conn, "/foo/bar", &sample_alpha.name, "BG_Alpha1");
-        BlockGroup::create(conn, "/foo/bar", &sample_beta.name, "BG_Beta1");
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_reference.name,
+                name: "BG_ReferenceA",
+                ..Default::default()
+            },
+        );
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_reference.name,
+                name: "BG_ReferenceB",
+                ..Default::default()
+            },
+        );
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_alpha.name,
+                name: "BG_Alpha1",
+                ..Default::default()
+            },
+        );
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_beta.name,
+                name: "BG_Beta1",
+                ..Default::default()
+            },
+        );
 
         // Call the function under test—notice we pass the full path
         let op_conn = context.operations().conn();

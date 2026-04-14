@@ -374,6 +374,8 @@ mod tests {
                 sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: 0,
+                parent_block_group_id: None,
+                is_default: false,
             }],
             nodes: vec![Node {
                 id: HashId::convert_str("node_hash"),

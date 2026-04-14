@@ -2,6 +2,7 @@ pub mod accession;
 pub mod annotations;
 pub mod block_group;
 pub mod block_group_edge;
+pub mod block_group_lineage;
 pub mod changesets;
 pub mod collection;
 pub mod db;

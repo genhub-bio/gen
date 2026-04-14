@@ -20,7 +20,7 @@ use crate::{
     annotations::{
         Annotation, AnnotationError, AnnotationGroup, AnnotationGroupError, AnnotationGroupSample,
     },
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
@@ -521,6 +521,8 @@ pub fn process_changesetiter(
                         sample_name: sample_name.clone(),
                         name,
                         created_on,
+                        parent_block_group_id: parse_maybe_hashid(item, 5),
+                        is_default: parse_number(item, 6) != 0,
                     });
 
                     created_block_groups_set.insert(bg_pk);
@@ -835,7 +837,16 @@ pub fn apply_changeset(
     }
 
     for bg in dependencies.block_group.iter() {
-        BlockGroup::create(conn, &bg.collection_name, &bg.sample_name, &bg.name);
+        BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &bg.collection_name,
+                sample_name: &bg.sample_name,
+                name: &bg.name,
+                parent_block_group_id: bg.parent_block_group_id.as_ref(),
+                is_default: bg.is_default,
+            },
+        );
     }
 
     for node in dependencies.nodes.iter() {
@@ -890,7 +901,16 @@ pub fn apply_changeset(
         NewSequence::from(sequence).save(conn);
     }
     for bg in &changeset.block_groups {
-        BlockGroup::create(conn, &bg.collection_name, &bg.sample_name, &bg.name);
+        BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &bg.collection_name,
+                sample_name: &bg.sample_name,
+                name: &bg.name,
+                parent_block_group_id: bg.parent_block_group_id.as_ref(),
+                is_default: bg.is_default,
+            },
+        );
     }
 
     for node in &changeset.nodes {
@@ -1214,6 +1234,8 @@ mod tests {
                 sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+                parent_block_group_id: None,
+                is_default: false,
             }],
             nodes: vec![
                 Node {
@@ -1377,6 +1399,8 @@ mod tests {
                 sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+                parent_block_group_id: None,
+                is_default: false,
             }],
             nodes: vec![
                 Node {
@@ -1580,7 +1604,15 @@ mod tests {
             let mut session = start_operation(conn);
             // make a blockgroup with an edge from our parent blockgroup
             let _ = Sample::create(conn, "new").unwrap();
-            let new_bg = BlockGroup::create(conn, "test", "new", "new-bg");
+            let new_bg = BlockGroup::create(
+                conn,
+                NewBlockGroup {
+                    collection_name: "test",
+                    sample_name: "new",
+                    name: "new-bg",
+                    ..Default::default()
+                },
+            );
             let shared_edge = old_edges[0].edge.clone();
             BlockGroupEdge::bulk_create(
                 conn,

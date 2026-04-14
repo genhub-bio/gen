@@ -3,7 +3,7 @@ use std::{io::Read, str};
 use gb_io::reader;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, PathChange},
+    block_group::{BlockGroup, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::DbContext,
@@ -65,7 +65,15 @@ where
                     )),
                 );
 
-                let block_group = BlockGroup::create(conn, &collection.name, sample, &locus.name);
+                let block_group = BlockGroup::create(
+                    conn,
+                    NewBlockGroup {
+                        collection_name: &collection.name,
+                        sample_name: sample,
+                        name: &locus.name,
+                        ..Default::default()
+                    },
+                );
                 let edge_into = Edge::create(
                     conn,
                     PATH_START_NODE_ID,
@@ -342,7 +350,7 @@ mod tests {
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
@@ -393,7 +401,7 @@ mod tests {
         GCTGAACGGTCTGGTTATAGGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTAC
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
-            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
             let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
             assert_eq!(
                 seqs,
@@ -451,7 +459,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion", None),
                 false,
             );
             assert_eq!(
@@ -512,7 +520,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution", None),
                 false,
             );
             assert_eq!(
@@ -558,7 +566,7 @@ mod tests {
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let sequences: HashSet<String> = BlockGroup::get_all_sequences(
                 conn,
-                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion"),
+                &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None),
                 false,
             )
             .iter()

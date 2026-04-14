@@ -1818,7 +1818,7 @@ mod tests {
         )
         .unwrap();
 
-        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123");
+        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123", None);
         let patch_1_seqs =
             HashSet::from_iter(vec!["ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string()]);
 
@@ -1850,7 +1850,7 @@ mod tests {
             false,
         );
 
-        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123");
+        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123", None);
         let patch_2_seqs = HashSet::from_iter(vec!["ATCGATCGATCGAGATCGGGAACACACAGAGA".to_string()]);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &foo_bg_id, false),
@@ -1868,7 +1868,7 @@ mod tests {
         // apply changes from branch-1, it will be operation id 2
         apply(&context, &op_2.hash, None, false).unwrap();
 
-        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123");
+        let foo_bg_id = BlockGroup::get_id(&collection, "foo", "m123", None);
         let patch_2_seqs = HashSet::from_iter(vec!["ATCATCGATCGAGATCGGGAACACACAGAGA".to_string()]);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &foo_bg_id, false),
@@ -1887,7 +1887,7 @@ mod tests {
             ])
         );
 
-        let unknown_bg_id = BlockGroup::get_id(&collection, "unknown", "m123");
+        let unknown_bg_id = BlockGroup::get_id(&collection, "unknown", "m123", None);
         let unknown_seqs =
             HashSet::from_iter(vec!["ATCATCGATAGACGATCGATCGGGAACACACAGAGA".to_string()]);
         assert_eq!(
