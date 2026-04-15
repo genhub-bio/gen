@@ -1141,7 +1141,10 @@ impl BlockGroup {
                     "{}.{}.{}.bg-{}",
                     collection_name, child_sample_name, old_source_node.id, target_block_group_id
                 )));
-                Node::create(conn, &old_source_node.sequence_hash, &new_source_node_hash)?
+                let new_node_id =
+                    Node::create(conn, &old_source_node.sequence_hash, &new_source_node_hash)?;
+                new_node_ids_by_old.insert(old_source_node.id, new_node_id);
+                new_node_id
             };
             let new_target_node_id = if let Some(node_id) =
                 new_node_ids_by_old.get(&source_edge.target_node_id)
@@ -1153,7 +1156,10 @@ impl BlockGroup {
                     "{}.{}.{}.bg-{}",
                     collection_name, child_sample_name, old_target_node.id, target_block_group_id
                 )));
-                Node::create(conn, &old_target_node.sequence_hash, &new_target_node_hash)?
+                let new_node_id =
+                    Node::create(conn, &old_target_node.sequence_hash, &new_target_node_hash)?;
+                new_node_ids_by_old.insert(old_target_node.id, new_node_id);
+                new_node_id
             };
             new_edges.push(EdgeData {
                 source_node_id: new_source_node_id,

@@ -157,6 +157,10 @@ pub fn derive_chunks(
             create_block_group,
         )?;
 
+        println!(
+            "here90, new node ids by old size: {}",
+            new_node_ids_by_old.len()
+        );
         let child_block_group_edges =
             BlockGroupEdge::edges_for_block_group(conn, &child_block_group_id);
 
@@ -192,9 +196,6 @@ pub fn derive_chunks(
             strand: Strand::Forward,
         };
 
-        println!("here10");
-        println!("start node coordinate: {start_node_coordinate}");
-        println!("start target node id: {new_start_target_node_id}");
         if create_block_group {
             let new_start_edge = child_block_group_edges
                 .iter()
@@ -207,19 +208,13 @@ pub fn derive_chunks(
             new_path_edge_ids.push(new_start_edge.edge.id);
         }
 
-        println!("here11");
         for edge in &current_path_edges {
             let new_source_node_id = new_node_ids_by_old.get(&edge.source_node_id);
             let new_target_node_id = new_node_ids_by_old.get(&edge.target_node_id);
-            println!("here12");
-            println!("edge source node id: {}", edge.source_node_id);
-            println!("edge target node id: {}", edge.target_node_id);
-            println!("new source node id: {:?}", new_source_node_id);
-            println!("new target node id: {:?}", new_target_node_id);
+
             if let Some(new_source_node_id) = new_source_node_id
                 && let Some(new_target_node_id) = new_target_node_id
             {
-                println!("here13");
                 let key = &(
                     *new_source_node_id,
                     edge.source_coordinate,
@@ -242,9 +237,7 @@ pub fn derive_chunks(
             strand: Strand::Forward,
         };
 
-        println!("here20");
         if create_block_group {
-            println!("here21");
             let new_end_edge = child_block_group_edges
                 .iter()
                 .find(|e| {
@@ -255,14 +248,12 @@ pub fn derive_chunks(
                 .unwrap();
             new_path_edge_ids.push(new_end_edge.edge.id);
 
-            println!("here22");
             let _path = Path::create(
                 conn,
                 &current_path.name,
                 &child_block_group_id,
                 &new_path_edge_ids,
             );
-            println!("here23");
         }
 
         let path_edges = Edge::query_by_ids(conn, &new_path_edge_ids);
@@ -684,7 +675,6 @@ mod tests {
             true,
         )?;
 
-        println!("here6");
         let block_groups = Sample::get_block_groups(conn, collection, "test3");
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
@@ -693,8 +683,6 @@ mod tests {
             all_sequences2,
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
         );
-
-        println!("here7");
 
         let path2 = BlockGroup::get_current_path(conn, &block_group2.id);
         assert_eq!(path2.sequence(conn), "TCAATCG");
@@ -708,8 +696,6 @@ mod tests {
                 "ATCGATCGATCGGGAACACA".to_string(),
             ])
         );
-
-        println!("here8");
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
         assert_eq!(path3.sequence(conn), "ATCGATCAAGGAACACA");
