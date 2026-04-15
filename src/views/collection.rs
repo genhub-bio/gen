@@ -21,7 +21,7 @@ use ratatui::{
     widgets::{Block, Paragraph, StatefulWidget, Wrap},
 };
 use rusqlite::params;
-use tui_widget_list::{ListBuilder, ListState, ListView};
+use tui_widget_list::{ListBuilder, ListState, ListView, hit_test::Hit};
 
 use crate::{
     config::get_theme_color,
@@ -600,6 +600,31 @@ impl CollectionExplorer {
                 }
             }
             _ => {}
+        }
+    }
+
+    pub fn handle_mouse(&self, state: &mut CollectionExplorerState, x: u16, y: u16) {
+        if let Some(Hit::Item(index)) = state.list_state.hit_test(x, y) {
+            state.list_state.select(Some(index));
+            let items = self.get_display_items(state);
+            match &items[index] {
+                ExplorerItem::BlockGroup { id, .. } => {
+                    state.selected_block_group_id = Some(*id);
+                    state.focus_change_requested = Some(FocusZone::Canvas);
+                }
+                ExplorerItem::Sample { .. } => {
+                    self.toggle_sample_expansion(state);
+                }
+                ExplorerItem::AnnotationFile { id, .. } => {
+                    state.toggle_annotation_file(*id);
+                    state.annotation_file_toggle_requested = Some(*id);
+                }
+                ExplorerItem::AnnotationGroup { name, .. } => {
+                    state.toggle_annotation_group(name);
+                    state.annotation_group_toggle_requested = Some(name.clone());
+                }
+                _ => {}
+            }
         }
     }
 

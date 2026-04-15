@@ -25,7 +25,7 @@ pub mod label {
 /// based on genomic sequence length.
 pub struct GenGraphNodeSizer;
 
-impl NodeSizer<&GenGraph> for GenGraphNodeSizer {
+impl NodeSizer<GenGraph> for GenGraphNodeSizer {
     /// Calculate how much screen space a GenGraph node needs based on sequence length and level of detail
     fn get_node_size(&self, node: &GraphNode, detail_level: VisualDetail) -> (u64, u64) {
         // Handle special start/end nodes with fixed label sizes (always show full label)
@@ -90,7 +90,7 @@ impl<'a> GenGraphNodeRenderer<'a> {
     }
 }
 
-impl NodeRenderer<&GenGraph> for GenGraphNodeRenderer<'_> {
+impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
     /// Render a GenGraph node with genomic sequence data and theme styling
     /// The rendering changes based on level of detail:
     /// - Minimal: Simple glyph representation
@@ -185,7 +185,7 @@ pub fn inner_truncation(s: &str, target_length: u32) -> String {
 /// A configured GraphWidget ready to visualize GenGraph data
 pub fn create_gen_graph_widget(
     conn: &GraphConnection,
-) -> GraphWidget<'_, &GenGraph, GenGraphNodeSizer, GenGraphNodeRenderer<'_>> {
+) -> GraphWidget<'_, GenGraph, GenGraphNodeSizer, GenGraphNodeRenderer<'_>> {
     let renderer = GenGraphNodeRenderer::new(conn);
     GraphWidget::with_renderer(renderer)
 }
@@ -194,7 +194,7 @@ pub fn create_gen_graph_widget(
 ///
 /// This is the standard way to initialize a graph controller for GenGraph visualization.
 /// It applies the application's theme colors, sets the detail level to Truncated, and
-/// enables the cursor.
+/// Starts in free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
 ///
 /// # Arguments
 /// * `graph` - The GenGraph to visualize
@@ -202,8 +202,8 @@ pub fn create_gen_graph_widget(
 /// # Returns
 /// A configured GraphController ready for use with `create_gen_graph_widget`
 pub fn create_gen_graph_controller(
-    graph: &GenGraph,
-) -> GraphController<&GenGraph, GenGraphNodeSizer> {
+    graph: GenGraph,
+) -> GraphController<GenGraph, GenGraphNodeSizer> {
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme {
         canvas: get_theme_color("canvas").unwrap(),
@@ -216,7 +216,7 @@ pub fn create_gen_graph_controller(
         highlight: Color::Cyan,
     });
     controller.set_detail_level(VisualDetail::Truncated);
-    controller.show_cursor();
+    controller.hide_cursor();
     controller
 }
 

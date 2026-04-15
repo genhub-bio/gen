@@ -118,24 +118,25 @@ impl EventSource for TickEventSource {
 }
 
 pub struct InlineGenGraphState<'a> {
-    controller: GraphController<&'a GenGraph, GenGraphNodeSizer>,
+    controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
 }
 
 impl<'a> InlineGenGraphState<'a> {
-    pub fn new(graph: &'a GenGraph, conn: &'a GraphConnection) -> Self {
+    pub fn new(graph: &GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
-        let mut graph_controller = GraphController::new(graph, node_sizer).with_theme(Theme {
-            canvas: Color::Reset,
-            node_fg: get_theme_color("text").unwrap(),
-            node_bg: get_theme_color("node").unwrap(),
-            edge_fg: get_theme_color("edge").unwrap(),
-            edge_bg: Color::Reset,
-            cursor_fg: get_theme_color("cursor_fg").unwrap(),
-            cursor_bg: get_theme_color("cursor_bg").unwrap(),
-            highlight: get_theme_color("cursor_highlight").unwrap(),
-        });
+        let mut graph_controller =
+            GraphController::new(graph.clone(), node_sizer).with_theme(Theme {
+                canvas: Color::Reset,
+                node_fg: get_theme_color("text").unwrap(),
+                node_bg: get_theme_color("node").unwrap(),
+                edge_fg: get_theme_color("edge").unwrap(),
+                edge_bg: Color::Reset,
+                cursor_fg: get_theme_color("cursor_fg").unwrap(),
+                cursor_bg: get_theme_color("cursor_bg").unwrap(),
+                highlight: get_theme_color("cursor_highlight").unwrap(),
+            });
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
         let paths = Vec::new();
@@ -148,7 +149,7 @@ impl<'a> InlineGenGraphState<'a> {
 
     /// Add a path to the widget, starting from a Path object
     pub fn add_path(&mut self, path: &Path, conn: &'a GraphConnection) -> Result<()> {
-        let path_nodes = get_path_nodes(conn, path, self.controller.graph)?;
+        let path_nodes = get_path_nodes(conn, path, self.controller.graph())?;
         self.paths.push(path_nodes);
         Ok(())
     }

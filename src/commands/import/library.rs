@@ -4,6 +4,7 @@ use gen_models::{errors::OperationError, sample::Sample};
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
+    graphs::combinatorial_library::parse_library,
     imports::library::{LibraryImportError, import_library},
 };
 
@@ -41,16 +42,22 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
+    let parts_list = parse_library(&cmd.parts.clone().unwrap(), &cmd.library.clone().unwrap())?;
+
+    let parts_path = cmd.parts.unwrap();
+    let library_path = cmd.library.unwrap();
+
     match import_library(
         context,
         name,
         cmd.sample.as_str(),
-        cmd.parts.as_deref().unwrap(),
-        cmd.library.as_deref().unwrap(),
         &cmd.library_name,
+        parts_list,
+        Some(&parts_path),
+        Some(&library_path),
     ) {
         Ok(_) => {
-            println!("Library imported.");
+            println!("Imported library file {library_path} and parts file {parts_path}");
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
             Ok(())

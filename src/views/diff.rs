@@ -91,7 +91,7 @@ pub fn view_diff(
     let panel_styles = PanelStyles::default();
 
     let mut graph_controller =
-        create_gen_graph_controller(&components[current_component].render.graph);
+        create_gen_graph_controller(components[current_component].render.graph.clone());
     apply_diff_highlights(&mut graph_controller, &components[current_component].render);
 
     let mut last_frame_time = Instant::now();
@@ -110,7 +110,7 @@ pub fn view_diff(
         if desired_component != current_component {
             current_component = desired_component;
             graph_controller =
-                create_gen_graph_controller(&components[current_component].render.graph);
+                create_gen_graph_controller(components[current_component].render.graph.clone());
             apply_diff_highlights(&mut graph_controller, &components[current_component].render);
         }
 

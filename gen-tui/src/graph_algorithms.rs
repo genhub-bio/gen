@@ -10,9 +10,11 @@ use petgraph::{
 /// this finds convergence bottlenecks where the graph "narrows" - nodes that have more
 /// incoming edges than outgoing edges, representing natural chokepoints in the DAG.
 /// This is much more suitable for partitioning DAGs than standard articulation point algorithms.
-pub fn find_articulation_points<G>(graph: G) -> Vec<G::NodeId>
+pub fn find_articulation_points<G>(graph: &G) -> Vec<G::NodeId>
 where
-    G: IntoNodeIdentifiers + IntoNeighborsDirected + NodeIndexable + NodeCount + GraphBase,
+    G: GraphBase + NodeIndexable + NodeCount,
+    for<'b> &'b G:
+        IntoNodeIdentifiers<NodeId = G::NodeId> + IntoNeighborsDirected<NodeId = G::NodeId>,
     G::NodeId: Copy + Eq + Hash + Ord,
 {
     let n = graph.node_bound();
@@ -154,12 +156,14 @@ where
 /// using an iterative implementation of Tarjan's algorithm.
 /// This version starts from a specific source node, useful for subgraph analysis.
 pub fn find_articulation_points_connected<G>(
-    graph: G,
+    graph: &G,
     source: G::NodeId,
     _sink: G::NodeId,
 ) -> Vec<G::NodeId>
 where
-    G: IntoNodeIdentifiers + IntoNeighborsDirected + NodeIndexable + NodeCount + GraphBase,
+    G: GraphBase + NodeIndexable + NodeCount,
+    for<'b> &'b G:
+        IntoNodeIdentifiers<NodeId = G::NodeId> + IntoNeighborsDirected<NodeId = G::NodeId>,
     G::NodeId: Copy + Ord,
 {
     let n = graph.node_bound();

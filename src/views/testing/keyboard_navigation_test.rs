@@ -57,7 +57,7 @@ mod tests {
         };
 
         let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new_with_config(&gen_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         // Set up test terminal
         let mut terminal = create_test_terminal(60, 40);
@@ -220,7 +220,7 @@ mod tests {
     }
 
     /// Test other navigation keys (up, down, left, zoom) - specific to our graph type
-    fn test_other_navigation_keys(controller: &mut GraphController<&GenGraph, GenGraphNodeSizer>) {
+    fn test_other_navigation_keys(controller: &mut GraphController<GenGraph, GenGraphNodeSizer>) {
         // Test left arrow (go back)
         let before_left = controller.viewport_state.cursor.current;
         controller.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
@@ -330,7 +330,7 @@ mod tests {
         };
 
         let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new_with_config(&gen_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 80, 24);
         controller.viewport_state.focus();
@@ -401,7 +401,7 @@ mod tests {
         };
 
         let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new_with_config(&gen_graph, node_sizer, config);
+        let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 80, 24);
         controller.viewport_state.focus();

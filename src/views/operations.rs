@@ -161,17 +161,17 @@ fn load_diff_components_for_operation(
     components
 }
 
-fn build_graph_controller<'a>(
-    components: &'a [OperationDiffComponent],
+fn build_graph_controller(
+    components: &[OperationDiffComponent],
     selected_component: usize,
-    empty_graph: &'a GenGraph,
-) -> GraphController<&'a GenGraph, GenGraphNodeSizer> {
+    empty_graph: &GenGraph,
+) -> GraphController<GenGraph, GenGraphNodeSizer> {
     if let Some(component) = components.get(selected_component) {
-        let mut controller = create_gen_graph_controller(&component.graph);
+        let mut controller = create_gen_graph_controller(component.graph.clone());
         apply_diff_highlights(&mut controller, component);
         controller
     } else {
-        create_gen_graph_controller(empty_graph)
+        create_gen_graph_controller(empty_graph.clone())
     }
 }
 

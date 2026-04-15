@@ -1,5 +1,5 @@
 python: venv
-	VIRTUAL_ENV=.venv maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module
+	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module --extras jupyter
 clean:
 	cargo clean
 build:

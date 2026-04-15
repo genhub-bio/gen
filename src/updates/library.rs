@@ -13,8 +13,8 @@ use thiserror::Error;
 use crate::graphs::{
     BlockGroupChunk,
     combinatorial_library::{
-        CombinatorialLibraryCreationError, CombinatorialLibraryParseError, create_library,
-        parse_library,
+        CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
+        create_library,
     },
     operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
 };
@@ -58,8 +58,9 @@ pub fn update_with_library(
     region_name: &str,
     start_coordinate: i64,
     end_coordinate: i64,
-    parts_file_path: &str,
-    library_file_path: &str,
+    parts_list: Vec<Vec<SequencePart>>,
+    library_file_path: Option<&str>,
+    parts_file_path: Option<&str>,
 ) -> Result<(), UpdateWithLibraryError> {
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
@@ -108,8 +109,6 @@ pub fn update_with_library(
         Some(child_block_group.id),
         false,
     )?;
-
-    let parts_list = parse_library(parts_file_path, library_file_path)?;
 
     let library_block_group_chunk = create_library(
         conn,
@@ -175,23 +174,32 @@ pub fn update_with_library(
         new_sample_name,
     )?;
 
+    let mut files = vec![];
+    if let Some(library_file_path) = library_file_path {
+        files.push(OperationFile {
+            file_path: library_file_path.to_string(),
+            file_type: FileTypes::CSV,
+        });
+    }
+    if let Some(parts_file_path) = parts_file_path {
+        files.push(OperationFile {
+            file_path: parts_file_path.to_string(),
+            file_type: FileTypes::Fasta,
+        });
+    }
+
     let summary_str = format!("{region_name} created.\n");
     gen_models::session_operations::end_operation(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: library_file_path.to_string(),
-                file_type: FileTypes::CSV,
-            }],
+            files,
             description: "library_csv_update".to_string(),
         },
         &summary_str,
         None,
     )
     .unwrap();
-
-    println!("Updated with library file: {library_file_path}");
 
     Ok(())
 }
@@ -200,13 +208,17 @@ pub fn update_with_library(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
+    use anyhow::Result;
     use gen_models::block_group::BlockGroup;
 
     use super::*;
-    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen, track_database};
+    use crate::{
+        graphs::combinatorial_library::parse_library, imports::fasta::import_fasta,
+        test_helpers::setup_gen, track_database,
+    };
 
     #[test]
-    fn makes_a_pool() {
+    fn makes_a_pool() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -224,9 +236,14 @@ mod tests {
         )
         .unwrap();
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+
+        let binding =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let library_path = binding.to_str().unwrap();
+
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = update_with_library(
             &context,
@@ -236,8 +253,9 @@ mod tests {
             "m123",
             7,
             20,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
@@ -259,10 +277,12 @@ mod tests {
                 "ATCGATCCAACATGCTAAGGAACACACAGAGA".to_string(),
             ])
         );
+
+        Ok(())
     }
 
     #[test]
-    fn one_column_of_parts() {
+    fn one_column_of_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -280,9 +300,12 @@ mod tests {
         )
         .unwrap();
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = update_with_library(
             &context,
@@ -292,8 +315,9 @@ mod tests {
             "m123",
             7,
             20,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
@@ -315,10 +339,12 @@ mod tests {
             path.sequence(conn),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
+
+        Ok(())
     }
 
     #[test]
-    fn two_columns_of_same_parts() {
+    fn two_columns_of_same_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -336,9 +362,12 @@ mod tests {
         )
         .unwrap();
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/design_reusing_parts.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = update_with_library(
             &context,
@@ -348,8 +377,9 @@ mod tests {
             "m123",
             7,
             20,
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
@@ -370,10 +400,12 @@ mod tests {
                 .map(|x| x.to_string())
                 .collect()
         );
+
+        Ok(())
     }
 
     #[test]
-    fn one_column_of_parts_full_replacement() {
+    fn one_column_of_parts_full_replacement() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -391,9 +423,12 @@ mod tests {
         )
         .unwrap();
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = update_with_library(
             &context,
@@ -403,8 +438,9 @@ mod tests {
             "m123",
             0,
             34, // Full sequence replacement
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
@@ -420,10 +456,12 @@ mod tests {
                 "CAAC".to_string(),
             ])
         );
+
+        Ok(())
     }
 
     #[test]
-    fn two_columns_of_same_parts_full_replacement() {
+    fn two_columns_of_same_parts_full_replacement() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -441,9 +479,12 @@ mod tests {
         )
         .unwrap();
 
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/design_reusing_parts.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
 
         let _ = update_with_library(
             &context,
@@ -453,8 +494,9 @@ mod tests {
             "m123",
             0,
             34, // Full sequence replacement
-            parts_path.to_str().unwrap(),
-            library_path.to_str().unwrap(),
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
         );
 
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
@@ -475,5 +517,7 @@ mod tests {
                 .map(|x| x.to_string())
                 .collect()
         );
+
+        Ok(())
     }
 }

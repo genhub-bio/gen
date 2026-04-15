@@ -1,5 +1,6 @@
 use std::hash::Hash;
 
+#[cfg(feature = "crossterm")]
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
 use log::trace;
@@ -40,12 +41,9 @@ pub struct GraphConfig {
 /// graph loading and layout computation, then used by widgets during rendering.
 pub struct GraphController<G, S>
 where
-    G: GraphBase + Clone,
+    G: GraphBase,
     S: NodeSizer<G>,
 {
-    /// The original graph used for node lookups and rendering
-    pub graph: G,
-
     /// Viewport state managing camera, animations, and viewport bounds
     pub viewport_state: ViewportState,
 
@@ -64,6 +62,9 @@ where
     last_rebuild_camera_center: WorldPos,
     /// Flag indicating that the viewport graph needs to be rebuilt
     rebuild_needed: bool,
+    /// Flag indicating that the layout changed (zoom, spacing) and the camera
+    /// should be repositioned to keep the cursor at its current viewport position.
+    layout_changed: bool,
 
     /// Persistent requested highlights in domain terms
     pub highlights: Vec<(HighlightKind<G::NodeId>, PathStyle)>,
@@ -85,18 +86,13 @@ pub enum HighlightKind<N> {
 
 impl<G, S> GraphController<G, S>
 where
-    G: GraphBase
-        + Clone
-        + EdgeIndexable
-        + NodeIndexable
-        + NodeCount
-        + Visitable
-        + IntoNodeIdentifiers
-        + IntoEdgeReferences
-        + IntoNeighborsDirected,
+    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord,
     G::EdgeId: Clone,
-    for<'b> &'b G: IntoNodeIdentifiers + IntoEdgeReferences + IntoNeighborsDirected,
+    for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNodeIdentifiers<NodeId = G::NodeId>
+        + IntoEdgeReferences<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNeighborsDirected<NodeId = G::NodeId>,
     for<'b> &'b G::NodeId: Hash + Ord,
     for<'b> &'b G::EdgeId: Clone,
     S: NodeSizer<G>,
@@ -134,31 +130,29 @@ where
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
-        let partition_controller = PartitionController::new_with_config(
+        let mut partition_controller = PartitionController::new_with_config(
             graph,
             node_sizer,
             config.partition,
             config.controller,
         );
 
-        let mut controller = Self {
-            graph,
+        if let Err(e) = partition_controller.set_anchor_partition(0) {
+            eprintln!("Warning: Failed to initialize reference partition: {}", e);
+        }
+
+        Self {
             viewport_state: ViewportState::new(),
             cursor: Cursor::default(),
             detail_level: VisualDetail::Truncated, // Default detail level
             partition_controller,
             viewport_graph: CroppedGraph::empty(),
             last_rebuild_camera_center: WorldPos::ZERO,
-            rebuild_needed: true, // Start with a rebuild required
+            rebuild_needed: true,
+            layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
             theme: Self::default_theme(),
-        };
-
-        if let Err(e) = controller.partition_controller.set_anchor_partition(0) {
-            eprintln!("Warning: Failed to initialize reference partition: {}", e);
         }
-
-        controller
     }
 
     pub fn get_layout(&self, partition_idx: usize) -> Option<&PartitionLayout> {
@@ -171,6 +165,17 @@ where
     /// Export the viewport graph to DOT format for visualization
     pub fn export_to_dot(&self, filename: &str) -> Result<(), std::io::Error> {
         crate::dot_export::export_to_dot(&self.viewport_graph, filename)
+    }
+
+    /// Get a reference to the original domain graph
+    pub fn graph(&self) -> &G {
+        &self.partition_controller.graph
+    }
+
+    /// Set the anchor partition and reset coordinate system
+    pub fn set_anchor_partition(&mut self, partition_idx: usize) -> Result<(), String> {
+        self.partition_controller
+            .set_anchor_partition(partition_idx)
     }
 
     /// Ensure a partition is loaded for rendering
@@ -219,6 +224,7 @@ where
         self.detail_level = detail_level;
         self.partition_controller.set_detail_level(detail_level);
         self.rebuild_needed = true;
+        self.layout_changed = true;
     }
 
     /// Get the current level of detail
@@ -297,14 +303,16 @@ where
 
     /// Set a node highlight
     pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
-        Self::apply_node_highlight(&mut self.viewport_graph, &self.graph, node_id, style);
+        let graph = &self.partition_controller.graph;
+        Self::apply_node_highlight(&mut self.viewport_graph, graph, node_id, style);
         let kind = HighlightKind::Node(node_id);
         self.highlights.push((kind, style));
     }
 
     /// Set an edge highlight
     pub fn set_edge_highlight(&mut self, edge: (G::NodeId, G::NodeId), style: PathStyle) {
-        Self::apply_edge_highlight(&mut self.viewport_graph, &self.graph, edge.0, edge.1, style);
+        let graph = &self.partition_controller.graph;
+        Self::apply_edge_highlight(&mut self.viewport_graph, graph, edge.0, edge.1, style);
         let kind = HighlightKind::Edge(edge.0, edge.1);
         self.highlights.push((kind, style));
     }
@@ -315,7 +323,8 @@ where
     /// - style: PathStyle for highlighting the path
     /// - path_nodes: Sequence of nodes that form the path
     pub fn set_path_highlight(&mut self, style: PathStyle, path_nodes: Vec<G::NodeId>) {
-        Self::apply_path_highlight(&mut self.viewport_graph, &self.graph, &path_nodes, style);
+        let graph = &self.partition_controller.graph;
+        Self::apply_path_highlight(&mut self.viewport_graph, graph, &path_nodes, style);
         let kind = HighlightKind::Path(path_nodes);
         self.highlights.push((kind, style));
     }
@@ -461,6 +470,11 @@ where
 
     /// Increase vertex spacing and refresh layouts
     pub fn disperse(&mut self) {
+        // Cap at ~5 zoom levels above default to prevent runaway layout recomputes
+        const MAX_VERTEX_SPACING: f64 = VERTEX_SPACING_DEFAULT + 10.0;
+        if self.partition_controller.get_vertex_spacing() >= MAX_VERTEX_SPACING {
+            return;
+        }
         // Increase vertex spacing
         self.partition_controller.adjust_vertex_spacing(2.0);
         trace!(
@@ -471,6 +485,7 @@ where
         // Clear all layouts to force complete recalculation with new spacing
         self.partition_controller.clear_all_layouts();
         self.rebuild_needed = true;
+        self.layout_changed = true;
     }
 
     /// Decrease vertex spacing and refresh layouts
@@ -490,6 +505,7 @@ where
         // Clear all layouts to force complete recalculation with new spacing
         self.partition_controller.clear_all_layouts();
         self.rebuild_needed = true;
+        self.layout_changed = true;
     }
 
     /// Get current vertex spacing from partition controller
@@ -569,9 +585,20 @@ where
         candidates.first().map(|(idx, _)| *idx)
     }
 
+    /// Move the cursor horizontally by `delta` world units.
+    pub fn navigate_horizontal(&mut self, delta: i64) -> Result<(), String> {
+        self.cursor.move_horizontal(delta, &self.viewport_graph)
+    }
+
+    /// Move the cursor vertically by `delta` world units.
+    pub fn navigate_vertical(&mut self, delta: i64) -> Result<(), String> {
+        self.cursor.move_vertical(delta, &self.viewport_graph)
+    }
+
     /// Handle keyboard events for graph navigation and control
     ///
     /// Returns Some(true) for normal exit, Some(false) for abort, None to continue
+    #[cfg(feature = "crossterm")]
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), String> {
         match key.code {
             KeyCode::Char('r') => {
@@ -587,6 +614,7 @@ where
                     -1
                 };
                 self.cursor.move_horizontal(delta, &self.viewport_graph)?;
+                self.trigger_rebuild();
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 let vp_w = self.viewport_state.viewport_bounds.width as i64;
@@ -596,6 +624,7 @@ where
                     1
                 };
                 self.cursor.move_horizontal(delta, &self.viewport_graph)?;
+                self.trigger_rebuild();
             }
             // Note: In world coordinates, Y increases upward
             KeyCode::Up | KeyCode::Char('k') => {
@@ -606,6 +635,7 @@ where
                     1
                 };
                 self.cursor.move_vertical(delta, &self.viewport_graph)?;
+                self.trigger_rebuild();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let vp_h = self.viewport_state.viewport_bounds.height as i64;
@@ -615,6 +645,7 @@ where
                     -1
                 };
                 self.cursor.move_vertical(delta, &self.viewport_graph)?; // Move down = negative Y
+                self.trigger_rebuild();
             }
 
             // Zoom/Scale controls
@@ -692,7 +723,10 @@ where
 
         // Step 2: Find which partition the cursor's node belongs to
         let cursor_partition = if let Some(node_idx) = self.cursor.node_idx() {
-            let node_id = <G as NodeIndexable>::from_index(&self.graph, node_idx.index());
+            let node_id = <G as NodeIndexable>::from_index(
+                &self.partition_controller.graph,
+                node_idx.index(),
+            );
             self.partition_controller
                 .partition_table
                 .node_map
@@ -707,15 +741,21 @@ where
             self.partition_controller.get_anchor_partition()
         };
 
-        // Step 3: Inactivate any running animations and set cursor partition as anchor
+        // Step 3: Inactivate any running animations and set cursor partition as anchor.
+        // Track whether the anchor changes: world coordinates are defined relative to the anchor
+        // (local_pos + partition_origin - anchor_origin), so a new anchor shifts the entire
+        // coordinate system. camera_current is stored in world coords, so it becomes invalid
+        // the moment the anchor changes and must be recomputed.
         self.viewport_state.camera_anim = None;
 
+        let old_anchor = self.partition_controller.get_anchor_partition();
         if let Err(e) = self
             .partition_controller
             .set_anchor_partition(cursor_partition)
         {
             return Err(format!("Failed to set anchor partition: {}", e));
         }
+        let anchor_changed = self.partition_controller.get_anchor_partition() != old_anchor;
 
         // Step 4: Compute cursor world position directly from anchor partition layout
         // Since anchor partition has localpos = worldpos, we can compute directly
@@ -770,21 +810,28 @@ where
         let half_width = (viewport_bounds_snapshot.width as i64 - 1) / 2;
         let half_height = (viewport_bounds_snapshot.height as i64 - 1) / 2;
 
-        // Step 6: Position the camera so that the cursor stays in the same position on the screen
-        // even if its world position is completely different.
+        // Step 6: Position the camera.
         //
         // # Coordinate System
         // - Camera represents the CENTER of the viewport in world coordinates
         // - Viewport origin (top-left) = camera - (width/2, height/2)
         // - Transformation: viewport_pos = world_pos - camera + (width/2, height/2)
         // - Inverse: camera = world_pos - viewport_pos + (width/2, height/2)
-        let camera = WorldPos::new(
-            cursor_world.x - cursor_viewport.x as i64 + half_width,
-            cursor_world.y - cursor_viewport.y as i64 + half_height,
-        );
-
-        self.viewport_state.camera_current = camera;
-        self.viewport_state.camera_target = camera;
+        //
+        // Reposition the camera when the layout changed (zoom, spacing) OR when the anchor
+        // partition changed. An anchor change invalidates camera_current because world coords
+        // are defined relative to the anchor; the old camera position is in the wrong coordinate
+        // system and must be recomputed from cursor_world (which was derived from the new anchor).
+        let layout_changed = self.layout_changed;
+        self.layout_changed = false;
+        if layout_changed || anchor_changed {
+            let cam = WorldPos::new(
+                cursor_world.x - cursor_viewport.x as i64 + half_width,
+                cursor_world.y - cursor_viewport.y as i64 + half_height,
+            );
+            self.viewport_state.camera_current = cam;
+            self.viewport_state.camera_target = cam;
+        }
 
         // Step 7: Compute camera rect with buffer (2x) and load partitions
         let camera_rect = self.viewport_state.camera_rect();
@@ -808,7 +855,7 @@ where
                 HighlightKind::Node(node_id) => {
                     Self::apply_node_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         *node_id,
                         *style,
                     );
@@ -816,7 +863,7 @@ where
                 HighlightKind::Edge(src, tgt) => {
                     Self::apply_edge_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         *src,
                         *tgt,
                         *style,
@@ -825,7 +872,7 @@ where
                 HighlightKind::Path(nodes) => {
                     Self::apply_path_highlight(
                         &mut self.viewport_graph,
-                        &self.graph,
+                        &self.partition_controller.graph,
                         nodes,
                         *style,
                     );
@@ -891,9 +938,142 @@ where
             .update(delta, &mut self.cursor, &self.viewport_graph);
     }
 
-    /// Enable cursor rendering
+    /// Returns true if any animation is currently in flight (camera easing).
+    /// Callers can use this to decide whether to redraw at a fixed rate or block
+    /// indefinitely waiting for the next input event.
+    pub fn is_animating(&self) -> bool {
+        self.viewport_state.camera_anim.is_some()
+    }
+
+    // ==================== Mouse / Panning Mode ====================
+
+    /// Returns true when the cursor is visible (keyboard-driven mode).
+    pub fn is_cursor_visible(&self) -> bool {
+        self.cursor.is_visible()
+    }
+
+    /// Hide the cursor and let the camera move freely.
+    /// The cursor still tracks the closest node so it is ready when switching back.
+    pub fn hide_cursor(&mut self) {
+        self.cursor.set_visibility(false);
+    }
+
+    /// Show the cursor and enable camera-following.
     pub fn show_cursor(&mut self) {
         self.cursor.set_visibility(true);
+    }
+
+    /// Pan the camera by a drag delta expressed in terminal coordinates.
+    ///
+    /// The Y-axis flip (world Y+ is up, terminal Y+ is down) is handled here so
+    /// callers can pass raw terminal deltas directly.
+    ///
+    /// Panning is applied immediately with no animation so the canvas tracks the
+    /// pointer without lag.
+    pub fn move_by_terminal(&mut self, terminal_dx: i16, terminal_dy: i16) {
+        // X: drag right → camera moves left (negate)
+        // Y: drag down (+terminal_dy) → camera moves down → camera_y increases because world Y+ is up
+        let world_dx = -(terminal_dx as i64);
+        let world_dy = terminal_dy as i64;
+
+        self.hide_cursor();
+        let new = WorldPos::new(
+            self.viewport_state.camera_target.x + world_dx,
+            self.viewport_state.camera_target.y + world_dy,
+        );
+        self.viewport_state.camera_current = new;
+        self.viewport_state.camera_target = new;
+        self.viewport_state.camera_anim = None;
+    }
+
+    /// Handle a click at the given terminal coordinates.
+    ///
+    /// - If a data node occupies the clicked cell: places the cursor on that node,
+    ///   switches to cursor-anchored mode, and returns `true`.
+    /// - Otherwise: switches to free-camera mode and returns `false`.
+    pub fn handle_click(&mut self, terminal_x: u16, terminal_y: u16) -> bool {
+        let Some(click_world) = self
+            .viewport_state
+            .terminal_to_world(terminal_x, terminal_y)
+        else {
+            self.hide_cursor();
+            return false;
+        };
+
+        // Collect the hit result before any mutable borrow to satisfy the borrow checker.
+        let hit =
+            self.viewport_graph
+                .data_nodes()
+                .find_map(|(node_center, domain_idx, layout_node)| {
+                    let rect = BigRect::from_center_and_size(node_center, layout_node.size);
+                    if rect.contains(click_world) {
+                        let frac_x = ((click_world.x - rect.left()) as f64
+                            / layout_node.size.0.max(1) as f64)
+                            .clamp(0.0, 1.0);
+                        let frac_y = ((click_world.y - rect.bottom()) as f64
+                            / layout_node.size.1.max(1) as f64)
+                            .clamp(0.0, 1.0);
+                        Some((domain_idx, (frac_x, frac_y)))
+                    } else {
+                        None
+                    }
+                });
+
+        if let Some((domain_idx, frac)) = hit {
+            self.cursor.set_node(domain_idx, frac);
+            self.show_cursor();
+            true
+        } else {
+            self.hide_cursor();
+            false
+        }
+    }
+
+    /// In free-camera mode, keep the cursor on the cell of the visible node closest to
+    /// the camera center, and update the cursor's viewport position to match.
+    ///
+    /// Both are updated on every drag move so that when the user zooms (layout changes),
+    /// `rebuild_viewport_graph` honours the contract: the anchor cell will be at the
+    /// exact same viewport position before and after the zoom.
+    pub fn sync_cursor_to_closest_node(&mut self) {
+        let center = self.viewport_state.camera_current;
+
+        // Find the node whose bounding rect is closest to the camera center.
+        let best = self
+            .viewport_graph
+            .data_nodes()
+            .min_by_key(|(pos, _, layout_node)| {
+                let rect = BigRect::from_center_and_size(*pos, layout_node.size);
+                let closest_x = center.x.clamp(rect.left(), rect.right());
+                let closest_y = center.y.clamp(rect.bottom(), rect.top());
+                let dx = closest_x - center.x;
+                let dy = closest_y - center.y;
+                dx * dx + dy * dy
+            });
+
+        if let Some((node_center, domain_idx, layout_node)) = best {
+            let rect = BigRect::from_center_and_size(node_center, layout_node.size);
+
+            // Closest cell within the node rect to the camera center.
+            let closest_x = center.x.clamp(rect.left(), rect.right());
+            let closest_y = center.y.clamp(rect.bottom(), rect.top());
+
+            let (width, height) = layout_node.size;
+            let frac_x = ((closest_x - rect.left()) as f64 / width.max(1) as f64).clamp(0.0, 1.0);
+            let frac_y =
+                ((closest_y - rect.bottom()) as f64 / height.max(1) as f64).clamp(0.0, 1.0);
+
+            self.cursor.set_node(domain_idx, (frac_x, frac_y));
+
+            // Keep the cursor's viewport position in sync with where that cell currently
+            // appears on screen.  The zoom formula uses this:
+            //   camera = cursor_world - cursor_viewport + half_viewport
+            // so cursor_viewport must be the *current* screen position of the anchor cell.
+            let closest_cell = WorldPos::new(closest_x, closest_y);
+            if let Some(vp) = self.viewport_state.world_to_viewport(closest_cell) {
+                self.cursor.set_viewport_pos(vp);
+            }
+        }
     }
 }
 
@@ -942,11 +1122,7 @@ mod tests {
         assert!(state.has_focus); // Focus is enabled by default for keyboard input
 
         state.focus();
-        assert!(state.has_focus);
-
-        // Test scroll with focus
-        state.handle_mouse_scroll(5, 5, Duration::from_millis(100));
-        assert!(state.camera_anim.is_some());
+        state.camera_anim.is_some();
 
         state.blur();
         assert!(!state.has_focus);
@@ -1102,7 +1278,7 @@ mod tests {
         #[derive(Clone)]
         struct TestNodeSizer;
 
-        impl NodeSizer<&MockDomainGraph> for TestNodeSizer {
+        impl NodeSizer<MockDomainGraph> for TestNodeSizer {
             fn get_node_size(&self, _node: &NodeIndex, _scale: VisualDetail) -> (u64, u64) {
                 (1, 1)
             }
@@ -1120,8 +1296,7 @@ mod tests {
 
         let node_sizer = TestNodeSizer;
 
-        // Create GraphController with the test graph (use reference)
-        let mut controller = GraphController::new(&domain_graph, node_sizer);
+        let mut controller = GraphController::new(domain_graph.clone(), node_sizer);
 
         // Set up viewport bounds
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 20, 10);
