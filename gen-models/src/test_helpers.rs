@@ -91,22 +91,22 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
         .save(conn);
-    let a_node_id = Node::create(conn, &a_seq.hash, &HashId::convert_str("test-a-node"));
+    let a_node_id = Node::create(conn, &a_seq.hash, &HashId::convert_str("test-a-node"))?;
     let t_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("TTTTTTTTTT")
         .save(conn);
-    let t_node_id = Node::create(conn, &t_seq.hash, &HashId::convert_str("test-t-node"));
+    let t_node_id = Node::create(conn, &t_seq.hash, &HashId::convert_str("test-t-node"))?;
     let c_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("CCCCCCCCCC")
         .save(conn);
-    let c_node_id = Node::create(conn, &c_seq.hash, &HashId::convert_str("test-c-node"));
+    let c_node_id = Node::create(conn, &c_seq.hash, &HashId::convert_str("test-c-node"))?;
     let g_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("GGGGGGGGGG")
         .save(conn);
-    let g_node_id = Node::create(conn, &g_seq.hash, &HashId::convert_str("test-g-node"));
+    let g_node_id = Node::create(conn, &g_seq.hash, &HashId::convert_str("test-g-node"))?;
     let _collection = Collection::create(conn, "test");
     Sample::get_or_create(conn, "test");
     let block_group = create_bg(conn, "test", "test", "chr1");

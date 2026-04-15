@@ -1,6 +1,8 @@
 use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
+use crate::node::NodeError;
+
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
 pub enum QueryError {
     #[error("Results not found: {0}")]
@@ -31,6 +33,8 @@ pub enum ChangesetError {
     SerializationError(String),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
 }
 
 #[derive(Debug, PartialEq, Error)]

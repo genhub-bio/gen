@@ -10,6 +10,7 @@ use gen_models::{
         AnnotationError, AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier,
     },
     block_group::BlockGroupError, edge::EdgeError, errors::OperationError,
+    node::NodeError,
 };
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
@@ -36,6 +37,8 @@ pub enum GenBankError {
     BlockGroupError(#[from] BlockGroupError),
     #[error("Edge write error: {0}")]
     EdgeError(#[from] EdgeError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

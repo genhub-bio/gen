@@ -341,10 +341,10 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCC")
             .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"))?;
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"))?;
 
         let edge1 = Edge::create(
             conn,
@@ -683,7 +683,7 @@ mod tests {
             .sequence_type("DNA")
             .sequence("NNNN")
             .save(conn);
-        let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"));
+        let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"))?;
         let insert = PathBlock {
             node_id: insert_node_id,
             block_sequence: insert_sequence.get_sequence(0, 4).to_string(),

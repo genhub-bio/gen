@@ -122,7 +122,7 @@ mod tests {
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db::GraphConnection,
-        edge::Edge,
+        edge::{Edge, EdgeError},
         node::Node,
         path::Path,
         sample::Sample,
@@ -135,7 +135,7 @@ mod tests {
     use super::propagate_gff;
     use crate::test_helpers::get_connection;
 
-    fn create_block_group(conn: &GraphConnection) {
+    fn create_block_group(conn: &GraphConnection) -> Result<(), EdgeError> {
         let collection = Collection::create(conn, "test");
         Sample::get_or_create(conn, Sample::DEFAULT_NAME);
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
@@ -171,7 +171,7 @@ mod tests {
             node_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge_out_of = Edge::create(
             conn,
             node_id,
@@ -180,7 +180,7 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )?;
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
@@ -204,9 +204,11 @@ mod tests {
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
         );
+
+        Ok(())
     }
 
-    fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
+    fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) -> Result<(), EdgeError> {
         Sample::get_or_create(conn, "child sample");
         let _ = Sample::get_or_create_child(
             conn,
@@ -240,7 +242,7 @@ mod tests {
                 path_id = sample_path.id,
                 sequence_hash = replacement.hash,
             )),
-        );
+        )?;
         let change = PathChange {
             block_group_id: sample_bg_id,
             path: sample_path.clone(),
@@ -277,13 +279,15 @@ mod tests {
         )[0]
         .clone();
         sample_path.new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert);
+
+        Ok(())
     }
 
     #[test]
-    fn simple_propagate() {
+    fn simple_propagate() -> Result<(), Box<dyn std::error::Error>> {
         let conn = get_connection();
-        create_block_group(&conn);
-        apply_child_sample_update_from_aa_fasta(&conn);
+        let _ = create_block_group(&conn);
+        apply_child_sample_update_from_aa_fasta(&conn)?;
 
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
         let temp_dir = tempdir().expect("should create temp directory");
@@ -321,5 +325,7 @@ mod tests {
                 assert_eq!(record.end().get(), 15);
             }
         }
+
+        Ok(())
     }
 }

@@ -10,7 +10,7 @@ use gen_models::{
     db::{DbContext, GraphConnection},
     errors::{OperationError, QueryError, SampleError},
     file_types::FileTypes,
-    node::Node,
+    node::{Node, NodeError},
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     reference_alias::ReferenceAlias,
@@ -192,6 +192,8 @@ pub enum VcfError {
     SampleError(#[from] SampleError),
     #[error("Invalid Record: {0}")]
     InvalidRecord(String),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
 }
 
 fn resolve_parent_samples(
@@ -563,7 +565,7 @@ pub fn update_with_vcf(
                     path_id = source_path_id,
                     sequence_hash = sequence.hash
                 )),
-            );
+            )?;
             let change = prepare_change(
                 &vcf_entry.block_group_id,
                 &vcf_entry.path,
@@ -661,7 +663,7 @@ mod tests {
         track_database,
     };
     #[test]
-    fn test_update_fasta_with_vcf() {
+    fn test_update_fasta_with_vcf() -> Result<(), VcfError> {
         let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/simple.vcf");
@@ -690,8 +692,7 @@ mod tests {
             None,
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
-        )
-        .unwrap();
+        )?;
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
@@ -710,6 +711,8 @@ mod tests {
             BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false),
             HashSet::from_iter(vec!["ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
+
+        Ok(())
     }
 
     #[test]

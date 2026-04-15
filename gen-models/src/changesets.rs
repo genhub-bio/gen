@@ -862,7 +862,7 @@ pub fn apply_changeset(
     }
 
     for node in dependencies.nodes.iter() {
-        Node::create(conn, &node.sequence_hash, &node.id);
+        Node::create(conn, &node.sequence_hash, &node.id)?;
     }
 
     Edge::bulk_create(
@@ -925,7 +925,7 @@ pub fn apply_changeset(
         );
     }
     for node in &changeset.nodes {
-        Node::create(conn, &node.sequence_hash, &node.id);
+        Node::create(conn, &node.sequence_hash, &node.id)?;
     }
 
     Edge::bulk_create(
@@ -1827,7 +1827,7 @@ mod tests {
                 .sequence("AAAATTTT")
                 .save(conn);
             let existing_node_id =
-                Node::create(conn, &existing_seq.hash, &HashId::convert_str("1"));
+                Node::create(conn, &existing_seq.hash, &HashId::convert_str("1"))?;
 
             let mut session = start_operation(conn);
 
@@ -1835,7 +1835,7 @@ mod tests {
                 .sequence_type("DNA")
                 .sequence("ATCG")
                 .save(conn);
-            let random_node_id = Node::create(conn, &random_seq.hash, &HashId::convert_str("2"));
+            let random_node_id = Node::create(conn, &random_seq.hash, &HashId::convert_str("2"))?;
 
             let new_edge = Edge::create(
                 conn,

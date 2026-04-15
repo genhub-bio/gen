@@ -4,7 +4,7 @@ use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
-    edge::Edge,
+    edge::{Edge, EdgeError},
     migrations::run_migrations,
     node::Node,
     path::Path,
@@ -20,7 +20,7 @@ pub fn get_connection() -> GraphConnection {
     GraphConnection(conn)
 }
 
-pub fn setup_test_data(conn: &GraphConnection) {
+pub fn setup_test_data(conn: &GraphConnection) -> Result<(), EdgeError> {
     let collection = Collection::create(conn, "test");
     Sample::get_or_create(conn, Sample::DEFAULT_NAME);
     let seq1 = Sequence::new()
@@ -39,7 +39,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
             collection = collection.name,
             hash = seq1.hash
         )),
-    );
+    )?;
     let node2 = Node::create(
         conn,
         &seq2.hash,
@@ -68,7 +68,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
         node1,
         0,
         Strand::Forward,
-    );
+    )?;
     let middle_edge = Edge::create(
         conn,
         node1,
@@ -77,7 +77,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
         node2,
         0,
         Strand::Forward,
-    );
+    )?;
     let edge_out_of = Edge::create(
         conn,
         node2,
@@ -86,7 +86,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
         PATH_END_NODE_ID,
         0,
         Strand::Forward,
-    );
+    )?;
 
     let new_block_group_edges = vec![
         BlockGroupEdgeData {
@@ -147,7 +147,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
             path_id = sample_path.id,
             sequence_hash = sequence.hash,
         )),
-    );
+    )?;
     let change = PathChange {
         block_group_id: sample_bg_id,
         path: sample_path,
@@ -169,4 +169,6 @@ pub fn setup_test_data(conn: &GraphConnection) {
     };
 
     BlockGroup::insert_change(conn, &change, &tree).expect("should apply variant change");
+
+    Ok(())
 }

@@ -16,7 +16,7 @@ use gen_models::{
     edge::{Edge, EdgeData},
     errors::{OperationError, SampleError},
     file_types::FileTypes,
-    node::Node,
+    node::{Node, NodeError},
     operations::{OperationFile, OperationInfo},
     sample::Sample,
     sequence::Sequence,
@@ -54,6 +54,8 @@ pub enum GafUpdateError {
     ParseInt(#[from] ParseIntError),
     #[error("Line did not match expected GAF format: {0}")]
     InvalidGafLine(String),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
 }
 
 pub fn transform_csv_to_fasta<R, W>(reader: R, writer: &mut W) -> Result<(), GafUpdateError>
@@ -294,7 +296,7 @@ where
                         -1
                     )),
                 )),
-            );
+            )?;
 
             let mut new_edges = vec![];
             let mut bg_nodes = vec![];

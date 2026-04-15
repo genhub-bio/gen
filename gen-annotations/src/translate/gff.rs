@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn translates_coordinates_to_nodes() {
         let conn = get_connection();
-        setup_test_data(&conn);
+        let _ = setup_test_data(&conn);
 
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("./fixtures/complex.gff3");
         let collection = "test".to_string();

@@ -96,7 +96,7 @@ pub fn update_with_sequence(
                     ref_end = seq.length,
                     sequence_hash = seq.hash
                 )),
-            );
+            )?;
 
             let path_block = PathBlock {
                 node_id,

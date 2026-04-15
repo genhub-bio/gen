@@ -57,7 +57,7 @@ where
                         collection = &collection.name,
                         hash = sequence.hash
                     )),
-                );
+                )?;
 
                 let block_group = if let Ok(bg) = BlockGroup::get(
                     conn,
@@ -163,7 +163,7 @@ where
                                     parent_hash = &sequence.hash,
                                     new_hash = &change_seq.hash,
                                 )),
-                            );
+                            )?;
                             PathChange {
                                 block_group_id: block_group.id,
                                 path: path.clone(),

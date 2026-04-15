@@ -4,6 +4,7 @@ use gen_models::{
     block_group::BlockGroupError,
     edge::EdgeError,
     errors::{OperationError, QueryError},
+    node::NodeError,
 };
 use thiserror::Error;
 
@@ -19,4 +20,6 @@ pub enum FastaError {
     BlockGroupError(#[from] BlockGroupError),
     #[error("Edge write error: {0}")]
     EdgeError(#[from] EdgeError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
 }

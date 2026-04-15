@@ -114,7 +114,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &a_seq.hash,
         &HashId::convert_str(&format!("test-a-node.{}", a_seq.hash)),
-    );
+    )?;
     let t_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("TTTTTTTTTT")
@@ -123,7 +123,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &t_seq.hash,
         &HashId::convert_str(&format!("test-t-node.{}", a_seq.hash)),
-    );
+    )?;
     let c_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("CCCCCCCCCC")
@@ -132,7 +132,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &c_seq.hash,
         &HashId::convert_str(&format!("test-c-node.{}", a_seq.hash)),
-    );
+    )?;
     let g_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("GGGGGGGGGG")
@@ -141,7 +141,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &g_seq.hash,
         &HashId::convert_str(&format!("test-g-node.{}", a_seq.hash)),
-    );
+    )?;
     let _collection = Collection::create(conn, "test");
     Sample::get_or_create(conn, "test");
     let block_group = create_bg(conn, "test", "test", "chr1");

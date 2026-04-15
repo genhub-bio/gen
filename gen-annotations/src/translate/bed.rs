@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn translates_coordinates_to_nodes() {
         let conn = get_connection();
-        setup_test_data(&conn);
+        let _ = setup_test_data(&conn);
 
         let bed_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("./fixtures/simple.bed");
         let collection = "test".to_string();

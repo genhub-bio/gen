@@ -128,7 +128,7 @@ pub fn update_with_fasta(
                         ref_end = seq.length,
                         sequence_hash = seq.hash
                     )),
-                );
+                )?;
 
                 let path_block = PathBlock {
                     node_id,
@@ -159,8 +159,6 @@ pub fn update_with_fasta(
                     state.first_node = None;
                 }
             }
-
-            change_count += 1;
         }
     }
 

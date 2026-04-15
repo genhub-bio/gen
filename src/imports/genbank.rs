@@ -533,7 +533,7 @@ where
                         contig = &locus.name,
                         hash = sequence.hash
                     )),
-                );
+                )?;
 
                 let block_group = BlockGroup::create(
                     conn,
@@ -602,7 +602,7 @@ where
                                 ))
                                 .sequence_type("DNA")
                                 .save(conn);
-                            let change_node = Node::create(
+                            let change_node_id = Node::create(
                                 conn,
                                 &change_seq.hash,
                                 &HashId::convert_str(&format!(
@@ -610,8 +610,7 @@ where
                                     parent_hash = &sequence.hash,
                                     new_hash = &change_seq.hash,
                                 )),
-                            );
-                            change_node_id = Some(change_node);
+                            )?;
                             PathChange {
                                 block_group_id: block_group.id,
                                 path: path.clone(),

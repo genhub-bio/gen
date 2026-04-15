@@ -1,6 +1,9 @@
 use std::io::Error as IOError;
 
-use gen_models::errors::{OperationError, QueryError};
+use gen_models::{
+    errors::{OperationError, QueryError},
+    node::NodeError,
+};
 use thiserror::Error;
 
 pub use crate::{
@@ -18,4 +21,6 @@ pub enum SequenceUpdateError {
     IOError(#[from] IOError),
     #[error("SQL query Error: {0}")]
     SQLQueryError(#[from] QueryError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
 }

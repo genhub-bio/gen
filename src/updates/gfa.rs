@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io,
-};
+use std::collections::{HashMap, HashSet};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal};
 use gen_models::{
@@ -19,6 +16,7 @@ use gen_models::{
 };
 
 use crate::{
+    errors::SequenceUpdateError,
     gfa::bool_to_strand,
     gfa_reader::{Gfa, Segment},
 };
@@ -29,7 +27,7 @@ pub fn update_with_gfa(
     parent_sample_name: &str,
     new_sample_name: &str,
     gfa_path: &str,
-) -> io::Result<()> {
+) -> Result<(), SequenceUpdateError> {
     /*
     Updates an existing sample by applying a "diff" represented by a GFA file, and creates a new
     sample with new paths, nodes, and edges from the GFA.
@@ -198,7 +196,7 @@ pub fn update_with_gfa(
                 unmatched_path_strands,
                 &gfa,
                 &segments_by_id,
-            );
+            )?;
             new_paths_added += 1;
         } else {
             println!(
@@ -243,7 +241,7 @@ fn create_new_path_from_existing(
     unmatched_path_strands: &[bool],
     gfa: &Gfa<String, (), ()>,
     segments_by_id: &HashMap<String, &Segment<String, ()>>,
-) {
+) -> Result<(), SequenceUpdateError> {
     let interval_tree = existing_path.intervaltree(conn);
     let mut existing_path_ranges_by_segment_id = HashMap::new();
     let mut existing_path_position = 0;
@@ -353,7 +351,7 @@ fn create_new_path_from_existing(
                     "{unmatched_path_name}_{segment_id}_{hash}",
                     hash = &sequence.hash
                 )),
-            );
+            )?;
             let next_node_strand = bool_to_strand(*unmatched_path_strands.get(i).unwrap());
             new_path_edges.push(AugmentedEdgeData {
                 edge_data: EdgeData {
@@ -463,6 +461,8 @@ fn create_new_path_from_existing(
         .collect::<Vec<BlockGroupEdgeData>>();
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
     Path::create(conn, unmatched_path_name, &block_group_id, &new_edge_ids);
+
+    Ok(())
 }
 
 #[cfg(test)]

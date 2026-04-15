@@ -13,7 +13,7 @@ use gen_models::{
     edge::{Edge, EdgeData},
     errors::OperationError,
     file_types::FileTypes,
-    node::Node,
+    node::{Node, NodeError},
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     sample::Sample,
@@ -36,6 +36,8 @@ use crate::{
 pub enum GFAImportError {
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
 }
 
 pub fn import_gfa(
@@ -76,7 +78,7 @@ pub fn import_gfa(
         sequences_by_segment_id.insert(&segment.id, sequence.clone());
         // TODO: Node hash is always new, it's sorted by insert time via being a v7 uuid but maybe want to
         // define the hash itself for idempotency?
-        let node_id = Node::create(conn, &sequence.hash, &HashId::uuid7());
+        let node_id = Node::create(conn, &sequence.hash, &HashId::uuid7())?;
         node_ids_by_segment_id.insert(&segment.id, node_id);
         bar.inc(1);
     }
