@@ -14,6 +14,7 @@ use gen_models::{
     db::GraphConnection,
     file_types::FileTypes,
     operations::FileAddition,
+    reference_alias::ReferenceAlias,
 };
 use noodles::{bed, core::Region, gff, tabix};
 
@@ -145,6 +146,7 @@ fn parse_translated_gff<R: BufRead>(
     reader: R,
     node_filter: &HashSet<HashId>,
     track_label: &str,
+    references_by_alias: HashMap<String, String>,
 ) -> Vec<AnnotationSpan> {
     let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
     let mut reader = gff::io::Reader::new(reader);
@@ -153,7 +155,11 @@ fn parse_translated_gff<R: BufRead>(
             Ok(record) => record,
             Err(_) => continue,
         };
-        let ref_name = record.reference_sequence_name().to_string();
+        let ref_name = record.reference_sequence_name();
+        let ref_name = references_by_alias
+            .get(&ref_name.to_string())
+            .unwrap_or(&ref_name.to_string())
+            .to_string();
         let node_id = match HashId::try_from(ref_name) {
             Ok(id) => id,
             Err(_) => continue,
@@ -194,6 +200,7 @@ fn parse_translated_bed<R: BufRead>(
     reader: R,
     node_filter: &HashSet<HashId>,
     track_label: &str,
+    references_by_alias: HashMap<String, String>,
 ) -> Vec<AnnotationSpan> {
     let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
     let mut bed_reader = bed::io::reader::Builder::<3>.build_from_reader(reader);
@@ -203,6 +210,10 @@ fn parse_translated_bed<R: BufRead>(
             break;
         }
         let ref_name = String::from_utf8_lossy(record.reference_sequence_name().as_ref());
+        let ref_name = references_by_alias
+            .get(&ref_name.to_string())
+            .unwrap_or(&ref_name.to_string())
+            .to_string();
         let node_id = match HashId::try_from(ref_name.to_string()) {
             Ok(id) => id,
             Err(_) => continue,
@@ -416,6 +427,11 @@ pub fn load_annotation_file_track(
             return Err(format!("Unsupported annotation file type: {other:?}").into());
         }
     }
+
+    let references_by_alias = ReferenceAlias::get_references_by_alias(
+        request.conn,
+        vec![request.block_group_name.unwrap_or_default().to_string()],
+    )?;
     let spans = match request.entry.file_addition.file_type {
         FileTypes::Gff3 => {
             if buffer.is_empty() {
@@ -425,12 +441,18 @@ pub fn load_annotation_file_track(
                 } else {
                     Box::new(BufReader::new(File::open(&file_path)?))
                 };
-                parse_translated_gff(reader, request.node_filter, &request.entry.display_name)
+                parse_translated_gff(
+                    reader,
+                    request.node_filter,
+                    &request.entry.display_name,
+                    references_by_alias,
+                )
             } else {
                 parse_translated_gff(
                     Cursor::new(buffer),
                     request.node_filter,
                     &request.entry.display_name,
+                    references_by_alias,
                 )
             }
         }
@@ -442,12 +464,18 @@ pub fn load_annotation_file_track(
                 } else {
                     Box::new(BufReader::new(File::open(&file_path)?))
                 };
-                parse_translated_bed(reader, request.node_filter, &request.entry.display_name)
+                parse_translated_bed(
+                    reader,
+                    request.node_filter,
+                    &request.entry.display_name,
+                    references_by_alias,
+                )
             } else {
                 parse_translated_bed(
                     Cursor::new(buffer),
                     request.node_filter,
                     &request.entry.display_name,
+                    references_by_alias,
                 )
             }
         }

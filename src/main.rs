@@ -47,6 +47,7 @@ use gen_models::{
     operations::{
         Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
     },
+    reference_alias::ReferenceAlias,
     sample::Sample,
     traits::Query,
 };
@@ -765,6 +766,29 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Pull { remote }) => {
             pull(&db_context, remote.as_deref())?;
             Ok(())
+        }
+        Some(Commands::AddReferenceAliases {
+            reference_name,
+            refseq_accession_id,
+            genbank_id,
+            ensembl_id,
+            ucsc_id,
+            custom_id,
+            chromosome,
+        }) => {
+            match ReferenceAlias::create(
+                graph_conn,
+                &reference_name,
+                refseq_accession_id,
+                genbank_id,
+                ucsc_id,
+                ensembl_id,
+                custom_id,
+                chromosome,
+            ) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("Error creating reference aliases: {e}").into()),
+            }
         }
     }
 }

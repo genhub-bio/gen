@@ -1,14 +1,28 @@
 use std::{
     cmp::{max, min},
     collections::HashMap,
-    io::{BufRead, Error, Read, Write},
+    io::{BufRead, Read, Write},
 };
 
 use gen_core::{HashId, Strand, is_terminal};
 use gen_graph::{GraphNode, project_path};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, sample::Sample};
+use gen_models::{
+    block_group::BlockGroup,
+    db::GraphConnection,
+    reference_alias::{ReferenceAlias, ReferenceAliasError},
+    sample::Sample,
+};
 use interavl::IntervalTree;
 use noodles::{core::Position, gff};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum GffError {
+    #[error("Couldn't translate GFF entry: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Error loading reference aliases: {0}")]
+    ReferenceAliasError(#[from] ReferenceAliasError),
+}
 
 pub fn translate_gff<R, W>(
     conn: &GraphConnection,
@@ -16,7 +30,7 @@ pub fn translate_gff<R, W>(
     sample: &str,
     reader: R,
     writer: &mut W,
-) -> Result<(), Error>
+) -> Result<(), GffError>
 where
     R: Read + BufRead,
     W: Write,
@@ -30,11 +44,20 @@ where
             .map(|bg| (bg.name.clone(), bg))
             .collect::<Vec<(String, &BlockGroup)>>(),
     );
+
+    // Load all reference aliases, to accommodate alternate reference names in the GFF file
+    let references = sample_bgs.keys().cloned().collect::<Vec<String>>();
+    let references_by_alias = ReferenceAlias::get_references_by_alias(conn, references)?;
+
     let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
 
     for result in gff_reader.record_bufs() {
         let record = result?;
         let ref_name = record.reference_sequence_name().to_string();
+        let ref_name = references_by_alias
+            .get(&ref_name)
+            .unwrap_or(&ref_name)
+            .to_string();
         let start = record.start().get() as i64;
         let end = record.end().get() as i64;
         if let Some(bg) = sample_bgs.get(&ref_name) {
@@ -90,7 +113,7 @@ where
 mod tests {
     use std::{fs::File, io::BufReader, path::PathBuf};
 
-    use gen_models::sample::Sample;
+    use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
 
     use super::translate_gff;
     use crate::test_helpers::{get_connection, setup_test_data};
@@ -146,6 +169,56 @@ mod tests {
             &mut buffer,
         )
         .expect("should translate gff for reference sample");
+        let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
+        assert_eq!(
+            results,
+            concat!(
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+            )
+        );
+    }
+
+    #[test]
+    fn translates_gff_using_reference_aliases() {
+        let conn = get_connection();
+        setup_test_data(&conn);
+
+        // Add a reference alias for the block group used in the fixture gff
+        ReferenceAlias::create(
+            &conn,
+            "alternate contig",
+            Some("m456".to_string()),
+            Some("m123".to_string()),
+            Some("m789".to_string()),
+            Some("chr1".to_string()),
+            None,
+            None,
+        )
+        .expect("should create reference alias");
+
+        let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("./fixtures/complex-with-reference-alias.gff3");
+        let collection = "test".to_string();
+
+        let mut buffer = Vec::new();
+        translate_gff(
+            &conn,
+            &collection,
+            Sample::DEFAULT_NAME,
+            BufReader::new(File::open(gff_path.clone()).expect("should open fixture gff")),
+            &mut buffer,
+        )
+        .expect("should translate gff for default sample");
         let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
         assert_eq!(
             results,

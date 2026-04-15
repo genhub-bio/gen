@@ -13,6 +13,7 @@ gen-graph = { path = "../gen-graph", version = "0.1.30" }
 gen-models = { path = "../gen-models", version = "0.1.30" }
 interavl = "0.3.0"
 noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }
+thiserror = "2.0.18"
 
 [dev-dependencies]
 rusqlite = { version = "0.32.1", features = ["array", "bundled"] }
