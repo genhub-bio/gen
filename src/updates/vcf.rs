@@ -251,11 +251,11 @@ pub fn update_with_vcf(
 
     let mut path_lengths: HashMap<HashId, i64> = HashMap::new();
 
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample.unwrap());
-    let block_group_names = block_groups
-        .iter()
-        .map(|bg| bg.name.clone())
-        .collect::<Vec<String>>();
+    let mut block_group_names = vec![];
+    for parent_sample in &parent_samples {
+        let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample);
+        block_group_names.extend(block_groups.iter().map(|bg| bg.name.clone()));
+    }
     let references_by_alias =
         ReferenceAlias::get_references_by_alias(conn, block_group_names).unwrap();
 

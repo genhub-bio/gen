@@ -1414,7 +1414,7 @@ mod tests {
         let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("merge-parent-a"));
         let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("merge-parent-b"));
 
-        let parent_a_edges = vec![
+        let parent_a_edges = [
             Edge::create(
                 conn,
                 PATH_START_NODE_ID,
@@ -1434,7 +1434,7 @@ mod tests {
                 Strand::Forward,
             ),
         ];
-        let parent_b_edges = vec![
+        let parent_b_edges = [
             Edge::create(
                 conn,
                 PATH_START_NODE_ID,
@@ -1611,7 +1611,7 @@ mod tests {
         let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("metadata-parent-a"));
         let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("metadata-parent-b"));
 
-        let parent_a_edges = vec![
+        let parent_a_edges = [
             Edge::create(
                 conn,
                 PATH_START_NODE_ID,
@@ -1631,7 +1631,7 @@ mod tests {
                 Strand::Forward,
             ),
         ];
-        let parent_b_edges = vec![
+        let parent_b_edges = [
             Edge::create(
                 conn,
                 PATH_START_NODE_ID,
