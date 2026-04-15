@@ -23,6 +23,9 @@ use petgraph::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod traits;
+pub use traits::MergeGraph;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct GraphNode {
     pub node_id: HashId,

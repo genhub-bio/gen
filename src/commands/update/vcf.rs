@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::errors::OperationError;
+use gen_models::{errors::OperationError, sample::Sample};
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -22,9 +22,14 @@ pub struct Command {
     /// Optional sample override. If omitted, use samples defined in the VCF.
     #[arg(short, long)]
     sample: Option<String>,
-    /// Use the given sample as the parent sample for changes.
-    #[arg(long = "parent-sample", aliases = ["ps"])]
-    parent_sample: Option<String>,
+    /// Use the given samples as the parent samples for changes. Repeat the flag or use commas.
+    #[arg(
+        long = "parent-samples",
+        aliases = ["parent-sample", "ps"],
+        value_delimiter = ',',
+        default_values_t = [Sample::DEFAULT_NAME.to_string()]
+    )]
+    parent_samples: Vec<String>,
     /// Apply edits in-place instead of using parent sample's reference coordinates
     #[arg(long = "inplace")]
     in_place: bool,
@@ -51,7 +56,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         name,
         cmd.genotype.clone().unwrap_or("".to_string()),
         cmd.sample.as_deref(),
-        cmd.parent_sample.as_deref(),
+        cmd.parent_samples.clone(),
         cmd.in_place,
     ) {
         Ok(_) => {

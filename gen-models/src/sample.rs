@@ -1,11 +1,14 @@
-use std::fmt::*;
+use std::{collections::HashSet, rc::Rc};
 
 use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
-use rusqlite::{Result as SQLResult, Row, params};
+use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
-use crate::{block_group::BlockGroup, db::GraphConnection, gen_models_capnp::sample, traits::*};
+use crate::{
+    block_group::BlockGroup, db::GraphConnection, errors::SampleError, gen_models_capnp::sample,
+    sample_lineage::SampleLineage, traits::Query,
+};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
@@ -41,6 +44,10 @@ impl Query for Sample {
 
 impl Sample {
     pub const DEFAULT_NAME: &str = "reference";
+
+    pub fn get_parent_names(conn: &GraphConnection, sample_name: &str) -> Vec<String> {
+        SampleLineage::get_parents(conn, sample_name)
+    }
 
     pub fn create(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
         let mut stmt = conn
@@ -92,35 +99,79 @@ impl Sample {
         sample_graph
     }
 
+    pub fn get_all_sequences(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        prune: bool,
+    ) -> HashSet<String> {
+        Sample::get_block_groups(conn, collection_name, sample_name)
+            .into_iter()
+            .flat_map(|block_group| BlockGroup::get_all_sequences(conn, &block_group.id, prune))
+            .collect()
+    }
+
     pub fn get_or_create_child(
         conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
-        parent_sample: Option<&str>,
-    ) -> Sample {
-        if let Ok(new_sample) = Sample::create(conn, sample_name) {
-            if let Some(parent) = parent_sample {
-                let bgs = BlockGroup::query(
-                    conn,
-                    "select * from block_groups where collection_name = ?1 AND sample_name = ?2",
-                    params!(collection_name, parent),
-                );
-                for bg in bgs.iter() {
-                    BlockGroup::get_or_create_sample_block_group(
+        parent_samples: Vec<String>,
+    ) -> Result<Sample, SampleError> {
+        match Sample::create(conn, sample_name) {
+            Ok(new_sample) => {
+                if !parent_samples.is_empty() {
+                    let parent_block_groups = BlockGroup::query(
                         conn,
-                        collection_name,
-                        &new_sample.name,
-                        &bg.name,
-                        parent_sample,
-                    )
-                    .expect("failed to get or create blockgroup clone.");
+                        "select * from block_groups
+                         where collection_name = ?1 AND sample_name IN rarray(?2)
+                         ORDER BY name, sample_name, created_on, id",
+                        params![
+                            collection_name,
+                            Rc::new(
+                                parent_samples
+                                    .iter()
+                                    .cloned()
+                                    .map(SQLValue::from)
+                                    .collect::<Vec<_>>()
+                            ),
+                        ],
+                    );
+                    let group_names = parent_block_groups
+                        .into_iter()
+                        .map(|parent_block_group| parent_block_group.name)
+                        .collect::<HashSet<_>>();
+
+                    for group_name in group_names {
+                        BlockGroup::get_or_create_sample_block_groups(
+                            conn,
+                            collection_name,
+                            &new_sample.name,
+                            &group_name,
+                            parent_samples.clone(),
+                        )
+                        .map_err(SampleError::from)?;
+                    }
+
+                    for parent_sample in parent_samples {
+                        SampleLineage::create(conn, &parent_sample, &new_sample.name)
+                            .map_err(SampleError::from)?;
+                    }
+                }
+
+                Ok(new_sample)
+            }
+            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
+                if err.code == rusqlite::ErrorCode::ConstraintViolation {
+                    Ok(Sample {
+                        name: sample_name.to_string(),
+                    })
+                } else {
+                    Err(SampleError::SqliteError(rusqlite::Error::SqliteFailure(
+                        err, _details,
+                    )))
                 }
             }
-            new_sample
-        } else {
-            Sample {
-                name: sample_name.to_string(),
-            }
+            Err(err) => Err(SampleError::SqliteError(err)),
         }
     }
 
@@ -155,7 +206,11 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
-    use crate::test_helpers::get_connection;
+    use crate::{
+        collection::Collection,
+        errors::SampleError,
+        test_helpers::{create_bg, get_connection},
+    };
 
     #[test]
     fn test_capnp_serialization() {
@@ -185,5 +240,68 @@ mod tests {
 
         assert!(Sample::get_by_name(conn, "sample1").is_err());
         assert!(Sample::get_by_name(conn, "sample2").is_ok());
+    }
+
+    #[test]
+    fn test_get_or_create_child_does_not_add_lineage_for_existing_sample() {
+        let conn = &get_connection(None).unwrap();
+        Sample::get_or_create(conn, "parent");
+        Sample::get_or_create(conn, "child");
+
+        Sample::get_or_create_child(conn, "test", "child", vec!["parent".to_string()]).unwrap();
+
+        assert!(SampleLineage::get_parents(conn, "child").is_empty());
+    }
+
+    #[test]
+    fn test_get_or_create_child_returns_sample_error_for_invalid_lineage() {
+        let conn = &get_connection(None).unwrap();
+
+        let err = Sample::get_or_create_child(conn, "test", "child", vec!["child".to_string()])
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SampleError::SqliteError(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::ConstraintViolation
+        ));
+    }
+
+    #[test]
+    fn test_get_or_create_child_multiple_parents() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test");
+
+        create_bg(conn, "test", "parent_a", "chr1");
+        create_bg(conn, "test", "parent_a", "chr2");
+        create_bg(conn, "test", "parent_b", "chr2");
+        create_bg(conn, "test", "parent_c", "chr3");
+
+        let child = Sample::get_or_create_child(
+            conn,
+            "test",
+            "child",
+            vec![
+                "parent_a".to_string(),
+                "parent_b".to_string(),
+                "parent_c".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let mut block_group_names = Sample::get_block_groups(conn, "test", &child.name)
+            .into_iter()
+            .map(|block_group| block_group.name)
+            .collect::<Vec<_>>();
+        block_group_names.sort();
+        assert_eq!(block_group_names, vec!["chr1", "chr2", "chr2", "chr3"]);
+        assert_eq!(
+            SampleLineage::get_parents(conn, &child.name),
+            vec![
+                "parent_a".to_string(),
+                "parent_b".to_string(),
+                "parent_c".to_string(),
+            ]
+        );
     }
 }

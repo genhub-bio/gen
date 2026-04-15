@@ -349,6 +349,8 @@ mod tests {
             sample_name: "sample".to_string(),
             name: "bg".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let seq = NewSequence::new()
             .sequence_type("dna")
@@ -432,6 +434,7 @@ mod tests {
         let changes = ChangesetModels {
             collections: vec![],
             samples: vec![],
+            sample_lineages: vec![],
             sequences: vec![new_seq.clone()],
             block_groups: vec![block_group.clone()],
             nodes: vec![new_node.clone()],

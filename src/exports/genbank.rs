@@ -1,7 +1,7 @@
 #![allow(warnings)]
-use std::{collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, str};
+use std::{borrow::Cow, collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, str};
 
-use gb_io::{self, QualifierKey, seq::Location};
+use gb_io::{self, seq::Location};
 use gen_core::{is_terminal, path::PathBlock};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, sample::Sample};
@@ -228,10 +228,10 @@ pub fn export_genbank(
                                     .splice(upos..upos, sequence.into_bytes())
                                     .collect::<Vec<_>>();
                                 qualifiers.push((
-                                    QualifierKey::from("note"),
+                                    Cow::Borrowed("note"),
                                     Some("Geneious type: Editing History Insertion".to_string()),
                                 ));
-                                qualifiers.push((QualifierKey::from("Original_Bases"), None));
+                                qualifiers.push((Cow::Borrowed("Original_Bases"), None));
                             } else {
                                 let end_pos = upos + next_node.length() as usize;
                                 offset += sequence.len() as i64 - next_node.length();
@@ -240,11 +240,11 @@ pub fn export_genbank(
                                     .splice(upos..end_pos, sequence.into_bytes())
                                     .collect::<Vec<u8>>();
                                 qualifiers.push((
-                                    QualifierKey::from("note"),
+                                    Cow::Borrowed("note"),
                                     Some("Geneious type: Editing History Replacement".to_string()),
                                 ));
                                 qualifiers.push((
-                                    QualifierKey::from("Original_Bases"),
+                                    Cow::Borrowed("Original_Bases"),
                                     Some(str::from_utf8(&original_bases).unwrap().to_string()),
                                 ));
                             }
@@ -271,17 +271,17 @@ pub fn export_genbank(
                             .unwrap();
                         location = Some(Location::Between(ls - 1, le - 1));
                         qualifiers.push((
-                            QualifierKey::from("note"),
+                            Cow::Borrowed("note"),
                             Some("Geneious type: Editing History Deletion".to_string()),
                         ));
                         qualifiers.push((
-                            QualifierKey::from("Original_Bases"),
+                            Cow::Borrowed("Original_Bases"),
                             Some(str::from_utf8(&original_bases).unwrap().to_string()),
                         ));
                     }
                     if let Some(l) = location {
                         seq.features.push(gb_io::seq::Feature {
-                            kind: gb_io::seq::FeatureKind::from("misc_feature"),
+                            kind: Cow::Borrowed("misc_feature"),
                             location: l,
                             qualifiers,
                         });

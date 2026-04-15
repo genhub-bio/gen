@@ -254,7 +254,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{imports::gfa::import_gfa, test_helpers::setup_gen, track_database};
+    use crate::{
+        imports::gfa::import_gfa,
+        test_helpers::{create_bg, setup_gen},
+        track_database,
+    };
 
     #[test]
     fn test_gfa_diff() {
@@ -267,7 +271,7 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
-        let block_group = BlockGroup::create(
+        let block_group = create_bg(
             conn,
             collection_name,
             Sample::DEFAULT_NAME,
@@ -327,8 +331,13 @@ mod tests {
         let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
         // Set up child
-        let _child_sample =
-            Sample::get_or_create_child(conn, collection_name, "child", Some(Sample::DEFAULT_NAME));
+        let _child_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "child",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        )
+        .unwrap();
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -403,8 +412,13 @@ mod tests {
         );
 
         // Set up grandchild
-        let _grandchild_sample =
-            Sample::get_or_create_child(conn, collection_name, "grandchild", Some("child"));
+        let _grandchild_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "grandchild",
+            vec!["child".to_string()],
+        )
+        .unwrap();
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")
@@ -519,8 +533,7 @@ mod tests {
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
         let _sample = Sample::get_or_create(conn, "test sample");
-        let block_group =
-            BlockGroup::create(conn, collection_name, "test sample", "test block group");
+        let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -618,8 +631,7 @@ mod tests {
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
         let _sample = Sample::get_or_create(conn, "test sample");
-        let block_group =
-            BlockGroup::create(conn, collection_name, "test sample", "test block group");
+        let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -717,7 +729,7 @@ mod tests {
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
         let _sample1 = Sample::get_or_create(conn, "sample1");
-        let block_group = BlockGroup::create(conn, collection_name, "sample1", "test block group");
+        let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -772,8 +784,7 @@ mod tests {
         let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
         let _sample2 = Sample::get_or_create(conn, "sample2");
-        let block_group2 =
-            BlockGroup::create(conn, collection_name, "sample2", "test block group 2");
+        let block_group2 = create_bg(conn, collection_name, "sample2", "test block group 2");
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
@@ -865,7 +876,7 @@ mod tests {
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
         let _sample1 = Sample::get_or_create(conn, "sample1");
-        let block_group = BlockGroup::create(conn, collection_name, "sample1", "test block group");
+        let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
@@ -920,7 +931,7 @@ mod tests {
         let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
         let _sample2 = Sample::get_or_create(conn, "sample2");
-        let block_group2 = BlockGroup::create(conn, collection_name, "sample2", "test block group");
+        let block_group2 = create_bg(conn, collection_name, "sample2", "test block group");
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
@@ -1012,7 +1023,7 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name);
-        let block_group = BlockGroup::create(
+        let block_group = create_bg(
             conn,
             collection_name,
             Sample::DEFAULT_NAME,
@@ -1058,8 +1069,13 @@ mod tests {
         let _path1 = Path::create(conn, "parent", &block_group.id, &[edge1.id, edge2.id]);
 
         // Set up child
-        let _child_sample =
-            Sample::get_or_create_child(conn, collection_name, "child", Some(Sample::DEFAULT_NAME));
+        let _child_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "child",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        )
+        .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
@@ -1134,8 +1150,13 @@ mod tests {
         );
 
         // Set up grandchild
-        let _grandchild_sample =
-            Sample::get_or_create_child(conn, collection_name, "grandchild", Some("child"));
+        let _grandchild_sample = Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "grandchild",
+            vec!["child".to_string()],
+        )
+        .unwrap();
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")

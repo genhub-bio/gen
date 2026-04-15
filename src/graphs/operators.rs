@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
 use gen_models::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::Edge,
@@ -107,9 +107,13 @@ pub fn derive_chunks(
 
             let child_block_group = BlockGroup::create(
                 conn,
-                collection_name,
-                new_sample_name,
-                child_block_group_name.as_str(),
+                NewBlockGroup {
+                    collection_name,
+                    sample_name: new_sample_name,
+                    name: child_block_group_name.as_str(),
+                    parent_block_group_id: Some(&parent_block_group_id),
+                    ..Default::default()
+                },
             );
             child_block_group.id
         };
@@ -303,8 +307,15 @@ pub fn make_stitch(
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
 
-    let child_block_group =
-        BlockGroup::create(conn, collection_name, new_sample_name, new_region_name);
+    let child_block_group = BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name,
+            sample_name: new_sample_name,
+            name: new_region_name,
+            ..Default::default()
+        },
+    );
 
     let mut block_group_chunks = vec![];
 

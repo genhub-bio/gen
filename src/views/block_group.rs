@@ -202,7 +202,7 @@ pub fn view_block_group(
         CollectionExplorer::new(conn, op_conn, sample_name.as_deref(), collection_name);
     let mut explorer_state = CollectionExplorerState::new();
     if let Some(ref s) = sample_name {
-        explorer_state.toggle_sample(s);
+        explorer_state.set_sample_expanded(s, true);
     }
 
     let mut block_graph;

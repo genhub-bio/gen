@@ -57,6 +57,11 @@ struct Sample {
   name @0 :Text;
 }
 
+struct SampleLineage {
+  parentSampleName @0 :Text;
+  childSampleName @1 :Text;
+}
+
 # Block group models
 struct BlockGroup {
   id @0 :List(UInt8);
@@ -64,6 +69,11 @@ struct BlockGroup {
   sampleName @2 :Text;
   name @3 :Text;
   createdOn @4 :Int64;
+  parentBlockGroupId :union {
+    none @5 :Void;
+    some @6 :List(UInt8);
+  }
+  isDefault @7 :Bool;
 }
 
 struct BlockGroupEdge {
@@ -270,6 +280,7 @@ struct ChangesetModels {
   annotationGroups @12 :List(AnnotationGroup);
   annotations @13 :List(Annotation);
   annotationGroupSamples @14 :List(AnnotationGroupSample);
+  sampleLineages @15 :List(SampleLineage);
 }
 
 struct DependencyModels {

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     convert::TryInto,
     fs,
     io::Read,
@@ -20,7 +20,7 @@ use crate::{
     annotations::{
         Annotation, AnnotationError, AnnotationGroup, AnnotationGroupError, AnnotationGroupSample,
     },
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
@@ -32,6 +32,7 @@ use crate::{
     path::Path,
     path_edge::PathEdge,
     sample::Sample,
+    sample_lineage::SampleLineage,
     sequence::{NewSequence, Sequence},
     session_operations::DependencyModels,
     traits::Query,
@@ -82,6 +83,7 @@ impl<'a> Capnp<'a> for DatabaseChangeset {
 pub struct ChangesetModels {
     pub collections: Vec<crate::collection::Collection>,
     pub samples: Vec<crate::sample::Sample>,
+    pub sample_lineages: Vec<SampleLineage>,
     pub sequences: Vec<Sequence>,
     pub block_groups: Vec<BlockGroup>,
     pub nodes: Vec<Node>,
@@ -116,6 +118,14 @@ impl<'a> Capnp<'a> for ChangesetModels {
         for (i, sample) in self.samples.iter().enumerate() {
             let mut sample_builder = samples_builder.reborrow().get(i as u32);
             sample.write_capnp(&mut sample_builder);
+        }
+
+        let mut sample_lineages_builder = builder
+            .reborrow()
+            .init_sample_lineages(self.sample_lineages.len() as u32);
+        for (i, sample_lineage) in self.sample_lineages.iter().enumerate() {
+            let mut sample_lineage_builder = sample_lineages_builder.reborrow().get(i as u32);
+            sample_lineage.write_capnp(&mut sample_lineage_builder);
         }
 
         // Write sequences
@@ -246,6 +256,12 @@ impl<'a> Capnp<'a> for ChangesetModels {
             samples.push(crate::sample::Sample::read_capnp(sample_reader));
         }
 
+        let sample_lineages_reader = reader.get_sample_lineages().unwrap();
+        let mut sample_lineages = Vec::new();
+        for sample_lineage_reader in sample_lineages_reader.iter() {
+            sample_lineages.push(SampleLineage::read_capnp(sample_lineage_reader));
+        }
+
         // Read sequences
         let sequences_reader = reader.get_sequences().unwrap();
         let mut sequences = Vec::new();
@@ -344,6 +360,7 @@ impl<'a> Capnp<'a> for ChangesetModels {
         ChangesetModels {
             collections,
             samples,
+            sample_lineages,
             sequences,
             block_groups,
             nodes,
@@ -431,6 +448,7 @@ pub fn process_changesetiter(
     let mut created_sequences = vec![];
     let mut created_bg_edges = vec![];
     let mut created_samples = vec![];
+    let mut created_sample_lineages = vec![];
     let mut created_collections = vec![];
     let mut created_paths = vec![];
     let mut created_path_edges = vec![];
@@ -496,6 +514,7 @@ pub fn process_changesetiter(
                     let sample_name = parse_string(item, 2);
                     let name = parse_string(item, 3);
                     let created_on = parse_number(item, 4);
+                    let parent_block_group_id = parse_maybe_hashid(item, 5);
 
                     created_block_groups.push(BlockGroup {
                         id: bg_pk,
@@ -503,9 +522,16 @@ pub fn process_changesetiter(
                         sample_name: sample_name.clone(),
                         name,
                         created_on,
+                        parent_block_group_id,
+                        is_default: parse_number(item, 6) != 0,
                     });
 
                     created_block_groups_set.insert(bg_pk);
+                    if let Some(parent_block_group_id) = parent_block_group_id
+                        && !created_block_groups_set.contains(&parent_block_group_id)
+                    {
+                        previous_block_groups.insert(parent_block_group_id);
+                    }
                     if !created_collections_set.contains(&collection) {
                         previous_collections.insert(collection);
                     }
@@ -575,6 +601,22 @@ pub fn process_changesetiter(
                     let name = parse_string(item, pk_column);
                     created_samples.push(Sample { name: name.clone() });
                     created_samples_set.insert(name);
+                }
+                "sample_lineage" => {
+                    let parent_sample_name = parse_string(item, 0);
+                    let child_sample_name = parse_string(item, 1);
+
+                    created_sample_lineages.push(SampleLineage {
+                        parent_sample_name: parent_sample_name.clone(),
+                        child_sample_name: child_sample_name.clone(),
+                    });
+
+                    if !created_samples_set.contains(&parent_sample_name) {
+                        previous_samples.insert(parent_sample_name);
+                    }
+                    if !created_samples_set.contains(&child_sample_name) {
+                        previous_samples.insert(child_sample_name);
+                    }
                 }
                 "collections" => {
                     let name = parse_string(item, pk_column);
@@ -751,6 +793,7 @@ pub fn process_changesetiter(
         edges: created_edges,
         block_group_edges: created_bg_edges,
         samples: created_samples,
+        sample_lineages: created_sample_lineages,
         collections: created_collections,
         paths: created_paths,
         path_edges: created_path_edges,
@@ -799,8 +842,17 @@ pub fn apply_changeset(
         }
     }
 
-    for bg in dependencies.block_group.iter() {
-        BlockGroup::create(conn, &bg.collection_name, &bg.sample_name, &bg.name);
+    for bg in block_groups_parent_first(&dependencies.block_group) {
+        BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &bg.collection_name,
+                sample_name: &bg.sample_name,
+                name: &bg.name,
+                parent_block_group_id: bg.parent_block_group_id.as_ref(),
+                is_default: bg.is_default,
+            },
+        );
     }
 
     for node in dependencies.nodes.iter() {
@@ -844,13 +896,28 @@ pub fn apply_changeset(
     for sample in &changeset.samples {
         Sample::get_or_create(conn, &sample.name);
     }
+    for sample_lineage in &changeset.sample_lineages {
+        SampleLineage::create(
+            conn,
+            &sample_lineage.parent_sample_name,
+            &sample_lineage.child_sample_name,
+        )?;
+    }
     for sequence in &changeset.sequences {
         NewSequence::from(sequence).save(conn);
     }
-    for bg in &changeset.block_groups {
-        BlockGroup::create(conn, &bg.collection_name, &bg.sample_name, &bg.name);
+    for bg in block_groups_parent_first(&changeset.block_groups) {
+        BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &bg.collection_name,
+                sample_name: &bg.sample_name,
+                name: &bg.name,
+                parent_block_group_id: bg.parent_block_group_id.as_ref(),
+                is_default: bg.is_default,
+            },
+        );
     }
-
     for node in &changeset.nodes {
         Node::create(conn, &node.sequence_hash, &node.id);
     }
@@ -949,6 +1016,13 @@ pub fn revert_changeset(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
 ) -> Result<(), ChangesetError> {
+    for sample_lineage in &changeset.sample_lineages {
+        SampleLineage::delete(
+            conn,
+            &sample_lineage.parent_sample_name,
+            &sample_lineage.child_sample_name,
+        )?;
+    }
     for annotation_group_sample in &changeset.annotation_group_samples {
         AnnotationGroupSample::delete(
             conn,
@@ -1095,6 +1169,53 @@ pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
     DependencyModels::read_capnp(root)
 }
 
+// This sorts parents first so when creating blockgroups, we don't have foreign key issues when a child is made before a parent.
+fn block_groups_parent_first(block_groups: &[BlockGroup]) -> Vec<&BlockGroup> {
+    let by_id = block_groups
+        .iter()
+        .map(|block_group| (block_group.id, block_group))
+        .collect::<HashMap<_, _>>();
+
+    fn walk<'a>(
+        block_group_id: HashId,
+        by_id: &HashMap<HashId, &'a BlockGroup>,
+        visiting: &mut HashSet<HashId>,
+        visited: &mut HashSet<HashId>,
+        ordered: &mut Vec<&'a BlockGroup>,
+    ) {
+        if visited.contains(&block_group_id) || !visiting.insert(block_group_id) {
+            return;
+        }
+
+        let block_group = by_id[&block_group_id];
+        if let Some(parent_id) = block_group.parent_block_group_id
+            && by_id.contains_key(&parent_id)
+        {
+            walk(parent_id, by_id, visiting, visited, ordered);
+        }
+
+        visiting.remove(&block_group_id);
+        if visited.insert(block_group_id) {
+            ordered.push(block_group);
+        }
+    }
+
+    let mut ordered = Vec::new();
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for block_group in block_groups {
+        walk(
+            block_group.id,
+            &by_id,
+            &mut visiting,
+            &mut visited,
+            &mut ordered,
+        );
+    }
+
+    ordered
+}
+
 pub fn write_changeset(
     workspace: &Workspace,
     operation: &Operation,
@@ -1148,6 +1269,10 @@ mod tests {
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
             }],
+            sample_lineages: vec![SampleLineage {
+                parent_sample_name: "parent_sample".to_string(),
+                child_sample_name: "test_sample".to_string(),
+            }],
             sequences: vec![
                 NewSequence::new()
                     .sequence("ATCG")
@@ -1161,6 +1286,8 @@ mod tests {
                 sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+                parent_block_group_id: None,
+                is_default: false,
             }],
             nodes: vec![
                 Node {
@@ -1264,6 +1391,7 @@ mod tests {
             changes: ChangesetModels {
                 collections: vec![],
                 samples: vec![],
+                sample_lineages: vec![],
                 sequences: vec![],
                 block_groups: vec![],
                 nodes: vec![],
@@ -1306,6 +1434,10 @@ mod tests {
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
             }],
+            sample_lineages: vec![SampleLineage {
+                parent_sample_name: "parent_sample".to_string(),
+                child_sample_name: "test_sample".to_string(),
+            }],
             sequences: vec![
                 NewSequence::new()
                     .sequence("ATCG")
@@ -1319,6 +1451,8 @@ mod tests {
                 sample_name: "test_sample".to_string(),
                 name: "test_bg".to_string(),
                 created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+                parent_block_group_id: None,
+                is_default: false,
             }],
             nodes: vec![
                 Node {
@@ -1461,6 +1595,135 @@ mod tests {
         assert_eq!(dependencies.accessions[0].id, accession.id);
     }
 
+    #[test]
+    fn test_changeset_includes_sample_lineage() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let _ = Sample::create(conn, "parent").unwrap();
+
+        let mut session = start_operation(conn);
+        let _ = Sample::create(conn, "child").unwrap();
+        SampleLineage::create(conn, "parent", "child").unwrap();
+
+        let operation = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![],
+                description: "sample lineage op".to_string(),
+            },
+            "sample lineage op",
+            None,
+        )
+        .unwrap();
+
+        let changeset = operation.get_changeset(context.workspace());
+        assert_eq!(
+            changeset.changes.sample_lineages,
+            vec![SampleLineage {
+                parent_sample_name: "parent".to_string(),
+                child_sample_name: "child".to_string(),
+            }]
+        );
+
+        let dependencies = operation.get_changeset_dependencies(context.workspace());
+        assert_eq!(dependencies.samples.len(), 1);
+        assert_eq!(dependencies.samples[0].name, "parent");
+    }
+
+    #[test]
+    fn test_block_groups_parent_first() {
+        let parent = BlockGroup {
+            id: HashId::pad_str(1),
+            collection_name: "test".to_string(),
+            sample_name: "parent".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: None,
+            is_default: false,
+        };
+        let child = BlockGroup {
+            id: HashId::pad_str(2),
+            collection_name: "test".to_string(),
+            sample_name: "child".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(parent.id),
+            is_default: false,
+        };
+
+        let block_groups = [child.clone(), parent.clone()];
+        let ordered = block_groups_parent_first(&block_groups);
+        assert_eq!(ordered, vec![&parent, &child]);
+    }
+
+    #[test]
+    fn test_block_groups_parent_first_with_three_level_lineage() {
+        let parent = BlockGroup {
+            id: HashId::pad_str(1),
+            collection_name: "test".to_string(),
+            sample_name: "parent".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: None,
+            is_default: false,
+        };
+        let child = BlockGroup {
+            id: HashId::pad_str(2),
+            collection_name: "test".to_string(),
+            sample_name: "child".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(parent.id),
+            is_default: false,
+        };
+        let grandchild = BlockGroup {
+            id: HashId::pad_str(3),
+            collection_name: "test".to_string(),
+            sample_name: "grandchild".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(child.id),
+            is_default: false,
+        };
+
+        let block_groups = [grandchild.clone(), child.clone(), parent.clone()];
+        let ordered = block_groups_parent_first(&block_groups);
+        assert_eq!(ordered, vec![&parent, &child, &grandchild]);
+    }
+
+    #[test]
+    fn test_block_groups_parent_first_when_every_entry_has_a_parent() {
+        let root_id = HashId::pad_str(1);
+        let child = BlockGroup {
+            id: HashId::pad_str(2),
+            collection_name: "test".to_string(),
+            sample_name: "child".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(root_id),
+            is_default: false,
+        };
+        let grandchild = BlockGroup {
+            id: HashId::pad_str(3),
+            collection_name: "test".to_string(),
+            sample_name: "grandchild".to_string(),
+            name: "bg".to_string(),
+            created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: Some(child.id),
+            is_default: false,
+        };
+
+        let block_groups = [grandchild.clone(), child.clone()];
+        let ordered = block_groups_parent_first(&block_groups);
+        assert_eq!(ordered, vec![&child, &grandchild]);
+    }
+
     #[cfg(test)]
     mod changeset_dependencies {
         use super::*;
@@ -1481,7 +1744,15 @@ mod tests {
             let mut session = start_operation(conn);
             // make a blockgroup with an edge from our parent blockgroup
             let _ = Sample::create(conn, "new").unwrap();
-            let new_bg = BlockGroup::create(conn, "test", "new", "new-bg");
+            let new_bg = BlockGroup::create(
+                conn,
+                NewBlockGroup {
+                    collection_name: "test",
+                    sample_name: "new",
+                    name: "new-bg",
+                    ..Default::default()
+                },
+            );
             let shared_edge = old_edges[0].edge.clone();
             BlockGroupEdge::bulk_create(
                 conn,

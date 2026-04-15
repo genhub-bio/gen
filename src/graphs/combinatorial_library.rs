@@ -286,7 +286,10 @@ pub fn create_library(
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{block_group::BlockGroup, sample::Sample};
+    use gen_models::{
+        block_group::{BlockGroup, NewBlockGroup},
+        sample::Sample,
+    };
 
     use super::*;
     use crate::{test_helpers::setup_gen, track_database};
@@ -301,7 +304,15 @@ mod tests {
         let collection = "test";
         let sample_name = "test-sample";
         let _sample = Sample::get_or_create(conn, sample_name);
-        let block_group = BlockGroup::create(conn, collection, sample_name, "test-block-group");
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: collection,
+                sample_name,
+                name: "test-block-group",
+                ..Default::default()
+            },
+        );
 
         match create_library(conn, block_group.id, "library", vec![], false) {
             Ok(_) => {

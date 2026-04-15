@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::errors::OperationError;
+use gen_models::{errors::OperationError, sample::Sample};
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -21,7 +21,7 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// A sample name to associate the fasta file with
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
     sample: String,
 }
 

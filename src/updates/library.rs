@@ -2,7 +2,7 @@ use core::ops::Range;
 use std::str;
 
 use gen_models::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     db::DbContext,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
@@ -88,8 +88,15 @@ pub fn update_with_library(
         });
     }
 
-    let child_block_group =
-        BlockGroup::create(conn, collection_name, new_sample_name, new_sample_name);
+    let child_block_group = BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name,
+            sample_name: new_sample_name,
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
 
     let derived_block_group_chunks = derive_chunks(
         context,

@@ -8,6 +8,14 @@ pub enum QueryError {
 }
 
 #[derive(Debug, Error, PartialEq)]
+pub enum SampleError {
+    #[error("Query Error: {0}")]
+    QueryError(#[from] QueryError),
+    #[error("SQLite Error: {0}")]
+    SqliteError(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, Error, PartialEq)]
 pub enum ChangeError {
     #[error("Operation Error: {0}")]
     OutOfBounds(String),

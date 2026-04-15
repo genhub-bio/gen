@@ -38,6 +38,8 @@ pub struct BlockGroup {
     pub sample_name: String,
     pub name: String,
     pub created_on: i64,
+    pub parent_block_group_id: Option<HashId>,
+    pub is_default: bool,
 }
 
 impl<'a> Capnp<'a> for BlockGroup {
@@ -50,6 +52,19 @@ impl<'a> Capnp<'a> for BlockGroup {
         builder.set_sample_name(&self.sample_name);
         builder.set_name(&self.name);
         builder.set_created_on(self.created_on);
+        match &self.parent_block_group_id {
+            None => {
+                builder.reborrow().get_parent_block_group_id().set_none(());
+            }
+            Some(parent_block_group_id) => {
+                builder
+                    .reborrow()
+                    .get_parent_block_group_id()
+                    .set_some(&parent_block_group_id.0)
+                    .unwrap();
+            }
+        }
+        builder.set_is_default(self.is_default);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -64,6 +79,26 @@ impl<'a> Capnp<'a> for BlockGroup {
         let sample_name = reader.get_sample_name().unwrap().to_string().unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
         let created_on = reader.get_created_on();
+        let parent_block_group_id =
+            reader
+                .get_parent_block_group_id()
+                .which()
+                .ok()
+                .and_then(|parent_block_group_id| match parent_block_group_id {
+                    block_group::parent_block_group_id::None(()) => None,
+                    block_group::parent_block_group_id::Some(parent_block_group_id) => {
+                        if let Ok(parent_block_group_id) = parent_block_group_id {
+                            if let Some(parent_block_group_id) = parent_block_group_id.as_slice() {
+                                parent_block_group_id.try_into().ok()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                });
+        let is_default = reader.get_is_default();
 
         BlockGroup {
             id,
@@ -71,6 +106,8 @@ impl<'a> Capnp<'a> for BlockGroup {
             sample_name,
             name,
             created_on,
+            parent_block_group_id,
+            is_default,
         }
     }
 }
@@ -80,6 +117,15 @@ pub struct BlockGroupData<'a> {
     pub collection_name: &'a str,
     pub sample_name: &'a str,
     pub name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NewBlockGroup<'a> {
+    pub collection_name: &'a str,
+    pub sample_name: &'a str,
+    pub name: &'a str,
+    pub parent_block_group_id: Option<&'a HashId>,
+    pub is_default: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -135,35 +181,56 @@ impl<'a> PathCache<'a> {
     }
 
     pub fn get_intervaltree<'b>(
-        path_cache: &'b PathCache<'_>,
+        path_cache: &'b mut PathCache<'_>,
         path: &Path,
-    ) -> Option<&'b IntervalTree<i64, NodeIntervalBlock>> {
-        path_cache.intervaltree_cache.get(path)
+    ) -> &'b IntervalTree<i64, NodeIntervalBlock> {
+        if !path_cache.intervaltree_cache.contains_key(path) {
+            let tree = path.intervaltree(path_cache.conn);
+            path_cache.intervaltree_cache.insert(path.clone(), tree);
+        }
+
+        path_cache.intervaltree_cache.get(path).unwrap()
     }
 }
 
 impl BlockGroup {
-    pub fn create(
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-        name: &str,
-    ) -> BlockGroup {
-        Sample::get_or_create(conn, sample_name);
-        let hash = HashId(calculate_hash(&format!(
-            "{collection_name}:{sample_name}:{name}"
-        )));
+    pub fn create(conn: &GraphConnection, new_block_group: NewBlockGroup<'_>) -> BlockGroup {
+        Sample::get_or_create(conn, new_block_group.sample_name);
+        let hash = BlockGroup::get_id(
+            new_block_group.collection_name,
+            new_block_group.sample_name,
+            new_block_group.name,
+            new_block_group.parent_block_group_id,
+        );
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-        let query = "INSERT INTO block_groups (id, collection_name, sample_name, name, created_on) VALUES (?1, ?2, ?3, ?4, ?5);";
+        let query = "INSERT INTO block_groups (
+                id,
+                collection_name,
+                sample_name,
+                name,
+                created_on,
+                parent_block_group_id,
+                is_default
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
         let mut stmt = conn.prepare(query).unwrap();
         let bg = BlockGroup {
             id: hash,
-            collection_name: collection_name.to_string(),
-            sample_name: sample_name.to_string(),
-            name: name.to_string(),
+            collection_name: new_block_group.collection_name.to_string(),
+            sample_name: new_block_group.sample_name.to_string(),
+            name: new_block_group.name.to_string(),
             created_on: timestamp,
+            parent_block_group_id: new_block_group.parent_block_group_id.copied(),
+            is_default: new_block_group.is_default,
         };
-        match stmt.execute((hash, collection_name, sample_name, name, timestamp)) {
+        match stmt.execute(params![
+            hash,
+            new_block_group.collection_name,
+            new_block_group.sample_name,
+            new_block_group.name,
+            timestamp,
+            new_block_group.parent_block_group_id,
+            new_block_group.is_default,
+        ]) {
             Ok(_) => bg,
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
                 if err.code == rusqlite::ErrorCode::ConstraintViolation {
@@ -203,39 +270,25 @@ impl BlockGroup {
         }
     }
 
-    pub fn duplicate(&self, conn: &GraphConnection, target_block_group_id: &HashId) {
+    fn copy_paths_and_accessions_into(
+        &self,
+        conn: &GraphConnection,
+        target_block_group_id: &HashId,
+    ) {
         let existing_paths = Path::query(
             conn,
             "SELECT * from paths where block_group_id = ?1;",
             params![self.id],
         );
 
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &self.id);
-        let edge_ids = augmented_edges
-            .iter()
-            .map(|edge| edge.edge.id)
-            .collect::<Vec<_>>();
-        let new_block_group_edges = edge_ids
-            .iter()
-            .enumerate()
-            .map(|(i, edge_id)| BlockGroupEdgeData {
-                block_group_id: *target_block_group_id,
-                edge_id: *edge_id,
-                chromosome_index: augmented_edges[i].chromosome_index,
-                phased: augmented_edges[i].phased,
-            })
-            .collect::<Vec<_>>();
-        BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-
         let mut path_map = HashMap::new();
-
-        for path in existing_paths.iter() {
+        for path in &existing_paths {
             let edge_ids = PathEdge::edges_for_path(conn, &path.id)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
             let new_path = Path::create(conn, &path.name, target_block_group_id, &edge_ids);
-            path_map.insert(&path.id, new_path.id);
+            path_map.insert(path.id, new_path.id);
         }
 
         for accession in Accession::query(
@@ -253,14 +306,13 @@ impl BlockGroup {
                 "Select * from accession_paths where accession_id = ?1 order by index_in_path ASC;",
                 rusqlite::params!(SQLValue::from(accession.id)),
             );
-            let new_path_id = &path_map[&accession.path_id];
-            let obj = Accession::create(
+            let new_path_id = path_map.get(&accession.path_id).unwrap();
+            let obj = Accession::get_or_create(
                 conn,
                 &accession.name,
                 new_path_id,
                 accession.parent_accession_id.as_ref(),
-            )
-            .expect("Unable to create accession in clone.");
+            );
             AccessionPath::create(
                 conn,
                 &obj.id,
@@ -269,58 +321,127 @@ impl BlockGroup {
         }
     }
 
-    pub fn get_or_create_sample_block_group(
+    pub fn get_or_create_sample_block_groups(
         conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
         group_name: &str,
-        parent_sample: Option<&str>,
-    ) -> Result<HashId, QueryError> {
-        let binding = BlockGroup::query(
+        parent_samples: Vec<String>,
+    ) -> Result<Vec<BlockGroup>, QueryError> {
+        let existing_block_groups = BlockGroup::query(
             conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+            "select * from block_groups
+             where collection_name = ?1 AND sample_name = ?2 AND name = ?3
+             order by created_on, id",
             params![collection_name, sample_name, group_name],
         );
-        let initial_query_result = binding.first();
 
-        if let Some(block_group) = initial_query_result {
-            return Ok(block_group.id);
+        if !existing_block_groups.is_empty() {
+            return Ok(existing_block_groups);
         }
 
-        let block_groups = if let Some(parent_sample_name) = parent_sample {
-            // use the base reference group if it exists
-            BlockGroup::query(
+        let parent_block_groups = BlockGroup::find_parent_block_groups(
+            conn,
+            collection_name,
+            sample_name,
+            group_name,
+            &parent_samples,
+        );
+
+        if parent_block_groups.is_empty() {
+            return Ok(vec![BlockGroup::create(
                 conn,
-                "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                params![collection_name, parent_sample_name, group_name],
-            )
-        } else {
-            vec![]
-        };
-
-        if let Some(parent_block_group) = block_groups.first() {
-            let new_block_group =
-                BlockGroup::create(conn, collection_name, sample_name, group_name);
-
-            // clone parent blocks/edges/path
-            parent_block_group.duplicate(conn, &new_block_group.id);
-
-            Ok(new_block_group.id)
-        } else {
-            let error_message = if let Some(parent_sample_name) = parent_sample {
-                format!(
-                    "Block group not found for either new sample ({sample_name}) or parent sample ({parent_sample_name})"
-                )
-            } else {
-                format!("Block group {group_name} not found for sample ({sample_name})")
-            };
-            Err(QueryError::ResultsNotFound(error_message))
+                NewBlockGroup {
+                    collection_name,
+                    sample_name,
+                    name: group_name,
+                    ..Default::default()
+                },
+            )]);
         }
+
+        let new_block_groups = parent_block_groups
+            .iter()
+            .map(|parent_block_group| {
+                let new_block_group = BlockGroup::create(
+                    conn,
+                    NewBlockGroup {
+                        collection_name,
+                        sample_name,
+                        name: group_name,
+                        parent_block_group_id: Some(&parent_block_group.id),
+                        ..Default::default()
+                    },
+                );
+                new_block_group.copy_contents_from(conn, parent_block_group);
+                new_block_group
+            })
+            .collect::<Vec<_>>();
+
+        Ok(new_block_groups)
     }
 
-    pub fn get_id(collection_name: &str, sample_name: &str, group_name: &str) -> HashId {
+    pub fn find_parent_block_groups(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        group_name: &str,
+        parent_samples: &[String],
+    ) -> Vec<BlockGroup> {
+        let parent_samples = if parent_samples.is_empty() {
+            Sample::get_parent_names(conn, sample_name)
+        } else {
+            parent_samples.to_vec()
+        };
+        if parent_samples.is_empty() {
+            return vec![];
+        }
+
+        BlockGroup::query(
+            conn,
+            "select * from block_groups
+             where collection_name = ?1 AND sample_name IN rarray(?2) AND name = ?3
+             order by sample_name, created_on, id",
+            params![
+                collection_name,
+                Rc::new(
+                    parent_samples
+                        .iter()
+                        .cloned()
+                        .map(SQLValue::from)
+                        .collect::<Vec<_>>()
+                ),
+                group_name
+            ],
+        )
+    }
+
+    fn copy_contents_from(&self, conn: &GraphConnection, source_block_group: &BlockGroup) {
+        let new_block_group_edges =
+            BlockGroupEdge::edges_for_block_group(conn, &source_block_group.id)
+                .into_iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: self.id,
+                    edge_id: edge.edge.id,
+                    chromosome_index: edge.chromosome_index,
+                    phased: edge.phased,
+                })
+                .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
+        source_block_group.copy_paths_and_accessions_into(conn, &self.id);
+    }
+
+    pub fn get_id(
+        collection_name: &str,
+        sample_name: &str,
+        group_name: &str,
+        parent_block_group_id: Option<&HashId>,
+    ) -> HashId {
+        let lineage_key = parent_block_group_id
+            .map(ToString::to_string)
+            .unwrap_or_default();
         HashId(calculate_hash(&format!(
-            "{collection_name}:{sample_name}:{group_name}"
+            "{collection_name}:{sample_name}:{group_name}:{lineage_key}"
         )))
     }
 
@@ -457,7 +578,7 @@ impl BlockGroup {
         end: i64,
         cache: &mut PathCache,
     ) -> Accession {
-        let tree = PathCache::get_intervaltree(cache, path).unwrap();
+        let tree = PathCache::get_intervaltree(cache, path);
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
@@ -543,7 +664,7 @@ impl BlockGroup {
                     BlockGroup::intervaltree_for(conn, &change.block_group_id, true)
                 })
             } else {
-                PathCache::get_intervaltree(cache, &change.path).unwrap()
+                PathCache::get_intervaltree(cache, &change.path)
             };
             let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
             new_augmented_edges_by_block_group
@@ -1135,6 +1256,8 @@ impl Query for BlockGroup {
             sample_name: row.get(2).unwrap(),
             name: row.get(3).unwrap(),
             created_on: row.get(4).unwrap(),
+            parent_block_group_id: row.get(5).unwrap(),
+            is_default: row.get(6).unwrap(),
         }
     }
 }
@@ -1142,6 +1265,7 @@ impl Query for BlockGroup {
 #[cfg(test)]
 mod tests {
     use core::ops::Range;
+    use std::collections::HashSet;
 
     use capnp::message::TypedBuilder;
     use chrono::Utc;
@@ -1153,8 +1277,29 @@ mod tests {
         node::Node,
         sample::Sample,
         sequence::Sequence,
-        test_helpers::{get_connection, interval_tree_verify, setup_block_group},
+        test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
     };
+
+    fn get_single_bg_id(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        group_name: &str,
+        parent_samples: Vec<String>,
+    ) -> HashId {
+        BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            collection_name,
+            sample_name,
+            group_name,
+            parent_samples,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id
+    }
 
     #[test]
     fn test_capnp_serialization() {
@@ -1164,6 +1309,8 @@ mod tests {
             sample_name: "test_sample".to_string(),
             name: "test_block_group".to_string(),
             created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            parent_block_group_id: None,
+            is_default: false,
         };
 
         let mut message = TypedBuilder::<block_group::Owned>::new_default();
@@ -1175,15 +1322,32 @@ mod tests {
     }
 
     #[test]
+    fn test_capnp_deserialization_defaults_missing_parent_to_none() {
+        let created_on = Utc::now().timestamp_nanos_opt().unwrap();
+
+        let mut message = TypedBuilder::<block_group::Owned>::new_default();
+        let mut root = message.init_root();
+        root.set_id(&HashId::pad_str(42).0).unwrap();
+        root.set_collection_name("test_collection");
+        root.set_sample_name("test_sample");
+        root.set_name("test_block_group");
+        root.set_created_on(created_on);
+
+        let deserialized = BlockGroup::read_capnp(root.into_reader());
+        assert_eq!(deserialized.parent_block_group_id, None);
+        assert!(!deserialized.is_default);
+    }
+
+    #[test]
     fn test_blockgroup_create() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
         Sample::get_or_create(conn, Sample::DEFAULT_NAME);
-        let bg1 = BlockGroup::create(conn, "test", Sample::DEFAULT_NAME, "hg19");
+        let bg1 = create_bg(conn, "test", Sample::DEFAULT_NAME, "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(conn, "sample");
-        let bg2 = BlockGroup::create(conn, "test", "sample", "hg19");
+        let bg2 = create_bg(conn, "test", "sample", "hg19");
         assert_eq!(bg2.collection_name, "test");
         assert_eq!(bg2.name, "hg19");
         assert_eq!(bg2.sample_name, "sample".to_string());
@@ -1196,8 +1360,8 @@ mod tests {
         Collection::create(conn, "test");
         Sample::get_or_create(conn, "sample1");
         Sample::get_or_create(conn, "sample2");
-        let bg1 = BlockGroup::create(conn, "test", "sample1", "hg19");
-        let bg2 = BlockGroup::create(conn, "test", "sample2", "hg19");
+        let bg1 = create_bg(conn, "test", "sample1", "hg19");
+        let bg2 = create_bg(conn, "test", "sample2", "hg19");
 
         BlockGroup::delete(conn, "test", &bg1.sample_name, &bg1.name);
 
@@ -1211,18 +1375,17 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test");
         Sample::get_or_create(conn, Sample::DEFAULT_NAME);
-        let bg1 = BlockGroup::create(conn, "test", Sample::DEFAULT_NAME, "hg19");
+        let bg1 = create_bg(conn, "test", Sample::DEFAULT_NAME, "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(conn, "sample");
-        let bg2 = BlockGroup::get_or_create_sample_block_group(
+        let bg2 = get_single_bg_id(
             conn,
             "test",
             "sample",
             "hg19",
-            Some(Sample::DEFAULT_NAME),
-        )
-        .unwrap();
+            vec![Sample::DEFAULT_NAME.to_string()],
+        );
         assert_eq!(
             BlockGroupEdge::edges_for_block_group(conn, &bg1.id),
             BlockGroupEdge::edges_for_block_group(conn, &bg2)
@@ -1230,11 +1393,420 @@ mod tests {
     }
 
     #[test]
+    fn test_blockgroup_copies_immediate_parent_block_groups() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test");
+        Sample::get_or_create(conn, "parent_a");
+        Sample::get_or_create(conn, "parent_b");
+        Sample::get_or_create(conn, "child");
+
+        let parent_a_bg = create_bg(conn, "test", "parent_a", "chr1");
+        let parent_b_bg = create_bg(conn, "test", "parent_b", "chr1");
+
+        let seq_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAA")
+            .save(conn);
+        let seq_b = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCCC")
+            .save(conn);
+        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("merge-parent-a"));
+        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("merge-parent-b"));
+
+        let parent_a_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_a,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_a,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+        let parent_b_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_b,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_b,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_a_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_a_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_b_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_b_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let child_block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            vec!["parent_a".to_string(), "parent_b".to_string()],
+        )
+        .unwrap();
+        assert_eq!(child_block_groups.len(), 2);
+
+        let child_by_parent = child_block_groups
+            .iter()
+            .map(|block_group| (block_group.parent_block_group_id.unwrap(), block_group))
+            .collect::<HashMap<_, _>>();
+
+        let child_a = child_by_parent.get(&parent_a_bg.id).unwrap();
+        let child_b = child_by_parent.get(&parent_b_bg.id).unwrap();
+
+        let child_a_edges = BlockGroupEdge::query(
+            conn,
+            "select * from block_group_edges where block_group_id = ?1",
+            params![child_a.id],
+        );
+        let child_b_edges = BlockGroupEdge::query(
+            conn,
+            "select * from block_group_edges where block_group_id = ?1",
+            params![child_b.id],
+        );
+        assert_eq!(
+            child_a_edges
+                .iter()
+                .map(|edge| edge.edge_id)
+                .collect::<HashSet<_>>(),
+            parent_a_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<HashSet<_>>()
+        );
+        assert_eq!(
+            child_b_edges
+                .iter()
+                .map(|edge| edge.edge_id)
+                .collect::<HashSet<_>>(),
+            parent_b_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<HashSet<_>>()
+        );
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &child_a.id, false),
+            HashSet::from_iter(vec!["AAAA".to_string()])
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &child_b.id, false),
+            HashSet::from_iter(vec!["CCCC".to_string()])
+        );
+        assert_eq!(
+            Sample::get_all_sequences(conn, "test", "child", false),
+            HashSet::from_iter(vec!["AAAA".to_string(), "CCCC".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_get_or_create_sample_block_groups_creates_root_block_group_if_no_parents() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test");
+        Sample::get_or_create(conn, "root_sample");
+
+        let block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            "test",
+            "root_sample",
+            "chr1",
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(block_groups.len(), 1);
+        assert_eq!(block_groups[0].collection_name, "test");
+        assert_eq!(block_groups[0].sample_name, "root_sample");
+        assert_eq!(block_groups[0].name, "chr1");
+        assert!(block_groups[0].parent_block_group_id.is_none());
+    }
+
+    #[test]
+    fn test_get_or_create_sample_block_groups_seeds_from_parents_without_block_groups() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test");
+        Sample::get_or_create(conn, "parent_sample");
+        Sample::get_or_create(conn, "child_sample");
+
+        let block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            "test",
+            "child_sample",
+            "chr1",
+            vec!["parent_sample".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(block_groups.len(), 1);
+        assert_eq!(block_groups[0].collection_name, "test");
+        assert_eq!(block_groups[0].sample_name, "child_sample");
+        assert_eq!(block_groups[0].name, "chr1");
+        assert!(block_groups[0].parent_block_group_id.is_none());
+        assert!(BlockGroupEdge::edges_for_block_group(conn, &block_groups[0].id).is_empty());
+    }
+
+    #[test]
+    fn test_blockgroup_merge_from_multiple_parents_preserves_paths_and_accessions() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test");
+        Sample::get_or_create(conn, "parent_a");
+        Sample::get_or_create(conn, "parent_b");
+        Sample::get_or_create(conn, "child");
+
+        let parent_a_bg = create_bg(conn, "test", "parent_a", "chr1");
+        let parent_b_bg = create_bg(conn, "test", "parent_b", "chr1");
+
+        let seq_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAA")
+            .save(conn);
+        let seq_b = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCCC")
+            .save(conn);
+        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("metadata-parent-a"));
+        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("metadata-parent-b"));
+
+        let parent_a_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_a,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_a,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+        let parent_b_edges = vec![
+            Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                node_b,
+                0,
+                Strand::Forward,
+            ),
+            Edge::create(
+                conn,
+                node_b,
+                4,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            ),
+        ];
+
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_a_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_a_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        BlockGroupEdge::bulk_create(
+            conn,
+            &parent_b_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id: parent_b_bg.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let parent_a_path = Path::create(
+            conn,
+            "chr1",
+            &parent_a_bg.id,
+            &parent_a_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+        );
+        let parent_b_path = Path::create(
+            conn,
+            "chr1",
+            &parent_b_bg.id,
+            &parent_b_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+        );
+        let parent_b_alt_path = Path::create(
+            conn,
+            "chr1-alt",
+            &parent_b_bg.id,
+            &parent_b_edges
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+        );
+
+        let mut path_cache = PathCache::new(conn);
+        let parent_a_path_len = parent_a_path.length(conn);
+        let parent_b_path_len = parent_b_path.length(conn);
+        let parent_b_alt_path_len = parent_b_alt_path.length(conn);
+        BlockGroup::add_accession(
+            conn,
+            &parent_a_path,
+            "parent-a-acc",
+            0,
+            parent_a_path_len,
+            &mut path_cache,
+        );
+        BlockGroup::add_accession(
+            conn,
+            &parent_b_path,
+            "parent-b-acc",
+            0,
+            parent_b_path_len,
+            &mut path_cache,
+        );
+        BlockGroup::add_accession(
+            conn,
+            &parent_b_alt_path,
+            "parent-b-alt-acc",
+            0,
+            parent_b_alt_path_len,
+            &mut path_cache,
+        );
+
+        let child_block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            "test",
+            "child",
+            "chr1",
+            vec!["parent_a".to_string(), "parent_b".to_string()],
+        )
+        .unwrap();
+        let child_by_parent = child_block_groups
+            .iter()
+            .map(|block_group| (block_group.parent_block_group_id.unwrap(), block_group))
+            .collect::<HashMap<_, _>>();
+        let child_a = child_by_parent.get(&parent_a_bg.id).unwrap();
+        let child_b = child_by_parent.get(&parent_b_bg.id).unwrap();
+
+        let child_a_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name",
+            params![child_a.id],
+        );
+        assert_eq!(
+            child_a_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chr1"]
+        );
+
+        let child_b_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name",
+            params![child_b.id],
+        );
+        assert_eq!(
+            child_b_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chr1", "chr1-alt"]
+        );
+
+        let child_a_accessions = Accession::query(
+            conn,
+            "select accessions.* from accessions join paths on accessions.path_id = paths.id where paths.block_group_id = ?1 order by accessions.name",
+            params![child_a.id],
+        );
+        assert_eq!(
+            child_a_accessions
+                .iter()
+                .map(|accession| accession.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent-a-acc"]
+        );
+
+        let child_b_accessions = Accession::query(
+            conn,
+            "select accessions.* from accessions join paths on accessions.path_id = paths.id where paths.block_group_id = ?1 order by accessions.name",
+            params![child_b.id],
+        );
+        assert_eq!(
+            child_b_accessions
+                .iter()
+                .map(|accession| accession.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent-b-acc", "parent-b-alt-acc"]
+        );
+    }
+
+    #[test]
     fn test_blockgroup_clone_passes_accessions() {
         let conn = &get_connection(None).unwrap();
-        let (bg_1, path) = setup_block_group(conn);
+        let (_bg_1, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);
-        PathCache::lookup(&mut path_cache, &bg_1, path.name.clone());
         let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache);
         assert_eq!(
             Accession::query(
@@ -1251,14 +1823,7 @@ mod tests {
         );
 
         Sample::get_or_create(conn, "sample2");
-        let _bg2 = BlockGroup::get_or_create_sample_block_group(
-            conn,
-            "test",
-            "sample2",
-            "chr1",
-            Some("test"),
-        )
-        .unwrap();
+        let _bg2 = get_single_bg_id(conn, "test", "sample2", "chr1", vec!["test".to_string()]);
         assert_eq!(
             Accession::query(
                 conn,
@@ -2223,14 +2788,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
-            conn,
-            "test",
-            "child",
-            "chr1",
-            Some("test"),
-        )
-        .unwrap();
+        let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2400,14 +2958,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
-            conn,
-            "test",
-            "child",
-            "chr1",
-            Some("test"),
-        )
-        .unwrap();
+        let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2449,14 +3000,13 @@ mod tests {
 
         // Now, we make a change against another descendant
         let _new_sample = Sample::get_or_create(conn, "grandchild");
-        let gc_bg_id = BlockGroup::get_or_create_sample_block_group(
+        let gc_bg_id = get_single_bg_id(
             conn,
             "test",
             "grandchild",
             "chr1",
-            Some("child"),
-        )
-        .unwrap();
+            vec!["child".to_string()],
+        );
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2500,14 +3050,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
-            conn,
-            "test",
-            "child",
-            "chr1",
-            Some("test"),
-        )
-        .unwrap();
+        let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2552,14 +3095,13 @@ mod tests {
 
         // Now, we make a change against another descendant
         let _new_sample = Sample::get_or_create(conn, "grandchild");
-        let gc_bg_id = BlockGroup::get_or_create_sample_block_group(
+        let gc_bg_id = get_single_bg_id(
             conn,
             "test",
             "grandchild",
             "chr1",
-            Some("child"),
-        )
-        .unwrap();
+            vec!["child".to_string()],
+        );
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2618,14 +3160,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child");
-        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
-            conn,
-            "test",
-            "child",
-            "chr1",
-            Some("test"),
-        )
-        .unwrap();
+        let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2672,14 +3207,13 @@ mod tests {
 
         // Now, we make a change against another descendant and get an error
         let _new_sample = Sample::get_or_create(conn, "grandchild");
-        let gc_bg_id = BlockGroup::get_or_create_sample_block_group(
+        let gc_bg_id = get_single_bg_id(
             conn,
             "test",
             "grandchild",
             "chr1",
-            Some("child"),
-        )
-        .unwrap();
+            vec!["child".to_string()],
+        );
         let new_path = Path::query(
             conn,
             "select * from paths where block_group_id = ?1",
@@ -2837,7 +3371,7 @@ mod tests {
             let end_block = blocks[blocks.len() - 1];
             let end_node_coordinate = 25 - end_block.start + end_block.sequence_start;
 
-            let block_group2 = BlockGroup::create(conn, "test", "test", "chr1.1");
+            let block_group2 = create_bg(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
                 "test",
@@ -3044,7 +3578,7 @@ mod tests {
             let end_block = blocks[blocks.len() - 1];
             let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
-            let block_group2 = BlockGroup::create(conn, "test", "test", "chr1.1");
+            let block_group2 = create_bg(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
                 "test",
@@ -3308,7 +3842,7 @@ mod tests {
             let end_block = blocks[blocks.len() - 1];
             let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
-            let block_group2 = BlockGroup::create(conn, "test", "test", "chr1.1");
+            let block_group2 = create_bg(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
                 "test",

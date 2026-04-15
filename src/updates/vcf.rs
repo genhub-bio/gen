@@ -8,7 +8,7 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
     db::{DbContext, GraphConnection},
-    errors::{OperationError, QueryError},
+    errors::{OperationError, QueryError, SampleError},
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -16,7 +16,6 @@ use gen_models::{
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
-    traits::*,
 };
 use noodles::{
     vcf,
@@ -33,7 +32,6 @@ use noodles::{
     },
 };
 use regex::{self, Regex};
-use rusqlite::{self, params};
 use thiserror::Error;
 
 use crate::{
@@ -43,14 +41,14 @@ use crate::{
 
 #[derive(Debug)]
 struct BlockGroupCache<'a> {
-    pub cache: HashMap<BlockGroupData<'a>, HashId>,
+    pub cache: HashMap<BlockGroupData<'a>, Vec<HashId>>,
     pub conn: &'a GraphConnection,
 }
 
 impl<'a> BlockGroupCache<'_> {
     pub fn new(conn: &GraphConnection) -> BlockGroupCache<'_> {
         BlockGroupCache {
-            cache: HashMap::<BlockGroupData, HashId>::new(),
+            cache: HashMap::<BlockGroupData, Vec<HashId>>::new(),
             conn,
         }
     }
@@ -60,8 +58,8 @@ impl<'a> BlockGroupCache<'_> {
         collection_name: &'a str,
         sample_name: &'a str,
         name: String,
-        parent_sample: Option<&'a str>,
-    ) -> Result<HashId, QueryError> {
+        parent_samples: &[String],
+    ) -> Result<Vec<HashId>, QueryError> {
         let block_group_key = BlockGroupData {
             collection_name,
             sample_name,
@@ -69,18 +67,21 @@ impl<'a> BlockGroupCache<'_> {
         };
         let block_group_lookup = block_group_cache.cache.get(&block_group_key);
         if let Some(block_group_id) = block_group_lookup {
-            Ok(*block_group_id)
+            Ok(block_group_id.clone())
         } else {
-            let new_block_group_id = BlockGroup::get_or_create_sample_block_group(
+            let result = BlockGroup::get_or_create_sample_block_groups(
                 block_group_cache.conn,
                 collection_name,
                 sample_name,
                 &name,
-                parent_sample,
-            );
-
-            let result = new_block_group_id?;
-            block_group_cache.cache.insert(block_group_key, result);
+                parent_samples.to_vec(),
+            )?
+            .into_iter()
+            .map(|block_group| block_group.id)
+            .collect::<Vec<_>>();
+            block_group_cache
+                .cache
+                .insert(block_group_key, result.clone());
             Ok(result)
         }
     }
@@ -186,23 +187,41 @@ struct VcfEntry {
 pub enum VcfError {
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
+    #[error("Sample Error: {0}")]
+    SampleError(#[from] SampleError),
     #[error("Invalid Record: {0}")]
     InvalidRecord(String),
 }
 
-pub fn update_with_vcf<'a>(
+fn resolve_parent_samples(
+    conn: &GraphConnection,
+    sample_name: &str,
+    explicit_parent_samples: &[String],
+    resolved_parent_samples: &mut HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    resolved_parent_samples
+        .entry(sample_name.to_string())
+        .or_insert_with(|| {
+            if explicit_parent_samples.is_empty() {
+                Sample::get_parent_names(conn, sample_name)
+            } else {
+                explicit_parent_samples.to_vec()
+            }
+        })
+        .clone()
+}
+
+pub fn update_with_vcf(
     context: &DbContext,
     vcf_path: &String,
-    collection_name: &'a str,
+    collection_name: &str,
     fixed_genotype: String,
-    fixed_sample: impl Into<Option<&'a str>>,
-    parent_sample: impl Into<Option<&'a str>>,
+    fixed_sample: Option<&str>,
+    parent_samples: Vec<String>,
     in_place: bool,
 ) -> Result<Operation, VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let fixed_sample = fixed_sample.into();
-    let parent_sample = parent_sample.into();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
 
     let mut session = start_operation(conn);
@@ -225,7 +244,8 @@ pub fn update_with_vcf<'a>(
 
     let mut changes: HashMap<(Path, String), Vec<PathChange>> = HashMap::new();
 
-    let mut parent_block_groups: HashMap<(&str, HashId), HashId> = HashMap::new();
+    let mut node_source_paths: HashMap<HashId, HashId> = HashMap::new();
+    let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
     let mut created_samples: HashSet<&str> = HashSet::new();
 
     let mut path_lengths: HashMap<HashId, i64> = HashMap::new();
@@ -260,16 +280,27 @@ pub fn update_with_vcf<'a>(
         };
 
         if let Some(fixed_sample) = fixed_sample.filter(|_| !genotype.is_empty()) {
+            let sample_parent_samples = resolve_parent_samples(
+                conn,
+                fixed_sample,
+                &parent_samples,
+                &mut resolved_parent_samples,
+            );
             if !created_samples.contains(fixed_sample) {
-                Sample::get_or_create_child(conn, collection_name, fixed_sample, parent_sample);
+                Sample::get_or_create_child(
+                    conn,
+                    collection_name,
+                    fixed_sample,
+                    sample_parent_samples.clone(),
+                )?;
                 created_samples.insert(fixed_sample);
             }
-            let sample_bg_id = BlockGroupCache::lookup(
+            let sample_bg_ids = BlockGroupCache::lookup(
                 &mut block_group_cache,
                 collection_name,
                 fixed_sample,
                 seq_name.clone(),
-                parent_sample,
+                &sample_parent_samples,
             )
             .expect("can't find sample bg....check this out more");
             let has_ref = genotype.iter().any(|gt| {
@@ -314,54 +345,69 @@ pub fn update_with_vcf<'a>(
                             Phasing::Phased => 1,
                             Phasing::Unphased => 0,
                         };
-                        let sample_path =
-                            PathCache::lookup(&mut path_cache, &sample_bg_id, seq_name.clone());
-                        let path_length = path_lengths
-                            .entry(sample_path.id)
-                            .or_insert_with(|| sample_path.length(conn));
+                        for sample_bg_id in &sample_bg_ids {
+                            let sample_path =
+                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone());
+                            let path_length = path_lengths
+                                .entry(sample_path.id)
+                                .or_insert_with(|| sample_path.length(conn));
 
-                        if ref_start > *path_length {
-                            return Err(VcfError::InvalidRecord(format!(
-                                "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
-                                sample_path.name
-                            )));
+                            if ref_start > *path_length {
+                                return Err(VcfError::InvalidRecord(format!(
+                                    "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
+                                    sample_path.name
+                                )));
+                            }
+                            vcf_entries.push(VcfEntry {
+                                ids: allele_accession.clone(),
+                                ref_start,
+                                block_group_id: *sample_bg_id,
+                                path: sample_path.clone(),
+                                sample_name: fixed_sample.to_string(),
+                                alt_seq: alt_seq.clone(),
+                                chromosome_index: chromosome_index as i64,
+                                phased,
+                                preserve_reference: has_ref,
+                            });
                         }
-                        vcf_entries.push(VcfEntry {
-                            ids: allele_accession,
-                            ref_start,
-                            block_group_id: sample_bg_id,
-                            path: sample_path.clone(),
-                            sample_name: fixed_sample.to_string(),
-                            alt_seq,
-                            chromosome_index: chromosome_index as i64,
-                            phased,
-                            preserve_reference: has_ref,
-                        });
                     } else if let Some(ref_accession) = allele_accession {
-                        let sample_path =
-                            PathCache::lookup(&mut path_cache, &sample_bg_id, seq_name.clone());
+                        for sample_bg_id in &sample_bg_ids {
+                            let sample_path =
+                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone());
 
-                        let key = (sample_path, ref_accession.clone());
+                            let key = (sample_path, ref_accession.clone());
 
-                        accession_cache.entry(key).or_insert_with(|| {
-                            (ref_start, ref_start + record.reference_bases().len() as i64)
-                        });
+                            accession_cache.entry(key).or_insert_with(|| {
+                                (ref_start, ref_start + record.reference_bases().len() as i64)
+                            });
+                        }
                     }
                 }
             }
         } else {
             for (sample_index, sample) in record.samples().iter().enumerate() {
-                let sample_name = sample_names[sample_index].as_ref();
+                let sample_name: &str = sample_names[sample_index].as_ref();
+                let sample_parent_samples = resolve_parent_samples(
+                    conn,
+                    sample_name,
+                    &parent_samples,
+                    &mut resolved_parent_samples,
+                );
                 if !created_samples.contains(sample_name) {
-                    Sample::get_or_create_child(conn, collection_name, sample_name, parent_sample);
+                    Sample::get_or_create_child(
+                        conn,
+                        collection_name,
+                        sample_name,
+                        sample_parent_samples.clone(),
+                    )?;
                     created_samples.insert(sample_name);
                 }
-                let sample_bg_id = BlockGroupCache::lookup(
+                let sample_bg_ids = BlockGroupCache::lookup(
                     &mut block_group_cache,
                     collection_name,
                     sample_name,
                     seq_name.clone(),
-                    parent_sample,
+                    &sample_parent_samples,
                 )
                 .expect("can't find sample bg....check this out more");
                 let genotype = sample.get(&header, "GT");
@@ -411,53 +457,57 @@ pub fn update_with_vcf<'a>(
                                             alt_seq = alt_seq[1..].to_string();
                                         }
                                     }
-                                    let sample_path = PathCache::lookup(
-                                        &mut path_cache,
-                                        &sample_bg_id,
-                                        seq_name.clone(),
-                                    );
-                                    let path_length =
-                                        if let Some(l) = path_lengths.get(&sample_path.id) {
-                                            l
-                                        } else {
-                                            let l = sample_path.sequence(conn).len();
-                                            path_lengths.insert(sample_path.id, l as i64);
-                                            &path_lengths[&sample_path.id]
-                                        };
+                                    for sample_bg_id in &sample_bg_ids {
+                                        let sample_path = PathCache::lookup(
+                                            &mut path_cache,
+                                            sample_bg_id,
+                                            seq_name.clone(),
+                                        );
+                                        let path_length =
+                                            if let Some(l) = path_lengths.get(&sample_path.id) {
+                                                l
+                                            } else {
+                                                let l = sample_path.sequence(conn).len();
+                                                path_lengths.insert(sample_path.id, l as i64);
+                                                &path_lengths[&sample_path.id]
+                                            };
 
-                                    if ref_start > *path_length {
-                                        return Err(VcfError::InvalidRecord(format!(
-                                            "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
-                                            sample_path.name
-                                        )));
-                                    }
+                                        if ref_start > *path_length {
+                                            return Err(VcfError::InvalidRecord(format!(
+                                                "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
+                                                sample_path.name
+                                            )));
+                                        }
 
-                                    vcf_entries.push(VcfEntry {
-                                        ids: allele_accession,
-                                        block_group_id: sample_bg_id,
-                                        ref_start,
-                                        path: sample_path.clone(),
-                                        sample_name: sample_name.to_string(),
-                                        alt_seq,
-                                        chromosome_index: chromosome_index as i64,
-                                        phased,
-                                        preserve_reference: has_ref,
-                                    });
-                                } else if let Some(ref_accession) = allele_accession {
-                                    let sample_path = PathCache::lookup(
-                                        &mut path_cache,
-                                        &sample_bg_id,
-                                        seq_name.clone(),
-                                    );
-
-                                    let key = (sample_path, ref_accession.clone());
-
-                                    accession_cache.entry(key).or_insert_with(|| {
-                                        (
+                                        vcf_entries.push(VcfEntry {
+                                            ids: allele_accession.clone(),
+                                            block_group_id: *sample_bg_id,
                                             ref_start,
-                                            ref_start + record.reference_bases().len() as i64,
-                                        )
-                                    });
+                                            path: sample_path.clone(),
+                                            sample_name: sample_name.to_string(),
+                                            alt_seq: alt_seq.clone(),
+                                            chromosome_index: chromosome_index as i64,
+                                            phased,
+                                            preserve_reference: has_ref,
+                                        });
+                                    }
+                                } else if let Some(ref_accession) = allele_accession {
+                                    for sample_bg_id in &sample_bg_ids {
+                                        let sample_path = PathCache::lookup(
+                                            &mut path_cache,
+                                            sample_bg_id,
+                                            seq_name.clone(),
+                                        );
+
+                                        let key = (sample_path, ref_accession.clone());
+
+                                        accession_cache.entry(key).or_insert_with(|| {
+                                            (
+                                                ref_start,
+                                                ref_start + record.reference_bases().len() as i64,
+                                            )
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -476,31 +526,28 @@ pub fn update_with_vcf<'a>(
                 SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string());
             let sequence_string = sequence.get_sequence(None, None);
 
-            let parent_path_id = parent_block_groups.entry((collection_name, vcf_entry.path.id)).or_insert_with(|| {
-                let parent_bg = if let Some(parent_sample_name) = parent_sample {
-                    BlockGroup::query(
-                        conn,
-                        "select * from block_groups where collection_name = ?1 AND sample_name = ?2 and name = ?3",
-                        params![collection_name, parent_sample_name, &vcf_entry.path.name],
-                    )
-                } else {
-                    vec![]
-                };
-                if parent_bg.is_empty() {
-                    vcf_entry.path.id
-                } else {
-                    let parent_path =
-                        PathCache::lookup(&mut path_cache, &parent_bg.first().unwrap().id, vcf_entry.path.name.clone());
-                    parent_path.id
-                }
-            });
+            let source_path_id = node_source_paths
+                .entry(vcf_entry.path.id)
+                .or_insert_with(|| {
+                    let block_group = BlockGroup::get_by_id(conn, &vcf_entry.block_group_id);
+                    if let Some(parent_block_group_id) = block_group.parent_block_group_id {
+                        let parent_path = PathCache::lookup(
+                            &mut path_cache,
+                            &parent_block_group_id,
+                            vcf_entry.path.name.clone(),
+                        );
+                        parent_path.id
+                    } else {
+                        vcf_entry.path.id
+                    }
+                });
 
             let node_id = Node::create(
                 conn,
                 &sequence.hash,
                 &HashId::convert_str(&format!(
                     "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                    path_id = parent_path_id,
+                    path_id = source_path_id,
                     sequence_hash = sequence.hash
                 )),
             );
@@ -588,7 +635,11 @@ mod tests {
     use std::time;
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{accession::Accession, node::Node};
+    use gen_models::{
+        accession::Accession, node::Node, sample::Sample, sample_lineage::SampleLineage,
+        traits::Query,
+    };
+    use rusqlite::params;
 
     use super::*;
     use crate::{
@@ -596,7 +647,6 @@ mod tests {
         test_helpers::{get_sample_bg, setup_gen},
         track_database,
     };
-
     #[test]
     fn test_update_fasta_with_vcf() {
         let context = setup_gen();
@@ -625,7 +675,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -675,7 +725,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -732,7 +782,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("sample 1"),
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -790,7 +840,7 @@ mod tests {
             &collection,
             "0/1".to_string(),
             Some("sample 1"),
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
         assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
@@ -823,7 +873,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -869,7 +919,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -910,7 +960,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -953,7 +1003,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Sample::DEFAULT_NAME,
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -967,7 +1017,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Sample::DEFAULT_NAME,
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
         assert!(matches!(
@@ -1012,7 +1062,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1026,7 +1076,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
         assert!(matches!(
@@ -1070,13 +1120,14 @@ mod tests {
             &collection,
             "0|1".to_string(),
             Some("test"),
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
         let elapsed = s.elapsed().as_secs();
+        let max_elapsed = if cfg!(debug_assertions) { 120 } else { 20 };
         assert!(
-            elapsed < 20,
+            elapsed < max_elapsed,
             "VCF import benchmark failed: Elapsed time is {elapsed}."
         );
     }
@@ -1110,7 +1161,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1165,7 +1216,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1190,7 +1241,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
         .unwrap();
@@ -1228,7 +1279,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            Sample::DEFAULT_NAME,
+            vec![Sample::DEFAULT_NAME.to_string()],
             true,
         )
         .unwrap();
@@ -1239,7 +1290,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            "f1",
+            vec!["f1".to_string()],
             true,
         )
         .unwrap();
@@ -1250,7 +1301,7 @@ mod tests {
             &collection,
             "".to_string(),
             None,
-            "f2",
+            vec!["f2".to_string()],
             true,
         )
         .unwrap();
@@ -1275,5 +1326,151 @@ mod tests {
             BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f3").id, true),
             HashSet::from_iter(vec!["ATCGGGATCGATCGCTCAGAACACACAGGA".to_string()])
         );
+    }
+
+    #[test]
+    fn test_update_vcf_uses_lineage_parent_when_parent_sample_is_omitted() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "reference",
+            false,
+        )
+        .unwrap();
+
+        Sample::get_or_create(conn, "child");
+        SampleLineage::create(conn, "reference", "child").unwrap();
+
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "0/1".to_string(),
+            Some("child"),
+            vec![],
+            false,
+        )
+        .unwrap();
+
+        let child_sequences = BlockGroup::get_all_sequences(
+            conn,
+            &get_sample_bg(conn, &collection, "child").id,
+            true,
+        );
+        assert_eq!(
+            child_sequences,
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCGATCGATAGACGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATAGACGATCGATCGGGAACACACAGAGA".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_update_vcf_with_parents_having_same_reference_names() {
+        // Ensure if we have a child sample with multiple parents with the same contig names it works
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "parent-a",
+            false,
+        )
+        .unwrap();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "parent-b",
+            false,
+        )
+        .unwrap();
+
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "0/1".to_string(),
+            Some("child"),
+            vec!["parent-a".to_string(), "parent-b".to_string()],
+            false,
+        )
+        .unwrap();
+
+        let child_sequences = BlockGroup::get_all_sequences(
+            conn,
+            &get_sample_bg(conn, &collection, "child").id,
+            true,
+        );
+        assert_eq!(
+            child_sequences,
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCGATCGATAGACGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCATCGATAGACGATCGATCGGGAACACACAGAGA".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_update_vcf_does_not_overwrite_parent_lineage_for_existing_sample() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "reference",
+            false,
+        )
+        .unwrap();
+
+        Sample::get_or_create(conn, "child");
+
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "0/1".to_string(),
+            Some("child"),
+            vec!["reference".to_string()],
+            false,
+        )
+        .unwrap();
+
+        assert!(SampleLineage::get_parents(conn, "child").is_empty());
     }
 }

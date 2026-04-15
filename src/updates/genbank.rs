@@ -3,7 +3,7 @@ use std::{io::Read, str};
 use gb_io::reader;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, PathChange},
+    block_group::{BlockGroup, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::DbContext,
@@ -76,7 +76,15 @@ where
                             contig = &locus.name
                         )));
                     }
-                    BlockGroup::create(conn, &collection.name, sample_name, &locus.name)
+                    BlockGroup::create(
+                        conn,
+                        NewBlockGroup {
+                            collection_name: &collection.name,
+                            sample_name,
+                            name: &locus.name,
+                            ..Default::default()
+                        },
+                    )
                 };
                 let paths = Path::query(
                     conn,
@@ -353,7 +361,7 @@ mod tests {
 
             let f = reader::parse_file(&path).unwrap();
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -409,7 +417,7 @@ mod tests {
             );
 
             let f = reader::parse_file(&path).unwrap();
-            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()
@@ -422,7 +430,7 @@ mod tests {
 
             // we have a new blockgroup called deletion that uses the same base sequence but
             // has a deletion in it.
-            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion");
+            let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
                     .iter()

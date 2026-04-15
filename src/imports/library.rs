@@ -2,7 +2,7 @@ use std::str;
 
 use anyhow::Result;
 use gen_models::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     collection::Collection,
     db::DbContext,
     errors::OperationError,
@@ -59,7 +59,15 @@ pub fn import_library(
     }
 
     Sample::get_or_create(conn, sample);
-    let new_block_group = BlockGroup::create(conn, collection_name, sample, library_name);
+    let new_block_group = BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name,
+            sample_name: sample,
+            name: library_name,
+            ..Default::default()
+        },
+    );
 
     let _block_group_boundaries =
         create_library(conn, new_block_group.id, library_name, parts_list, true)?;

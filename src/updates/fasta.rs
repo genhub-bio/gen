@@ -37,149 +37,160 @@ pub fn update_with_fasta(
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
-    let mut found_bg_id = None;
+    let mut target_block_groups = vec![];
     for block_group in block_groups {
-        let new_bg_id = BlockGroup::get_or_create_sample_block_group(
+        let new_block_groups = BlockGroup::get_or_create_sample_block_groups(
             conn,
             collection_name,
             new_sample_name,
             &block_group.name,
-            Some(parent_sample_name),
+            vec![parent_sample_name.to_string()],
         )?;
 
         if block_group.name == region_name {
-            found_bg_id = Some(new_bg_id);
+            target_block_groups = new_block_groups;
         }
     }
 
-    let new_block_group_id = if let Some(x) = found_bg_id {
-        x
-    } else {
+    if target_block_groups.is_empty() {
         panic!("No region found with name: {region_name}");
-    };
+    }
 
-    let path = BlockGroup::get_current_path(conn, &new_block_group_id);
-    let interval_tree = path.intervaltree(conn);
+    struct TargetBlockGroupState {
+        block_group_id: HashId,
+        path: gen_models::path::Path,
+        interval_tree: intervaltree::IntervalTree<i64, gen_core::NodeIntervalBlock>,
+        first_node: Option<HashId>,
+    }
 
-    // Assuming just one entry in the fasta file
-    let mut first_node = None;
+    let mut target_states = target_block_groups
+        .iter()
+        .map(|target_block_group| {
+            let path = BlockGroup::get_current_path(conn, &target_block_group.id);
+            let interval_tree = path.intervaltree(conn);
+            TargetBlockGroupState {
+                block_group_id: target_block_group.id,
+                path,
+                interval_tree,
+                first_node: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
     let mut change_count = 0;
     for (index, result) in fasta_reader.records().enumerate() {
         let record = result?;
+        let sequence = str::from_utf8(record.sequence().as_ref()).unwrap();
 
-        let sequence = str::from_utf8(record.sequence().as_ref())
-            .unwrap()
-            .to_string();
-        if sequence.is_empty() {
-            // We assume this is a deletion.
-            let node_id = HashId::convert_str("");
-            // This path block represents a deletion, so will not actually be
-            // used to create a new node.  So the node ID can be anything, which
-            // is why we're setting it to the HashId of the empty string.  The
-            // important part is that sequence_start == sequence_end (the 0
-            // values for them are arbitrary), which flags that it's a deletion
-            // to the logic in BlockGroup::insert_change.
-            let path_block = PathBlock {
-                node_id,
-                block_sequence: sequence,
-                sequence_start: 0,
-                sequence_end: 0,
-                path_start: start_coordinate,
-                path_end: end_coordinate,
-                strand: Strand::Forward,
-            };
+        for state in &mut target_states {
+            if sequence.is_empty() {
+                let node_id = HashId::convert_str("");
+                let path_block = PathBlock {
+                    node_id,
+                    block_sequence: sequence.to_string(),
+                    sequence_start: 0,
+                    sequence_end: 0,
+                    path_start: start_coordinate,
+                    path_end: end_coordinate,
+                    strand: Strand::Forward,
+                };
 
-            let path_change = PathChange {
-                block_group_id: new_block_group_id,
-                path: path.clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block: path_block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
+                let path_change = PathChange {
+                    block_group_id: state.block_group_id,
+                    path: state.path.clone(),
+                    path_accession: None,
+                    start: start_coordinate,
+                    end: end_coordinate,
+                    block: path_block,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    preserve_edge: true,
+                };
 
-            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
-            if index == 0 {
-                first_node = Some(node_id);
-            } else if first_node.is_some() {
-                first_node = None;
+                BlockGroup::insert_change(conn, &path_change, &state.interval_tree).unwrap();
+                if index == 0 {
+                    state.first_node = Some(node_id);
+                } else if state.first_node.is_some() {
+                    state.first_node = None;
+                }
+            } else {
+                let seq = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(sequence)
+                    .save(conn);
+                let node_id = Node::create(
+                    conn,
+                    &seq.hash,
+                    &HashId::convert_str(&format!(
+                        "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
+                        path_id = state.path.id,
+                        ref_start = 0,
+                        ref_end = seq.length,
+                        sequence_hash = seq.hash
+                    )),
+                );
+
+                let path_block = PathBlock {
+                    node_id,
+                    block_sequence: sequence.to_string(),
+                    sequence_start: 0,
+                    sequence_end: seq.length,
+                    path_start: start_coordinate,
+                    path_end: end_coordinate,
+                    strand: Strand::Forward,
+                };
+
+                let path_change = PathChange {
+                    block_group_id: state.block_group_id,
+                    path: state.path.clone(),
+                    path_accession: None,
+                    start: start_coordinate,
+                    end: end_coordinate,
+                    block: path_block,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    preserve_edge: true,
+                };
+
+                BlockGroup::insert_change(conn, &path_change, &state.interval_tree).unwrap();
+                if index == 0 {
+                    state.first_node = Some(node_id);
+                } else if state.first_node.is_some() {
+                    state.first_node = None;
+                }
             }
-        } else {
-            let seq = Sequence::new()
-                .sequence_type("DNA")
-                .sequence(&sequence)
-                .save(conn);
-            let node_id = Node::create(
-                conn,
-                &seq.hash,
-                &HashId::convert_str(&format!(
-                    "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                    path_id = path.id,
-                    ref_start = 0,
-                    ref_end = seq.length,
-                    sequence_hash = seq.hash
-                )),
-            );
 
-            let path_block = PathBlock {
-                node_id,
-                block_sequence: sequence,
-                sequence_start: 0,
-                sequence_end: seq.length,
-                path_start: start_coordinate,
-                path_end: end_coordinate,
-                strand: Strand::Forward,
-            };
-
-            let path_change = PathChange {
-                block_group_id: new_block_group_id,
-                path: path.clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block: path_block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-
-            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
-            if index == 0 {
-                first_node = Some(node_id);
-            } else if first_node.is_some() {
-                first_node = None;
-            }
+            change_count += 1;
         }
-
-        change_count += 1;
     }
 
-    if !disable_reference_path_update && let Some(node_id) = first_node {
-        if node_id == HashId::convert_str("") {
-            let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
-        } else {
-            let edge_to_new_node = Edge::query(
-                conn,
-                "select * from edges where target_node_id = ?1",
-                rusqlite::params![node_id],
-            )[0]
-            .clone();
-            let edge_from_new_node = Edge::query(
-                conn,
-                "select * from edges where source_node_id = ?1",
-                rusqlite::params!(SQLValue::from(node_id)),
-            )[0]
-            .clone();
-            path.new_path_with(
-                conn,
-                start_coordinate,
-                end_coordinate,
-                &edge_to_new_node,
-                &edge_from_new_node,
-            );
+    for state in target_states {
+        if !disable_reference_path_update && let Some(node_id) = state.first_node {
+            if node_id == HashId::convert_str("") {
+                let _ = state
+                    .path
+                    .new_path_with_deletion(conn, start_coordinate, end_coordinate);
+            } else {
+                let edge_to_new_node = Edge::query(
+                    conn,
+                    "select * from edges where target_node_id = ?1",
+                    rusqlite::params![node_id],
+                )[0]
+                .clone();
+                let edge_from_new_node = Edge::query(
+                    conn,
+                    "select * from edges where source_node_id = ?1",
+                    rusqlite::params!(SQLValue::from(node_id)),
+                )[0]
+                .clone();
+                state.path.new_path_with(
+                    conn,
+                    start_coordinate,
+                    end_coordinate,
+                    &edge_to_new_node,
+                    &edge_from_new_node,
+                );
+            }
         }
     }
 

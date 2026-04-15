@@ -53,7 +53,7 @@ impl Factory {
                     weights.push(weight_dict);
                 }
 
-                // Use PyNodeKey without block_id - #[pyclass] objects are automatically converted
+                // #[pyclass] objects are automatically converted.
                 let src_key = PyNodeKey::new(src.node_id, src.sequence_start, src.sequence_end);
 
                 let dst_key = PyNodeKey::new(dst.node_id, dst.sequence_start, dst.sequence_end);
@@ -155,7 +155,7 @@ impl Factory {
                 node_data.set_item("sequence_start", node.sequence_start)?;
                 node_data.set_item("sequence_end", node.sequence_end)?;
 
-                // Create a PyNodeKey for the node (without block_id)
+                // Create a PyNodeKey for the node.
                 let node_key = PyNodeKey::new(node.node_id, node.sequence_start, node.sequence_end);
 
                 // Add the node to the NetworkX graph with its attributes

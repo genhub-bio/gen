@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [workspace]
 members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
-default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas"]
+default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
 exclude = ["gen-python"]
 
 [features]
@@ -57,7 +57,7 @@ tempfile = "3.20.0"
 interavl = "0.3.0"
 regex = "1.11.1"
 flate2 = "1.1.0"
-gb-io = "0.8.0"
+gb-io = "0.9.0"
 thiserror = "2.0.12"
 indicatif = "0.18.3"
 html-escape = "0.2.13"
@@ -85,7 +85,7 @@ indexmap = "2.11.3"
 anyhow = { version = "1.0.100", features = ["backtrace"] }
 
 [dev-dependencies]
-cargo-llvm-cov = "0.6.16"
+cargo-llvm-cov = "0.8.5"
 cargo-deny = "0.19.0"
 more-asserts = "0.3.1"
 

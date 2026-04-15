@@ -318,9 +318,12 @@ mod tests {
         Collection::create(conn, collection_name);
         let block_group = BlockGroup::create(
             conn,
-            collection_name,
-            Sample::DEFAULT_NAME,
-            "test block group",
+            gen_models::block_group::NewBlockGroup {
+                collection_name,
+                sample_name: Sample::DEFAULT_NAME,
+                name: "test block group",
+                ..Default::default()
+            },
         );
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -544,7 +547,7 @@ mod tests {
 
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -587,7 +590,7 @@ mod tests {
 
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -630,7 +633,7 @@ mod tests {
 
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "");
+        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");

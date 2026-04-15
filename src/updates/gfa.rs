@@ -47,8 +47,9 @@ pub fn update_with_gfa(
         conn,
         collection_name,
         new_sample_name,
-        Some(parent_sample_name),
-    );
+        vec![parent_sample_name.to_string()],
+    )
+    .map_err(io::Error::other)?;
     let block_groups = Sample::get_block_groups(conn, collection_name, new_sample_name);
 
     // NOTE: Only getting the current path for each block group because it's the most likely one to

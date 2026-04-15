@@ -118,7 +118,7 @@ mod tests {
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     };
     use gen_models::{
-        block_group::{BlockGroup, PathChange},
+        block_group::{BlockGroup, NewBlockGroup, PathChange},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db::GraphConnection,
@@ -152,7 +152,16 @@ mod tests {
                 hash = reference_sequence.hash
             )),
         );
-        let block_group = BlockGroup::create(conn, &collection.name, Sample::DEFAULT_NAME, "m123");
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &collection.name,
+                sample_name: Sample::DEFAULT_NAME,
+                name: "m123",
+                parent_block_group_id: None,
+                is_default: false,
+            },
+        );
 
         let edge_into = Edge::create(
             conn,
@@ -199,17 +208,22 @@ mod tests {
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
         Sample::get_or_create(conn, "child sample");
-        let _ =
-            Sample::get_or_create_child(conn, "test", "child sample", Some(Sample::DEFAULT_NAME));
+        let _ = Sample::get_or_create_child(
+            conn,
+            "test",
+            "child sample",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        );
 
-        let sample_bg_id = BlockGroup::get_or_create_sample_block_group(
+        let sample_bg_id = BlockGroup::get_or_create_sample_block_groups(
             conn,
             "test",
             "child sample",
             "m123",
-            Some(Sample::DEFAULT_NAME),
+            vec![Sample::DEFAULT_NAME.to_string()],
         )
-        .expect("should create child block group");
+        .expect("should create child block group")[0]
+            .id;
         let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
         let tree = sample_path.intervaltree(conn);
         let replacement_sequence = "AA";

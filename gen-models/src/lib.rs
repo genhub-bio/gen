@@ -2,6 +2,7 @@ pub mod accession;
 pub mod annotations;
 pub mod block_group;
 pub mod block_group_edge;
+pub mod block_group_lineage;
 pub mod changesets;
 pub mod collection;
 pub mod db;
@@ -12,6 +13,7 @@ pub mod files;
 #[allow(clippy::all)]
 pub mod generated;
 pub use generated::gen_models_capnp;
+pub mod lineage;
 pub mod manifest;
 pub mod metadata;
 pub mod migrations;
@@ -20,6 +22,7 @@ pub mod operations;
 pub mod path;
 pub mod path_edge;
 pub mod sample;
+pub mod sample_lineage;
 pub mod sequence;
 pub mod session_operations;
 #[cfg(test)]
