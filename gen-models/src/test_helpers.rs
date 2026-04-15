@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use tempfile::tempdir;
 
 use crate::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::{DbContext, GraphConnection, OperationsConnection},
@@ -23,6 +23,23 @@ use crate::{
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
 };
+
+pub fn create_bg(
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+    name: &str,
+) -> BlockGroup {
+    BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name,
+            sample_name,
+            name,
+            ..Default::default()
+        },
+    )
+}
 
 pub fn get_connection<'a>(
     db_path: impl Into<Option<&'a str>>,
@@ -92,7 +109,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     let g_node_id = Node::create(conn, &g_seq.hash, &HashId::convert_str("test-g-node"));
     let _collection = Collection::create(conn, "test");
     Sample::get_or_create(conn, "test");
-    let block_group = BlockGroup::create(conn, "test", "test", "chr1");
+    let block_group = create_bg(conn, "test", "test", "chr1");
     let edge0 = Edge::create(
         conn,
         PATH_START_NODE_ID,

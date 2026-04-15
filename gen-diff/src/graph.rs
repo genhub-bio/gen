@@ -349,6 +349,8 @@ mod tests {
             sample_name: "sample".to_string(),
             name: "bg".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let seq = NewSequence::new()
             .sequence_type("dna")

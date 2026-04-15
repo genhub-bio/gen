@@ -14,6 +14,7 @@ pub mod messages;
 pub mod operations;
 pub mod panels;
 pub mod patch;
+pub mod samples;
 pub mod tui_runtime;
 
 #[cfg(test)]

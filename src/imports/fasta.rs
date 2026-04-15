@@ -8,7 +8,7 @@ use std::{
 use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::DbContext,
@@ -91,7 +91,15 @@ pub fn import_fasta(
                 hash = seq.hash
             )),
         );
-        let block_group = BlockGroup::create(conn, &collection.name, sample, &name);
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &collection.name,
+                sample_name: sample,
+                name: &name,
+                ..Default::default()
+            },
+        );
         let edge_into = Edge::create(
             conn,
             PATH_START_NODE_ID,
@@ -189,7 +197,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -220,7 +228,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -244,7 +252,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "chr22");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "chr22", None);
         let sequences = Sequence::query_by_blockgroup(conn, &block_group_id);
         let dna = sequences
             .iter()
@@ -271,7 +279,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -296,7 +304,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", "new-sample", "m123");
+        let block_group_id = BlockGroup::get_id("test", "new-sample", "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
@@ -331,7 +339,7 @@ mod tests {
             true,
         )
         .unwrap();
-        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123");
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])

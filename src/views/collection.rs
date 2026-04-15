@@ -10,6 +10,7 @@ use gen_models::{
     db::{GraphConnection, OperationsConnection},
     file_types::FileTypes,
     sample::Sample,
+    sample_lineage::SampleLineage,
     traits::Query,
 };
 use ratatui::{
@@ -27,6 +28,7 @@ use crate::{
     views::{
         annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
         annotation_groups::{AnnotationGroupEntry, load_annotation_group_entries},
+        samples::{SampleTree, SampleTreeEntry},
     },
 };
 
@@ -116,6 +118,12 @@ pub struct CollectionExplorerData {
     pub reference_block_groups: Vec<(gen_core::HashId, String)>,
     /// The samples in the entire collection
     pub collection_samples: Vec<String>,
+    /// Root samples for the lineage tree.
+    pub sample_roots: Vec<String>,
+    /// Direct child samples for each sample.
+    pub sample_children: HashMap<String, Vec<String>>,
+    /// Direct parent samples for each sample.
+    pub sample_parents: HashMap<String, Vec<String>>,
     /// The block groups for each sample
     pub sample_block_groups: HashMap<String, Vec<(gen_core::HashId, String)>>,
     /// Immediate sub-collections ("direct children") one level deeper
@@ -145,6 +153,34 @@ pub fn gather_collection_explorer_data(
         all_blocks.iter().map(|bg| bg.sample_name.clone()).collect();
     let mut collection_samples: Vec<String> = sample_names.drain().collect();
     collection_samples.sort();
+
+    let collection_sample_set: HashSet<String> = collection_samples.iter().cloned().collect();
+    let mut sample_children = HashMap::new();
+    let mut sample_parents = HashMap::new();
+    let mut sample_roots = Vec::new();
+    for sample in &collection_samples {
+        let mut parents = SampleLineage::get_parents(conn, sample)
+            .into_iter()
+            .filter(|parent| collection_sample_set.contains(parent))
+            .collect::<Vec<_>>();
+        parents.sort();
+        parents.dedup();
+
+        let mut children = SampleLineage::get_children(conn, sample)
+            .into_iter()
+            .filter(|child| collection_sample_set.contains(child))
+            .collect::<Vec<_>>();
+        children.sort();
+        children.dedup();
+
+        if parents.is_empty() {
+            sample_roots.push(sample.clone());
+        }
+
+        sample_parents.insert(sample.clone(), parents);
+        sample_children.insert(sample.clone(), children);
+    }
+    sample_roots.sort();
 
     // 4) For each sample, retrieve block groups
     let mut sample_block_groups = HashMap::new();
@@ -186,6 +222,9 @@ pub fn gather_collection_explorer_data(
         current_collection,
         reference_block_groups,
         collection_samples,
+        sample_roots,
+        sample_children,
+        sample_parents,
         sample_block_groups,
         nested_collections,
         annotation_files,
@@ -203,10 +242,13 @@ pub enum ExplorerItem {
     BlockGroup {
         id: HashId,
         name: String,
+        depth: usize,
     },
     Sample {
         name: String,
         expanded: bool,
+        depth: usize,
+        has_children: bool,
     },
     Header {
         text: String,
@@ -244,8 +286,8 @@ pub struct CollectionExplorerState {
     pub has_focus: bool,
     /// The currently selected block group
     pub selected_block_group_id: Option<HashId>,
-    /// Tracks which samples are expanded/collapsed
-    expanded_samples: HashSet<String>,
+    /// Explicit sample expansion overrides, separate from the default auto-open tree.
+    sample_expansion_overrides: HashMap<String, bool>,
     /// Indicates which focus zone should receive focus (if any)
     pub focus_change_requested: Option<FocusZone>,
     /// Active annotation files
@@ -256,6 +298,8 @@ pub struct CollectionExplorerState {
     pub annotation_file_toggle_requested: Option<HashId>,
     /// Pending annotation group toggle request
     pub annotation_group_toggle_requested: Option<String>,
+    /// Horizontal scroll offset for the sample lineage tree.
+    pub sample_tree_scroll: u16,
 }
 
 impl CollectionExplorerState {
@@ -269,27 +313,35 @@ impl CollectionExplorerState {
             total_items: 0,
             has_focus: false,
             selected_block_group_id: block_group_id,
-            expanded_samples: HashSet::new(),
+            sample_expansion_overrides: HashMap::new(),
             focus_change_requested: None,
             active_annotation_files: HashSet::new(),
             active_annotation_groups: HashSet::new(),
             annotation_file_toggle_requested: None,
             annotation_group_toggle_requested: None,
+            sample_tree_scroll: 0,
         }
     }
 
     /// Toggle expansion state of a sample
-    pub fn toggle_sample(&mut self, sample_name: &str) {
-        if self.expanded_samples.contains(sample_name) {
-            self.expanded_samples.remove(sample_name);
-        } else {
-            self.expanded_samples.insert(sample_name.to_string());
-        }
+    pub fn toggle_sample(&mut self, sample_name: &str, currently_expanded: bool) {
+        let next = !currently_expanded;
+        self.sample_expansion_overrides
+            .insert(sample_name.to_string(), next);
     }
 
     /// Check if a sample is expanded
-    pub fn is_sample_expanded(&self, sample_name: &str) -> bool {
-        self.expanded_samples.contains(sample_name)
+    pub fn is_sample_expanded(&self, sample_name: &str, default_expanded: bool) -> bool {
+        self.sample_expansion_overrides
+            .get(sample_name)
+            .copied()
+            .unwrap_or(default_expanded)
+    }
+
+    /// Force a sample to a specific expansion state.
+    pub fn set_sample_expanded(&mut self, sample_name: &str, expanded: bool) {
+        self.sample_expansion_overrides
+            .insert(sample_name.to_string(), expanded);
     }
 
     /// Toggle an annotation file on/off
@@ -381,7 +433,10 @@ impl CollectionExplorer {
             gather_collection_explorer_data(conn, op_conn, sample_name, full_collection_name);
         let changed = self.data.reference_block_groups.len()
             != new_data.reference_block_groups.len()
-            || self.data.sample_block_groups != new_data.sample_block_groups;
+            || self.data.sample_block_groups != new_data.sample_block_groups
+            || self.data.sample_roots != new_data.sample_roots
+            || self.data.sample_children != new_data.sample_children
+            || self.data.sample_parents != new_data.sample_parents;
         self.data = new_data;
         changed
     }
@@ -480,6 +535,47 @@ impl CollectionExplorer {
         match key.code {
             KeyCode::Up => self.previous(state),
             KeyCode::Down => self.next(state),
+            KeyCode::Left => {
+                if let Some(selected_idx) = state.list_state.selected {
+                    let items = self.get_display_items(state);
+                    if let Some(ExplorerItem::Sample { name, expanded, .. }) =
+                        items.get(selected_idx)
+                    {
+                        if *expanded {
+                            state.toggle_sample(name, *expanded);
+                        } else if let Some(parent_name) = self
+                            .data
+                            .sample_parents
+                            .get(name)
+                            .and_then(|parents| parents.first())
+                        {
+                            state.list_state.selected =
+                                items.iter().enumerate().find_map(|(idx, item)| match item {
+                                    ExplorerItem::Sample {
+                                        name: item_name, ..
+                                    } if item_name == parent_name => Some(idx),
+                                    _ => None,
+                                });
+                        }
+                    }
+                }
+            }
+            KeyCode::Right => {
+                if let Some(selected_idx) = state.list_state.selected {
+                    let items = self.get_display_items(state);
+                    if let Some(ExplorerItem::Sample {
+                        name,
+                        expanded,
+                        has_children,
+                        ..
+                    }) = items.get(selected_idx)
+                        && *has_children
+                        && !*expanded
+                    {
+                        state.toggle_sample(name, *expanded);
+                    }
+                }
+            }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(selected_idx) = state.list_state.selected {
                     let items = self.get_display_items(state);
@@ -508,12 +604,14 @@ impl CollectionExplorer {
     }
 
     pub fn get_status_line() -> String {
-        "*▼ ▲* navigate | *return* select | *space* toggle".to_string()
+        "*▼ ▲* navigate | *return/space* toggle | *←/→* tree".to_string()
     }
 
     /// Get all items to display, taking into account the current state
     fn get_display_items(&self, state: &CollectionExplorerState) -> Vec<ExplorerItem> {
         let mut items = Vec::new();
+        let sample_tree = SampleTree::new(&self.data);
+        let sample_entries = sample_tree.build_entries(state);
 
         // Current collection name
         items.push(ExplorerItem::Collection {
@@ -536,6 +634,7 @@ impl CollectionExplorer {
             items.push(ExplorerItem::BlockGroup {
                 id: *id,
                 name: name.clone(),
+                depth: 0,
             });
         }
 
@@ -546,24 +645,24 @@ impl CollectionExplorer {
 
         // Samples section
         items.push(ExplorerItem::Header {
-            text: "Sample graphs:".to_string(),
+            text: "Sample lineages:".to_string(),
         });
 
-        // Samples and their block groups
-        for sample in &self.data.collection_samples {
-            items.push(ExplorerItem::Sample {
-                name: sample.clone(),
-                expanded: state.is_sample_expanded(sample),
-            });
-
-            if state.is_sample_expanded(sample)
-                && let Some(block_groups) = self.data.sample_block_groups.get(sample)
-            {
-                for (id, name) in block_groups {
-                    items.push(ExplorerItem::BlockGroup {
-                        id: *id,
-                        name: name.clone(),
-                    });
+        for entry in sample_entries {
+            match entry {
+                SampleTreeEntry::Sample {
+                    name,
+                    expanded,
+                    depth,
+                    has_children,
+                } => items.push(ExplorerItem::Sample {
+                    name,
+                    expanded,
+                    depth,
+                    has_children,
+                }),
+                SampleTreeEntry::BlockGroup { id, name, depth } => {
+                    items.push(ExplorerItem::BlockGroup { id, name, depth })
                 }
             }
         }
@@ -639,8 +738,8 @@ impl CollectionExplorer {
     pub fn toggle_sample_expansion(&self, state: &mut CollectionExplorerState) {
         if let Some(selected_idx) = state.list_state.selected {
             let items = self.get_display_items(state);
-            if let Some(ExplorerItem::Sample { name, .. }) = items.get(selected_idx) {
-                state.toggle_sample(name);
+            if let Some(ExplorerItem::Sample { name, expanded, .. }) = items.get(selected_idx) {
+                state.toggle_sample(name, *expanded);
             }
         }
     }
@@ -651,6 +750,17 @@ impl StatefulWidget for &CollectionExplorer {
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let items = self.get_display_items(state);
+        state.sample_tree_scroll = state
+            .list_state
+            .selected
+            .and_then(|idx| items.get(idx))
+            .map(|item| match item {
+                ExplorerItem::Sample { depth, .. } | ExplorerItem::BlockGroup { depth, .. } => {
+                    (*depth as u16).saturating_mul(2)
+                }
+                _ => 0,
+            })
+            .unwrap_or(0);
         let mut display_items = Vec::new();
 
         // Convert ExplorerItems to display items
@@ -674,7 +784,7 @@ impl StatefulWidget for &CollectionExplorer {
                             .wrap(Wrap { trim: false })
                     }
                 }
-                ExplorerItem::BlockGroup { id, name, .. } => {
+                ExplorerItem::BlockGroup { id, name, depth } => {
                     // Check if this block group is one of the sample_name = NULL reference block groups
                     // This influences the indentation
                     let is_reference = self
@@ -682,20 +792,45 @@ impl StatefulWidget for &CollectionExplorer {
                         .reference_block_groups
                         .iter()
                         .any(|(ref_id, _)| ref_id == id);
+                    let scroll = if *depth > 0 {
+                        state.sample_tree_scroll
+                    } else {
+                        0
+                    };
 
                     if is_reference {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("   • {}", name))]))
+                        Paragraph::new(Line::from(vec![Span::raw(format!("  • {}", name))]))
                             .wrap(Wrap { trim: false })
                     } else {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("     • {}", name))]))
-                            .wrap(Wrap { trim: false })
+                        Paragraph::new(Line::from(vec![Span::raw(format!(
+                            "  {}• {}",
+                            "  ".repeat(*depth),
+                            name
+                        ))]))
+                        .scroll((0, scroll))
+                        .wrap(Wrap { trim: false })
                     }
                 }
-                ExplorerItem::Sample { name, expanded } => Paragraph::new(Line::from(vec![
-                    Span::raw(if *expanded { "   ▼ " } else { "   ▶ " }),
-                    Span::styled(name, Style::default()),
-                ]))
-                .wrap(Wrap { trim: false }),
+                ExplorerItem::Sample {
+                    name,
+                    expanded,
+                    depth,
+                    has_children,
+                } => {
+                    let marker = if *has_children {
+                        if *expanded { "▼" } else { "▶" }
+                    } else {
+                        "•"
+                    };
+                    Paragraph::new(Line::from(vec![Span::raw(format!(
+                        "  {}{} {}",
+                        "  ".repeat(*depth),
+                        marker,
+                        name
+                    ))]))
+                    .scroll((0, state.sample_tree_scroll))
+                    .wrap(Wrap { trim: false })
+                }
                 ExplorerItem::Header { text } => Paragraph::new(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(text, Style::default().add_modifier(Modifier::UNDERLINED)),
@@ -813,10 +948,42 @@ mod tests {
         let sample_beta = Sample::get_or_create(conn, "SampleBeta");
 
         // Create block groups for three explicit samples
-        BlockGroup::create(conn, "/foo/bar", &sample_reference.name, "BG_ReferenceA");
-        BlockGroup::create(conn, "/foo/bar", &sample_reference.name, "BG_ReferenceB");
-        BlockGroup::create(conn, "/foo/bar", &sample_alpha.name, "BG_Alpha1");
-        BlockGroup::create(conn, "/foo/bar", &sample_beta.name, "BG_Beta1");
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_reference.name,
+                name: "BG_ReferenceA",
+                ..Default::default()
+            },
+        );
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_reference.name,
+                name: "BG_ReferenceB",
+                ..Default::default()
+            },
+        );
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_alpha.name,
+                name: "BG_Alpha1",
+                ..Default::default()
+            },
+        );
+        BlockGroup::create(
+            conn,
+            gen_models::block_group::NewBlockGroup {
+                collection_name: "/foo/bar",
+                sample_name: &sample_beta.name,
+                name: "BG_Beta1",
+                ..Default::default()
+            },
+        );
 
         // Call the function under test—notice we pass the full path
         let op_conn = context.operations().conn();

@@ -6,7 +6,7 @@ use gen_core::{
 };
 use gen_graph::GenGraph;
 use gen_models::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::{DbContext, GraphConnection, OperationsConnection},
@@ -20,6 +20,23 @@ use gen_models::{
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
 };
+
+pub fn create_bg(
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+    name: &str,
+) -> BlockGroup {
+    BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name,
+            sample_name,
+            name,
+            ..Default::default()
+        },
+    )
+}
 use intervaltree::IntervalTree;
 use rusqlite::Connection;
 use tempfile::tempdir;
@@ -127,7 +144,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     );
     let _collection = Collection::create(conn, "test");
     Sample::get_or_create(conn, "test");
-    let block_group = BlockGroup::create(conn, "test", "test", "chr1");
+    let block_group = create_bg(conn, "test", "test", "chr1");
     let edge0 = Edge::create(
         conn,
         PATH_START_NODE_ID,

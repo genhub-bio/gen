@@ -5,6 +5,7 @@ use clap::Args;
 use gen_models::{
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
+    sample::Sample,
 };
 
 use crate::{
@@ -22,7 +23,7 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// The name of the sample to update
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
     sample: String,
     /// If a new entity is found, create it as a normal import
     #[arg(long, action, alias = "cm")]

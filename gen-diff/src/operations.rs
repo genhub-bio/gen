@@ -411,6 +411,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "bg".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
 
         let head = Operation::create(op_conn, "add", &HashId::pad_str(2)).expect("create op");
@@ -461,6 +463,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "bg".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
 
         let head = Operation::create(op_conn, "add", &HashId::pad_str(2)).expect("create op");
@@ -504,6 +508,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "bg1".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let seq_one = NewSequence::new()
             .sequence_type("dna")
@@ -533,6 +539,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "bg2".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let seq_two = NewSequence::new()
             .sequence_type("dna")
@@ -591,6 +599,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "main".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let main_seq = NewSequence::new()
             .sequence_type("dna")
@@ -629,6 +639,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "feature".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let feature_seq = NewSequence::new()
             .sequence_type("dna")
@@ -691,6 +703,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "db-one".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let seq_one = NewSequence::new()
             .sequence_type("dna")
@@ -725,6 +739,8 @@ mod tests {
             sample_name: "s".to_string(),
             name: "db-two".to_string(),
             created_on: 0,
+            parent_block_group_id: None,
+            is_default: false,
         };
         let seq_two = NewSequence::new()
             .sequence_type("dna")
