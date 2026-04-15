@@ -68,6 +68,17 @@ impl ReferenceAlias {
         })
     }
 
+    fn chromosome_aliases(alias_id: &str) -> Vec<String> {
+        vec![
+            format!("chr{}", alias_id),
+            format!("Chr{}", alias_id),
+            format!("chrom{}", alias_id),
+            format!("Chrom{}", alias_id),
+            format!("chromosome{}", alias_id),
+            format!("Chromosome{}", alias_id),
+        ]
+    }
+
     fn compute_aliases(reference_alias: ReferenceAlias) -> HashSet<String> {
         let mut aliases = HashSet::new();
         if let Some(refseq_id) = reference_alias.refseq_accession_id {
@@ -91,30 +102,15 @@ impl ReferenceAlias {
         }
         if let Some(ensembl_id) = reference_alias.ensembl_id.clone() {
             aliases.insert(ensembl_id.clone());
-            aliases.insert(format!("chr{}", ensembl_id));
-            aliases.insert(format!("Chr{}", ensembl_id));
-            aliases.insert(format!("chrom{}", ensembl_id));
-            aliases.insert(format!("Chrom{}", ensembl_id));
-            aliases.insert(format!("chromosome{}", ensembl_id));
-            aliases.insert(format!("Chromosome{}", ensembl_id));
+            aliases.extend(ReferenceAlias::chromosome_aliases(&ensembl_id));
         }
         if let Some(custom_id) = reference_alias.custom_id {
             aliases.insert(custom_id.clone());
-            aliases.insert(format!("chr{}", custom_id));
-            aliases.insert(format!("Chr{}", custom_id));
-            aliases.insert(format!("chrom{}", custom_id));
-            aliases.insert(format!("Chrom{}", custom_id));
-            aliases.insert(format!("chr{}", custom_id));
-            aliases.insert(format!("Chromosome{}", custom_id));
+            aliases.extend(ReferenceAlias::chromosome_aliases(&custom_id));
         }
         if let Some(chromosome) = reference_alias.chromosome {
             aliases.insert(chromosome.to_string());
-            aliases.insert(format!("chr{}", chromosome));
-            aliases.insert(format!("Chr{}", chromosome));
-            aliases.insert(format!("chrom{}", chromosome));
-            aliases.insert(format!("Chrom{}", chromosome));
-            aliases.insert(format!("chromosome{}", chromosome));
-            aliases.insert(format!("Chromosome{}", chromosome));
+            aliases.extend(ReferenceAlias::chromosome_aliases(&chromosome.to_string()));
         }
         aliases
     }
