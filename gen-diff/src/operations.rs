@@ -131,7 +131,8 @@ pub fn collect_operation_diff(
 
         (operations_in_order, added_ops, removed_ops)
     } else {
-        (vec![to_hash], vec![to_hash], vec![])
+        let upstream_operations = Operation::get_upstream(op_conn, &to_hash);
+        (upstream_operations.clone(), upstream_operations, vec![])
     };
 
     let added_graphs = build_block_group_diffs(workspace, op_conn, &added_ops, db_path)?;
