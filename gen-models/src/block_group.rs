@@ -1283,7 +1283,7 @@ mod tests {
 
     use capnp::message::TypedBuilder;
     use chrono::Utc;
-    use gen_core::NO_CHROMOSOME_INDEX;
+    use gen_core::{NO_CHROMOSOME_INDEX, errors::ConnectionError};
 
     use super::*;
     use crate::{
@@ -1293,6 +1293,18 @@ mod tests {
         sequence::Sequence,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
     };
+
+    #[derive(Debug, Error)]
+    enum BlockGroupTestError {
+        #[error("BlockGroupError: {0}")]
+        BlockGroup(#[from] BlockGroupError),
+        #[error("ConnectionError: {0}")]
+        Connection(#[from] ConnectionError),
+        #[error("NodeError: {0}")]
+        Node(#[from] NodeError),
+        #[error("EdgeError: {0}")]
+        Edge(#[from] EdgeError),
+    }
 
     fn get_single_bg_id(
         conn: &GraphConnection,
@@ -1353,8 +1365,8 @@ mod tests {
     }
 
     #[test]
-    fn test_blockgroup_create() {
-        let conn = &get_connection(None).unwrap();
+    fn test_blockgroup_create() -> Result<(), BlockGroupTestError> {
+        let conn = &get_connection(None)?;
         Collection::create(conn, "test");
         Sample::get_or_create(conn, Sample::DEFAULT_NAME);
         let bg1 = create_bg(conn, "test", Sample::DEFAULT_NAME, "hg19");
@@ -1366,11 +1378,13 @@ mod tests {
         assert_eq!(bg2.name, "hg19");
         assert_eq!(bg2.sample_name, "sample".to_string());
         assert_ne!(&bg1.id, &bg2.id);
+
+        Ok(())
     }
 
     #[test]
-    fn test_blockgroup_delete() {
-        let conn = &get_connection(None).unwrap();
+    fn test_blockgroup_delete() -> Result<(), BlockGroupTestError> {
+        let conn = &get_connection(None)?;
         Collection::create(conn, "test");
         Sample::get_or_create(conn, "sample1");
         Sample::get_or_create(conn, "sample2");
@@ -1382,11 +1396,13 @@ mod tests {
         let bgs = BlockGroup::all(conn);
         assert_eq!(bgs.len(), 1);
         assert_eq!(bgs[0], bg2);
+
+        Ok(())
     }
 
     #[test]
-    fn test_blockgroup_clone() {
-        let conn = &get_connection(None).unwrap();
+    fn test_blockgroup_clone() -> Result<(), BlockGroupTestError> {
+        let conn = &get_connection(None)?;
         Collection::create(conn, "test");
         Sample::get_or_create(conn, Sample::DEFAULT_NAME);
         let bg1 = create_bg(conn, "test", Sample::DEFAULT_NAME, "hg19");
@@ -1404,11 +1420,13 @@ mod tests {
             BlockGroupEdge::edges_for_block_group(conn, &bg1.id),
             BlockGroupEdge::edges_for_block_group(conn, &bg2)
         );
+
+        Ok(())
     }
 
     #[test]
-    fn test_blockgroup_copies_immediate_parent_block_groups() {
-        let conn = &get_connection(None).unwrap();
+    fn test_blockgroup_copies_immediate_parent_block_groups() -> Result<(), BlockGroupTestError> {
+        let conn = &get_connection(None)?;
         Collection::create(conn, "test");
         Sample::get_or_create(conn, "parent_a");
         Sample::get_or_create(conn, "parent_b");
@@ -1425,8 +1443,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCC")
             .save(conn);
-        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("merge-parent-a"));
-        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("merge-parent-b"));
+        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("merge-parent-a"))?;
+        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("merge-parent-b"))?;
 
         let parent_a_edges = [
             Edge::create(
@@ -1437,7 +1455,7 @@ mod tests {
                 node_a,
                 0,
                 Strand::Forward,
-            ),
+            )?,
             Edge::create(
                 conn,
                 node_a,
@@ -1446,7 +1464,7 @@ mod tests {
                 PATH_END_NODE_ID,
                 0,
                 Strand::Forward,
-            ),
+            )?,
         ];
         let parent_b_edges = [
             Edge::create(
@@ -1457,7 +1475,7 @@ mod tests {
                 node_b,
                 0,
                 Strand::Forward,
-            ),
+            )?,
             Edge::create(
                 conn,
                 node_b,
@@ -1466,7 +1484,7 @@ mod tests {
                 PATH_END_NODE_ID,
                 0,
                 Strand::Forward,
-            ),
+            )?,
         ];
 
         BlockGroupEdge::bulk_create(
@@ -1555,6 +1573,8 @@ mod tests {
             Sample::get_all_sequences(conn, "test", "child", false),
             HashSet::from_iter(vec!["AAAA".to_string(), "CCCC".to_string()])
         );
+
+        Ok(())
     }
 
     #[test]
@@ -1604,8 +1624,9 @@ mod tests {
     }
 
     #[test]
-    fn test_blockgroup_merge_from_multiple_parents_preserves_paths_and_accessions() {
-        let conn = &get_connection(None).unwrap();
+    fn test_blockgroup_merge_from_multiple_parents_preserves_paths_and_accessions()
+    -> Result<(), BlockGroupTestError> {
+        let conn = &get_connection(None)?;
         Collection::create(conn, "test");
         Sample::get_or_create(conn, "parent_a");
         Sample::get_or_create(conn, "parent_b");
@@ -1622,8 +1643,8 @@ mod tests {
             .sequence_type("DNA")
             .sequence("CCCC")
             .save(conn);
-        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("metadata-parent-a"));
-        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("metadata-parent-b"));
+        let node_a = Node::create(conn, &seq_a.hash, &HashId::convert_str("metadata-parent-a"))?;
+        let node_b = Node::create(conn, &seq_b.hash, &HashId::convert_str("metadata-parent-b"))?;
 
         let parent_a_edges = [
             Edge::create(
@@ -1634,7 +1655,7 @@ mod tests {
                 node_a,
                 0,
                 Strand::Forward,
-            ),
+            )?,
             Edge::create(
                 conn,
                 node_a,
@@ -1643,7 +1664,7 @@ mod tests {
                 PATH_END_NODE_ID,
                 0,
                 Strand::Forward,
-            ),
+            )?,
         ];
         let parent_b_edges = [
             Edge::create(
@@ -1654,7 +1675,7 @@ mod tests {
                 node_b,
                 0,
                 Strand::Forward,
-            ),
+            )?,
             Edge::create(
                 conn,
                 node_b,
@@ -1663,7 +1684,7 @@ mod tests {
                 PATH_END_NODE_ID,
                 0,
                 Strand::Forward,
-            ),
+            )?,
         ];
 
         BlockGroupEdge::bulk_create(
@@ -1814,12 +1835,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["parent-b-acc", "parent-b-alt-acc"]
         );
+
+        Ok(())
     }
 
     #[test]
-    fn test_blockgroup_clone_passes_accessions() -> Result<(), BlockGroupError> {
+    fn test_blockgroup_clone_passes_accessions() -> Result<(), BlockGroupTestError> {
         let conn = &get_connection(None)?;
-        let (bg_1, path) = setup_block_group(conn);
+        let (_bg_1, path) = setup_block_group(conn)?;
         let mut path_cache = PathCache::new(conn);
         let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache);
         assert_eq!(
@@ -1852,8 +1875,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_and_deletion_get_all() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_and_deletion_get_all() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -1937,8 +1960,8 @@ mod tests {
     }
 
     #[test]
-    fn simple_insert_get_all() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn simple_insert_get_all() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -1981,8 +2004,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_on_block_boundary_middle() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_on_block_boundary_middle() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2025,8 +2048,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_within_block() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_within_block() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2069,8 +2092,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_on_block_boundary_start() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_on_block_boundary_start() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2113,8 +2136,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_on_block_boundary_end() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_on_block_boundary_end() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2157,8 +2180,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_across_entire_block_boundary() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_across_entire_block_boundary() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2201,8 +2224,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_across_two_blocks() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_across_two_blocks() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2245,8 +2268,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_spanning_blocks() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_spanning_blocks() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2289,8 +2312,8 @@ mod tests {
     }
 
     #[test]
-    fn simple_deletion() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn simple_deletion() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2336,8 +2359,8 @@ mod tests {
     }
 
     #[test]
-    fn doesnt_apply_same_insert_twice() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn doesnt_apply_same_insert_twice() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2392,8 +2415,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_at_beginning_of_path() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_at_beginning_of_path() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2436,8 +2459,8 @@ mod tests {
     }
 
     #[test]
-    fn homozygous_insert_at_beginning_of_path() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn homozygous_insert_at_beginning_of_path() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2479,8 +2502,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_at_end_of_path() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_at_end_of_path() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
 
         let insert_sequence = Sequence::new()
@@ -2524,8 +2547,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_at_one_bp_into_block() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_at_one_bp_into_block() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2568,8 +2591,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_at_one_bp_from_end_of_block() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn insert_at_one_bp_from_end_of_block() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2612,8 +2635,8 @@ mod tests {
     }
 
     #[test]
-    fn delete_at_beginning_of_path() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn delete_at_beginning_of_path() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2657,8 +2680,8 @@ mod tests {
     }
 
     #[test]
-    fn delete_at_end_of_path() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn delete_at_end_of_path() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2702,8 +2725,8 @@ mod tests {
     }
 
     #[test]
-    fn error_on_out_of_bounds_change() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn error_on_out_of_bounds_change() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2752,8 +2775,8 @@ mod tests {
     }
 
     #[test]
-    fn deletion_starting_at_block_boundary() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn deletion_starting_at_block_boundary() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2797,8 +2820,8 @@ mod tests {
     }
 
     #[test]
-    fn deletion_ending_at_block_boundary() -> Result<(), BlockGroupError> {
-        let conn = get_connection(None).unwrap();
+    fn deletion_ending_at_block_boundary() -> Result<(), BlockGroupTestError> {
+        let conn = get_connection(None)?;
         let (block_group_id, path) = setup_block_group(&conn)?;
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2842,8 +2865,8 @@ mod tests {
     }
 
     #[test]
-    fn test_blockgroup_interval_tree() -> Result<(), BlockGroupError> {
-        let conn = &get_connection(None).unwrap();
+    fn test_blockgroup_interval_tree() -> Result<(), BlockGroupTestError> {
+        let conn = &get_connection(None)?;
         let (block_group_id, path) = setup_block_group(conn)?;
         let _new_sample = Sample::get_or_create(conn, "child");
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
@@ -3014,8 +3037,8 @@ mod tests {
     }
 
     #[test]
-    fn test_changes_against_derivative_blockgroups() -> Result<(), BlockGroupError> {
-        let conn = &get_connection(None).unwrap();
+    fn test_changes_against_derivative_blockgroups() -> Result<(), BlockGroupTestError> {
+        let conn = &get_connection(None)?;
         let (_block_group_id, _path) = setup_block_group(conn)?;
         let _new_sample = Sample::get_or_create(conn, "child");
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
@@ -3106,10 +3129,10 @@ mod tests {
     }
 
     #[test]
-    fn test_changes_against_derivative_diploid_blockgroups() -> Result<(), BlockGroupError> {
+    fn test_changes_against_derivative_diploid_blockgroups() -> Result<(), BlockGroupTestError> {
         // This test ensures that if we have heterozygous changes that do not introduce frameshifts,
         // we can modify regions downstream of them.
-        let conn = &get_connection(None).unwrap();
+        let conn = &get_connection(None)?;
         let (_block_group_id, _path) = setup_block_group(conn)?;
         let _new_sample = Sample::get_or_create(conn, "child");
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
@@ -3328,14 +3351,14 @@ mod tests {
         };
 
         #[test]
-        fn test_derive_subgraph_one_insertion() -> Result<(), BlockGroupError> {
+        fn test_derive_subgraph_one_insertion() -> Result<(), BlockGroupTestError> {
             /*
             AAAAAAAAAA -> TTTTTTTTTT -> CCCCCCCCCC -> GGGGGGGGGG
                               \-> AAAAAAAA ->/
             Subgraph range:  |-----------------|
             Sequences of the subgraph are TAAAAAAAAC, TTTTTCCCCC
              */
-            let conn = &get_connection(None).unwrap();
+            let conn = &get_connection(None)?;
             Collection::create(conn, "test");
             let (block_group1_id, original_path) = setup_block_group(conn)?;
 
@@ -3459,13 +3482,13 @@ mod tests {
         }
 
         #[test]
-        fn test_derive_subgraph_two_independent_insertions() -> Result<(), BlockGroupError> {
+        fn test_derive_subgraph_two_independent_insertions() -> Result<(), BlockGroupTestError> {
             /*
             AAAAAAAAAA -> TTTTTTTTTT -> CCCCCCCCCC -----> GGGGGGGGGG
                                   \-> AAAAAAAA ->/  \->TTTTTTTT -/
             Subgraph range:     |----------------------------------|
              */
-            let conn = &get_connection(None).unwrap();
+            let conn = &get_connection(None)?;
             Collection::create(conn, "test");
             let (block_group1_id, original_path) = setup_block_group(conn)?;
 
@@ -3674,7 +3697,7 @@ mod tests {
 
         #[test]
         fn test_derive_subgraph_two_independent_insertions_and_one_deletion()
-        -> Result<(), BlockGroupError> {
+        -> Result<(), BlockGroupTestError> {
             /*
                        /--------------------------------------------\  (<-- Deletion edge)
             AAAAAAAAAA -> TTTTTTTTTT -> CCCCCCCCCC -----> GGGGGGGGGG
@@ -3683,7 +3706,7 @@ mod tests {
 
             Confirms that deletion edge is ignored and not added to subgraph
              */
-            let conn = &get_connection(None).unwrap();
+            let conn = &get_connection(None)?;
             Collection::create(conn, "test");
             let (block_group1_id, original_path) = setup_block_group(conn)?;
 

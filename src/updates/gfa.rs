@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Error as IOError,
+};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal};
 use gen_models::{
@@ -47,7 +50,7 @@ pub fn update_with_gfa(
         new_sample_name,
         vec![parent_sample_name.to_string()],
     )
-    .map_err(io::Error::other)?;
+    .map_err(IOError::other)?;
     let block_groups = Sample::get_block_groups(conn, collection_name, new_sample_name);
 
     // NOTE: Only getting the current path for each block group because it's the most likely one to

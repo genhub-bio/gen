@@ -48,7 +48,7 @@ pub fn setup_test_data(conn: &GraphConnection) -> Result<(), EdgeError> {
             collection = collection.name,
             hash = seq2.hash
         )),
-    );
+    )?;
     let block_group = BlockGroup::create(
         conn,
         NewBlockGroup {

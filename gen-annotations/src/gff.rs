@@ -151,7 +151,7 @@ mod tests {
                 collection = collection.name,
                 hash = reference_sequence.hash
             )),
-        );
+        )?;
         let block_group = BlockGroup::create(
             conn,
             NewBlockGroup {

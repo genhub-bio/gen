@@ -866,7 +866,7 @@ mod tests {
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
-        edge::EdgeError, test_helpers::get_connection,
+        edge::EdgeError,
         test_helpers::get_connection,
     };
 

@@ -78,6 +78,7 @@ pub fn update_with_fasta(
         .collect::<Vec<_>>();
 
     let mut change_count = 0;
+
     for (index, result) in fasta_reader.records().enumerate() {
         let record = result?;
         let sequence = str::from_utf8(record.sequence().as_ref()).unwrap();
@@ -160,6 +161,8 @@ pub fn update_with_fasta(
                 }
             }
         }
+
+        change_count += 1;
     }
 
     for state in target_states {
