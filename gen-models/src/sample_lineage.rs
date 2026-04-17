@@ -305,12 +305,22 @@ mod tests {
     fn test_search_name_returns_partial_matches() {
         let conn = get_connection(None).unwrap();
 
-        for sample in ["alpha", "BarFooBaz", "child", "foo", "QuxFood", "zzz"] {
+        for sample in [
+            "alpha",
+            "BarFooBaz",
+            "child",
+            "foo",
+            "plain-parent",
+            "plain-child",
+            "QuxFood",
+            "zzz",
+        ] {
             Sample::get_or_create(&conn, sample);
         }
 
         SampleLineage::create(&conn, "alpha", "BarFooBaz").unwrap();
         SampleLineage::create(&conn, "foo", "child").unwrap();
+        SampleLineage::create(&conn, "plain-parent", "plain-child").unwrap();
         SampleLineage::create(&conn, "zzz", "QuxFood").unwrap();
 
         let matches = SampleLineage::search_name(&conn, "FoO");
