@@ -92,6 +92,17 @@ impl SampleLineage {
         .collect()
     }
 
+    pub fn search_name(conn: &GraphConnection, name: &str) -> Vec<Self> {
+        SampleLineage::query(
+            conn,
+            "SELECT * FROM sample_lineage
+             WHERE instr(lower(parent_sample_name), lower(?1)) > 0
+                OR instr(lower(child_sample_name), lower(?1)) > 0
+             ORDER BY parent_sample_name, child_sample_name;",
+            params![name],
+        )
+    }
+
     pub fn create(
         conn: &GraphConnection,
         parent_sample_name: &str,
@@ -288,5 +299,38 @@ mod tests {
             rusqlite::Error::SqliteFailure(code, _)
                 if code.code == rusqlite::ErrorCode::ConstraintViolation
         ));
+    }
+
+    #[test]
+    fn test_search_name_returns_partial_matches() {
+        let conn = get_connection(None).unwrap();
+
+        for sample in ["alpha", "BarFooBaz", "child", "foo", "QuxFood", "zzz"] {
+            Sample::get_or_create(&conn, sample);
+        }
+
+        SampleLineage::create(&conn, "alpha", "BarFooBaz").unwrap();
+        SampleLineage::create(&conn, "foo", "child").unwrap();
+        SampleLineage::create(&conn, "zzz", "QuxFood").unwrap();
+
+        let matches = SampleLineage::search_name(&conn, "FoO");
+
+        assert_eq!(
+            matches,
+            vec![
+                SampleLineage {
+                    parent_sample_name: "alpha".to_string(),
+                    child_sample_name: "BarFooBaz".to_string(),
+                },
+                SampleLineage {
+                    parent_sample_name: "foo".to_string(),
+                    child_sample_name: "child".to_string(),
+                },
+                SampleLineage {
+                    parent_sample_name: "zzz".to_string(),
+                    child_sample_name: "QuxFood".to_string(),
+                },
+            ]
+        );
     }
 }
