@@ -199,6 +199,16 @@ impl Sample {
             rusqlite::params!(name),
         )
     }
+
+    pub fn search_name(conn: &GraphConnection, name: &str) -> Vec<Sample> {
+        Sample::query(
+            conn,
+            "select * from samples
+             where instr(lower(name), lower(?1)) > 0
+             order by name;",
+            rusqlite::params!(name),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +250,22 @@ mod tests {
 
         assert!(Sample::get_by_name(conn, "sample1").is_err());
         assert!(Sample::get_by_name(conn, "sample2").is_ok());
+    }
+
+    #[test]
+    fn test_search_name_returns_partial_matches() {
+        let conn = &get_connection(None).unwrap();
+
+        for sample in ["alpha", "BarFooBaz", "foo", "QuxFood", "zzz"] {
+            Sample::create(conn, sample).unwrap();
+        }
+
+        let matches = Sample::search_name(conn, "FoO")
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(matches, vec!["BarFooBaz", "QuxFood", "foo"]);
     }
 
     #[test]
