@@ -215,7 +215,10 @@ impl Edge {
             "{source_node_id}:{source_coordinate}:{source_strand}:{target_node_id}:{target_coordinate}:{target_strand}"
         )));
         let query = "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = match conn.prepare(query) {
+            Ok(s) => s,
+            Err(e) => return Err(EdgeError::DatabaseError(e)),
+        };
         match stmt.execute(params![
             hash,
             source_node_id,
@@ -506,7 +509,7 @@ mod tests {
     #[test]
     fn test_bulk_create() -> Result<(), EdgeError> {
         let conn = &mut get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -571,7 +574,7 @@ mod tests {
     #[test]
     fn test_bulk_create_returns_edges_in_order() -> Result<(), EdgeError> {
         let conn = &mut get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
@@ -631,7 +634,7 @@ mod tests {
     #[test]
     fn test_bulk_create_with_existing_edge() -> Result<(), EdgeError> {
         let conn = &mut get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")

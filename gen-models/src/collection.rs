@@ -1,10 +1,19 @@
 use gen_core::traits::Capnp;
 use rusqlite::{Row, params_from_iter};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     block_group::BlockGroup, db::GraphConnection, gen_models_capnp::collection, traits::*,
 };
+
+#[derive(Debug, Error, PartialEq)]
+pub enum CollectionError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+    #[error("Collection already exists")]
+    Duplicate(Collection),
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Collection {
@@ -47,29 +56,27 @@ impl Collection {
         stmt.exists([name]).unwrap()
     }
 
-    pub fn create(conn: &GraphConnection, name: &str) -> Collection {
-        let mut stmt = conn
-            .prepare("INSERT INTO collections (name) VALUES (?1) RETURNING *;")
-            .unwrap();
+    pub fn create(conn: &GraphConnection, name: &str) -> Result<Collection, CollectionError> {
+        let mut stmt = match conn.prepare("INSERT INTO collections (name) VALUES (?1) RETURNING *;")
+        {
+            Ok(stmt) => stmt,
+            Err(e) => return Err(CollectionError::DatabaseError(e)),
+        };
 
         match stmt.query_row((name,), |_row| {
             Ok(Collection {
                 name: name.to_string(),
             })
         }) {
-            Ok(res) => res,
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    Collection {
-                        name: name.to_string(),
-                    }
-                } else {
-                    panic!("something bad happened querying the database")
-                }
+            Ok(res) => Ok(res),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(CollectionError::Duplicate(Collection {
+                    name: name.to_string(),
+                }))
             }
-            Err(_err) => {
-                panic!("something bad happened querying the database")
-            }
+            Err(e) => Err(CollectionError::DatabaseError(e)),
         }
     }
 
@@ -127,8 +134,8 @@ mod tests {
     #[test]
     pub fn test_delete_by_name() {
         let conn = &get_connection(None).unwrap();
-        let collection1 = Collection::create(conn, "test1");
-        let collection2 = Collection::create(conn, "test2");
+        let collection1 = Collection::create(conn, "test1").unwrap();
+        let collection2 = Collection::create(conn, "test2").unwrap();
 
         Collection::delete_by_name(conn, &collection1.name);
 

@@ -961,16 +961,16 @@ mod tests {
         let conn = context.graph().conn();
 
         // Create collections with hierarchical paths
-        Collection::create(conn, "/foo/bar");
-        Collection::create(conn, "/foo/bar/a");
-        Collection::create(conn, "/foo/bar/a/b");
-        Collection::create(conn, "/foo/bar2");
-        Collection::create(conn, "/foo/baz");
+        Collection::create(conn, "/foo/bar").unwrap();
+        Collection::create(conn, "/foo/bar/a").unwrap();
+        Collection::create(conn, "/foo/bar/a/b").unwrap();
+        Collection::create(conn, "/foo/bar2").unwrap();
+        Collection::create(conn, "/foo/baz").unwrap();
 
         // Create samples
-        let sample_reference = Sample::get_or_create(conn, Sample::DEFAULT_NAME);
-        let sample_alpha = Sample::get_or_create(conn, "SampleAlpha");
-        let sample_beta = Sample::get_or_create(conn, "SampleBeta");
+        let sample_reference = Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
+        let sample_alpha = Sample::get_or_create(conn, "SampleAlpha").unwrap();
+        let sample_beta = Sample::get_or_create(conn, "SampleBeta").unwrap();
 
         // Create block groups for three explicit samples
         BlockGroup::create(

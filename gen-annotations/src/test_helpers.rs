@@ -21,8 +21,8 @@ pub fn get_connection() -> GraphConnection {
 }
 
 pub fn setup_test_data(conn: &GraphConnection) -> Result<(), EdgeError> {
-    let collection = Collection::create(conn, "test");
-    Sample::get_or_create(conn, Sample::DEFAULT_NAME);
+    let collection = Collection::create(conn, "test").unwrap();
+    Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
     let seq1 = Sequence::new()
         .sequence_type("DNA")
         .sequence("ATCGATCGATCGATCGA")
@@ -117,7 +117,7 @@ pub fn setup_test_data(conn: &GraphConnection) -> Result<(), EdgeError> {
         &[edge_into.id, middle_edge.id, edge_out_of.id],
     );
 
-    Sample::get_or_create(conn, "foo");
+    Sample::get_or_create(conn, "foo").unwrap();
     let _ =
         Sample::get_or_create_child(conn, "test", "foo", vec![Sample::DEFAULT_NAME.to_string()]);
 

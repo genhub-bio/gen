@@ -315,7 +315,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let block_group = BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {

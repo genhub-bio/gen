@@ -270,7 +270,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let block_group = create_bg(
             conn,
             collection_name,
@@ -533,7 +533,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample = Sample::get_or_create(conn, "test sample");
         let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
@@ -633,7 +633,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample = Sample::get_or_create(conn, "test sample");
         let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
@@ -733,7 +733,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample1 = Sample::get_or_create(conn, "sample1");
         let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
@@ -882,7 +882,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample1 = Sample::get_or_create(conn, "sample1");
         let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
@@ -1032,7 +1032,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let block_group = create_bg(
             conn,
             collection_name,

@@ -3,7 +3,7 @@ use std::str;
 use anyhow::Result;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
-    collection::Collection,
+    collection::{Collection, CollectionError},
     db::DbContext,
     errors::OperationError,
     file_types::FileTypes,
@@ -54,11 +54,24 @@ pub fn import_library(
 ) -> Result<Operation, LibraryImportError> {
     let conn = context.graph().conn();
     let mut session = session_operations::start_operation(conn);
-    if !Collection::exists(conn, collection_name) {
-        Collection::create(conn, collection_name);
+    match Collection::create(conn, collection_name) {
+        Ok(_) => {}
+        Err(CollectionError::Duplicate(_)) => {}
+        Err(e) => {
+            return Err(LibraryImportError::ImportFailed(format!(
+                "Failed to get or create collection: {e}"
+            )));
+        }
     }
 
-    Sample::get_or_create(conn, sample);
+    match Sample::get_or_create(conn, sample) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(LibraryImportError::ImportFailed(format!(
+                "Failed to get or create sample: {e}"
+            )));
+        }
+    }
     let new_block_group = BlockGroup::create(
         conn,
         NewBlockGroup {

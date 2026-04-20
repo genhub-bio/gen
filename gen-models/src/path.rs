@@ -902,7 +902,7 @@ mod tests {
     #[test]
     fn test_path_delete() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
 
         // Create first path
@@ -998,7 +998,7 @@ mod tests {
     #[test]
     fn test_gets_sequence() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1087,7 +1087,7 @@ mod tests {
     #[test]
     fn test_gets_sequence_with_rc() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1183,7 +1183,7 @@ mod tests {
     #[test]
     fn test_intervaltree() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1304,7 +1304,7 @@ mod tests {
         // node, and the edge to the virtual end node comes from the middle of the last node, the
         // sequence is correctly generated
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1431,7 +1431,7 @@ mod tests {
             Mapping: (0, 8) -> (0, 8)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1495,7 +1495,7 @@ mod tests {
             Mappings: empty
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1594,7 +1594,7 @@ mod tests {
             Mapping: (0, 4) -> (0, 4)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1711,7 +1711,7 @@ mod tests {
             (4, 8) -> (12, 16)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1830,7 +1830,7 @@ mod tests {
             (6, 8) -> (10, 12)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -1948,7 +1948,7 @@ mod tests {
             (6, 8) -> (2, 4)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2054,7 +2054,7 @@ mod tests {
             (8, 16) -> (16, 24)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2188,7 +2188,7 @@ mod tests {
             (12, 16) -> (12, 16)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2321,7 +2321,7 @@ mod tests {
             (12, 16) -> (4, 8)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2434,7 +2434,7 @@ mod tests {
             Mapping: (0, 8) -> (0, 8)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2501,7 +2501,7 @@ mod tests {
             Mappings: empty
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2606,7 +2606,7 @@ mod tests {
             Mapping: (0, 4) -> (0, 4)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2726,7 +2726,7 @@ mod tests {
             (4, 8) -> (12, 16)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2846,7 +2846,7 @@ mod tests {
             (6, 8) -> (10, 12)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -2966,7 +2966,7 @@ mod tests {
             (8, 16) -> (16, 24)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3100,7 +3100,7 @@ mod tests {
             (12, 16) -> (4, 8)
         */
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3206,7 +3206,7 @@ mod tests {
     #[test]
     fn test_new_path_with() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3340,7 +3340,7 @@ mod tests {
     #[test]
     fn test_new_path_with_deletion() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3423,7 +3423,7 @@ mod tests {
     #[test]
     fn test_duplicate_edge_warning() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3471,7 +3471,7 @@ mod tests {
     #[should_panic(expected = "Not all edges are in the block group")]
     fn test_edges_must_be_in_path_block_group() {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3508,7 +3508,7 @@ mod tests {
     // Panic message is something like "Edges 1 and 2 don't share the same node (3 vs. 4)"
     fn test_consecutive_edges_must_share_a_node() {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3567,7 +3567,7 @@ mod tests {
     // Panic message is something like "Strand mismatch between consecutive edges 1 and 2"
     fn test_consecutive_edges_must_share_the_same_strand() {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3621,7 +3621,7 @@ mod tests {
     // Panic message is something like "Source coordinate 2 for edge 2 is before target coordinate 4 for edge 1"
     fn test_consecutive_edges_must_have_different_coordinates_on_a_node() {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3673,7 +3673,7 @@ mod tests {
     #[test]
     fn test_node_blocks_for_range() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -3811,7 +3811,7 @@ mod tests {
     #[test]
     fn test_node_blocks_for_range_with_node_parts() -> Result<(), EdgeError> {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
         let sequence1 = Sequence::new()
             .sequence_type("DNA")

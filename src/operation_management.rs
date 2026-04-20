@@ -2338,12 +2338,12 @@ mod tests {
             let local_root = local_context.repo_root().unwrap();
 
             // Create a test collection and operation
-            let _collection = Collection::create(local_conn, "test_collection");
+            let _collection = Collection::create(local_conn, "test_collection").unwrap();
             for i in 0..3 {
                 let mut session = start_operation(local_conn);
 
                 // Make some actual changes to trigger changeset creation
-                Collection::create(local_conn, &format!("test_collection_{i}"));
+                Collection::create(local_conn, &format!("test_collection_{i}")).unwrap();
 
                 let file_path = format!("test_file_{i}.fa");
                 let op_info = OperationInfo {

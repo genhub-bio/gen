@@ -1,7 +1,7 @@
 use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
-use crate::node::NodeError;
+use crate::{collection::CollectionError, node::NodeError, sample::Sample};
 
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
 pub enum QueryError {
@@ -15,6 +15,8 @@ pub enum SampleError {
     QueryError(#[from] QueryError),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Sample already exists")]
+    Duplicate(Sample),
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -33,6 +35,10 @@ pub enum ChangesetError {
     SerializationError(String),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Collection creation error: {0}")]
+    CollectionError(#[from] CollectionError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
 }

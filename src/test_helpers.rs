@@ -143,7 +143,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         &HashId::convert_str(&format!("test-g-node.{}", a_seq.hash)),
     )?;
     let _collection = Collection::create(conn, "test");
-    Sample::get_or_create(conn, "test");
+    Sample::get_or_create(conn, "test").unwrap();
     let block_group = create_bg(conn, "test", "test", "chr1");
     let edge0 = Edge::create(
         conn,

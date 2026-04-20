@@ -68,7 +68,10 @@ impl Node {
         node_hash: &HashId,
     ) -> Result<HashId, NodeError> {
         let insert_statement = "INSERT INTO nodes (id, sequence_hash) VALUES (?1, ?2);";
-        let mut stmt = conn.prepare_cached(insert_statement).unwrap();
+        let mut stmt = match conn.prepare_cached(insert_statement) {
+            Ok(s) => s,
+            Err(e) => return Err(NodeError::DatabaseError(e)),
+        };
         match stmt.execute(params![node_hash, sequence_hash]) {
             Ok(_) => Ok(*node_hash),
             Err(rusqlite::Error::SqliteFailure(e, _))

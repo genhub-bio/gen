@@ -15,7 +15,7 @@ use gen_models::{
     annotations::Annotation,
     block_group::{BlockGroup, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::Collection,
+    collection::{Collection, CollectionError},
     db::DbContext,
     edge::Edge,
     node::Node,
@@ -505,8 +505,19 @@ where
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
     let reader = reader::SeqReader::new(data);
-    let collection = Collection::create(conn, collection.into().unwrap_or_default());
-    Sample::get_or_create(conn, sample);
+    let collection = match Collection::create(conn, collection.into().unwrap_or_default()) {
+        Ok(c) => c,
+        Err(CollectionError::Duplicate(c)) => c,
+        Err(e) => {
+            return Err(GenBankError::CollectionError(e));
+        }
+    };
+    match Sample::get_or_create(conn, sample) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(GenBankError::SampleError(e));
+        }
+    }
 
     let _ = progress_bar.println("Parsing GenBank");
     let bar = progress_bar.add(get_progress_bar(None));

@@ -136,8 +136,8 @@ mod tests {
     use crate::test_helpers::get_connection;
 
     fn create_block_group(conn: &GraphConnection) -> Result<(), EdgeError> {
-        let collection = Collection::create(conn, "test");
-        Sample::get_or_create(conn, Sample::DEFAULT_NAME);
+        let collection = Collection::create(conn, "test").unwrap();
+        Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -209,7 +209,7 @@ mod tests {
     }
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) -> Result<(), EdgeError> {
-        Sample::get_or_create(conn, "child sample");
+        Sample::get_or_create(conn, "child sample").unwrap();
         let _ = Sample::get_or_create_child(
             conn,
             "test",

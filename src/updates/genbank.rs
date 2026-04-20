@@ -5,7 +5,7 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::Collection,
+    collection::{Collection, CollectionError},
     db::DbContext,
     edge::Edge,
     node::Node,
@@ -34,7 +34,11 @@ where
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let reader = reader::SeqReader::new(data);
-    let collection = Collection::create(conn, collection.into().unwrap_or_default());
+    let collection = match Collection::create(conn, collection.into().unwrap_or_default()) {
+        Ok(c) => c,
+        Err(CollectionError::Duplicate(c)) => c,
+        Err(e) => return Err(GenBankError::CollectionError(e)),
+    };
     for result in reader {
         match result {
             Ok(seq) => {

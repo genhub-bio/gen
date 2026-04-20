@@ -8,10 +8,10 @@ use gen_graph::{GraphEdge, GraphNode};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::Collection,
+    collection::{Collection, CollectionError},
     db::DbContext,
     edge::{Edge, EdgeData},
-    errors::OperationError,
+    errors::{OperationError, SampleError},
     file_types::FileTypes,
     node::{Node, NodeError},
     operations::{Operation, OperationFile, OperationInfo},
@@ -36,6 +36,10 @@ use crate::{
 pub enum GFAImportError {
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
+    #[error("Collection creation error: {0}")]
+    CollectionError(#[from] CollectionError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
 }
@@ -49,8 +53,17 @@ pub fn import_gfa(
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
-    Collection::create(conn, collection_name);
-    Sample::get_or_create(conn, sample_name);
+    match Collection::create(conn, collection_name) {
+        Ok(_) => {}
+        Err(CollectionError::Duplicate(_)) => {}
+        Err(e) => return Err(GFAImportError::CollectionError(e)),
+    }
+    match Sample::get_or_create(conn, sample_name) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(GFAImportError::SampleError(e));
+        }
+    }
     let block_group = BlockGroup::create(
         conn,
         NewBlockGroup {

@@ -473,7 +473,7 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        Collection::create(conn, "test");
+        Collection::create(conn, "test").unwrap();
         let (block_group1_id, original_path) = setup_block_group(conn)?;
 
         let intervaltree = original_path.intervaltree(conn);

@@ -1365,7 +1365,7 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child");
+        Sample::get_or_create(conn, "child").unwrap();
         SampleLineage::create(conn, "reference", "child").unwrap();
 
         update_with_vcf(
@@ -1474,7 +1474,7 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child");
+        Sample::get_or_create(conn, "child").unwrap();
 
         update_with_vcf(
             &context,

@@ -10,9 +10,10 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::Collection,
+    collection::{Collection, CollectionError},
     db::DbContext,
     edge::Edge,
+    errors::SampleError,
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -49,14 +50,19 @@ pub fn import_fasta(
     };
     let mut reader = fasta::io::reader::Builder.build_from_reader(reader_stream)?;
 
-    let collection = if !Collection::exists(conn, name) {
-        Collection::create(conn, name)
-    } else {
-        Collection {
-            name: name.to_string(),
-        }
+    let collection = match Collection::create(conn, name) {
+        Ok(collection) => collection,
+        Err(CollectionError::Duplicate(collection)) => collection,
+        Err(e) => return Err(FastaError::CollectionError(e)),
     };
-    Sample::get_or_create(conn, sample);
+
+    match Sample::get_or_create(conn, sample) {
+        Ok(_) => {}
+        Err(SampleError::Duplicate(_)) => {}
+        Err(e) => {
+            return Err(FastaError::SampleError(e));
+        }
+    }
     let mut summary: HashMap<String, i64> = HashMap::new();
 
     let _ = progress_bar.println("Parsing Fasta");

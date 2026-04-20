@@ -22,7 +22,7 @@ use crate::{
     },
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::Collection,
+    collection::{Collection, CollectionError},
     db::GraphConnection,
     edge::{Edge, EdgeData},
     errors::ChangesetError,
@@ -832,11 +832,18 @@ pub fn apply_changeset(
     dependencies: &DependencyModels,
 ) -> Result<(), ChangesetError> {
     for collection in dependencies.collections.iter() {
-        Collection::create(conn, &collection.name);
+        match Collection::create(conn, &collection.name) {
+            Ok(_) => {}
+            Err(CollectionError::Duplicate(_)) => {}
+            Err(err) => return Err(ChangesetError::CollectionError(err)),
+        }
     }
 
     for sample in dependencies.samples.iter() {
-        Sample::get_or_create(conn, &sample.name);
+        match Sample::get_or_create(conn, &sample.name) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::SampleError(err)),
+        }
     }
 
     for sequence in dependencies.sequences.iter() {
@@ -897,10 +904,16 @@ pub fn apply_changeset(
     }
 
     for collection in &changeset.collections {
-        Collection::create(conn, &collection.name);
+        match Collection::create(conn, &collection.name) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::CollectionError(err)),
+        }
     }
     for sample in &changeset.samples {
-        Sample::get_or_create(conn, &sample.name);
+        match Sample::get_or_create(conn, &sample.name) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::SampleError(err)),
+        }
     }
     for sample_lineage in &changeset.sample_lineages {
         SampleLineage::create(
