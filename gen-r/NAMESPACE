@@ -1,0 +1,6 @@
+useDynLib(genr, .registration = TRUE)
+export(db_context)
+export(export_fasta)
+export(get_gen_dir)
+export(import_fasta)
+export(init)
