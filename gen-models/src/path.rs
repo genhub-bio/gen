@@ -15,17 +15,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    Direction, ModelSelect,
+    block_group::BlockGroup,
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     edge::{Edge, EdgeData},
     errors::QueryError,
     gen_models_capnp::path as PathCapnp,
     node::Node,
+    select::SqlFilter,
     sequence::SequenceError,
     traits::*,
 };
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]
 pub struct Path {
     pub id: HashId,
     pub block_group_id: HashId,
@@ -91,6 +94,35 @@ impl<'a> Capnp<'a> for Path {
 pub struct PathData {
     pub name: String,
     pub block_group_id: HashId,
+}
+
+impl PathSelect<'_> {
+    fn with_block_groups(self) -> Self {
+        if self
+            .joins
+            .iter()
+            .any(|join| join.source().table_name() == BlockGroup::TABLE_NAME)
+        {
+            self
+        } else {
+            let conn = self.conn;
+            self.join(BlockGroup::select(conn))
+        }
+    }
+
+    pub fn collection_name(self, collection_name: impl Into<String>) -> Self {
+        self.with_block_groups().push_filter(SqlFilter::new(
+            "block_groups.collection_name = ?",
+            vec![SQLValue::from(collection_name.into())],
+        ))
+    }
+
+    pub fn sample_name(self, sample_name: impl Into<String>) -> Self {
+        self.with_block_groups().push_filter(SqlFilter::new(
+            "block_groups.sample_name = ?",
+            vec![SQLValue::from(sample_name.into())],
+        ))
+    }
 }
 
 // interesting gist here: https://gist.github.com/mbhall88/cd900add6335c96127efea0e0f6a9f48, see if we
@@ -405,8 +437,10 @@ impl Path {
     }
 
     pub fn query_for_collection(conn: &GraphConnection, collection_name: &str) -> Vec<Path> {
-        let query = "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
-        Path::query(conn, query, params![collection_name])
+        Path::select(conn)
+            .collection_name(collection_name)
+            .order_by(PathSelect::CreatedOn, Direction::Desc)
+            .load()
     }
 
     pub fn query_for_collection_and_sample(
@@ -414,8 +448,11 @@ impl Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Vec<Path> {
-        let query = "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
-        Path::query(conn, query, params![collection_name, sample_name])
+        Path::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .order_by(PathSelect::CreatedOn, Direction::Desc)
+            .load()
     }
 
     pub fn sequence(
@@ -1474,6 +1511,47 @@ mod tests {
             edge_ids.last().copied()
         );
         assert_eq!(Path::edge_id_at(conn, &path.id, edge_ids.len(), None), None);
+    }
+
+    #[test]
+    fn test_search_supports_sort_and_pagination() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, seed_path) = setup_block_group(conn);
+        let edge_ids = Path::edge_ids_for_path(conn, &seed_path.id, None);
+
+        let alpha = Path::create(conn, "alpha", &block_group_id, &edge_ids).unwrap();
+        let beta = Path::create(conn, "beta", &block_group_id, &edge_ids).unwrap();
+        let gamma = Path::create(conn, "gamma", &block_group_id, &edge_ids).unwrap();
+
+        let matches = Path::select(conn)
+            .collection_name("test")
+            .order_by(PathSelect::CreatedOn, Direction::Asc)
+            .limit(2)
+            .offset(1)
+            .load();
+
+        assert_eq!(matches, vec![alpha, beta]);
+        assert_eq!(gamma.name, "gamma");
+    }
+
+    #[test]
+    fn test_select_with_ref_applies_to_joined_tables() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, historical_path) = setup_block_group(conn);
+        let edge_ids = Path::edge_ids_for_path(conn, &historical_path.id, None);
+        let historical_commit =
+            commit_all(conn, "historical path selector").expect("should commit path");
+        let current_path = Path::create(conn, "current", &block_group_id, &edge_ids)
+            .expect("should create current path");
+
+        let historical_matches = Path::select(conn)
+            .with_ref(historical_commit.to_string())
+            .collection_name("test")
+            .order_by(PathSelect::CreatedOn, Direction::Asc)
+            .load();
+
+        assert_eq!(historical_matches, vec![historical_path]);
+        assert!(!historical_matches.contains(&current_path));
     }
 
     #[test]

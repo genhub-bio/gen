@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    Direction, ModelSelect,
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
@@ -39,7 +40,7 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq, ModelSelect)]
 pub struct BlockGroup {
     pub id: HashId,
     pub collection_name: String,
@@ -435,13 +436,13 @@ impl BlockGroup {
         group_name: &str,
         parent_samples: Vec<String>,
     ) -> Result<Vec<BlockGroup>, BlockGroupError> {
-        let existing_block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups
-             where collection_name = ?1 AND sample_name = ?2 AND name = ?3
-             order by created_on, id",
-            params![collection_name, sample_name, group_name],
-        );
+        let existing_block_groups = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .name(group_name)
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+            .order_by(BlockGroupSelect::Id, Direction::Asc)
+            .load();
 
         if !existing_block_groups.is_empty() {
             return Ok(existing_block_groups);
@@ -1156,7 +1157,8 @@ impl BlockGroup {
     ) -> Result<Path, BlockGroupError> {
         let query = format!(
             "SELECT id, block_group_id, name, created_on FROM {} \
-             WHERE block_group_id = :block_group_id ORDER BY created_on DESC",
+             WHERE block_group_id = :block_group_id \
+             ORDER BY created_on DESC, id DESC LIMIT 1",
             Path::table_name_with_history_ref(history_ref)
         );
         let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
@@ -1180,17 +1182,12 @@ impl BlockGroup {
         let paths = Path::try_query(
             conn,
             "SELECT id, block_group_id, name, created_on FROM paths \
-             WHERE block_group_id = ?1 ORDER BY created_on DESC",
-            params![block_group_id],
+             WHERE block_group_id = ?1 AND name = ?2 \
+             ORDER BY created_on DESC, id DESC LIMIT 1",
+            params![block_group_id, path_name],
         )?;
 
-        for path in &paths {
-            if path.name == path_name {
-                return Ok(Some(path.clone()));
-            }
-        }
-
-        Ok(None)
+        Ok(paths.into_iter().next())
     }
 
     pub fn derive_subgraph(
@@ -1457,6 +1454,26 @@ mod tests {
 
         let deserialized = BlockGroup::read_capnp(root.into_reader());
         assert_eq!(block_group, deserialized);
+    }
+
+    #[test]
+    fn test_search_supports_sort_and_pagination() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test").unwrap();
+
+        let alpha = create_bg(conn, "test", "sample-a", "alpha");
+        let beta = create_bg(conn, "test", "sample-a", "beta");
+        let gamma = create_bg(conn, "test", "sample-b", "gamma");
+
+        let matches = BlockGroup::select(conn)
+            .collection_name("test")
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+            .limit(2)
+            .offset(1)
+            .load();
+
+        assert_eq!(matches, vec![beta, gamma]);
+        assert_eq!(alpha.name, "alpha");
     }
 
     #[test]

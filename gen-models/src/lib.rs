@@ -1,3 +1,7 @@
+extern crate self as gen_models;
+
+pub use gen_models_macros::ModelSelect;
+
 pub mod accession;
 pub mod annotations;
 pub mod assets;

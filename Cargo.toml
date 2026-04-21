@@ -21,8 +21,8 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
-default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
+members = [".", "gen-core", "gen-models", "gen-models-macros", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
+default-members = [".", "gen-core", "gen-models", "gen-models-macros", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
 exclude = ["gen-python", "gen-r/src/rust"]
 
 [features]

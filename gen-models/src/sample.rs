@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group::BlockGroup,
+    Direction, ModelSelect,
+    block_group::{BlockGroup, BlockGroupSelect},
     db::GraphConnection,
     errors::{BlockGroupError, QueryError},
     gen_models_capnp::sample,
@@ -15,7 +16,7 @@ use crate::{
     traits::Query,
 };
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, ModelSelect)]
 pub struct Sample {
     pub name: String,
     pub is_reference: bool,
@@ -143,15 +144,13 @@ impl Sample {
     }
 
     pub fn get_reference_samples(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<Sample> {
-        let query = format!(
-            "select * from {} where is_reference = 1 order by name;",
-            Sample::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = Sample::select(conn)
+            .is_reference(true)
+            .order_by(SampleSelect::Name, Direction::Asc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        Sample::query(conn, &query, &params[..])
+        select.load()
     }
 
     pub fn get_sample_reference_block_groups(
@@ -292,30 +291,22 @@ impl Sample {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<BlockGroup> {
-        let query = format!(
-            "select * from {} where collection_name = :collection_name AND sample_name = :sample_name;",
-            BlockGroup::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
-            (":collection_name", &collection_name),
-            (":sample_name", &sample_name),
-        ];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        BlockGroup::query(conn, &query, &params[..])
+        select.load()
     }
 
     pub fn get_all_names(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<String> {
-        let query = format!(
-            "select * from {};",
-            Sample::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = Sample::select(conn);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        let samples = Sample::query(conn, &query, &params[..]);
+        let samples = select.load();
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
@@ -332,17 +323,13 @@ impl Sample {
         name: &str,
         history_ref: Option<&str>,
     ) -> Vec<Sample> {
-        let query = format!(
-            "select * from {}
-             where instr(lower(name), lower(:name)) > 0
-             order by name;",
-            Sample::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":name", &name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = Sample::select(conn)
+            .name_contains(name)
+            .order_by(SampleSelect::Name, Direction::Asc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        Sample::query(conn, &query, &params[..])
+        select.load()
     }
 }
 
@@ -418,12 +405,92 @@ mod tests {
             .unwrap();
         }
 
-        let matches = Sample::search_name(conn, "FoO", None)
+        let matches = Sample::select(conn)
+            .name_contains("FoO")
+            .order_by(SampleSelect::Name, Direction::CaseInsensitiveAsc)
+            .load()
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
 
-        assert_eq!(matches, vec!["BarFooBaz", "QuxFood", "foo"]);
+        assert_eq!(matches, vec!["BarFooBaz", "foo", "QuxFood"]);
+
+        let exact_matches = Sample::select(conn).name("foo").load();
+        assert_eq!(exact_matches.len(), 1);
+        assert_eq!(exact_matches[0].name, "foo");
+
+        let limited_matches = Sample::select(conn)
+            .name_contains("FoO")
+            .order_by(SampleSelect::Name, Direction::CaseInsensitiveDesc)
+            .limit(2)
+            .load()
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(limited_matches, vec!["QuxFood", "foo"]);
+    }
+
+    #[test]
+    fn test_search_supports_sort_and_pagination() {
+        let conn = &get_connection(None).unwrap();
+
+        for (sample, is_reference) in [
+            ("alpha", false),
+            ("BarFooBaz", true),
+            ("foo", true),
+            ("QuxFood", true),
+            ("zzz", false),
+        ] {
+            Sample::create(
+                conn,
+                NewSample {
+                    name: sample,
+                    is_reference,
+                },
+            )
+            .unwrap();
+        }
+
+        let matches = Sample::select(conn)
+            .name_contains("o")
+            .is_reference(true)
+            .order_by(SampleSelect::Name, Direction::CaseInsensitiveDesc)
+            .limit(2)
+            .offset(1)
+            .load()
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(matches, vec!["foo", "BarFooBaz"]);
+    }
+
+    #[test]
+    fn test_select_joins_related_model_selectors() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "join-test").unwrap();
+        create_bg(conn, "join-test", "sample-alpha", "target-group");
+        create_bg(conn, "join-test", "sample-beta", "other-group");
+        Sample::set_reference(conn, "sample-alpha", true).unwrap();
+
+        let samples = Sample::select(conn)
+            .name_contains("sample")
+            .join(BlockGroup::select(conn).name("target-group"))
+            .load()
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+        assert_eq!(samples, vec!["sample-alpha"]);
+
+        let block_groups = BlockGroup::select(conn)
+            .name_contains("group")
+            .join(Sample::select(conn).is_reference(true))
+            .load()
+            .into_iter()
+            .map(|block_group| block_group.name)
+            .collect::<Vec<_>>();
+        assert_eq!(block_groups, vec!["target-group"]);
     }
 
     #[test]
@@ -449,12 +516,36 @@ mod tests {
         )
         .expect("should create current sample");
 
-        let matches = Sample::search_name(conn, "foo", Some(&historical_ref))
+        let matches = Sample::select(conn)
+            .with_ref(&historical_ref)
+            .name_contains("foo")
+            .order_by(SampleSelect::Name, Direction::Asc)
+            .load()
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
 
         assert_eq!(matches, vec!["historical-foo"]);
+    }
+
+    #[test]
+    fn test_join_applies_history_ref_to_every_source() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "history-join").unwrap();
+        create_bg(conn, "history-join", "historical-sample", "matching-group");
+        let historical_commit =
+            commit_staged_all(conn, "add historical join rows").expect("should commit join rows");
+        create_bg(conn, "history-join", "current-sample", "matching-group");
+
+        let samples = Sample::select(conn)
+            .join(BlockGroup::select(conn).name("matching-group"))
+            .with_ref(historical_commit.to_string())
+            .load()
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(samples, vec!["historical-sample"]);
     }
 
     #[test]

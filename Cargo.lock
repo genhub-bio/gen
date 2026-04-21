@@ -1935,6 +1935,7 @@ dependencies = [
  "gen-capnp-schemas",
  "gen-core",
  "gen-graph",
+ "gen-models-macros",
  "include_dir",
  "indexmap",
  "intervaltree",
@@ -1955,6 +1956,15 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "gen-models-macros"
+version = "0.2.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]
