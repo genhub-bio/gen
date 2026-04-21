@@ -58,9 +58,12 @@ jobs:
       - name: Install system dependencies
         run: |
           brew install capnp llvm pkg-config sqlite
+          SQLITE_PREFIX="$(brew --prefix sqlite)"
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
           echo "LIBSQLITE3_SYS_USE_PKG_CONFIG=1" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$(brew --prefix sqlite)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=${SQLITE_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "SQLITE3_INCLUDE_DIR=${SQLITE_PREFIX}/include" >> "$GITHUB_ENV"
+          echo "SQLITE3_LIB_DIR=${SQLITE_PREFIX}/lib" >> "$GITHUB_ENV"
 
       - name: Install R package dependencies
         run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
@@ -147,7 +150,14 @@ jobs:
         run: |
           $version = (Select-String -Path gen-r/DESCRIPTION -Pattern '^Version: ' | Select-Object -First 1).ToString().Split(':')[1].Trim()
           $asset = "genr_${version}-windows-x86_64.zip"
-          $pkg = Get-ChildItem -Path . -Filter "genr_*.zip" | Select-Object -First 1
+          $pkg = Get-ChildItem -Path . -Recurse -File -Filter "genr_*.zip" | Select-Object -First 1
+          if ($null -eq $pkg) {
+            Write-Host "No Windows package artifact found. Files in workspace root:"
+            Get-ChildItem -Path . -Force
+            Write-Host "Candidate package files:"
+            Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Name -match '^genr_.*\.(zip|tar\.gz|tgz)$' } | Select-Object FullName
+            throw "Expected a genr_*.zip artifact after R CMD INSTALL --build gen-r"
+          }
           Move-Item $pkg.FullName $asset
           "ASSET_NAME=$asset" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
