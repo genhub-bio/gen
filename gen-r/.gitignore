@@ -1,6 +1,4 @@
 src/rust/target/
-src/Makevars
-src/Makevars.win
 *.tar.gz
 *.Rcheck
 .Rproj.user
