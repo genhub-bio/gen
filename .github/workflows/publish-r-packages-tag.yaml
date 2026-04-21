@@ -57,8 +57,10 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          brew install capnp llvm pkg-config
+          brew install capnp llvm pkg-config sqlite
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          echo "LIBSQLITE3_SYS_USE_PKG_CONFIG=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix sqlite)/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: Install R package dependencies
         run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
