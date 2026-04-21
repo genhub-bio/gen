@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "gen"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "anyhow",
  "base64",
@@ -1164,18 +1164,19 @@ dependencies = [
 
 [[package]]
 name = "gen-annotations"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "gen-core",
  "gen-graph",
  "gen-models",
  "interavl",
  "noodles",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gen-capnp-schemas"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "capnp",
  "capnpc",
@@ -1183,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "gen-core"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "capnp",
  "gen-capnp-schemas",
@@ -1202,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "gen-diff"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1216,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "gen-graph"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "gen-core",
  "interavl",
@@ -1228,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "anyhow",
  "cached",
@@ -1255,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "gen-python"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "flate2",
  "gen",
@@ -1274,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "gen-sugiyama"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "log",
  "petgraph",
@@ -1282,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "gen-tui"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "crossterm",
  "ftree",
