@@ -138,7 +138,7 @@ jobs:
 
       - name: Build Windows binary package
         shell: pwsh
-        run: R CMD INSTALL --build gen-r
+        run: cmd /c "R CMD INSTALL --build gen-r"
 
       - name: Rename Windows binary asset
         shell: pwsh
