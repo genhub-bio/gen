@@ -833,4 +833,120 @@ mod tests {
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
+
+    #[test]
+    fn test_update_before_start() {
+        /*
+        Graph after fasta update:
+        <start node> ----> ATCGA ------> TCGATCGATCGATCGGGAACACACAGAGA
+                    \---> AAAAAAAA ----/
+        */
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_path.push("fixtures/simple.fa");
+        let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_update_path.push("fixtures/aaaaaaaa.fa");
+
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        let _ = update_with_fasta(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123",
+            0,
+            5,
+            fasta_update_path.to_str().unwrap(),
+            false,
+        );
+
+        let expected_sequences = vec![
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            "AAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+        ];
+        let block_groups = BlockGroup::query(
+            conn,
+            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
+            rusqlite::params!(
+                SQLValue::from(collection),
+                SQLValue::from("child sample".to_string()),
+            ),
+        );
+        assert_eq!(block_groups.len(), 1);
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            HashSet::from_iter(expected_sequences),
+        );
+    }
+
+    #[test]
+    fn test_update_after_end() {
+        /*
+        Graph after fasta update:
+        ATCGATCGATCGATCGATCGGGAACACAC ---> AGAGA ------> <end node>
+                                     \---> AAAAAAAA ----/
+        */
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_path.push("fixtures/simple.fa");
+        let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fasta_update_path.push("fixtures/aaaaaaaa.fa");
+
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        let _ = update_with_fasta(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123",
+            29,
+            34,
+            fasta_update_path.to_str().unwrap(),
+            false,
+        );
+
+        let expected_sequences = vec![
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            "ATCGATCGATCGATCGATCGGGAACACACAAAAAAAA".to_string(),
+        ];
+        let block_groups = BlockGroup::query(
+            conn,
+            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
+            rusqlite::params!(
+                SQLValue::from(collection),
+                SQLValue::from("child sample".to_string()),
+            ),
+        );
+        assert_eq!(block_groups.len(), 1);
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            HashSet::from_iter(expected_sequences),
+        );
+    }
 }
