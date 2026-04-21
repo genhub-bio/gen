@@ -1109,6 +1109,7 @@ pub fn view_block_group(
             }
 
             is_loading = false;
+            continue;
         }
 
         // If an animation is running, wake up after tick_rate to advance it.
