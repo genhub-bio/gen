@@ -24,7 +24,10 @@ The current exported surface is intentionally small:
 ## Installation
 
 Install a prebuilt package from a tagged GitHub release. This is the supported
-end-user path and does not require Rust, cargo, `libclang`, or `capnp`.
+end-user path on macOS and Windows and does not require Rust, cargo,
+`libclang`, or `capnp`.
+
+On macOS and Windows, install the published R package binary:
 
 ```r
 install.packages("remotes")
@@ -50,8 +53,8 @@ remotes::install_url(sprintf(
 ))
 ```
 
-If you need to build from source for development, install Rust/cargo,
-`libclang`, and `capnp`, then use:
+Linux installs currently require a source build. For development or Linux,
+install Rust/cargo, `libclang`, and `capnp`, then use:
 
 ```r
 remotes::install_github("genhub-bio/gen", subdir = "gen-r", ref = "v0.1.31")

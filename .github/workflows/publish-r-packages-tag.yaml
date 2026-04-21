@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - gen-r
   workflow_dispatch:
     inputs:
       git_ref:
