@@ -136,16 +136,21 @@ jobs:
         run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
 
       - name: Build Windows binary package
-        shell: pwsh
+        shell: cmd
         run: |
-          cmd /c "R CMD build gen-r"
-          $src = Get-ChildItem -Path . -Recurse -File -Filter "genr_*.tar.gz" | Select-Object -First 1
-          if ($null -eq $src) {
-            Write-Host "No source tarball found after R CMD build."
-            Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Name -match '^genr_.*\.(tar\.gz|zip)$' } | Select-Object FullName
-            throw "Expected a genr_*.tar.gz artifact after R CMD build gen-r"
-          }
-          cmd /c "R CMD INSTALL --build `"$($src.FullName)`""
+          where R
+          R --version
+          R CMD build gen-r
+          if errorlevel 1 exit /b 1
+          dir /s /b genr_*.tar.gz
+          for /f "delims=" %%F in ('dir /s /b genr_*.tar.gz') do set SRC_TARBALL=%%F
+          if not defined SRC_TARBALL (
+            echo No source tarball found after R CMD build.
+            dir /s /b genr_*.*
+            exit /b 1
+          )
+          R CMD INSTALL --build "%SRC_TARBALL%"
+          if errorlevel 1 exit /b 1
 
       - name: Rename Windows binary asset
         shell: pwsh
