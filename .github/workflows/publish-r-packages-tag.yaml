@@ -140,16 +140,7 @@ jobs:
         run: |
           where R
           R --version
-          R CMD build gen-r
-          if errorlevel 1 exit /b 1
-          dir /s /b genr_*.tar.gz
-          for /f "delims=" %%F in ('dir /s /b genr_*.tar.gz') do set SRC_TARBALL=%%F
-          if not defined SRC_TARBALL (
-            echo No source tarball found after R CMD build.
-            dir /s /b genr_*.*
-            exit /b 1
-          )
-          R CMD INSTALL --build "%SRC_TARBALL%"
+          R CMD INSTALL --build gen-r
           if errorlevel 1 exit /b 1
 
       - name: Rename Windows binary asset
