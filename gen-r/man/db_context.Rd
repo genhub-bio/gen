@@ -14,7 +14,11 @@ A named list with \code{workspace_path} and \code{db_path}.
 }
 \description{
 Validates that Gen can open the workspace and target database, then returns the
-resolved workspace and database paths.
+resolved workspace and database paths. \code{DbContext()} wraps this result in a
+\code{gen_db_context} object for convenience.
+}
+\seealso{
+\code{\link{DbContext}}, \code{\link{get_gen_dir}}, \code{\link{Repository}}
 }
 \examples{
 \dontrun{
@@ -25,5 +29,6 @@ on.exit(setwd(old), add = TRUE)
 
 init()
 db_context()
+DbContext()
 }
 }

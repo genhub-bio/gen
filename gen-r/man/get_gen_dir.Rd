@@ -9,7 +9,8 @@ A character scalar containing the path to the active \code{.gen} directory.
 }
 \description{
 Returns the path to the current workspace's \code{.gen} directory, creating it
-if needed.
+if needed. This is the same workspace directory used by \code{\link{init}} and
+\code{\link{Repository}}.
 }
 \examples{
 \dontrun{

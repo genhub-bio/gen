@@ -8,7 +8,9 @@ init()
 A character scalar confirming that the Gen workspace was initialized.
 }
 \description{
-Initialises a \code{.gen/} workspace in the current working directory.
+Initialises a \code{.gen/} workspace in the current working directory. This
+creates the metadata directory used by the higher-level import, update, export,
+and repository helpers.
 }
 \examples{
 \dontrun{
