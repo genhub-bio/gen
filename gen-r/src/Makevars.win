@@ -1,7 +1,8 @@
+RUST_TARGET = x86_64-pc-windows-gnu
 TARGET_DIR = ./rust/target
-LIBDIR = $(TARGET_DIR)/release
+LIBDIR = $(TARGET_DIR)/$(RUST_TARGET)/release
 STATLIB = $(LIBDIR)/libgenr.a
-PKG_LIBS += $(abspath $(STATLIB))
+PKG_LIBS += -L$(abspath $(LIBDIR)) -lgenr
 
 all: $(SHLIB)
 
@@ -10,7 +11,7 @@ all: $(SHLIB)
 $(SHLIB): $(STATLIB)
 
 $(STATLIB):
-	cargo build --release --lib --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
+	cargo build --release --lib --target $(RUST_TARGET) --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
 
 clean:
 	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR)
