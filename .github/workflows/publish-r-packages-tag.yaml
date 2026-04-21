@@ -57,13 +57,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          brew install capnp llvm pkg-config sqlite
-          SQLITE_PREFIX="$(brew --prefix sqlite)"
-          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
-          echo "LIBSQLITE3_SYS_USE_PKG_CONFIG=1" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=${SQLITE_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
-          echo "SQLITE3_INCLUDE_DIR=${SQLITE_PREFIX}/include" >> "$GITHUB_ENV"
-          echo "SQLITE3_LIB_DIR=${SQLITE_PREFIX}/lib" >> "$GITHUB_ENV"
+          brew install capnp
 
       - name: Install R package dependencies
         run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
@@ -143,7 +137,15 @@ jobs:
 
       - name: Build Windows binary package
         shell: pwsh
-        run: cmd /c "R CMD INSTALL --build gen-r"
+        run: |
+          cmd /c "R CMD build gen-r"
+          $src = Get-ChildItem -Path . -Recurse -File -Filter "genr_*.tar.gz" | Select-Object -First 1
+          if ($null -eq $src) {
+            Write-Host "No source tarball found after R CMD build."
+            Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Name -match '^genr_.*\.(tar\.gz|zip)$' } | Select-Object FullName
+            throw "Expected a genr_*.tar.gz artifact after R CMD build gen-r"
+          }
+          cmd /c "R CMD INSTALL --build `"$($src.FullName)`""
 
       - name: Rename Windows binary asset
         shell: pwsh
