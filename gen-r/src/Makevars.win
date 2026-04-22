@@ -2,7 +2,7 @@ RUST_TARGET = x86_64-pc-windows-gnu
 TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/$(RUST_TARGET)/release
 STATLIB = $(LIBDIR)/libgenr.a
-PKG_LIBS += -L$(abspath $(LIBDIR)) -lgenr
+PKG_LIBS += -L$(abspath $(LIBDIR)) -lgenr -lbcrypt -lntdll
 
 all: $(SHLIB)
 
