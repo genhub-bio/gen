@@ -157,16 +157,22 @@ jobs:
       - name: Capture built package path
         shell: pwsh
         run: |
-          $version = (Select-String -Path gen-r/DESCRIPTION -Pattern '^Version: ' | Select-Object -First 1).ToString().Split(':')[1].Trim()
-          $pkg = Get-ChildItem -Path . -Filter ("genr_{0}.zip" -f $version) | Select-Object -First 1
+          $pkg = Get-ChildItem -Path . -Filter 'genr_*.zip' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
           if (-not $pkg) {
-            throw "Could not find built package genr_$version.zip in $PWD"
+            throw "Could not find built package matching genr_*.zip in $PWD"
           }
+
+          if ($pkg.Name -notmatch '^genr_(.+)\.zip$') {
+            throw "Built package name did not match expected pattern: $($pkg.Name)"
+          }
+
+          $version = $matches[1]
 
           "GENR_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "GENR_PKG=$($pkg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+          Write-Host "Version: $version"
           Write-Host "Built package: $($pkg.FullName)"
 
       - name: Smoke test Windows binary package
