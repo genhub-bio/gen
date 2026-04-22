@@ -577,7 +577,7 @@ mod tests {
             context,
             BufReader::new(file),
             Some("fixtures"),
-            Some(sample_name),
+            sample_name,
             OperationInfo {
                 files: vec![OperationFile {
                     file_path: path.to_str().unwrap().to_string(),
@@ -715,7 +715,7 @@ mod tests {
                 .any(|annotation| annotation.name == "ori")
         );
 
-        let block_group = Sample::get_block_groups(conn, "fixtures", Some("puc19-sample"))
+        let block_group = Sample::get_block_groups(conn, "fixtures", "puc19-sample")
             .into_iter()
             .next()
             .unwrap();
