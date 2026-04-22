@@ -17,4 +17,4 @@ jobs:
       - name: Build Docker install test image
         run: |
           docker build -f gen-r/Dockerfile -t gen-r-install-test .
-          docker run --rm -it gen-r-install-test
+          docker run --rm gen-r-install-test
