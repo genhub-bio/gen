@@ -1,16 +1,19 @@
 library(genr)
 
 local_fixture_root <- function() {
-  # Prefer fixtures bundled with the R package tests, and fall back to the
-  # repository-level fixtures when the tests are run from the repo root.
+  # Prefer fixtures bundled next to the testthat directory, independent of the
+  # process working directory. Fall back to common CI checkout locations.
   candidates <- c(
+    tryCatch(testthat::test_path("..", "fixtures"), error = function(...) NA_character_),
+    file.path(Sys.getenv("GITHUB_WORKSPACE", unset = ""), "gen-r", "tests", "fixtures"),
+    file.path(Sys.getenv("GITHUB_WORKSPACE", unset = ""), "tests", "fixtures"),
     file.path("gen-r", "tests", "fixtures"),
     file.path("tests", "fixtures"),
     file.path("fixtures")
   )
 
   for (candidate in candidates) {
-    if (dir.exists(candidate)) {
+    if (!is.na(candidate) && nzchar(candidate) && dir.exists(candidate)) {
       return(normalizePath(candidate, mustWork = TRUE))
     }
   }
