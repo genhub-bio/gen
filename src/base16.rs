@@ -94,6 +94,14 @@ impl Base16Palette {
             .extract::<Base16Palette>()
             .map_err(Base16PaletteError::ExtractionFailed)
     }
+
+    #[allow(clippy::result_large_err)]
+    pub fn from_yaml_str(contents: &str) -> Result<Self, Base16PaletteError> {
+        Figment::new()
+            .merge(Yaml::string(contents))
+            .extract::<Base16Palette>()
+            .map_err(Base16PaletteError::ExtractionFailed)
+    }
 }
 
 fn deserialize_from_str<'de, D>(deserializer: D) -> Result<Color, D::Error>

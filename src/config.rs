@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, string::ToString, sync::RwLock};
+use std::{env, string::ToString, sync::RwLock};
 
 use itertools::iproduct;
 use once_cell::sync::Lazy;
@@ -7,11 +7,22 @@ use ratatui::style::Color;
 use crate::base16::Base16Palette;
 
 // Color theme support
-fn get_theme_path() -> &'static str {
+enum Theme {
+    Dark,
+    Light,
+}
+
+fn get_theme() -> Theme {
     match env::var("GEN_THEME").ok().as_deref() {
-        Some("dark") => "config/mocha.yaml",
-        Some("light") => "config/latte.yaml",
-        _ => "config/mocha.yaml",
+        Some("light") => Theme::Light,
+        _ => Theme::Dark,
+    }
+}
+
+fn get_theme_yaml() -> &'static str {
+    match get_theme() {
+        Theme::Dark => include_str!("../config/mocha.yaml"),
+        Theme::Light => include_str!("../config/latte.yaml"),
     }
 }
 
@@ -49,8 +60,7 @@ pub fn html_to_ansi_color(html_code: &str) -> Color {
 }
 
 pub static PALETTE: Lazy<RwLock<Base16Palette>> = Lazy::new(|| {
-    let palette_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(get_theme_path());
-    let mut palette = Base16Palette::from_yaml(palette_path).expect("Failed to load theme");
+    let mut palette = Base16Palette::from_yaml_str(get_theme_yaml()).expect("Failed to load theme");
 
     // If the terminal does not support truecolor, convert to ansi colors
     // (The mac os terminal degrades poorly when presented with truecolor)
