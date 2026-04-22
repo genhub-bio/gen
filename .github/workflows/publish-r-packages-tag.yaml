@@ -182,7 +182,7 @@ jobs:
             throw "Missing built package: $env:GENR_PKG"
           }
 
-          Rscript -e "install.packages(commandArgs(TRUE)[1], repos = NULL, type = 'win.binary'); library(testthat); test_dir('gen-r/tests/testthat')" $env:GENR_PKG
+          Rscript -e "install.packages(commandArgs(TRUE)[1], repos = NULL, type = 'win.binary'); library(testthat); testthat::test_dir('gen-r/tests/testthat')" $env:GENR_PKG
 
       - name: Prepare renamed artifact
         shell: pwsh
