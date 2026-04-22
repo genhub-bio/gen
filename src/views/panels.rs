@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
-use crate::{config::get_theme_color, views::helpers::style_text};
+use crate::{theme::get_theme_color, views::helpers::style_text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusMode {

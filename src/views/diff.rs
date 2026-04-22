@@ -13,7 +13,7 @@ use ratatui::{
 };
 
 use crate::{
-    config::get_theme_color,
+    theme::get_theme_color,
     views::{
         diff_graph::{
             DiffGraphComponent, apply_diff_highlights, block_group_label,

@@ -22,7 +22,6 @@ use r#gen::{
         },
         remote::handle_remote_command,
     },
-    config,
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection, operation_management,
     operation_management::{parse_patch_operations, pull, push},
