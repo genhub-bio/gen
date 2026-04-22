@@ -18,12 +18,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /work/gen
 
-COPY . .
+COPY Cargo.toml Cargo.lock LICENSE ./
+COPY config ./config
+COPY src ./src
+COPY gen-core ./gen-core
+COPY gen-diff ./gen-diff
+COPY gen-graph ./gen-graph
+COPY gen-models ./gen-models
+COPY gen-tui ./gen-tui
+COPY gen-sugiyama ./gen-sugiyama
+COPY gen-annotations ./gen-annotations
+COPY gen-capnp-schemas ./gen-capnp-schemas
+COPY gen-r ./gen-r
 
 RUN Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
 
 RUN R CMD INSTALL gen-r
 
-RUN Rscript -e "library(testthat); testthat::test_dir('gen-r/tests/testthat')"
-
-CMD ["Rscript", "-e", "library(genr); sessionInfo()"]
+CMD ["Rscript", "-e", "library(testthat); testthat::test_dir('gen-r/tests/testthat')"]

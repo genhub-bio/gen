@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - "v*"
-    branches:
-      - gen-r
   workflow_dispatch:
     inputs:
       git_ref:
@@ -30,9 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
-            asset_suffix: macos-x86_64
-          - os: macos-14
+          - os: macos-15
             asset_suffix: macos-arm64
 
     steps:

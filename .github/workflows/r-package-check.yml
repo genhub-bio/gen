@@ -15,4 +15,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker install test image
-        run: docker build -f gen-r/Dockerfile -t gen-r-install-test .
+        run: |
+          docker build -f gen-r/Dockerfile -t gen-r-install-test .
+          docker run --rm -it gen-r-install-test
