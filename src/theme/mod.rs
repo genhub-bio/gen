@@ -4,7 +4,9 @@ use itertools::iproduct;
 use once_cell::sync::Lazy;
 use ratatui::style::Color;
 
-use crate::base16::Base16Palette;
+mod base16;
+
+use base16::Base16Palette;
 
 // Color theme support
 enum Theme {
@@ -21,8 +23,8 @@ fn get_theme() -> Theme {
 
 fn get_theme_yaml() -> &'static str {
     match get_theme() {
-        Theme::Dark => include_str!("../theme/mocha.yaml"),
-        Theme::Light => include_str!("../theme/latte.yaml"),
+        Theme::Dark => include_str!("../../theme/mocha.yaml"),
+        Theme::Light => include_str!("../../theme/latte.yaml"),
     }
 }
 
