@@ -4,13 +4,14 @@ use std::{
 };
 
 use gb_io::seq::{Feature, Location, Seq};
+use gen_core::Strand;
 use gen_models::{annotations::AnnotationError, errors::OperationError};
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
 
 use crate::normalize_string;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum GenBankError {
     #[error("Feature Location Error: {0}")]
     LocationError(&'static str),
@@ -26,25 +27,6 @@ pub enum GenBankError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Regex Error: {0}")]
     Regex(#[from] RegexError),
-}
-
-impl PartialEq for GenBankError {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (GenBankError::LocationError(a), GenBankError::LocationError(b)) => a == b,
-            (GenBankError::ParseError(a), GenBankError::ParseError(b)) => a == b,
-            (GenBankError::LookupError(a), GenBankError::LookupError(b)) => a == b,
-            (GenBankError::OperationError(a), GenBankError::OperationError(b)) => a == b,
-            (GenBankError::AnnotationError(a), GenBankError::AnnotationError(b)) => {
-                a.to_string() == b.to_string()
-            }
-            (GenBankError::DatabaseError(a), GenBankError::DatabaseError(b)) => {
-                a.to_string() == b.to_string()
-            }
-            (GenBankError::Regex(a), GenBankError::Regex(b)) => a.to_string() == b.to_string(),
-            _ => false,
-        }
-    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -92,6 +74,7 @@ pub struct GenBankEdit {
 pub struct GenBankAnnotationSegment {
     pub start: i64,
     pub end: i64,
+    pub strand: Strand,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -176,6 +159,7 @@ fn merge_annotation_segments(
             continue;
         }
         if let Some(last) = merged.last_mut()
+            && last.strand == segment.strand
             && segment.start >= last.start
             && segment.start <= last.end
         {
@@ -187,32 +171,43 @@ fn merge_annotation_segments(
     merged
 }
 
-fn annotation_segments_for_location(location: &Location) -> Vec<GenBankAnnotationSegment> {
+fn annotation_segments_for_location_with_strand(
+    location: &Location,
+    strand: Strand,
+) -> Vec<GenBankAnnotationSegment> {
     match location {
         Location::Range((start, _), (end, _)) => vec![GenBankAnnotationSegment {
             start: *start,
             end: *end,
+            strand,
         }],
         Location::Between(start, end) => vec![GenBankAnnotationSegment {
             start: *start,
             end: end + 1,
+            strand,
         }],
-        Location::Complement(inner) => annotation_segments_for_location(inner),
+        Location::Complement(inner) => {
+            annotation_segments_for_location_with_strand(inner, Strand::Reverse)
+        }
         Location::Join(locations)
         | Location::Order(locations)
         | Location::Bond(locations)
         | Location::OneOf(locations) => merge_annotation_segments(
             locations
                 .iter()
-                .flat_map(annotation_segments_for_location)
+                .flat_map(|location| annotation_segments_for_location_with_strand(location, strand))
                 .collect(),
         ),
         Location::External(_, maybe_location) => maybe_location
             .as_deref()
-            .map(annotation_segments_for_location)
+            .map(|location| annotation_segments_for_location_with_strand(location, strand))
             .unwrap_or_default(),
         Location::Gap(_) => vec![],
     }
+}
+
+fn annotation_segments_for_location(location: &Location) -> Vec<GenBankAnnotationSegment> {
+    annotation_segments_for_location_with_strand(location, Strand::Forward)
 }
 
 fn annotation_for_feature(feature: &Feature) -> Option<GenBankAnnotation> {
@@ -221,12 +216,12 @@ fn annotation_for_feature(feature: &Feature) -> Option<GenBankAnnotation> {
         return None;
     }
 
+    // See https://www.insdc.org/submitting-standards/feature-table/#7.3.1 for feature qualifiers
     let name = feature_qualifier_value(feature, "label")
         .or_else(|| feature_qualifier_value(feature, "gene"))
+        .or_else(|| feature_qualifier_value(feature, "protein_id"))
         .or_else(|| feature_qualifier_value(feature, "product"))
         .or_else(|| feature_qualifier_value(feature, "note"))
-        .or_else(|| feature_qualifier_value(feature, "bound_moiety"))
-        .or_else(|| feature_qualifier_value(feature, "organism"))
         .unwrap_or_else(|| feature.kind.as_ref().to_string());
 
     Some(GenBankAnnotation { name, segments })
@@ -311,6 +306,7 @@ mod tests {
     use std::path::PathBuf;
 
     use gb_io::reader;
+    use gen_core::Strand;
     use noodles::fasta;
 
     use super::*;
@@ -386,5 +382,26 @@ mod tests {
             );
         }
         assert_eq!(wt_sequence, seq.sequence);
+    }
+
+    #[test]
+    fn test_preserves_reverse_strand_annotations() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
+        let mut records = reader::parse_file(&path).unwrap();
+        let seq = process_sequence(records.remove(0)).unwrap();
+
+        let annotation = seq
+            .annotations
+            .iter()
+            .find(|annotation| annotation.name == "M13 Forward")
+            .unwrap();
+        assert_eq!(
+            annotation.segments,
+            vec![GenBankAnnotationSegment {
+                start: 688,
+                end: 706,
+                strand: Strand::Reverse,
+            }]
+        );
     }
 }

@@ -58,6 +58,7 @@ struct NodeSequenceSegment {
     node_id: HashId,
     sequence_start: i64,
     sequence_end: i64,
+    strand: Strand,
 }
 
 struct LocusAnnotationImport<'a> {
@@ -181,6 +182,7 @@ fn merge_node_sequence_segments(segments: Vec<NodeSequenceSegment>) -> Vec<NodeS
         }
         if let Some(last) = merged.last_mut()
             && last.node_id == segment.node_id
+            && last.strand == segment.strand
             && segment.sequence_start >= last.sequence_start
             && segment.sequence_start <= last.sequence_end
         {
@@ -216,6 +218,7 @@ fn map_annotation_segments(
                         node_id: final_segment.node_id,
                         sequence_start: segment_start,
                         sequence_end: segment_end,
+                        strand: annotation_segment.strand,
                     })
                 })
             })
@@ -241,7 +244,7 @@ fn create_accession_for_segments(
         source_strand: Strand::Forward,
         target_node_id: first.node_id,
         target_coordinate: first.sequence_start,
-        target_strand: Strand::Forward,
+        target_strand: first.strand,
         chromosome_index: 0,
     });
 
@@ -251,10 +254,10 @@ fn create_accession_for_segments(
         edges.push(AccessionEdgeData {
             source_node_id: current.node_id,
             source_coordinate: current.sequence_end,
-            source_strand: Strand::Forward,
+            source_strand: current.strand,
             target_node_id: next.node_id,
             target_coordinate: next.sequence_start,
-            target_strand: Strand::Forward,
+            target_strand: next.strand,
             chromosome_index: 0,
         });
     }
@@ -263,7 +266,7 @@ fn create_accession_for_segments(
     edges.push(AccessionEdgeData {
         source_node_id: last.node_id,
         source_coordinate: last.sequence_end,
-        source_strand: Strand::Forward,
+        source_strand: last.strand,
         target_node_id: PATH_END_NODE_ID,
         target_coordinate: -1,
         target_strand: Strand::Forward,
@@ -733,6 +736,15 @@ mod tests {
 
         let spans =
             load_annotations_for_group(conn, &groups[0].name, &visible_ranges_by_node).unwrap();
+        let m13_forward = spans
+            .iter()
+            .find(|annotation| annotation.name == "M13 Forward")
+            .unwrap();
+        assert_eq!(m13_forward.segments.len(), 1);
+        assert_eq!(m13_forward.segments[0].start, 688);
+        assert_eq!(m13_forward.segments[0].end, 706);
+        assert_eq!(m13_forward.segments[0].strand, Strand::Reverse);
+
         let ori = spans
             .iter()
             .find(|annotation| annotation.name == "ori")
