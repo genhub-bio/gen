@@ -142,8 +142,24 @@ jobs:
         run: |
           where R
           R --version
+          echo BEFORE
+          dir gen-r\src\rust
+          dir gen-r\src\rust\target
+          dir gen-r\src\rust\target\release
+          dir gen-r\src\rust\target\release\deps
           R CMD INSTALL --build gen-r
-          if errorlevel 1 exit /b 1
+          if errorlevel 1 (
+            echo AFTER FAILURE
+            dir gen-r\src\rust
+            dir gen-r\src\rust\target
+            dir gen-r\src\rust\target\release
+            dir gen-r\src\rust\target\release\deps
+            exit /b 1
+          )
+
+          echo AFTER SUCCESS
+          dir gen-r\src\rust\target\release
+          dir gen-r\src\rust\target\release\deps
 
       - name: Rename Windows binary asset
         shell: pwsh
