@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /work/gen
 
 COPY Cargo.toml Cargo.lock LICENSE ./
-COPY config ./config
+COPY theme ./theme
 COPY src ./src
 COPY gen-core ./gen-core
 COPY gen-diff ./gen-diff
