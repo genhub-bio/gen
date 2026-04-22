@@ -12,7 +12,7 @@ use ratatui::{
     style::{Color, Style},
 };
 
-use crate::{config::get_theme_color, views::gen_graph_widget::GenGraphNodeSizer};
+use crate::{theme::get_theme_color, views::gen_graph_widget::GenGraphNodeSizer};
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSegment {

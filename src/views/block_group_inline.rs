@@ -21,7 +21,7 @@ use ratatui::{
 };
 
 use crate::{
-    config::get_theme_color,
+    theme::get_theme_color,
     views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
 };
 

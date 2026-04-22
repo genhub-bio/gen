@@ -7,7 +7,7 @@ repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
 include = [
-  "/config",
+  "/theme",
   "/src",
   "/LICENSE",
 ]

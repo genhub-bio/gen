@@ -24,7 +24,7 @@ use rusqlite::params;
 use tui_widget_list::{ListBuilder, ListState, ListView, hit_test::Hit};
 
 use crate::{
-    config::get_theme_color,
+    theme::get_theme_color,
     views::{
         annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
         annotation_groups::{AnnotationGroupEntry, load_annotation_group_entries},

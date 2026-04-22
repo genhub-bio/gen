@@ -7,7 +7,6 @@ use std::{
 };
 pub mod base16;
 pub mod commands;
-pub mod config;
 pub mod diffs;
 pub mod errors;
 pub mod exports;
@@ -26,6 +25,7 @@ pub mod patch;
 mod progress_bar;
 #[cfg(any(test, debug_assertions))]
 pub mod test_helpers;
+pub mod theme;
 pub mod updates;
 pub mod views;
 

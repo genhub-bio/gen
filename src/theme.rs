@@ -21,8 +21,8 @@ fn get_theme() -> Theme {
 
 fn get_theme_yaml() -> &'static str {
     match get_theme() {
-        Theme::Dark => include_str!("../config/mocha.yaml"),
-        Theme::Light => include_str!("../config/latte.yaml"),
+        Theme::Dark => include_str!("../theme/mocha.yaml"),
+        Theme::Light => include_str!("../theme/latte.yaml"),
     }
 }
 

@@ -13,7 +13,7 @@ use gen_tui::{
 };
 use ratatui::style::{Color, Style};
 
-use crate::config::get_theme_color;
+use crate::theme::get_theme_color;
 
 /// Labels for special start/end nodes
 pub mod label {
