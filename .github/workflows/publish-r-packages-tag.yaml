@@ -142,49 +142,61 @@ jobs:
         run: |
           where R
           R --version
-          echo BEFORE
-          dir gen-r\src\rust
-          dir gen-r\src\rust\target
-          dir gen-r\src\rust\target\release
-          dir gen-r\src\rust\target\release\deps
           R CMD INSTALL --build gen-r
           if errorlevel 1 (
-            echo AFTER FAILURE
-            dir gen-r\src\rust
-            dir gen-r\src\rust\target
-            dir gen-r\src\rust\target\release
-            dir gen-r\src\rust\target\release\deps
             exit /b 1
           )
 
-          echo AFTER SUCCESS
-          dir gen-r\src\rust\target\release
-          dir gen-r\src\rust\target\release\deps
+      - name: Debug built files
+        shell: pwsh
+        run: |
+          Write-Host "PWD: $PWD"
+          Get-ChildItem .
+          if (Test-Path dist) { Get-ChildItem dist }
 
-      - name: Rename Windows binary asset
+      - name: Capture built package path
         shell: pwsh
         run: |
           $version = (Select-String -Path gen-r/DESCRIPTION -Pattern '^Version: ' | Select-Object -First 1).ToString().Split(':')[1].Trim()
-          $asset = "genr_${version}-windows-x86_64.zip"
-          $pkg = Get-ChildItem -Path . -Recurse -File -Filter "genr_*.zip" | Select-Object -First 1
-          if ($null -eq $pkg) {
-            Write-Host "No Windows package artifact found. Files in workspace root:"
-            Get-ChildItem -Path . -Force
-            Write-Host "Candidate package files:"
-            Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Name -match '^genr_.*\.(zip|tar\.gz|tgz)$' } | Select-Object FullName
-            throw "Expected a genr_*.zip artifact after R CMD INSTALL --build gen-r"
+          $pkg = Get-ChildItem -Path . -Filter "genr_$version.zip" | Select-Object -First 1
+
+          if (-not $pkg) {
+            throw "Could not find built package genr_$version.zip in $PWD"
           }
-          Move-Item $pkg.FullName $asset
-          "ASSET_NAME=$asset" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          "GENR_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "GENR_PKG=$($pkg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "Built package: $($pkg.FullName)"
 
       - name: Smoke test Windows binary package
         shell: pwsh
-        run: Rscript -e "install.packages(commandArgs(TRUE)[1], repos = NULL, type = 'win.binary'); library(testthat); test_dir('gen-r/tests/testthat')" $env:ASSET_NAME
+        run: |
+          if (-not (Test-Path $env:GENR_PKG)) {
+            throw "Missing built package: $env:GENR_PKG"
+          }
+
+          Rscript -e "install.packages(commandArgs(TRUE)[1], repos = NULL, type = 'win.binary'); library(testthat); test_dir('gen-r/tests/testthat')" $env:GENR_PKG
+
+      - name: Prepare renamed artifact
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:GENR_PKG)) {
+            throw "Missing built package before artifact prep: $env:GENR_PKG"
+          }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $asset = Join-Path (Resolve-Path dist) "genr-windows-$env:GENR_VERSION.zip"
+
+          Copy-Item -LiteralPath $env:GENR_PKG -Destination $asset -Force
+          "ASSET_NAME=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "Prepared artifact: $asset"
 
       - name: Upload Windows binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ASSET_NAME }}
+          name: windows-binary
           path: ${{ env.ASSET_NAME }}
           if-no-files-found: error
 
