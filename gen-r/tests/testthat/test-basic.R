@@ -1,10 +1,25 @@
 library(genr)
 
-fixture_path <- function(...) {
-  normalizePath(
-    file.path(Sys.getenv("PWD"), "fixtures", ...),
-    mustWork = TRUE
+local_fixture_root <- function() {
+  # Prefer fixtures bundled with the R package tests, and fall back to the
+  # repository-level fixtures when the tests are run from the repo root.
+  candidates <- c(
+    file.path("gen-r", "tests", "fixtures"),
+    file.path("tests", "fixtures"),
+    file.path("fixtures")
   )
+
+  for (candidate in candidates) {
+    if (dir.exists(candidate)) {
+      return(normalizePath(candidate, mustWork = TRUE))
+    }
+  }
+
+  stop("Could not locate test fixtures for genr.", call. = FALSE)
+}
+
+fixture_path <- function(...) {
+  normalizePath(file.path(local_fixture_root(), ...), mustWork = TRUE)
 }
 
 with_workspace <- function(prefix, code) {
@@ -73,7 +88,7 @@ test_that("constructors and workspace bindings work", {
     expect_type(ctx_plain, "list")
     expect_s3_class(ctx_object, "gen_db_context")
     expect_equal(normalizePath(ctx_plain$workspace_path, mustWork = FALSE), workspace)
-    expect_match(ctx_plain$db_path, "\\.gen/default\\.db$")
+    expect_match(ctx_plain$db_path, "\\.gen[\\\\/]default\\.db$")
     expect_equal(
       normalizePath(get_gen_dir(), mustWork = FALSE),
       normalizePath(file.path(workspace, ".gen"), mustWork = FALSE)
@@ -390,7 +405,7 @@ test_that("low-level helper bindings are directly callable", {
       normalizePath(genr:::repo_get_gen_dir(NULL), mustWork = FALSE),
       normalizePath(file.path(workspace, ".gen"), mustWork = FALSE)
     )
-    expect_match(genr:::repo_get_db_path(NULL), "\\.gen/default\\.db$")
+    expect_match(genr:::repo_get_db_path(NULL), "\\.gen[\\\\/]default\\.db$")
 
     genr:::repo_execute(db_path, "CREATE TABLE IF NOT EXISTS low_level_smoke (id INTEGER)")
     genr:::repo_execute(db_path, "INSERT INTO low_level_smoke (id) VALUES (7)")

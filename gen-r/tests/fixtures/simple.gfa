@@ -1,0 +1,9 @@
+H	VN:Z:1.2
+S	1	ATC	SN:Z:m123	SO:i:0	SR:i:0
+S	2	GATCGATCGA	SN:Z:m123	SO:i:3	SR:i:0
+S	3	TCGATCGGG	SN:Z:m123	SO:i:13	SR:i:0
+S	4	AACACACAGAGA	SN:Z:m123	SO:i:22	SR:i:0
+L	1	+	2	+	*
+L	2	+	3	+	*
+L	3	+	4	+	*
+P	m123	1+,2+,3+,4+	4M

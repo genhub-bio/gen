@@ -1,0 +1,14 @@
+##fileformat=VCFv4.1
+##filedate=Tue Sep  4 13:12:57 2018
+##reference=simple.fa
+##contig=<ID=m123,length=34>
+##phasing=none
+##INFO=<ID=GAN,Number=1,Type=String,Description="Accession name for Gen">
+##INFO=<ID=GAA,Number=1,Type=Integer,Description="Allele to create accession for. Defaults to reference allele (0).">
+##INFO=<ID=TYPE,Number=A,Type=String,Description="The type of allele, either snp, mnp, ins, del, or complex.">
+##filter="QUAL > 1"
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	unknown	G1	foo
+m123	3	.	CG	C	1611.92	.	GAN=del1;GAA=1;TYPE=del	GT	1/1	.	1/1
+m123	10	.	T	TAGA	2216.6	.	TYPE=ins	GT	1/1	.	0/0
