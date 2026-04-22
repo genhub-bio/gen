@@ -18,8 +18,10 @@ local_fixture_root <- function() {
   stop("Could not locate test fixtures for genr.", call. = FALSE)
 }
 
+fixture_root <- local_fixture_root()
+
 fixture_path <- function(...) {
-  normalizePath(file.path(local_fixture_root(), ...), mustWork = TRUE)
+  normalizePath(file.path(fixture_root, ...), mustWork = TRUE)
 }
 
 with_workspace <- function(prefix, code) {
