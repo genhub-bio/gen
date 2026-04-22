@@ -158,7 +158,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Select-String -Path gen-r/DESCRIPTION -Pattern '^Version: ' | Select-Object -First 1).ToString().Split(':')[1].Trim()
-          $pkg = Get-ChildItem -Path . -Filter "genr_$version.zip" | Select-Object -First 1
+          $pkg = Get-ChildItem -Path . -Filter ("genr_{0}.zip" -f $version) | Select-Object -First 1
 
           if (-not $pkg) {
             throw "Could not find built package genr_$version.zip in $PWD"
@@ -186,7 +186,7 @@ jobs:
           }
 
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $asset = Join-Path (Resolve-Path dist) "genr-windows-$env:GENR_VERSION.zip"
+          $asset = Join-Path (Resolve-Path dist) ("genr-windows-{0}.zip" -f $env:GENR_VERSION)
 
           Copy-Item -LiteralPath $env:GENR_PKG -Destination $asset -Force
           "ASSET_NAME=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
