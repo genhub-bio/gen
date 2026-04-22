@@ -12,6 +12,9 @@ $(SHLIB): $(STATLIB)
 
 $(STATLIB):
 	cargo build --release --lib --target $(RUST_TARGET) --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
+	dir .\rust\target\release
+	dir .\rust\target\release\deps
+	dir $(LIBDIR)
 
 clean:
 	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR)

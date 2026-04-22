@@ -22,83 +22,83 @@ env:
   RELEASE_NAME: ${{ github.event.inputs.release_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
-  build-macos:
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-13
-            asset_suffix: macos-x86_64
-          - os: macos-14
-            asset_suffix: macos-arm64
+  # build-macos:
+  #   runs-on: ${{ matrix.os }}
+  #   permissions:
+  #     contents: write
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include:
+  #         - os: macos-13
+  #           asset_suffix: macos-x86_64
+  #         - os: macos-14
+  #           asset_suffix: macos-arm64
 
-    steps:
-      - name: Ensure ref provided
-        run: |
-          if [ -z "${{ env.PACKAGE_REF }}" ]; then
-            echo "PACKAGE_REF is required." >&2
-            exit 1
-          fi
+  #   steps:
+  #     - name: Ensure ref provided
+  #       run: |
+  #         if [ -z "${{ env.PACKAGE_REF }}" ]; then
+  #           echo "PACKAGE_REF is required." >&2
+  #           exit 1
+  #         fi
 
-      - name: Checkout ref
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.PACKAGE_REF }}
-          fetch-depth: 0
+  #     - name: Checkout ref
+  #       uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ env.PACKAGE_REF }}
+  #         fetch-depth: 0
 
-      - uses: r-lib/actions/setup-r@v2
-        with:
-          use-public-rspm: true
+  #     - uses: r-lib/actions/setup-r@v2
+  #       with:
+  #         use-public-rspm: true
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-pc-windows-gnu
+  #     - uses: actions-rust-lang/setup-rust-toolchain@v1
+  #       with:
+  #         target: x86_64-pc-windows-gnu
 
-      - name: Install system dependencies
-        run: |
-          brew install capnp
+  #     - name: Install system dependencies
+  #       run: |
+  #         brew install capnp
 
-      - name: Install R package dependencies
-        run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
+  #     - name: Install R package dependencies
+  #       run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
 
-      - name: Build macOS binary package
-        run: R CMD INSTALL --build gen-r
+  #     - name: Build macOS binary package
+  #       run: R CMD INSTALL --build gen-r
 
-      - name: Rename macOS binary asset
-        run: |
-          version=$(sed -n 's/^Version: //p' gen-r/DESCRIPTION)
-          asset="genr_${version}-${{ matrix.asset_suffix }}.tgz"
-          mv genr_*.tgz "$asset"
-          echo "ASSET_NAME=$asset" >> "$GITHUB_ENV"
+  #     - name: Rename macOS binary asset
+  #       run: |
+  #         version=$(sed -n 's/^Version: //p' gen-r/DESCRIPTION)
+  #         asset="genr_${version}-${{ matrix.asset_suffix }}.tgz"
+  #         mv genr_*.tgz "$asset"
+  #         echo "ASSET_NAME=$asset" >> "$GITHUB_ENV"
 
-      - name: Smoke test macOS binary package
-        run: |
-          Rscript -e "install.packages(commandArgs(TRUE)[1], repos = NULL, type = 'mac.binary'); library(testthat); test_dir('gen-r/tests/testthat')" "$ASSET_NAME"
+  #     - name: Smoke test macOS binary package
+  #       run: |
+  #         Rscript -e "install.packages(commandArgs(TRUE)[1], repos = NULL, type = 'mac.binary'); library(testthat); test_dir('gen-r/tests/testthat')" "$ASSET_NAME"
 
-      - name: Upload macOS binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ASSET_NAME }}
-          path: ${{ env.ASSET_NAME }}
-          if-no-files-found: error
+  #     - name: Upload macOS binary artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: ${{ env.ASSET_NAME }}
+  #         path: ${{ env.ASSET_NAME }}
+  #         if-no-files-found: error
 
-      - name: Ensure release exists
-        if: ${{ env.RELEASE_NAME != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "${{ env.RELEASE_NAME }}" >/dev/null 2>&1 || \
-            gh release create "${{ env.RELEASE_NAME }}" --notes "" || \
-            gh release view "${{ env.RELEASE_NAME }}"
+  #     - name: Ensure release exists
+  #       if: ${{ env.RELEASE_NAME != '' }}
+  #       env:
+  #         GH_TOKEN: ${{ github.token }}
+  #       run: |
+  #         gh release view "${{ env.RELEASE_NAME }}" >/dev/null 2>&1 || \
+  #           gh release create "${{ env.RELEASE_NAME }}" --notes "" || \
+  #           gh release view "${{ env.RELEASE_NAME }}"
 
-      - name: Upload macOS binary to release
-        if: ${{ env.RELEASE_NAME != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ env.RELEASE_NAME }}" "${{ env.ASSET_NAME }}" --clobber
+  #     - name: Upload macOS binary to release
+  #       if: ${{ env.RELEASE_NAME != '' }}
+  #       env:
+  #         GH_TOKEN: ${{ github.token }}
+  #       run: gh release upload "${{ env.RELEASE_NAME }}" "${{ env.ASSET_NAME }}" --clobber
 
   build-windows:
     runs-on: windows-latest
