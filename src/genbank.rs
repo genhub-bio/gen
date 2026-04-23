@@ -249,8 +249,7 @@ fn genbank_extra_for_feature(feature: &Feature) -> AnnotationExtra {
                 .collect(),
             location_operator: genbank_location_operator(&feature.location),
         }),
-        gff: None,
-        bed: None,
+        ..AnnotationExtra::default()
     }
 }
 

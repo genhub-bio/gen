@@ -111,14 +111,14 @@ pub struct AnnotationExtra {
     pub bed: Option<BedExtra>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub struct GenBankExtra {
     pub kind: String,
     pub qualifiers: Vec<GenBankQualifier>,
     pub location_operator: Option<GenBankLocationOperator>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub struct GenBankQualifier {
     pub key: String,
     pub value: Option<String>,
@@ -132,7 +132,7 @@ pub enum GenBankLocationOperator {
     OneOf,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub struct GffExtra {
     pub source: Option<String>,
     pub ty: String,
@@ -141,13 +141,13 @@ pub struct GffExtra {
     pub attributes: Vec<GffAttribute>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub struct GffAttribute {
     pub key: String,
     pub values: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub struct BedExtra {
     pub score: Option<String>,
     pub thick_start: Option<i64>,
