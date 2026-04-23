@@ -18,6 +18,7 @@ target/
 fixtures/*.ipynb
 **/.ipynb_checkpoints/
 .venv/
+uv.lock
 
 # Mac droppings
 .DS_Store
