@@ -90,6 +90,11 @@ pub fn track_database(
                 if let Some(uuid_db) = exist_by_uuid {
                     if path_db == uuid_db {
                         return Ok(());
+                    } else {
+                        return Err(core::errors::ConnectionError::DatabaseTracking(format!(
+                            "Database conflict: Database '{}' (UUID: {}) is registered at path '{}', which does not match the database found at {}",
+                            path_db.name, path_db.db_uuid, path_db.path, db_path
+                        )));
                     }
                 } else {
                     return Err(core::errors::ConnectionError::DatabaseTracking(format!(
