@@ -31,19 +31,38 @@ use crate::{
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GenBankImportOptions {
     pub add_annotations: bool,
+    pub annotation_name: Option<String>,
 }
 
 impl Default for GenBankImportOptions {
     fn default() -> Self {
         Self {
             add_annotations: true,
+            annotation_name: None,
         }
     }
 }
 
+impl GenBankImportOptions {
+    pub fn annotation_name_from_path(mut self, path: impl AsRef<FsPath>) -> Self {
+        self.annotation_name = path
+            .as_ref()
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .map(str::to_string);
+        self
+    }
+}
+
+/// Maps a half-open interval in the final edited GenBank sequence back to a canonical node range.
+///
+/// `final_start` and `final_end` are coordinates in the fully edited sequence from the imported
+/// GenBank record. `node_id`, `sequence_start`, and `sequence_end` identify the corresponding
+/// half-open range on the canonical node that stores that portion of sequence in the graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FinalSequenceSegment {
     final_start: i64,
@@ -67,38 +86,41 @@ struct LocusAnnotationImport<'a> {
     wt_length: i64,
     annotations: &'a [GenBankAnnotation],
     changes: &'a [(GenBankEdit, Option<HashId>)],
-    operation_info: &'a OperationInfo,
+    annotation_name: Option<&'a str>,
     collection: &'a str,
-    sample: Option<&'a str>,
+    sample: &'a str,
     locus_name: &'a str,
 }
 
-fn annotation_file_label(operation_info: &OperationInfo, fallback: &str) -> String {
-    operation_info
-        .files
-        .first()
-        .and_then(|file| {
-            FsPath::new(&file.file_path)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.is_empty())
-                .map(str::to_string)
-        })
+fn annotation_file_label(annotation_name: Option<&str>, fallback: &str) -> String {
+    annotation_name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
         .or_else(|| (!fallback.is_empty()).then(|| fallback.to_string()))
         .unwrap_or_else(|| "genbank".to_string())
 }
 
 fn annotation_group_name(
-    operation_info: &OperationInfo,
+    annotation_name: Option<&str>,
     collection: &str,
-    sample: Option<&str>,
+    sample: &str,
     locus_name: &str,
 ) -> String {
-    let file_label = annotation_file_label(operation_info, locus_name);
-    let sample_label = sample.unwrap_or("reference");
-    format!("GenBank {collection}/{sample_label}/{file_label}")
+    let file_label = annotation_file_label(annotation_name, locus_name);
+    format!("GenBank {collection}/{sample}/{file_label}")
 }
 
+/// Builds a coordinate translation table from the final imported GenBank sequence back to the
+/// graph nodes that store it.
+///
+/// GenBank annotations are expressed against the fully edited sequence from the file, but after
+/// import that sequence may be split across the WT node plus any inserted or replacement nodes
+/// created for edits. Each `FinalSequenceSegment` says which half-open range in the final sequence
+/// maps to which node and node-local coordinate range, and `map_annotation_segments` uses that to
+/// project annotation spans onto the correct graph nodes.
+///
+/// A confusing part of this code is that edit.start refers to the position in the wildtype sequence
+/// where an edit begins. That is how GenBankEdit defines start/end.
 fn build_final_sequence_segments(
     wt_node_id: HashId,
     wt_length: i64,
@@ -109,6 +131,8 @@ fn build_final_sequence_segments(
     let mut final_cursor = 0;
 
     for (edit, change_node_id) in changes {
+        // If we are not at the position of the edit, add the segment of the wildtype sequence
+        // to the chain
         if wt_cursor < edit.start {
             let reference_length = edit.start - wt_cursor;
             segments.push(FinalSequenceSegment {
@@ -289,38 +313,29 @@ fn import_locus_annotations(
     let final_segments =
         build_final_sequence_segments(input.wt_node_id, input.wt_length, input.changes);
     let annotation_group = annotation_group_name(
-        input.operation_info,
+        input.annotation_name,
         input.collection,
         input.sample,
         input.locus_name,
     );
 
-    for (annotation_index, annotation) in input.annotations.iter().enumerate() {
+    for annotation in input.annotations.iter() {
         let mapped_segments = map_annotation_segments(&annotation.segments, &final_segments);
         if mapped_segments.is_empty() {
             continue;
         }
 
-        let accession_name = format!("{annotation_group}:{annotation_index}:{}", annotation.name);
+        let accession_name = format!("{annotation_group}:{}", annotation.name);
         let accession_id =
             create_accession_for_segments(conn, input.path, &accession_name, &mapped_segments)?;
 
-        if let Some(sample_name) = input.sample {
-            let _ = Annotation::create_with_samples(
-                conn,
-                &annotation.name,
-                &annotation_group,
-                &accession_id,
-                &[sample_name],
-            )?;
-        } else {
-            let _ = Annotation::get_or_create(
-                conn,
-                &annotation.name,
-                &annotation_group,
-                &accession_id,
-            )?;
-        }
+        let _ = Annotation::create_with_samples(
+            conn,
+            &annotation.name,
+            &annotation_group,
+            &accession_id,
+            &[input.sample],
+        )?;
     }
 
     Ok(())
@@ -502,9 +517,9 @@ where
                             wt_length: sequence.length,
                             annotations: &locus.annotations,
                             changes: &applied_changes,
-                            operation_info: &operation_info,
+                            annotation_name: options.annotation_name.as_deref(),
                             collection: &collection.name,
-                            sample: Some(sample),
+                            sample,
                             locus_name: &locus.name,
                         },
                     )?;
@@ -588,7 +603,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
-            options,
+            options.annotation_name_from_path(&path),
         )
         .unwrap();
         path.to_string_lossy().to_string()
@@ -774,6 +789,7 @@ mod tests {
             "no-annotation-sample",
             GenBankImportOptions {
                 add_annotations: false,
+                annotation_name: None,
             },
         );
 

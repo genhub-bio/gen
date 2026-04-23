@@ -50,6 +50,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     } else {
         Box::new(File::open(cmd.path.clone()).unwrap())
     };
+    let mut options = GenBankImportOptions::default().annotation_name_from_path(&cmd.path);
+    options.add_annotations = !cmd.no_annotations;
     match import_genbank(
         context,
         &mut reader,
@@ -62,9 +64,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
             }],
             description: "GenBank Import".to_string(),
         },
-        GenBankImportOptions {
-            add_annotations: !cmd.no_annotations,
-        },
+        options,
     ) {
         Ok(_) => {
             println!("GenBank imported.");

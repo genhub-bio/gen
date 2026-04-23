@@ -61,6 +61,11 @@ impl FromStr for EditType {
     }
 }
 
+/// Represents how the wildtype sequence was changed.
+///
+/// The `start` and `end` coordinates refer to positions in the wildtype sequence, and have nothing
+/// to do with the edit itself. `old_sequence` is the wildtype sequence that is replaced by `new_sequence`.
+/// This is so there is an easy mapping to carry out an edit via old_sequence[start:end] = new_sequence
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenBankEdit {
     pub start: i64,

@@ -343,7 +343,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
-                GenBankImportOptions::default(),
+                GenBankImportOptions::default().annotation_name_from_path(&path),
             );
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -401,7 +401,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
-                GenBankImportOptions::default(),
+                GenBankImportOptions::default().annotation_name_from_path(&path),
             );
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -471,7 +471,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
-                GenBankImportOptions::default(),
+                GenBankImportOptions::default().annotation_name_from_path(&path),
             );
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

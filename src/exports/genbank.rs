@@ -395,7 +395,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
-            GenBankImportOptions::default(),
+            GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
@@ -427,7 +427,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
-            GenBankImportOptions::default(),
+            GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
@@ -459,7 +459,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
-            GenBankImportOptions::default(),
+            GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
