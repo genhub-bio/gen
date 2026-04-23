@@ -185,7 +185,7 @@ impl<'a> Capnp<'a> for Annotation {
         builder.set_accession_id(&self.accession_id.0).unwrap();
         builder.set_extra_json(
             serialize_annotation_extra(self.extra.as_ref())
-                .expect("should serialize annotation extra for changesets")
+                .unwrap_or_default()
                 .as_str(),
         );
     }
@@ -214,7 +214,7 @@ impl<'a> Capnp<'a> for Annotation {
                 .map(|value| value.to_string().unwrap())
                 .filter(|value| !value.is_empty()),
         )
-        .expect("should deserialize annotation extra from changesets");
+        .unwrap_or(None);
 
         Annotation {
             id,
@@ -292,8 +292,14 @@ impl Annotation {
             Err(AnnotationError::DatabaseError(rusqlite::Error::SqliteFailure(err, _details)))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Annotation::get_by_id(conn, &Annotation::generate_id(name, group, accession_id))
-                    .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
+                let id = Annotation::generate_id(name, group, accession_id);
+                Ok(Annotation {
+                    id,
+                    name: name.to_string(),
+                    group: group.to_string(),
+                    accession_id: *accession_id,
+                    extra: extra.cloned(),
+                })
             }
             Err(err) => Err(err),
         }
