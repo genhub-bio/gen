@@ -5,7 +5,12 @@ use std::{
 
 use gb_io::seq::{Feature, Location, Seq};
 use gen_core::Strand;
-use gen_models::{annotations::AnnotationError, errors::OperationError};
+use gen_models::{
+    annotations::{
+        AnnotationError, AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier,
+    },
+    errors::OperationError,
+};
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
 
@@ -86,6 +91,7 @@ pub struct GenBankAnnotationSegment {
 pub struct GenBankAnnotation {
     pub name: String,
     pub segments: Vec<GenBankAnnotationSegment>,
+    pub extra: Option<AnnotationExtra>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -215,6 +221,39 @@ fn annotation_segments_for_location(location: &Location) -> Vec<GenBankAnnotatio
     annotation_segments_for_location_with_strand(location, Strand::Forward)
 }
 
+fn genbank_location_operator(location: &Location) -> Option<GenBankLocationOperator> {
+    match location {
+        Location::Complement(inner) => genbank_location_operator(inner),
+        Location::Join(_) => Some(GenBankLocationOperator::Join),
+        Location::Order(_) => Some(GenBankLocationOperator::Order),
+        Location::Bond(_) => Some(GenBankLocationOperator::Bond),
+        Location::OneOf(_) => Some(GenBankLocationOperator::OneOf),
+        Location::Range(..)
+        | Location::Between(_, _)
+        | Location::External(_, _)
+        | Location::Gap(_) => None,
+    }
+}
+
+fn genbank_extra_for_feature(feature: &Feature) -> AnnotationExtra {
+    AnnotationExtra {
+        genbank: Some(GenBankExtra {
+            kind: feature.kind.as_ref().to_string(),
+            qualifiers: feature
+                .qualifiers
+                .iter()
+                .map(|(key, value)| GenBankQualifier {
+                    key: key.as_ref().to_string(),
+                    value: value.clone(),
+                })
+                .collect(),
+            location_operator: genbank_location_operator(&feature.location),
+        }),
+        gff: None,
+        bed: None,
+    }
+}
+
 fn annotation_for_feature(feature: &Feature) -> Option<GenBankAnnotation> {
     let segments = annotation_segments_for_location(&feature.location);
     if segments.is_empty() {
@@ -229,7 +268,11 @@ fn annotation_for_feature(feature: &Feature) -> Option<GenBankAnnotation> {
         .or_else(|| feature_qualifier_value(feature, "note"))
         .unwrap_or_else(|| feature.kind.as_ref().to_string());
 
-    Some(GenBankAnnotation { name, segments })
+    Some(GenBankAnnotation {
+        name,
+        segments,
+        extra: Some(genbank_extra_for_feature(feature)),
+    })
 }
 
 pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {

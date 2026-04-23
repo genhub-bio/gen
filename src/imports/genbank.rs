@@ -434,6 +434,7 @@ fn import_locus_annotations(
             &annotation.name,
             &annotation_group,
             &accession_id,
+            annotation.extra.as_ref(),
             &[input.sample],
         )?;
     }
@@ -664,7 +665,7 @@ mod tests {
 
     use gen_core::is_terminal;
     use gen_models::{
-        annotations::{Annotation, AnnotationGroup},
+        annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
         operations::OperationFile,
         traits::Query,
@@ -1067,6 +1068,36 @@ mod tests {
             annotations
                 .iter()
                 .any(|annotation| annotation.name == "ori")
+        );
+        let amp_r = annotations
+            .iter()
+            .find(|annotation| annotation.name == "AmpR")
+            .unwrap();
+        let amp_r_extra = amp_r
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.genbank.as_ref())
+            .unwrap();
+        assert_eq!(amp_r_extra.kind, "CDS");
+        assert!(
+            amp_r_extra
+                .qualifiers
+                .iter()
+                .any(|qualifier| qualifier.key == "product"
+                    && qualifier.value.as_deref() == Some("beta-lactamase"))
+        );
+
+        let ori_annotation = annotations
+            .iter()
+            .find(|annotation| annotation.name == "ori")
+            .unwrap();
+        assert_eq!(
+            ori_annotation
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.genbank.as_ref())
+                .and_then(|extra| extra.location_operator.as_ref()),
+            Some(&GenBankLocationOperator::Join)
         );
 
         let block_group = Sample::get_block_groups(conn, "fixtures", "puc19-sample")

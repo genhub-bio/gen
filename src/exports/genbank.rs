@@ -1,10 +1,27 @@
 #![allow(warnings)]
-use std::{borrow::Cow, collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, str};
+use std::{
+    borrow::Cow,
+    cmp::{max, min},
+    collections::HashSet,
+    fs::File,
+    hash::Hash,
+    iter::zip,
+    path::PathBuf,
+    str,
+};
 
 use gb_io::{self, seq::Location};
-use gen_core::{is_terminal, path::PathBlock};
+use gen_core::{Strand, is_terminal, path::PathBlock};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, sample::Sample};
+use gen_models::{
+    accession::{Accession, AccessionEdge},
+    annotations::{Annotation, GenBankLocationOperator},
+    block_group::BlockGroup,
+    db::GraphConnection,
+    node::Node,
+    sample::Sample,
+    traits::Query,
+};
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};
 use rusqlite::{self, Connection};
@@ -14,6 +31,224 @@ use thiserror::Error;
 pub enum GenbankExportError {
     #[error("I/O error while exporting GenBank: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AnnotationSegment {
+    node_id: gen_core::HashId,
+    start: i64,
+    end: i64,
+    strand: Strand,
+}
+
+fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
+    let mut segments = Vec::new();
+    let mut current_node = None;
+    let mut current_start = None;
+    let mut current_strand = None;
+
+    for edge in edges {
+        if edge.source_coordinate < 0 {
+            current_node = Some(edge.target_node_id);
+            current_start = Some(edge.target_coordinate);
+            current_strand = Some(edge.target_strand);
+            continue;
+        }
+
+        if let (Some(node_id), Some(start), Some(strand)) =
+            (current_node, current_start, current_strand)
+        {
+            let (segment_start, segment_end) = if start <= edge.source_coordinate {
+                (start, edge.source_coordinate)
+            } else {
+                (edge.source_coordinate, start)
+            };
+            if segment_end > segment_start {
+                segments.push(AnnotationSegment {
+                    node_id,
+                    start: segment_start,
+                    end: segment_end,
+                    strand,
+                });
+            }
+        }
+
+        if edge.target_coordinate < 0 {
+            break;
+        }
+
+        current_node = Some(edge.target_node_id);
+        current_start = Some(edge.target_coordinate);
+        current_strand = Some(edge.target_strand);
+    }
+
+    segments
+}
+
+fn flip_strand(strand: Strand) -> Strand {
+    match strand {
+        Strand::Forward => Strand::Reverse,
+        Strand::Reverse => Strand::Forward,
+        Strand::Unknown => Strand::Unknown,
+        Strand::ImportantButUnknown => Strand::ImportantButUnknown,
+    }
+}
+
+fn merge_annotation_segments(segments: Vec<AnnotationSegment>) -> Vec<AnnotationSegment> {
+    let mut merged: Vec<AnnotationSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if segment.end <= segment.start {
+            continue;
+        }
+        if let Some(last) = merged.last_mut()
+            && last.strand == segment.strand
+            && segment.start >= last.start
+            && segment.start <= last.end
+        {
+            last.end = max(last.end, segment.end);
+            continue;
+        }
+        merged.push(segment);
+    }
+    merged
+}
+
+fn project_annotation_segments(
+    accession_segments: &[AnnotationSegment],
+    path_blocks: &[PathBlock],
+) -> Vec<AnnotationSegment> {
+    merge_annotation_segments(
+        accession_segments
+            .iter()
+            .flat_map(|segment| {
+                path_blocks.iter().filter_map(|block| {
+                    if block.node_id != segment.node_id {
+                        return None;
+                    }
+                    let overlap_start = max(segment.start, block.sequence_start);
+                    let overlap_end = min(segment.end, block.sequence_end);
+                    if overlap_end <= overlap_start {
+                        return None;
+                    }
+
+                    let (start, end) = if block.strand == Strand::Reverse {
+                        (
+                            block.path_start + (block.sequence_end - overlap_end),
+                            block.path_start + (block.sequence_end - overlap_start),
+                        )
+                    } else {
+                        (
+                            block.path_start + (overlap_start - block.sequence_start),
+                            block.path_start + (overlap_end - block.sequence_start),
+                        )
+                    };
+                    let strand = if block.strand == Strand::Reverse {
+                        flip_strand(segment.strand)
+                    } else {
+                        segment.strand
+                    };
+
+                    Some(AnnotationSegment {
+                        node_id: block.node_id,
+                        start,
+                        end,
+                        strand,
+                    })
+                })
+            })
+            .collect(),
+    )
+}
+
+fn build_annotation_location(
+    locations: Vec<Location>,
+    operator: Option<&GenBankLocationOperator>,
+) -> Option<Location> {
+    match locations.len() {
+        0 => None,
+        1 => locations.into_iter().next(),
+        _ => Some(match operator {
+            Some(GenBankLocationOperator::Join) | None => Location::Join(locations),
+            Some(GenBankLocationOperator::Order) => Location::Order(locations),
+            Some(GenBankLocationOperator::Bond) => Location::Bond(locations),
+            Some(GenBankLocationOperator::OneOf) => Location::OneOf(locations),
+        }),
+    }
+}
+
+fn annotation_location(
+    segments: &[AnnotationSegment],
+    operator: Option<&GenBankLocationOperator>,
+) -> Option<Location> {
+    let mut locations = segments
+        .iter()
+        .filter(|segment| segment.end > segment.start)
+        .map(|segment| Location::simple_range(segment.start, segment.end))
+        .collect::<Vec<_>>();
+    if locations.is_empty() {
+        return None;
+    }
+
+    let strand = segments.first()?.strand;
+    let location = build_annotation_location(locations, operator)?;
+
+    Some(if strand == Strand::Reverse {
+        Location::Complement(Box::new(location))
+    } else {
+        location
+    })
+}
+
+fn export_annotations(
+    conn: &GraphConnection,
+    path: &gen_models::path::Path,
+    path_blocks: &[PathBlock],
+    seq: &mut gb_io::seq::Seq,
+    sample_name: &str,
+) {
+    let annotations = Annotation::query_by_sample(conn, sample_name)
+        .expect("should load sample annotations for GenBank export");
+    for annotation in annotations {
+        let Some(accession) = Accession::get_by_id(conn, &annotation.accession_id) else {
+            continue;
+        };
+        if accession.path_id != path.id {
+            continue;
+        }
+
+        let accession_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
+            conn,
+            &annotation.accession_id,
+        ));
+        let projected_segments = project_annotation_segments(&accession_segments, path_blocks);
+        let genbank_extra = annotation
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.genbank.as_ref());
+        let Some(location) = annotation_location(
+            &projected_segments,
+            genbank_extra.and_then(|extra| extra.location_operator.as_ref()),
+        ) else {
+            continue;
+        };
+        let kind = genbank_extra
+            .map(|extra| Cow::Owned(extra.kind.clone()))
+            .unwrap_or_else(|| Cow::Borrowed("misc_feature"));
+        let qualifiers = genbank_extra
+            .map(|extra| {
+                extra
+                    .qualifiers
+                    .iter()
+                    .map(|qualifier| (Cow::Owned(qualifier.key.clone()), qualifier.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![(Cow::Borrowed("label"), Some(annotation.name.clone()))]);
+        seq.features.push(gb_io::seq::Feature {
+            kind,
+            location,
+            qualifiers,
+        });
+    }
 }
 
 fn merge_nodes(nodes: &[GraphNode]) -> Vec<GraphNode> {
@@ -153,6 +388,7 @@ pub fn export_genbank(
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
         seq.seq = path.sequence(conn).into_bytes();
+        export_annotations(conn, &path, &path_blocks, &mut seq, sample_name);
 
         // Identify the node traversal corresponding to our path.
         let graph = BlockGroup::get_graph(conn, &block_group.id);
@@ -372,6 +608,24 @@ mod tests {
         assert_eq!(a_features, b_features);
     }
 
+    fn feature_label(feature: &gb_io::seq::Feature) -> Option<String> {
+        feature
+            .qualifiers
+            .iter()
+            .find_map(|(key, value)| (*key == "label").then(|| value.clone()).flatten())
+    }
+
+    fn feature_qualifier(feature: &gb_io::seq::Feature, key: &str) -> Option<String> {
+        feature
+            .qualifiers
+            .iter()
+            .find_map(|(qualifier_key, value)| {
+                ((*qualifier_key).as_ref() == key)
+                    .then(|| value.clone())
+                    .flatten()
+            })
+    }
+
     #[test]
     fn test_import_then_export_insertion() {
         let context = setup_gen();
@@ -466,6 +720,85 @@ mod tests {
         let filename = tmp_dir.join("out.gb");
         export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
         compare_genbanks(&path, &filename);
+    }
+
+    #[test]
+    fn test_import_then_export_annotations() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
+        let file = File::open(&path).unwrap();
+        import_genbank(
+            &context,
+            BufReader::new(file),
+            Some("fixtures"),
+            "puc19-export",
+            OperationInfo {
+                files: vec![OperationFile {
+                    file_path: path.to_str().unwrap().to_string(),
+                    file_type: FileTypes::GenBank,
+                }],
+                description: "test".to_string(),
+            },
+            GenBankImportOptions::default().annotation_name_from_path(&path),
+        )
+        .unwrap();
+
+        let tmp_dir = tempfile::tempdir().unwrap().keep();
+        let filename = tmp_dir.join("out.gb");
+        export_genbank(conn, "fixtures", "puc19-export", &filename).unwrap();
+
+        let output = reader::parse_file(&filename).unwrap();
+        let features = &output[0].features;
+        let labels = features
+            .iter()
+            .filter_map(feature_label)
+            .collect::<HashSet<_>>();
+        assert!(labels.contains("AmpR"), "export should include AmpR");
+        assert!(
+            labels.contains("lac promoter"),
+            "export should include lac promoter"
+        );
+        assert!(labels.contains("ori"), "export should include ori");
+        assert!(
+            labels.contains("M13 Forward"),
+            "export should include reverse-strand annotations"
+        );
+
+        let amp_r = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("AmpR"))
+            .unwrap();
+        assert_eq!(amp_r.kind.as_ref(), "CDS");
+        assert_eq!(
+            feature_qualifier(amp_r, "product").as_deref(),
+            Some("beta-lactamase")
+        );
+
+        let m13_forward = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("M13 Forward"))
+            .unwrap();
+        assert_eq!(
+            m13_forward.location,
+            Location::Complement(Box::new(Location::simple_range(688, 706)))
+        );
+
+        let ori = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("ori"))
+            .unwrap();
+        assert_eq!(
+            ori.location,
+            Location::Join(vec![
+                Location::simple_range(2314, 2686),
+                Location::simple_range(0, 217),
+            ])
+        );
     }
 
     #[test]
