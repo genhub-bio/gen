@@ -39,4 +39,13 @@ gen-python/python/gen/*.so
 
 # Cap'n proto generated files
 **/generated/*capnp.rs
+
+# precommit stuff
+.cache
+
+# Editor stuff
+.zed
+
+# Agent stuff
+.codex
 **/.kiro/specs/*
