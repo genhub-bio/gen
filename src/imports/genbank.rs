@@ -35,6 +35,7 @@ use crate::{
 pub struct GenBankImportOptions {
     pub add_annotations: bool,
     pub annotation_name: Option<String>,
+    pub annotation_group: Option<String>,
 }
 
 impl Default for GenBankImportOptions {
@@ -42,6 +43,7 @@ impl Default for GenBankImportOptions {
         Self {
             add_annotations: true,
             annotation_name: None,
+            annotation_group: None,
         }
     }
 }
@@ -88,6 +90,7 @@ struct LocusAnnotationImport<'a> {
     annotations: &'a [GenBankAnnotation],
     changes: &'a [(GenBankEdit, Option<HashId>)],
     annotation_name: Option<&'a str>,
+    annotation_group: Option<&'a str>,
     collection: &'a str,
     sample: &'a str,
     locus_name: &'a str,
@@ -211,11 +214,16 @@ fn build_final_sequence_segments(
 /// - `[0, 3)` then `[2, 7)` merges to `[0, 7)`
 /// - `[0, 3)` then `[5, 7)` does not merge
 /// - Same coordinates on different nodes or strands do not merge
-fn merge_node_sequence_segments(segments: Vec<NodeSequenceSegment>) -> Vec<NodeSequenceSegment> {
+fn merge_node_sequence_segments(
+    segments: Vec<NodeSequenceSegment>,
+) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
     let mut merged: Vec<NodeSequenceSegment> = Vec::with_capacity(segments.len());
     for segment in segments {
         if segment.sequence_end <= segment.sequence_start {
-            continue;
+            return Err(GenBankError::ParseError(format!(
+                "Invalid node sequence segment: start {} must be less than end {}",
+                segment.sequence_start, segment.sequence_end
+            )));
         }
         if let Some(last) = merged.last_mut()
             && last.node_id == segment.node_id
@@ -228,13 +236,50 @@ fn merge_node_sequence_segments(segments: Vec<NodeSequenceSegment>) -> Vec<NodeS
         }
         merged.push(segment);
     }
-    merged
+    Ok(merged)
 }
 
+/// Maps annotation spans from final edited-sequence coordinates onto node-local coordinates.
+///
+/// `overlap_end <= overlap_start` means the annotation segment and the current final-sequence
+/// segment do not contribute a positive-width overlap, so that pair is skipped.
+///
+/// Completely before:
+/// ```text
+/// annotation: [----)
+/// final:           [----)
+///
+/// overlap_start = final.start
+/// overlap_end   = annotation.end
+///
+/// annotation.end <= final.start
+/// => overlap_end <= overlap_start
+/// ```
+///
+/// Completely after:
+/// ```text
+/// annotation:        [----)
+/// final:      [----)
+///
+/// overlap_start = annotation.start
+/// overlap_end   = final.end
+///
+/// final.end <= annotation.start
+/// => overlap_end <= overlap_start
+/// ```
+///
+/// Touching at a boundary:
+/// ```text
+/// annotation: [----)
+/// final:           [----)
+///
+/// annotation.end == final.start
+/// => overlap_end == overlap_start
+/// ```
 fn map_annotation_segments(
     annotation_segments: &[GenBankAnnotationSegment],
     final_segments: &[FinalSequenceSegment],
-) -> Vec<NodeSequenceSegment> {
+) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
     merge_node_sequence_segments(
         annotation_segments
             .iter()
@@ -333,15 +378,20 @@ fn import_locus_annotations(
 
     let final_segments =
         build_final_sequence_segments(input.wt_node_id, input.wt_length, input.changes);
-    let annotation_group = annotation_group_name(
-        input.annotation_name,
-        input.collection,
-        input.sample,
-        input.locus_name,
-    );
+    let annotation_group = input
+        .annotation_group
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            annotation_group_name(
+                input.annotation_name,
+                input.collection,
+                input.sample,
+                input.locus_name,
+            )
+        });
 
     for annotation in input.annotations.iter() {
-        let mapped_segments = map_annotation_segments(&annotation.segments, &final_segments);
+        let mapped_segments = map_annotation_segments(&annotation.segments, &final_segments)?;
         if mapped_segments.is_empty() {
             continue;
         }
@@ -569,6 +619,7 @@ where
                             annotations: &locus.annotations,
                             changes: &applied_changes,
                             annotation_name: options.annotation_name.as_deref(),
+                            annotation_group: options.annotation_group.as_deref(),
                             collection: &collection.name,
                             sample,
                             locus_name: &locus.name,
@@ -777,12 +828,6 @@ mod tests {
             },
             NodeSequenceSegment {
                 node_id,
-                sequence_start: 7,
-                sequence_end: 7,
-                strand: Strand::Forward,
-            },
-            NodeSequenceSegment {
-                node_id,
                 sequence_start: 1,
                 sequence_end: 2,
                 strand: Strand::Reverse,
@@ -793,7 +838,8 @@ mod tests {
                 sequence_end: 1,
                 strand: Strand::Forward,
             },
-        ]);
+        ])
+        .unwrap();
 
         assert_eq!(
             merged,
@@ -817,6 +863,23 @@ mod tests {
                     strand: Strand::Forward,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn test_merge_node_sequence_segments_errors_on_invalid_range() {
+        let node_id = HashId::convert_str("node");
+
+        assert_eq!(
+            merge_node_sequence_segments(vec![NodeSequenceSegment {
+                node_id,
+                sequence_start: 7,
+                sequence_end: 7,
+                strand: Strand::Forward,
+            }]),
+            Err(GenBankError::ParseError(
+                "Invalid node sequence segment: start 7 must be less than end 7".to_string()
+            ))
         );
     }
 
@@ -854,7 +917,8 @@ mod tests {
                     sequence_end: 5,
                 },
             ],
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             mapped,
@@ -1062,6 +1126,7 @@ mod tests {
             GenBankImportOptions {
                 add_annotations: false,
                 annotation_name: None,
+                annotation_group: None,
             },
         );
 

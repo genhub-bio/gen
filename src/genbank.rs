@@ -390,6 +390,46 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_annotation_segments() {
+        assert_eq!(
+            merge_annotation_segments(vec![
+                GenBankAnnotationSegment {
+                    start: 0,
+                    end: 3,
+                    strand: Strand::Forward,
+                },
+                GenBankAnnotationSegment {
+                    start: 3,
+                    end: 5,
+                    strand: Strand::Forward,
+                },
+                GenBankAnnotationSegment {
+                    start: 1,
+                    end: 2,
+                    strand: Strand::Reverse,
+                },
+                GenBankAnnotationSegment {
+                    start: 7,
+                    end: 7,
+                    strand: Strand::Forward,
+                },
+            ]),
+            vec![
+                GenBankAnnotationSegment {
+                    start: 0,
+                    end: 5,
+                    strand: Strand::Forward,
+                },
+                GenBankAnnotationSegment {
+                    start: 1,
+                    end: 2,
+                    strand: Strand::Reverse,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn test_preserves_reverse_strand_annotations() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
         let mut records = reader::parse_file(&path).unwrap();
