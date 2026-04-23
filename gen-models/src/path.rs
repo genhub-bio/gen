@@ -204,7 +204,7 @@ impl Path {
             }
         };
 
-        PathEdge::bulk_create(conn, &path.id, edge_ids);
+        let _ = PathEdge::bulk_create(conn, &path.id, edge_ids);
 
         path
     }

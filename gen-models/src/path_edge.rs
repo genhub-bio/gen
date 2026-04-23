@@ -4,6 +4,7 @@ use gen_core::{HashId, calculate_hash, traits::Capnp};
 use itertools::Itertools;
 use rusqlite::{self, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     db::GraphConnection, edge::Edge, gen_models_capnp::path_edge as PathEdgeCapnp, traits::*,
@@ -15,6 +16,14 @@ pub struct PathEdge {
     pub path_id: HashId,
     pub edge_id: HashId,
     pub index_in_path: i64,
+}
+
+#[derive(Debug, Error)]
+pub enum PathEdgeError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+    #[error("Duplicate entry with uuid: {0}")]
+    Duplicate(String),
 }
 
 impl<'a> Capnp<'a> for PathEdge {
@@ -82,33 +91,42 @@ impl PathEdge {
         path_id: &HashId,
         index_in_path: i64,
         edge_id: HashId,
-    ) -> PathEdge {
+    ) -> Result<PathEdge, PathEdgeError> {
         let query =
             "INSERT INTO path_edges (id, path_id, edge_id, index_in_path) VALUES (?1, ?2, ?3, ?4);";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = match conn.prepare(query) {
+            Ok(stmt) => stmt,
+            Err(e) => return Err(PathEdgeError::DatabaseError(e)),
+        };
         let hash = HashId(calculate_hash(&format!(
             "{path_id}:{edge_id}:{index_in_path}"
         )));
         match stmt.execute(params![hash, path_id, edge_id, index_in_path]) {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code != rusqlite::ErrorCode::ConstraintViolation {
-                    panic!("something bad happened querying the database")
-                }
+            Ok(_) => Ok(PathEdge {
+                id: hash,
+                path_id: *path_id,
+                index_in_path,
+                edge_id,
+            }),
+            Err(rusqlite::Error::SqliteFailure(err, _details))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Ok(PathEdge {
+                    id: hash,
+                    path_id: *path_id,
+                    index_in_path,
+                    edge_id,
+                })
             }
-            Err(_) => {
-                panic!("something bad happened querying the database")
-            }
-        }
-        PathEdge {
-            id: hash,
-            path_id: *path_id,
-            index_in_path,
-            edge_id,
+            Err(e) => Err(PathEdgeError::DatabaseError(e)),
         }
     }
 
-    pub fn bulk_create(conn: &GraphConnection, path_id: &HashId, edge_ids: &[HashId]) {
+    pub fn bulk_create(
+        conn: &GraphConnection,
+        path_id: &HashId,
+        edge_ids: &[HashId],
+    ) -> Result<(), PathEdgeError> {
         let batch_size = max_rows_per_batch(conn, 4);
 
         for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
@@ -129,9 +147,17 @@ impl PathEdge {
                 rows_to_insert.join(", ")
             );
 
-            let mut stmt = conn.prepare(&sql).unwrap();
-            stmt.execute(rusqlite::params_from_iter(params)).unwrap();
+            let mut stmt = match conn.prepare(&sql) {
+                Ok(stmt) => stmt,
+                Err(e) => return Err(PathEdgeError::DatabaseError(e)),
+            };
+            match stmt.execute(rusqlite::params_from_iter(params)) {
+                Ok(_) => (),
+                Err(e) => return Err(PathEdgeError::DatabaseError(e)),
+            }
         }
+
+        Ok(())
     }
 
     pub fn delete(conn: &GraphConnection, path_id: &HashId) {

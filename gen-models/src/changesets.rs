@@ -966,7 +966,7 @@ pub fn apply_changeset(
             .filter(|edge| edge.path_id == path.id)
             .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
             .map(|path_edge| path_edge.edge_id);
-        PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
+        let _ = PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
     }
 
     AccessionEdge::bulk_create(
