@@ -84,6 +84,7 @@ struct LocusAnnotationImport<'a> {
     path: &'a Path,
     wt_node_id: HashId,
     wt_length: i64,
+    final_sequence: &'a str,
     annotations: &'a [GenBankAnnotation],
     changes: &'a [(GenBankEdit, Option<HashId>)],
     annotation_name: Option<&'a str>,
@@ -198,6 +199,18 @@ fn build_final_sequence_segments(
     segments
 }
 
+/// Coalesces consecutive overlapping or adjacent node-local segments that are already ordered.
+///
+/// This is not a general interval merge. It assumes `segments` arrive in the correct traversal
+/// order, so only the most recently merged segment needs to be checked. When two consecutive
+/// segments are on the same node and strand and overlap or touch, the merged segment keeps the
+/// original `sequence_start` and extends `sequence_end` to the farthest right boundary.
+///
+/// For example:
+/// - `[0, 3)` then `[3, 5)` merges to `[0, 5)`
+/// - `[0, 3)` then `[2, 7)` merges to `[0, 7)`
+/// - `[0, 3)` then `[5, 7)` does not merge
+/// - Same coordinates on different nodes or strands do not merge
 fn merge_node_sequence_segments(segments: Vec<NodeSequenceSegment>) -> Vec<NodeSequenceSegment> {
     let mut merged: Vec<NodeSequenceSegment> = Vec::with_capacity(segments.len());
     for segment in segments {
@@ -256,7 +269,15 @@ fn create_accession_for_segments(
     accession_name: &str,
     segments: &[NodeSequenceSegment],
 ) -> Result<HashId, GenBankError> {
-    let accession = Accession::create(conn, accession_name, &path.id, None)?;
+    let accession = match Accession::create(conn, accession_name, &path.id, None) {
+        Ok(accession) => accession,
+        Err(rusqlite::Error::SqliteFailure(err, _details))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Ok(Accession::get_or_create(conn, accession_name, &path.id, None).id);
+        }
+        Err(err) => return Err(err.into()),
+    };
     let mut edges = Vec::with_capacity(segments.len() + 1);
 
     let first = segments.first().ok_or_else(|| {
@@ -325,7 +346,36 @@ fn import_locus_annotations(
             continue;
         }
 
-        let accession_name = format!("{annotation_group}:{}", annotation.name);
+        let annotation_sequence_key = annotation
+            .segments
+            .iter()
+            .map(|segment| {
+                let segment_sequence =
+                    &input.final_sequence[segment.start as usize..segment.end as usize];
+                format!(
+                    "{}:{}:{}:{segment_sequence}",
+                    segment.start, segment.end, segment.strand
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let mapped_segment_key = mapped_segments
+            .iter()
+            .map(|segment| {
+                format!(
+                    "{}:{}:{}:{}",
+                    segment.node_id, segment.sequence_start, segment.sequence_end, segment.strand
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let annotation_sequence_hash = HashId::convert_str(&format!(
+            "{annotation_sequence_key};mapped_segments={mapped_segment_key}"
+        ));
+        let accession_name = format!(
+            "{annotation_group}:annotation_sequence_hash={annotation_sequence_hash}:{}",
+            annotation.name,
+        );
         let accession_id =
             create_accession_for_segments(conn, input.path, &accession_name, &mapped_segments)?;
 
@@ -515,6 +565,7 @@ where
                             path: &path,
                             wt_node_id,
                             wt_length: sequence.length,
+                            final_sequence: &locus.sequence,
                             annotations: &locus.annotations,
                             changes: &applied_changes,
                             annotation_name: options.annotation_name.as_deref(),
@@ -607,6 +658,227 @@ mod tests {
         )
         .unwrap();
         path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn test_build_final_sequence_segments() {
+        let wt_node_id = HashId::convert_str("wt");
+        let insertion_node_id = HashId::convert_str("insertion");
+        let replacement_node_id = HashId::convert_str("replacement");
+        let segments = build_final_sequence_segments(
+            wt_node_id,
+            10,
+            &[
+                (
+                    GenBankEdit {
+                        start: 2,
+                        end: 2,
+                        old_sequence: String::new(),
+                        new_sequence: "GG".to_string(),
+                        edit_type: EditType::Insertion,
+                    },
+                    Some(insertion_node_id),
+                ),
+                (
+                    GenBankEdit {
+                        start: 5,
+                        end: 7,
+                        old_sequence: "AA".to_string(),
+                        new_sequence: "TTT".to_string(),
+                        edit_type: EditType::Replacement,
+                    },
+                    Some(replacement_node_id),
+                ),
+                (
+                    GenBankEdit {
+                        start: 8,
+                        end: 9,
+                        old_sequence: "C".to_string(),
+                        new_sequence: String::new(),
+                        edit_type: EditType::Deletion,
+                    },
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            segments,
+            vec![
+                FinalSequenceSegment {
+                    final_start: 0,
+                    final_end: 2,
+                    node_id: wt_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 2,
+                    final_end: 4,
+                    node_id: insertion_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 4,
+                    final_end: 7,
+                    node_id: wt_node_id,
+                    sequence_start: 2,
+                    sequence_end: 5,
+                },
+                FinalSequenceSegment {
+                    final_start: 7,
+                    final_end: 10,
+                    node_id: replacement_node_id,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                },
+                FinalSequenceSegment {
+                    final_start: 10,
+                    final_end: 11,
+                    node_id: wt_node_id,
+                    sequence_start: 7,
+                    sequence_end: 8,
+                },
+                FinalSequenceSegment {
+                    final_start: 11,
+                    final_end: 12,
+                    node_id: wt_node_id,
+                    sequence_start: 9,
+                    sequence_end: 10,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_node_sequence_segments() {
+        let node_id = HashId::convert_str("node");
+        let other_node_id = HashId::convert_str("other");
+
+        let merged = merge_node_sequence_segments(vec![
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 0,
+                sequence_end: 3,
+                strand: Strand::Forward,
+            },
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 3,
+                sequence_end: 5,
+                strand: Strand::Forward,
+            },
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 4,
+                sequence_end: 7,
+                strand: Strand::Forward,
+            },
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 7,
+                sequence_end: 7,
+                strand: Strand::Forward,
+            },
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 1,
+                sequence_end: 2,
+                strand: Strand::Reverse,
+            },
+            NodeSequenceSegment {
+                node_id: other_node_id,
+                sequence_start: 0,
+                sequence_end: 1,
+                strand: Strand::Forward,
+            },
+        ]);
+
+        assert_eq!(
+            merged,
+            vec![
+                NodeSequenceSegment {
+                    node_id,
+                    sequence_start: 0,
+                    sequence_end: 7,
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id,
+                    sequence_start: 1,
+                    sequence_end: 2,
+                    strand: Strand::Reverse,
+                },
+                NodeSequenceSegment {
+                    node_id: other_node_id,
+                    sequence_start: 0,
+                    sequence_end: 1,
+                    strand: Strand::Forward,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_map_annotation_segments() {
+        let wt_node_id = HashId::convert_str("wt");
+        let insertion_node_id = HashId::convert_str("insertion");
+
+        let mapped = map_annotation_segments(
+            &[GenBankAnnotationSegment {
+                start: 1,
+                end: 6,
+                strand: Strand::Forward,
+            }],
+            &[
+                FinalSequenceSegment {
+                    final_start: 0,
+                    final_end: 2,
+                    node_id: wt_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 2,
+                    final_end: 4,
+                    node_id: insertion_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 4,
+                    final_end: 7,
+                    node_id: wt_node_id,
+                    sequence_start: 2,
+                    sequence_end: 5,
+                },
+            ],
+        );
+
+        assert_eq!(
+            mapped,
+            vec![
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_start: 1,
+                    sequence_end: 2,
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id: insertion_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_start: 2,
+                    sequence_end: 4,
+                    strand: Strand::Forward,
+                },
+            ]
+        );
     }
 
     #[test]

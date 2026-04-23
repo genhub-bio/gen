@@ -409,4 +409,32 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn test_preserves_origin_spanning_annotations() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
+        let mut records = reader::parse_file(&path).unwrap();
+        let seq = process_sequence(records.remove(0)).unwrap();
+
+        let annotation = seq
+            .annotations
+            .iter()
+            .find(|annotation| annotation.name == "ori")
+            .unwrap();
+        assert_eq!(
+            annotation.segments,
+            vec![
+                GenBankAnnotationSegment {
+                    start: 2314,
+                    end: 2686,
+                    strand: Strand::Forward,
+                },
+                GenBankAnnotationSegment {
+                    start: 0,
+                    end: 217,
+                    strand: Strand::Forward,
+                },
+            ]
+        );
+    }
 }
