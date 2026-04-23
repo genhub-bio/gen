@@ -8,7 +8,7 @@ use gen_models::{
     db::{DbContext, GraphConnection},
     edge::Edge,
     errors::OperationError,
-    path::Path,
+    path::{Path, PathError},
     path_edge::PathEdge,
     sample::Sample,
     traits::Query,
@@ -31,6 +31,8 @@ pub enum GraphOperationError {
     GraphError(#[from] GraphError),
     #[error("Error deriving subgraph: {0}")]
     DeriveSubgraphError(#[from] BlockGroupError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
 }
 
 pub fn get_path(
@@ -253,7 +255,7 @@ pub fn derive_chunks(
                 &current_path.name,
                 &child_block_group_id,
                 &new_path_edge_ids,
-            );
+            )?;
         }
 
         let path_edges = Edge::query_by_ids(conn, &new_path_edge_ids);
@@ -420,7 +422,7 @@ pub fn make_stitch_from_block_groups(
             new_region_name,
             &child_block_group_id,
             &new_path_edge_ids,
-        );
+        )?;
     }
 
     Ok(())
@@ -544,8 +546,9 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let insert_path =
-            original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+        let insert_path = original_path
+            .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+            .unwrap();
         assert_eq!(
             insert_path.sequence(conn),
             "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"

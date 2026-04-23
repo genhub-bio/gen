@@ -14,6 +14,7 @@ use gen_models::{
     edge::EdgeError,
     errors::{OperationError, SampleError},
     node::NodeError,
+    path::PathError,
 };
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
@@ -46,6 +47,8 @@ pub enum GenBankError {
     EdgeError(#[from] EdgeError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

@@ -146,7 +146,7 @@ pub fn import_fasta(
             &name,
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
-        );
+        )?;
         summary.entry(path.name).or_insert(sequence_length);
         bar.inc(1);
     }

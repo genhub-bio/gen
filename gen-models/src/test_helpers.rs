@@ -199,7 +199,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         "chr1",
         &block_group.id,
         &[edge0.id, edge1.id, edge2.id, edge3.id, edge4.id],
-    );
+    )
+    .unwrap();
     Ok((block_group.id, path))
 }
 

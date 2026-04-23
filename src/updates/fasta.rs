@@ -190,7 +190,7 @@ pub fn update_with_fasta(
                     end_coordinate,
                     &edge_to_new_node,
                     &edge_from_new_node,
-                );
+                )?;
             }
         }
     }

@@ -144,7 +144,7 @@ where
                         &locus.name,
                         &block_group.id,
                         &[edge_into.id, edge_out_of.id],
-                    )
+                    )?
                 };
                 for edit in locus.changes_to_wt() {
                     let start = edit.start;

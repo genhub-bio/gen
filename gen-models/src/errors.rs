@@ -1,7 +1,7 @@
 use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
-use crate::{collection::CollectionError, node::NodeError, sample::Sample};
+use crate::{collection::CollectionError, node::NodeError, path::PathError, sample::Sample};
 
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
 pub enum QueryError {
@@ -41,6 +41,8 @@ pub enum ChangesetError {
     SampleError(#[from] SampleError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
 }
 
 #[derive(Debug, PartialEq, Error)]

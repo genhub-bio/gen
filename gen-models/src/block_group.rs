@@ -298,7 +298,8 @@ impl BlockGroup {
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
-            let new_path = Path::create(conn, &path.name, target_block_group_id, &edge_ids);
+            let new_path =
+                Path::create(conn, &path.name, target_block_group_id, &edge_ids).unwrap();
             path_map.insert(path.id, new_path.id);
         }
 
@@ -1711,7 +1712,8 @@ mod tests {
                 .iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>(),
-        );
+        )
+        .unwrap();
         let parent_b_path = Path::create(
             conn,
             "chr1",
@@ -1720,7 +1722,8 @@ mod tests {
                 .iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>(),
-        );
+        )
+        .unwrap();
         let parent_b_alt_path = Path::create(
             conn,
             "chr1-alt",
@@ -1729,7 +1732,8 @@ mod tests {
                 .iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>(),
-        );
+        )
+        .unwrap();
 
         let mut path_cache = PathCache::new(conn);
         let parent_a_path_len = parent_a_path.length(conn);
@@ -3394,8 +3398,9 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert_path =
-                original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+            let insert_path = original_path
+                .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+                .unwrap();
             assert_eq!(
                 insert_path.sequence(conn),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
@@ -3527,8 +3532,9 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert_path =
-                original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+            let insert_path = original_path
+                .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+                .unwrap();
             assert_eq!(
                 insert_path.sequence(conn),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
@@ -3609,8 +3615,9 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert2_path =
-                insert_path.new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2);
+            let insert2_path = insert_path
+                .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
+                .unwrap();
             assert_eq!(
                 insert2_path.sequence(conn),
                 "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
@@ -3751,8 +3758,9 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert_path =
-                original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+            let insert_path = original_path
+                .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+                .unwrap();
             assert_eq!(
                 insert_path.sequence(conn),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
@@ -3832,8 +3840,9 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert2_path =
-                insert_path.new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2);
+            let insert2_path = insert_path
+                .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
+                .unwrap();
             assert_eq!(
                 insert2_path.sequence(conn),
                 "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"

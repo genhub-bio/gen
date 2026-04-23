@@ -203,7 +203,8 @@ mod tests {
             "m123",
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
-        );
+        )
+        .unwrap();
 
         Ok(())
     }
@@ -278,7 +279,9 @@ mod tests {
             rusqlite::params![node_id],
         )[0]
         .clone();
-        sample_path.new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert);
+        sample_path
+            .new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert)
+            .unwrap();
 
         Ok(())
     }

@@ -10,7 +10,7 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     db::GraphConnection,
     node::{Node, NodeError},
-    path::Path,
+    path::{Path, PathError},
     sequence::Sequence,
 };
 use noodles::fasta;
@@ -43,6 +43,8 @@ pub enum CombinatorialLibraryCreationError {
     GraphError(#[from] GraphError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
 }
 
 pub fn parse_library(
@@ -285,7 +287,7 @@ pub fn create_library(
             format!("{library_name} default path").as_str(),
             &block_group_id,
             &path_edge_ids,
-        );
+        )?;
     }
 
     Ok(result_block_group_chunk)

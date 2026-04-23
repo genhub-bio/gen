@@ -6,6 +6,7 @@ use gen_models::{
     edge::EdgeError,
     errors::{OperationError, QueryError, SampleError},
     node::NodeError,
+    path::PathError,
 };
 use thiserror::Error;
 
@@ -27,4 +28,6 @@ pub enum FastaError {
     EdgeError(#[from] EdgeError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
 }

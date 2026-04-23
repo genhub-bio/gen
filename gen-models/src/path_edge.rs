@@ -18,7 +18,7 @@ pub struct PathEdge {
     pub index_in_path: i64,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum PathEdgeError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),

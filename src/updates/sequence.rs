@@ -146,7 +146,7 @@ pub fn update_with_sequence(
                     end_coordinate,
                     &edge_to_new_node,
                     &edge_from_new_node,
-                );
+                )?;
             }
         }
     }

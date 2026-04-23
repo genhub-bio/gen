@@ -595,7 +595,7 @@ where
                     &locus.name,
                     &block_group.id,
                     &[edge_into.id, edge_out_of.id],
-                );
+                )?;
 
                 let wt_changes = locus.changes_to_wt();
                 let mut applied_changes = Vec::with_capacity(wt_changes.len());

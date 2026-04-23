@@ -115,7 +115,8 @@ pub fn setup_test_data(conn: &GraphConnection) -> Result<(), EdgeError> {
         "m123",
         &block_group.id,
         &[edge_into.id, middle_edge.id, edge_out_of.id],
-    );
+    )
+    .unwrap();
 
     Sample::get_or_create(conn, "foo").unwrap();
     let _ =

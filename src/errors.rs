@@ -3,6 +3,7 @@ use std::io::Error as IOError;
 use gen_models::{
     errors::{OperationError, QueryError},
     node::NodeError,
+    path::PathError,
 };
 use thiserror::Error;
 
@@ -23,4 +24,6 @@ pub enum SequenceUpdateError {
     SQLQueryError(#[from] QueryError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
 }

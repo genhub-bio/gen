@@ -882,7 +882,7 @@ pub fn apply_changeset(
     );
 
     for path in dependencies.paths.iter() {
-        Path::create(conn, &path.name, &path.block_group_id, &[]);
+        Path::create(conn, &path.name, &path.block_group_id, &[])?;
     }
 
     AccessionEdge::bulk_create(
@@ -959,7 +959,7 @@ pub fn apply_changeset(
     );
 
     for path in &changeset.paths {
-        Path::create(conn, &path.name, &path.block_group_id, &[]);
+        Path::create(conn, &path.name, &path.block_group_id, &[])?;
         let edges = changeset
             .path_edges
             .iter()

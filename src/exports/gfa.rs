@@ -431,7 +431,8 @@ mod tests {
             "1234",
             &block_group.id,
             &[edge1.id, edge2.id, edge3.id, edge4.id, edge5.id],
-        );
+        )
+        .unwrap();
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
 
