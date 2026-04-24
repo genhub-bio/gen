@@ -44,9 +44,6 @@ gen-python/python/gen/*.so
 # precommit stuff
 .cache
 
-# Editor stuff
-.zed
-
 # Agent stuff
 .codex
 **/.kiro/specs/*

@@ -183,7 +183,7 @@ impl<'a> Capnp<'a> for Annotation {
         builder.set_name(&self.name);
         builder.set_annotation_group(&self.group);
         builder.set_accession_id(&self.accession_id.0).unwrap();
-        builder.set_extra_json(
+        builder.set_extra(
             serialize_annotation_extra(self.extra.as_ref())
                 .unwrap_or_default()
                 .as_str(),
@@ -209,7 +209,7 @@ impl<'a> Capnp<'a> for Annotation {
             .unwrap();
         let extra = deserialize_annotation_extra(
             reader
-                .get_extra_json()
+                .get_extra()
                 .ok()
                 .map(|value| value.to_string().unwrap())
                 .filter(|value| !value.is_empty()),
