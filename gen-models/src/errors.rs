@@ -75,6 +75,10 @@ pub enum BranchError {
     SQLError(String),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Duplicate entry: {0}")]
+    Duplicate(String),
+    #[error("Couldn't create branch: {0}")]
+    CannotCreate(String),
 }
 
 #[derive(Debug, Error, PartialEq)]

@@ -16,7 +16,7 @@ use gen_models::{
     annotations::{AnnotationFile, AnnotationFileError},
     changesets::{apply_changeset, revert_changeset},
     db::{DbContext, OperationsConnection},
-    errors::{ChangesetError, FileAdditionError, OperationError, RemoteError},
+    errors::{BranchError, ChangesetError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
     manifest::{
         ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
@@ -148,7 +148,9 @@ pub enum RemoteOperationError {
     #[error("Annotation File Error: {0}")]
     AnnotationFileError(#[from] AnnotationFileError),
     #[error("Branch Error: {0}")]
-    BranchError(String),
+    BranchNotSet(String),
+    #[error("Branch Error: {0}")]
+    BranchError(#[from] BranchError),
 }
 
 #[derive(Debug, Error)]
@@ -712,7 +714,7 @@ fn push_to_file_remote(
 
     let (remote_workspace, ref remote_op_conn) = connect_file_remote(remote_url)?;
 
-    let remote_branch = Branch::get_or_create(remote_op_conn, branch_name);
+    let remote_branch = Branch::get_or_create(remote_op_conn, branch_name)?;
     let remote_generator = ManifestGenerator::new(remote_op_conn);
     let remote_manifest = if let Some(hash) = remote_branch.current_operation_hash {
         Some(remote_generator.generate_manifest(branch_name, Some(&hash))?)
@@ -910,7 +912,7 @@ pub fn pull(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
     let remote_url = remote.url;
 
     let current_branch_id = OperationState::get_current_branch(operation_conn)
-        .ok_or_else(|| RemoteOperationError::BranchError("No current branch set".to_string()))?;
+        .ok_or_else(|| RemoteOperationError::BranchNotSet("No current branch set".to_string()))?;
     let branch = Branch::get_by_id(operation_conn, current_branch_id).ok_or_else(|| {
         RemoteOperationError::DoesNotExist(format!(
             "Branch {current_branch_id} not found in database."
@@ -1452,8 +1454,8 @@ mod tests {
                 HashId::convert_str("op-2"),
             );
 
-            let branch_1 = Branch::get_or_create(op_conn, "branch-1");
-            let branch_2 = Branch::get_or_create(op_conn, "branch-2");
+            let branch_1 = Branch::get_or_create(op_conn, "branch-1").unwrap();
+            let branch_2 = Branch::get_or_create(op_conn, "branch-2").unwrap();
             OperationState::set_branch(op_conn, "branch-1");
             let op_3 = create_operation(
                 &context,
@@ -1803,8 +1805,8 @@ mod tests {
         )
         .unwrap();
 
-        Branch::get_or_create(op_conn, "branch-1");
-        Branch::get_or_create(op_conn, "branch-2");
+        Branch::get_or_create(op_conn, "branch-1").unwrap();
+        Branch::get_or_create(op_conn, "branch-2").unwrap();
         checkout(&context, &Some("branch-1".to_string()), None).unwrap();
 
         let op_2 = update_with_vcf(
@@ -1931,9 +1933,9 @@ mod tests {
         assert_eq!(sample_count, 1);
         assert_eq!(op_count, 1);
 
-        let branch_1 = Branch::get_or_create(op_conn, "branch_1");
+        let branch_1 = Branch::get_or_create(op_conn, "branch_1").unwrap();
 
-        let branch_2 = Branch::get_or_create(op_conn, "branch_2");
+        let branch_2 = Branch::get_or_create(op_conn, "branch_2").unwrap();
 
         OperationState::set_branch(op_conn, "branch_1");
         assert_eq!(
@@ -2069,7 +2071,7 @@ mod tests {
             HashId::convert_str("op-2"),
         );
 
-        let branch_a = Branch::get_or_create(op_conn, "branch-a");
+        let branch_a = Branch::get_or_create(op_conn, "branch-a").unwrap();
 
         OperationState::set_branch(op_conn, "branch-a");
 
@@ -2129,7 +2131,7 @@ mod tests {
 
         OperationState::set_operation(op_conn, &HashId::convert_str("op-5"));
 
-        let branch_b = Branch::get_or_create(op_conn, "branch-b");
+        let branch_b = Branch::get_or_create(op_conn, "branch-b").unwrap();
 
         OperationState::set_branch(op_conn, "branch-b");
 
