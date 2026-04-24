@@ -105,6 +105,7 @@ pub struct Annotation {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AnnotationExtra {
     pub genbank: Option<GenBankExtra>,
     pub gff: Option<GffExtra>,
@@ -112,6 +113,7 @@ pub struct AnnotationExtra {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct GenBankExtra {
     pub kind: String,
     pub qualifiers: Vec<GenBankQualifier>,
@@ -119,6 +121,7 @@ pub struct GenBankExtra {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct GenBankQualifier {
     pub key: String,
     pub value: Option<String>,
@@ -133,6 +136,7 @@ pub enum GenBankLocationOperator {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct GffExtra {
     pub source: Option<String>,
     pub ty: String,
@@ -142,12 +146,14 @@ pub struct GffExtra {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct GffAttribute {
     pub key: String,
     pub values: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct BedExtra {
     pub score: Option<String>,
     pub thick_start: Option<i64>,
@@ -918,6 +924,45 @@ mod tests {
 
         let by_group = Annotation::query_by_group(&conn, "project-tracks").unwrap();
         assert_eq!(by_group, vec![annotation]);
+    }
+
+    #[test]
+    fn deserialize_annotation_extra_defaults_missing_fields() {
+        // Ensure that if we add new fields to the AnnotationExtra struct, like new_annotation_format we still parse old ones
+        let extra = deserialize_annotation_extra(Some(r#"{"genbank":{"kind":"CDS"}}"#.to_string()))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            extra.genbank,
+            Some(GenBankExtra {
+                kind: "CDS".to_string(),
+                ..GenBankExtra::default()
+            })
+        );
+        assert_eq!(extra.gff, None);
+        assert_eq!(extra.bed, None);
+    }
+
+    #[test]
+    fn deserialize_annotation_extra_ignores_unknown_fields() {
+        // ensure if we drop a format, removed_top_level key here, we still parse
+        let extra = deserialize_annotation_extra(Some(
+            r#"{"genbank":{"kind":"CDS","legacy_field":"value"},"removed_top_level":true}"#
+                .to_string(),
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            extra.genbank,
+            Some(GenBankExtra {
+                kind: "CDS".to_string(),
+                ..GenBankExtra::default()
+            })
+        );
+        assert_eq!(extra.gff, None);
+        assert_eq!(extra.bed, None);
     }
 
     #[test]
