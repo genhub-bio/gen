@@ -966,6 +966,30 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_and_reserialize_annotation_extra_keeps_compatible_fields() {
+        // Ensure that if we parse an older field, we can still reserialize it with the compatible fields kept.
+        let extra = deserialize_annotation_extra(Some(
+            r#"{"genbank":{"kind":"CDS","legacy_field":"value"},"removed_top_level":true}"#
+                .to_string(),
+        ))
+        .unwrap()
+        .unwrap();
+
+        let reserialized = serialize_annotation_extra(Some(&extra)).unwrap();
+        let reparsed: AnnotationExtra = serde_json::from_str(&reserialized).unwrap();
+
+        assert_eq!(
+            reparsed.genbank,
+            Some(GenBankExtra {
+                kind: "CDS".to_string(),
+                ..GenBankExtra::default()
+            })
+        );
+        assert_eq!(reparsed.gff, None);
+        assert_eq!(reparsed.bed, None);
+    }
+
+    #[test]
     fn add_annotation_file_to_operation() {
         let context = setup_gen();
         let op_conn = context.operations().conn();
