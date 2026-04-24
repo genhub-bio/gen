@@ -11,7 +11,7 @@ use tempfile::tempdir;
 use crate::{
     block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::{Collection, CollectionError},
+    collection::Collection,
     db::{DbContext, GraphConnection, OperationsConnection},
     edge::Edge,
     file_types::FileTypes,
@@ -107,11 +107,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         .sequence("GGGGGGGGGG")
         .save(conn);
     let g_node_id = Node::create(conn, &g_seq.hash, &HashId::convert_str("test-g-node"))?;
-    match Collection::create(conn, "test") {
-        Ok(_) => {}
-        Err(CollectionError::Duplicate(_)) => {}
-        Err(e) => panic!("Unexpected error creating collection: {:?}", e),
-    }
+    Collection::get_or_create(conn, "test").unwrap();
     Sample::get_or_create(conn, "test").unwrap();
     let block_group = create_bg(conn, "test", "test", "chr1");
     let edge0 = Edge::create(

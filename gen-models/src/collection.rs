@@ -80,6 +80,27 @@ impl Collection {
         }
     }
 
+    pub fn get_or_create(
+        conn: &GraphConnection,
+        name: &str,
+    ) -> Result<Collection, CollectionError> {
+        match Collection::create(conn, name) {
+            Ok(collection) => Ok(collection),
+            Err(CollectionError::Duplicate(_)) => {
+                let collections =
+                    Self::query(conn, "SELECT * FROM collections WHERE name = ?1", [name]);
+                if let Some(collection) = collections.into_iter().next() {
+                    Ok(collection)
+                } else {
+                    Err(CollectionError::DatabaseError(
+                        rusqlite::Error::QueryReturnedNoRows,
+                    ))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn bulk_create(conn: &GraphConnection, names: &Vec<String>) -> Vec<Collection> {
         let placeholders = names.iter().map(|_| "(?)").collect::<Vec<_>>().join(", ");
         let q = format!("INSERT INTO collections (name) VALUES {placeholders} RETURNING *",);
