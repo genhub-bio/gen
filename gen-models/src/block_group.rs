@@ -19,11 +19,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    accession::{
+        Accession, AccessionEdge, AccessionEdgeData, AccessionError, AccessionPath,
+        AccessionPathError,
+    },
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{Edge, EdgeData, EdgeError, GroupBlock},
-    errors::{ChangeError, QueryError},
+    errors::QueryError,
     gen_models_capnp::block_group,
     node::{Node, NodeError},
     path::{Path, PathData},
@@ -51,6 +54,14 @@ pub enum BlockGroupError {
     EdgeError(#[from] EdgeError),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Accession creation error: {0}")]
+    AccessionError(#[from] AccessionError),
+    #[error("Accession path creation error: {0}")]
+    AccessionPathError(#[from] AccessionPathError),
+    #[error("Query error: {0}")]
+    QueryError(#[from] QueryError),
+    #[error("Change error: {0}")]
+    ChangeOutOfBounds(String),
 }
 
 impl<'a> Capnp<'a> for BlockGroup {
@@ -285,7 +296,7 @@ impl BlockGroup {
         &self,
         conn: &GraphConnection,
         target_block_group_id: &HashId,
-    ) {
+    ) -> Result<(), BlockGroupError> {
         let existing_paths = Path::query(
             conn,
             "SELECT * from paths where block_group_id = ?1;",
@@ -324,13 +335,15 @@ impl BlockGroup {
                 &accession.name,
                 new_path_id,
                 accession.parent_accession_id.as_ref(),
-            );
+            )?;
             AccessionPath::create(
                 conn,
                 &obj.id,
                 &edges.iter().map(|ap| ap.edge_id).collect::<Vec<_>>(),
-            );
+            )?;
         }
+
+        Ok(())
     }
 
     pub fn get_or_create_sample_block_groups(
@@ -339,7 +352,7 @@ impl BlockGroup {
         sample_name: &str,
         group_name: &str,
         parent_samples: Vec<String>,
-    ) -> Result<Vec<BlockGroup>, QueryError> {
+    ) -> Result<Vec<BlockGroup>, BlockGroupError> {
         let existing_block_groups = BlockGroup::query(
             conn,
             "select * from block_groups
@@ -372,23 +385,21 @@ impl BlockGroup {
             )]);
         }
 
-        let new_block_groups = parent_block_groups
-            .iter()
-            .map(|parent_block_group| {
-                let new_block_group = BlockGroup::create(
-                    conn,
-                    NewBlockGroup {
-                        collection_name,
-                        sample_name,
-                        name: group_name,
-                        parent_block_group_id: Some(&parent_block_group.id),
-                        ..Default::default()
-                    },
-                );
-                new_block_group.copy_contents_from(conn, parent_block_group);
-                new_block_group
-            })
-            .collect::<Vec<_>>();
+        let mut new_block_groups = vec![];
+        for parent_block_group in &parent_block_groups {
+            let new_block_group = BlockGroup::create(
+                conn,
+                NewBlockGroup {
+                    collection_name,
+                    sample_name,
+                    name: group_name,
+                    parent_block_group_id: Some(&parent_block_group.id),
+                    ..Default::default()
+                },
+            );
+            new_block_group.copy_contents_from(conn, parent_block_group)?;
+            new_block_groups.push(new_block_group);
+        }
 
         Ok(new_block_groups)
     }
@@ -428,7 +439,11 @@ impl BlockGroup {
         )
     }
 
-    fn copy_contents_from(&self, conn: &GraphConnection, source_block_group: &BlockGroup) {
+    fn copy_contents_from(
+        &self,
+        conn: &GraphConnection,
+        source_block_group: &BlockGroup,
+    ) -> Result<(), BlockGroupError> {
         let new_block_group_edges =
             BlockGroupEdge::edges_for_block_group(conn, &source_block_group.id)
                 .into_iter()
@@ -440,7 +455,8 @@ impl BlockGroup {
                 })
                 .collect::<Vec<_>>();
         BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-        source_block_group.copy_paths_and_accessions_into(conn, &self.id);
+        source_block_group.copy_paths_and_accessions_into(conn, &self.id)?;
+        Ok(())
     }
 
     pub fn get_id(
@@ -589,7 +605,7 @@ impl BlockGroup {
         start: i64,
         end: i64,
         cache: &mut PathCache,
-    ) -> Accession {
+    ) -> Result<Accession, BlockGroupError> {
         let tree = PathCache::get_intervaltree(cache, path);
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(start).map(|x| &x.value).collect();
@@ -656,8 +672,8 @@ impl BlockGroup {
             conn,
             &accession.id,
             &AccessionEdge::bulk_create(conn, &path_edges),
-        );
-        accession
+        )?;
+        Ok(accession)
     }
 
     pub fn insert_changes(
@@ -665,7 +681,7 @@ impl BlockGroup {
         changes: &[PathChange],
         cache: &mut PathCache,
         modify_blockgroup: bool,
-    ) -> Result<(), ChangeError> {
+    ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
             HashMap::<&HashId, Vec<AugmentedEdgeData>>::new();
         let mut new_accession_edges = HashMap::new();
@@ -738,7 +754,7 @@ impl BlockGroup {
                     );
                     let acc = Accession::create(conn, accession_name, &path.id, None)
                         .expect("Accession could not be created.");
-                    AccessionPath::create(conn, &acc.id, &acc_edges);
+                    AccessionPath::create(conn, &acc.id, &acc_edges)?;
                 }
             }
         }
@@ -751,7 +767,7 @@ impl BlockGroup {
         conn: &GraphConnection,
         change: &PathChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
-    ) -> Result<(), ChangeError> {
+    ) -> Result<(), BlockGroupError> {
         let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
         let new_edges = new_augmented_edges
             .iter()
@@ -775,7 +791,7 @@ impl BlockGroup {
     fn set_up_new_edges(
         change: &PathChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
-    ) -> Result<Vec<AugmentedEdgeData>, ChangeError> {
+    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(change.start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
@@ -801,7 +817,7 @@ impl BlockGroup {
         // changes at the extremes, it's not ok for the change to start beyond the current
         // boundaries.
         if is_start_node(start_block.node_id) && change.start < start_block.end {
-            return Err(ChangeError::OutOfBounds(format!(
+            return Err(BlockGroupError::ChangeOutOfBounds(format!(
                 "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
                 pos = change.start,
                 path_pos = start_block.end
@@ -813,7 +829,7 @@ impl BlockGroup {
         let end_block = end_blocks[0];
 
         if is_end_node(end_block.node_id) && change.end > end_block.start {
-            return Err(ChangeError::OutOfBounds(format!(
+            return Err(BlockGroupError::ChangeOutOfBounds(format!(
                 "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
                 pos = change.end,
                 path_pos = end_block.start
@@ -1746,7 +1762,8 @@ mod tests {
             0,
             parent_a_path_len,
             &mut path_cache,
-        );
+        )
+        .unwrap();
         BlockGroup::add_accession(
             conn,
             &parent_b_path,
@@ -1754,7 +1771,8 @@ mod tests {
             0,
             parent_b_path_len,
             &mut path_cache,
-        );
+        )
+        .unwrap();
         BlockGroup::add_accession(
             conn,
             &parent_b_alt_path,
@@ -1762,7 +1780,8 @@ mod tests {
             0,
             parent_b_alt_path_len,
             &mut path_cache,
-        );
+        )
+        .unwrap();
 
         let child_block_groups = BlockGroup::get_or_create_sample_block_groups(
             conn,
@@ -1837,7 +1856,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_bg_1, path) = setup_block_group(conn).unwrap();
         let mut path_cache = PathCache::new(conn);
-        let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache);
+        let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache).unwrap();
         assert_eq!(
             Accession::query(
                 conn,
@@ -2737,9 +2756,9 @@ mod tests {
         };
         let tree = path.intervaltree(&conn);
         let res = BlockGroup::insert_change(&conn, &after_end_change, &tree);
-        assert!(matches!(res, Err(ChangeError::OutOfBounds(_))));
+        assert!(matches!(res, Err(BlockGroupError::ChangeOutOfBounds(_))));
         let res = BlockGroup::insert_change(&conn, &before_start_change, &tree);
-        assert!(matches!(res, Err(ChangeError::OutOfBounds(_))));
+        assert!(matches!(res, Err(BlockGroupError::ChangeOutOfBounds(_))));
     }
 
     #[test]

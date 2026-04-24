@@ -6,9 +6,9 @@ use std::{
 
 use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
+    block_group::{BlockGroup, BlockGroupData, BlockGroupError, PathCache, PathChange},
     db::{DbContext, GraphConnection},
-    errors::{OperationError, QueryError, SampleError},
+    errors::{OperationError, SampleError},
     file_types::FileTypes,
     node::{Node, NodeError},
     operations::{Operation, OperationFile, OperationInfo},
@@ -60,7 +60,7 @@ impl<'a> BlockGroupCache<'_> {
         sample_name: &'a str,
         name: String,
         parent_samples: &[String],
-    ) -> Result<Vec<HashId>, QueryError> {
+    ) -> Result<Vec<HashId>, BlockGroupError> {
         let block_group_key = BlockGroupData {
             collection_name,
             sample_name,
@@ -194,6 +194,8 @@ pub enum VcfError {
     InvalidRecord(String),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 fn resolve_parent_samples(
@@ -613,7 +615,7 @@ pub fn update_with_vcf(
             *acc_start,
             *acc_end,
             &mut path_cache,
-        );
+        )?;
     }
     let mut summary_str = "".to_string();
     for (sample_name, sample_changes) in summary.iter() {

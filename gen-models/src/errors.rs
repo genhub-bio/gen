@@ -1,7 +1,14 @@
 use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
-use crate::{collection::CollectionError, node::NodeError, path::PathError, sample::Sample};
+use crate::{
+    accession::{AccessionError, AccessionPathError},
+    block_group::BlockGroupError,
+    collection::CollectionError,
+    node::NodeError,
+    path::PathError,
+    sample::Sample,
+};
 
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
 pub enum QueryError {
@@ -17,12 +24,8 @@ pub enum SampleError {
     SqliteError(#[from] rusqlite::Error),
     #[error("Sample already exists")]
     Duplicate(Sample),
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum ChangeError {
-    #[error("Operation Error: {0}")]
-    OutOfBounds(String),
+    #[error("Block group creation error: {0}")]
+    BlockGroup(#[from] BlockGroupError),
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -43,6 +46,10 @@ pub enum ChangesetError {
     NodeError(#[from] NodeError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
+    #[error("Accession creation error: {0}")]
+    AccessionError(#[from] AccessionError),
+    #[error("Accession path creation error: {0}")]
+    AccessionPathError(#[from] AccessionPathError),
 }
 
 #[derive(Debug, PartialEq, Error)]

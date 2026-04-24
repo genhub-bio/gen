@@ -1,6 +1,7 @@
 use std::io::Error as IOError;
 
 use gen_models::{
+    block_group::BlockGroupError,
     errors::{OperationError, QueryError},
     node::NodeError,
     path::PathError,
@@ -26,4 +27,6 @@ pub enum SequenceUpdateError {
     NodeError(#[from] NodeError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }

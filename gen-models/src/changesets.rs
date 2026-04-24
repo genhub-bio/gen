@@ -895,12 +895,15 @@ pub fn apply_changeset(
     );
 
     for accession in dependencies.accessions.iter() {
-        Accession::get_or_create(
+        match Accession::get_or_create(
             conn,
             &accession.name,
             &accession.path_id,
             accession.parent_accession_id.as_ref(),
-        );
+        ) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::AccessionError(err)),
+        }
     }
 
     for collection in &changeset.collections {
@@ -984,14 +987,14 @@ pub fn apply_changeset(
             &accession.name,
             &accession.path_id,
             accession.parent_accession_id.as_ref(),
-        );
+        )?;
         let edges = changeset
             .accession_paths
             .iter()
             .filter(|ap| ap.accession_id == accession.id)
             .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
             .map(|ap| ap.edge_id);
-        AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>());
+        AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>())?;
     }
 
     for annotation_group in &changeset.annotation_groups {
@@ -1586,7 +1589,8 @@ mod tests {
         let (block_group_id, path) = setup_block_group(conn)?;
         let mut cache = PathCache::new(conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
-        let accession = BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
 
         let mut session = start_operation(conn);
         let annotation =

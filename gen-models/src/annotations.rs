@@ -552,7 +552,7 @@ pub fn add_annotation(
 
     let mut cache = PathCache::new(graph_conn);
     let _ = PathCache::lookup(&mut cache, &block_group.id, path.name.clone());
-    let accession = BlockGroup::add_accession(graph_conn, &path, name, start, end, &mut cache);
+    let accession = BlockGroup::add_accession(graph_conn, &path, name, start, end, &mut cache)?;
 
     let annotation_group = group.unwrap_or("default");
     let annotation =
@@ -902,7 +902,8 @@ mod tests {
 
         let mut cache = PathCache::new(&conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
-        let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache);
+        let accession =
+            BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
 
         let annotation =
             Annotation::get_or_create(&conn, "gene-a", "project-tracks", &accession.id, None)
