@@ -139,14 +139,16 @@ pub fn end_operation(
             if err.code == rusqlite::ErrorCode::ConstraintViolation {
                 Err(OperationError::OperationExists)
             } else {
-                panic!("something bad happened querying the database {details:?}");
+                Err(OperationError::SqliteError(rusqlite::Error::SqliteFailure(
+                    err, details,
+                )))
             }
         }
-        Err(e) => {
+        Err(err) => {
             operation_conn
                 .execute("ROLLBACK TRANSACTION TO SAVEPOINT new_operation;", [])
                 .unwrap();
-            panic!("something bad happened querying the database {e:?}");
+            Err(OperationError::SqliteError(err))
         }
     }
 }
