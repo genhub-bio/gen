@@ -61,7 +61,7 @@ use sha2::digest::typenum::Gr;
 // start/end are the node's own coordinates in the reference sequence.
 fn fmt_match_path(m: &GraphLocus) -> String {
     let parts: Vec<String> = m
-        .nodes
+        .blocks
         .iter()
         .map(|node| {
             let hash = format!("{}", node.node_id);
@@ -723,7 +723,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         SeedIndex::load_from_path(p, false).ok()
                     })
                     .map(|idx| matcher.find_all_with_seed_index(&idx, query_bytes))
-                    .unwrap_or_else(|| matcher.find_all(query_bytes));
+                    .unwrap_or_else(|| Ok(matcher.find_all(query_bytes)))?;
                 for m in matches {
                     println!(
                         "{}\t{}\t{}\t{}",
