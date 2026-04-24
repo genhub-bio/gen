@@ -996,11 +996,13 @@ pub fn apply_changeset(
             annotation.extra.as_ref(),
         )
         .map_err(|err| match err {
-            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
-                inner
+                ChangesetError::SqliteError(inner)
             }
-            AnnotationError::SerializationError(message) => panic!("{message}"),
+            AnnotationError::SerializationError(message) => {
+                ChangesetError::SerializationError(message)
+            }
         })?;
     }
 
@@ -1011,11 +1013,13 @@ pub fn apply_changeset(
             &annotation_group_sample.sample_name,
         )
         .map_err(|err| match err {
-            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
-                inner
+                ChangesetError::SqliteError(inner)
             }
-            AnnotationError::SerializationError(message) => panic!("{message}"),
+            AnnotationError::SerializationError(message) => {
+                ChangesetError::SerializationError(message)
+            }
         })?;
     }
     Ok(())
@@ -1039,11 +1043,13 @@ pub fn revert_changeset(
             &annotation_group_sample.sample_name,
         )
         .map_err(|err| match err {
-            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
-                inner
+                ChangesetError::SqliteError(inner)
             }
-            AnnotationError::SerializationError(message) => panic!("{message}"),
+            AnnotationError::SerializationError(message) => {
+                ChangesetError::SerializationError(message)
+            }
         })?;
     }
     Annotation::delete_by_ids(

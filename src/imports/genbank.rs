@@ -276,36 +276,54 @@ fn merge_node_sequence_segments(
 /// annotation.end == final.start
 /// => overlap_end == overlap_start
 /// ```
-fn map_annotation_segments(
-    annotation_segments: &[GenBankAnnotationSegment],
+fn map_single_annotation_segment(
+    annotation_segment: &GenBankAnnotationSegment,
     final_segments: &[FinalSequenceSegment],
 ) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
     merge_node_sequence_segments(
-        annotation_segments
+        final_segments
             .iter()
-            .flat_map(|annotation_segment| {
-                final_segments.iter().filter_map(|final_segment| {
-                    let overlap_start = max(annotation_segment.start, final_segment.final_start);
-                    let overlap_end = min(annotation_segment.end, final_segment.final_end);
-                    if overlap_end <= overlap_start {
-                        return None;
-                    }
+            .filter_map(|final_segment| {
+                let overlap_start = max(annotation_segment.start, final_segment.final_start);
+                let overlap_end = min(annotation_segment.end, final_segment.final_end);
+                if overlap_end <= overlap_start {
+                    return None;
+                }
 
-                    let segment_start =
-                        final_segment.sequence_start + (overlap_start - final_segment.final_start);
-                    let segment_end =
-                        final_segment.sequence_start + (overlap_end - final_segment.final_start);
+                let segment_start =
+                    final_segment.sequence_start + (overlap_start - final_segment.final_start);
+                let segment_end =
+                    final_segment.sequence_start + (overlap_end - final_segment.final_start);
 
-                    Some(NodeSequenceSegment {
-                        node_id: final_segment.node_id,
-                        sequence_start: segment_start,
-                        sequence_end: segment_end,
-                        strand: annotation_segment.strand,
-                    })
+                Some(NodeSequenceSegment {
+                    node_id: final_segment.node_id,
+                    sequence_start: segment_start,
+                    sequence_end: segment_end,
+                    strand: annotation_segment.strand,
                 })
             })
             .collect(),
     )
+}
+
+fn map_annotation_segments(
+    annotation_segments: &[GenBankAnnotationSegment],
+    final_segments: &[FinalSequenceSegment],
+    preserve_part_boundaries: bool,
+) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
+    let mapped = annotation_segments
+        .iter()
+        .map(|annotation_segment| map_single_annotation_segment(annotation_segment, final_segments))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    if preserve_part_boundaries {
+        Ok(mapped)
+    } else {
+        merge_node_sequence_segments(mapped)
+    }
 }
 
 fn create_accession_for_segments(
@@ -391,7 +409,16 @@ fn import_locus_annotations(
         });
 
     for annotation in input.annotations.iter() {
-        let mapped_segments = map_annotation_segments(&annotation.segments, &final_segments)?;
+        let mapped_segments = map_annotation_segments(
+            &annotation.segments,
+            &final_segments,
+            annotation
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.genbank.as_ref())
+                .and_then(|extra| extra.location_operator.as_ref())
+                .is_some(),
+        )?;
         if mapped_segments.is_empty() {
             continue;
         }
@@ -918,6 +945,7 @@ mod tests {
                     sequence_end: 5,
                 },
             ],
+            false,
         )
         .unwrap();
 
@@ -940,6 +968,53 @@ mod tests {
                     node_id: wt_node_id,
                     sequence_start: 2,
                     sequence_end: 4,
+                    strand: Strand::Forward,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_map_annotation_segments_preserves_part_boundaries() {
+        let wt_node_id = HashId::convert_str("wt");
+
+        let mapped = map_annotation_segments(
+            &[
+                GenBankAnnotationSegment {
+                    start: 0,
+                    end: 2,
+                    strand: Strand::Forward,
+                },
+                GenBankAnnotationSegment {
+                    start: 2,
+                    end: 5,
+                    strand: Strand::Forward,
+                },
+            ],
+            &[FinalSequenceSegment {
+                final_start: 0,
+                final_end: 5,
+                node_id: wt_node_id,
+                sequence_start: 0,
+                sequence_end: 5,
+            }],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mapped,
+            vec![
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_start: 2,
+                    sequence_end: 5,
                     strand: Strand::Forward,
                 },
             ]

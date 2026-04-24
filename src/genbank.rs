@@ -161,25 +161,8 @@ fn feature_qualifier_value(feature: &Feature, key: &str) -> Option<String> {
         })
 }
 
-fn merge_annotation_segments(
-    segments: Vec<GenBankAnnotationSegment>,
-) -> Vec<GenBankAnnotationSegment> {
-    let mut merged: Vec<GenBankAnnotationSegment> = Vec::with_capacity(segments.len());
-    for segment in segments {
-        if segment.end <= segment.start {
-            continue;
-        }
-        if let Some(last) = merged.last_mut()
-            && last.strand == segment.strand
-            && segment.start >= last.start
-            && segment.start <= last.end
-        {
-            last.end = last.end.max(segment.end);
-            continue;
-        }
-        merged.push(segment);
-    }
-    merged
+fn normalize_qualifier_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn annotation_segments_for_location_with_strand(
@@ -203,12 +186,11 @@ fn annotation_segments_for_location_with_strand(
         Location::Join(locations)
         | Location::Order(locations)
         | Location::Bond(locations)
-        | Location::OneOf(locations) => merge_annotation_segments(
-            locations
-                .iter()
-                .flat_map(|location| annotation_segments_for_location_with_strand(location, strand))
-                .collect(),
-        ),
+        | Location::OneOf(locations) => locations
+            .iter()
+            .flat_map(|location| annotation_segments_for_location_with_strand(location, strand))
+            .filter(|segment| segment.end > segment.start)
+            .collect(),
         Location::External(_, maybe_location) => maybe_location
             .as_deref()
             .map(|location| annotation_segments_for_location_with_strand(location, strand))
@@ -244,7 +226,7 @@ fn genbank_extra_for_feature(feature: &Feature) -> AnnotationExtra {
                 .iter()
                 .map(|(key, value)| GenBankQualifier {
                     key: key.as_ref().to_string(),
-                    value: value.clone(),
+                    value: value.as_deref().map(normalize_qualifier_text),
                 })
                 .collect(),
             location_operator: genbank_location_operator(&feature.location),
@@ -265,6 +247,7 @@ fn annotation_for_feature(feature: &Feature) -> Option<GenBankAnnotation> {
         .or_else(|| feature_qualifier_value(feature, "protein_id"))
         .or_else(|| feature_qualifier_value(feature, "product"))
         .or_else(|| feature_qualifier_value(feature, "note"))
+        .map(|value| normalize_qualifier_text(&value))
         .unwrap_or_else(|| feature.kind.as_ref().to_string());
 
     Some(GenBankAnnotation {
@@ -291,11 +274,13 @@ pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
     };
 
     for feature in seq.features.iter() {
-        let edit_note = feature_qualifier_value(feature, "note").and_then(|note| {
-            geneious_edit
-                .captures(&note)
-                .map(|captures| captures["edit_type"].to_string())
-        });
+        let edit_note = feature_qualifier_value(feature, "note")
+            .map(|note| normalize_qualifier_text(&note))
+            .and_then(|note| {
+                geneious_edit
+                    .captures(&note)
+                    .map(|captures| captures["edit_type"].to_string())
+            });
         if let Some(edit_type) = edit_note {
             let (mut start, mut end) = feature
                 .location
@@ -429,46 +414,6 @@ mod tests {
             );
         }
         assert_eq!(wt_sequence, seq.sequence);
-    }
-
-    #[test]
-    fn test_merge_annotation_segments() {
-        assert_eq!(
-            merge_annotation_segments(vec![
-                GenBankAnnotationSegment {
-                    start: 0,
-                    end: 3,
-                    strand: Strand::Forward,
-                },
-                GenBankAnnotationSegment {
-                    start: 3,
-                    end: 5,
-                    strand: Strand::Forward,
-                },
-                GenBankAnnotationSegment {
-                    start: 1,
-                    end: 2,
-                    strand: Strand::Reverse,
-                },
-                GenBankAnnotationSegment {
-                    start: 7,
-                    end: 7,
-                    strand: Strand::Forward,
-                },
-            ]),
-            vec![
-                GenBankAnnotationSegment {
-                    start: 0,
-                    end: 5,
-                    strand: Strand::Forward,
-                },
-                GenBankAnnotationSegment {
-                    start: 1,
-                    end: 2,
-                    strand: Strand::Reverse,
-                },
-            ]
-        );
     }
 
     #[test]
