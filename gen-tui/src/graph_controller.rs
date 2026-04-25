@@ -293,6 +293,25 @@ where
         }
     }
 
+    /// Internal helper to apply a node rect highlight to the viewport graph.
+    /// Resolves the node to its world position and stores that for consistency
+    /// with node_highlights and edge_highlights.
+    fn apply_cell_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+        style: PathStyle,
+    ) {
+        let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
+        if let Some(&world_pos) = viewport_graph.node_positions.get(&node_idx) {
+            viewport_graph
+                .cell_highlights
+                .push((world_pos, tl, br, style));
+        }
+    }
+
     /// Pick the next unused accent color from the theme (slots 0x08–0x0F).
     ///
     /// Scans `self.highlights` for colors already in use and returns the first
@@ -337,24 +356,6 @@ where
         color
     }
 
-    /// Internal helper to apply a node rect highlight to the viewport graph.
-    /// Stores the domain NodeIndex directly — no world-coordinate conversion needed.
-    fn apply_cell_highlight(
-        viewport_graph: &mut CroppedGraph,
-        graph: &G,
-        node_id: G::NodeId,
-        tl: (i64, i64),
-        br: (i64, i64),
-        style: PathStyle,
-    ) {
-        let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
-        if viewport_graph.node_positions.contains_key(&node_idx) {
-            viewport_graph
-                .cell_highlights
-                .push((node_idx, tl, br, style));
-        }
-    }
-
     /// Set a node highlight
     pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
         let graph = &self.partition_controller.graph;
@@ -393,9 +394,9 @@ where
     }
 
     /// Highlight the rectangle from `tl` to `br` (node-local col/row offsets,
-    /// exclusive end) for a single node.
+    /// both inclusive) for a single node.
     ///
-    /// Example — columns 5..12 on the top row:
+    /// Example — columns 5 through 12 inclusive (8 columns) on the top row:
     ///   set_cell_highlight(node_id, (5, 0), (12, 0), style)
     pub fn set_cell_highlight(
         &mut self,
@@ -429,7 +430,7 @@ where
 
     /// Get a reference to the node rect highlights in the current viewport
     #[allow(clippy::type_complexity)]
-    pub fn get_cell_highlights(&self) -> &[(NodeIndex, (i64, i64), (i64, i64), PathStyle)] {
+    pub fn get_cell_highlights(&self) -> &[(WorldPos, (i64, i64), (i64, i64), PathStyle)] {
         &self.viewport_graph.cell_highlights
     }
 

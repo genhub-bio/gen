@@ -33,11 +33,11 @@ pub struct CroppedGraph {
     pub node_highlights: Vec<(WorldPos, crate::plotter::PathStyle)>,
     /// Edge highlights: list of world position pairs with their associated styles
     pub edge_highlights: Vec<((WorldPos, WorldPos), crate::plotter::PathStyle)>,
-    /// Sub-rect highlights keyed by domain NodeIndex.
+    /// Sub-rect highlights keyed by world position (node centre).
     /// tl/br are node-local (col, row) offsets from the node's top-left corner,
     /// both inclusive.
     #[allow(clippy::type_complexity)]
-    pub cell_highlights: Vec<(NodeIndex, (i64, i64), (i64, i64), crate::plotter::PathStyle)>,
+    pub cell_highlights: Vec<(WorldPos, (i64, i64), (i64, i64), crate::plotter::PathStyle)>,
 }
 
 impl CroppedGraph {
