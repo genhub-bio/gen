@@ -4,7 +4,7 @@ use gen_core::{is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::GraphConnection, node::Node};
 use gen_tui::{
-    geometry::WorldRect,
+    geometry::{WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
@@ -40,8 +40,8 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
         let sequence_length = (node.sequence_end - node.sequence_start) as u64;
         match detail_level {
             VisualDetail::Minimal => (1u64, 1u64), // Just a glyph
-            VisualDetail::Truncated => (sequence_length.min(12), 1u64), // Truncated to max 12 chars
-            VisualDetail::Full => (sequence_length, 1u64), // Full sequence length
+            VisualDetail::Truncated => (sequence_length.min(13), 1u64), // 13 = 5 border + 1 mid + 5 border + 2
+            VisualDetail::Full => (sequence_length, 1u64),              // Full sequence length
         }
     }
 }
@@ -126,13 +126,13 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
         match detail_level {
             VisualDetail::Minimal => {
                 // Base scale: Just show a simple glyph
-                let text_style = Style::default().fg(theme[0x00]).bg(theme[0x05]);
+                let text_style = Style::default().fg(theme[0x05]).bg(theme[0x00]);
                 buffer.set_string_styled(area.left_center(), &NODE_GLYPH.to_string(), text_style);
             }
             VisualDetail::Truncated => {
-                // Truncated scale: Show sequence with truncation to max 12 chars
+                // 13 cells: 5 left bases + "..." + 5 right bases.
                 let sequence = self.get_sequence(node_id);
-                let max_width = 12u32;
+                let max_width = 13u32;
                 let truncated = inner_truncation(&sequence, max_width);
                 buffer.set_string_styled(area.left_center(), &truncated, text_style);
             }
@@ -216,8 +216,8 @@ pub fn create_gen_graph_controller(
 /// * `controller` — the graph controller to position
 /// * `node`       — the exact `GraphNode` key to center on
 /// * `offset`     — fractional `(x, y)` position within the node (0.0–1.0)
-pub fn center_on_node_offset(
-    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+pub fn center_on_node_offset<S: NodeSizer<GenGraph>>(
+    controller: &mut GraphController<GenGraph, S>,
     node: GraphNode,
     offset: (f64, f64),
 ) {
@@ -255,27 +255,143 @@ pub fn center_on_node_offset(
     controller.trigger_rebuild();
 }
 
+/// Build a GraphNode → (WorldPos, node_size) lookup from the current viewport graph.
+pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
+    controller: &GraphController<GenGraph, S>,
+) -> HashMap<GraphNode, (WorldPos, (u64, u64))> {
+    let graph = controller.graph();
+    controller
+        .get_viewport_graph()
+        .data_nodes()
+        .map(|(world_pos, domain_idx, layout_node)| {
+            let node = <&GenGraph as NodeIndexable>::from_index(&graph, domain_idx.index());
+            (node, (world_pos, layout_node.size))
+        })
+        .collect()
+}
+
+/// Compute the world-space bounding corners of the matched region in a `GraphLocus`.
+///
+/// Returns `(left_pos, right_pos)` where:
+/// - `left_pos` is the world position of the first matched column in `blocks[0]`,
+///   with the minimum y across all blocks
+/// - `right_pos` is the world position of the last matched column in `blocks[last]`,
+///   with the maximum y across all blocks
+///
+/// Column offsets are clamped with `clamp_col` so they map correctly in every
+/// detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
+///
+/// Returns `None` if no block in the locus is present in `pos_map` (all off-screen).
+pub fn locus_label_bounds(
+    locus: &GraphLocus,
+    pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
+    detail_level: VisualDetail,
+) -> Option<(WorldPos, WorldPos)> {
+    let block_world_pos = |block: GraphNode, col_raw: i64| -> Option<WorldPos> {
+        let &(center, size) = pos_map.get(&block)?;
+        let rect = WorldRect::from_center_and_size(center, size);
+        let col = clamp_col(col_raw, block.length(), detail_level);
+        Some(WorldPos::new(rect.min.x + col, center.y))
+    };
+
+    let last = locus.blocks.len() - 1;
+
+    let left_pos = locus.blocks.iter().enumerate().find_map(|(i, &block)| {
+        let col_raw = if i == 0 { locus.start_offset as i64 } else { 0 };
+        block_world_pos(block, col_raw)
+    })?;
+
+    let right_pos = locus
+        .blocks
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, &block)| {
+            let col_raw = if i == last {
+                locus.end_offset.saturating_sub(1) as i64
+            } else {
+                block.length() - 1
+            };
+            block_world_pos(block, col_raw)
+        })?;
+
+    let mut y_min = i64::MAX;
+    let mut y_max = i64::MIN;
+    for &block in &locus.blocks {
+        let Some(&(center, _)) = pos_map.get(&block) else {
+            continue;
+        };
+        y_min = y_min.min(center.y);
+        y_max = y_max.max(center.y);
+    }
+
+    if y_min == i64::MAX {
+        return None;
+    }
+
+    let left_pos = WorldPos::new(left_pos.x, y_max);
+    let right_pos = WorldPos::new(right_pos.x, y_min);
+
+    Some((left_pos, right_pos))
+}
+
+/// Apply detail-level clamping to a raw column offset.
+///
+/// In `Truncated` mode, interior columns of long nodes map to the `...` region.
+fn clamp_col(col_raw: i64, block_seq_len: i64, detail_level: VisualDetail) -> i64 {
+    if detail_level == VisualDetail::Truncated && block_seq_len > 13 {
+        clamp_truncated_col(col_raw, block_seq_len)
+    } else {
+        col_raw
+    }
+}
+
+/// Map a sequence offset to a visual cell column inside a 13-cell truncated node.
+///
+/// Display layout: `AAAAA...BBBBB` — first 5 bases (cells 0-4), `...` (cells 5-7),
+/// last 5 bases (cells 8-12). Interior positions that fall in the `...` region clamp
+/// to cell 6 (the centre dot).
+fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
+    if value < 5 {
+        value
+    } else if block_seq_len - value <= 5 {
+        13 - (block_seq_len - value)
+    } else {
+        6
+    }
+}
+
 /// Highlight only the matched bytes of a `GraphLocus`, using sub-rect tinting.
 ///
 /// - Start node: tinted from `start_offset` to its right edge.
 /// - Middle nodes: fully tinted.
 /// - End node: tinted from its left edge to `end_offset` (exclusive).
-pub fn highlight_match_range(
-    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+///
+/// In `Truncated` detail level the column offsets are clamped so that interior
+/// positions map to the `...` cell rather than a precise (wrong) location.
+pub fn highlight_match_range<S: NodeSizer<GenGraph>>(
+    controller: &mut GraphController<GenGraph, S>,
     m: &GraphLocus,
     style: PathStyle,
 ) {
+    let detail_level = controller.get_detail_level();
+
     let path_len = m.blocks.len();
     for (i, &node) in m.blocks.iter().enumerate() {
-        let col_start = if i == 0 { m.start_offset as i64 } else { 0 };
-        // br is inclusive, so end_offset (exclusive) - 1; saturate to avoid underflow on empty match
-        let col_end = if i == path_len - 1 {
+        let block_seq_len = node.length();
+        let col_start_raw = if i == 0 { m.start_offset as i64 } else { 0 };
+        let col_end_raw = if i == path_len - 1 {
             m.end_offset.saturating_sub(1) as i64
         } else {
-            node.length() - 1
+            block_seq_len - 1
         };
+        let (col_start, col_end) = (
+            clamp_col(col_start_raw, block_seq_len, detail_level),
+            clamp_col(col_end_raw, block_seq_len, detail_level),
+        );
         controller.set_cell_highlight(node, (col_start, 0), (col_end, 0), style);
     }
+
     for (&src, &dst) in m.blocks.iter().zip(m.blocks.iter().skip(1)) {
         controller.set_edge_highlight((src, dst), style);
     }

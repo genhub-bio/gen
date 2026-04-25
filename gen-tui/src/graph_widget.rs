@@ -7,7 +7,7 @@ use petgraph::visit::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     widgets::{Block, StatefulWidget, Widget},
 };
 
@@ -274,7 +274,23 @@ where
 
         if controller.cursor.is_visible() {
             let viewport_graph = controller.get_viewport_graph();
-            let cursor_bg = theme[0x07];
+            // Apply color, formatting and/or glyph swap
+            let apply_cursor_style = |ch: char, style: Style| -> (char, Style) {
+                if ch == NODE_GLYPH {
+                    let new_style = style
+                        .fg(theme[0x06])
+                        .bg(theme[0x00])
+                        .remove_modifier(Modifier::all());
+                    ('█', new_style) // alternative: ○
+                } else {
+                    let new_style = style
+                        .fg(theme[0x00])
+                        .bg(theme[0x06])
+                        .remove_modifier(Modifier::all())
+                        .add_modifier(Modifier::BOLD);
+                    (ch, new_style)
+                }
+            };
 
             if controller.cursor.is_coarse_mode() {
                 // Highlight the whole node in coarse mode
@@ -291,12 +307,13 @@ where
                             if let Some((current_char, current_style)) =
                                 cursor_buffer.get_char_styled(pos)
                             {
-                                let (char_to_render, new_style) = if current_char == NODE_GLYPH {
-                                    ('■', current_style.fg(cursor_bg).bg(theme[0x00]))
-                                } else {
-                                    (current_char, current_style.bg(cursor_bg))
-                                };
-                                cursor_buffer.set_char_styled(pos, char_to_render, new_style);
+                                let (char_to_render, new_style) =
+                                    apply_cursor_style(current_char, current_style);
+                                cursor_buffer.set_char_styled(
+                                    pos,
+                                    char_to_render,
+                                    new_style.add_modifier(Modifier::UNDERLINED),
+                                );
                             }
                         }
                     }
@@ -309,13 +326,13 @@ where
                     if let Some((current_char, current_style)) =
                         cursor_buffer.get_char_styled(cursor_world_pos)
                     {
-                        let (char_to_render, new_style) = if current_char == NODE_GLYPH {
-                            ('■', current_style.fg(cursor_bg))
-                        } else {
-                            (current_char, current_style.bg(cursor_bg))
-                        };
+                        let (char_to_render, new_style) =
+                            apply_cursor_style(current_char, current_style);
                         cursor_buffer.set_char_styled(cursor_world_pos, char_to_render, new_style);
                     }
+
+                    let below_pos = WorldPos::new(cursor_world_pos.x, cursor_world_pos.y - 1);
+                    cursor_buffer.set_char(below_pos, '^');
                 }
             }
         }
