@@ -197,52 +197,50 @@ impl Range {
     }
 }
 
+/// Merges an already ordered stream of items where each item decides whether it can merge with
+/// the current tail and how that merge updates the tail in place.
+pub trait OrderedMerge: Sized {
+    fn should_merge_with(&self, next: &Self) -> bool;
+    fn merge_with(&mut self, next: &Self);
+}
+
+pub fn merge_ordered_items<T: OrderedMerge>(items: Vec<T>) -> Vec<T> {
+    let mut merged: Vec<T> = Vec::with_capacity(items.len());
+
+    for item in items {
+        if let Some(last) = merged.last_mut()
+            && last.should_merge_with(&item)
+        {
+            last.merge_with(&item);
+        } else {
+            merged.push(item);
+        }
+    }
+
+    merged
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RangeMapping {
     pub source_range: Range,
     pub target_range: Range,
 }
 
+impl OrderedMerge for RangeMapping {
+    fn should_merge_with(&self, next: &Self) -> bool {
+        self.source_range.left_adjoins(&next.source_range, None)
+            && self.target_range.left_adjoins(&next.target_range, None)
+    }
+
+    fn merge_with(&mut self, next: &Self) {
+        self.source_range = self.source_range.extend_to(&next.source_range);
+        self.target_range = self.target_range.extend_to(&next.target_range);
+    }
+}
+
 impl RangeMapping {
     pub fn merge_contiguous_mappings(mappings: Vec<RangeMapping>) -> Vec<RangeMapping> {
-        let mut grouped_mappings = vec![];
-        let mut current_group = vec![];
-
-        for mapping in mappings {
-            if current_group.is_empty() {
-                current_group.push(mapping);
-            } else {
-                let last_mapping = current_group.last().unwrap();
-                if last_mapping
-                    .source_range
-                    .left_adjoins(&mapping.source_range, None)
-                    && last_mapping
-                        .target_range
-                        .left_adjoins(&mapping.target_range, None)
-                {
-                    current_group.push(mapping);
-                } else {
-                    grouped_mappings.push(current_group);
-                    current_group = vec![mapping];
-                }
-            }
-        }
-
-        if !current_group.is_empty() {
-            grouped_mappings.push(current_group);
-        }
-
-        let mut merged_mappings = vec![];
-        for group in grouped_mappings {
-            let first = group.first().unwrap();
-            let last = group.last().unwrap();
-            merged_mappings.push(RangeMapping {
-                source_range: first.source_range.extend_to(&last.source_range),
-                target_range: first.target_range.extend_to(&last.target_range),
-            });
-        }
-
-        merged_mappings
+        merge_ordered_items(mappings)
     }
 }
 
