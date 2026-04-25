@@ -85,15 +85,6 @@ fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment
     segments
 }
 
-fn flip_strand(strand: Strand) -> Strand {
-    match strand {
-        Strand::Forward => Strand::Reverse,
-        Strand::Reverse => Strand::Forward,
-        Strand::Unknown => Strand::Unknown,
-        Strand::ImportantButUnknown => Strand::ImportantButUnknown,
-    }
-}
-
 fn merge_annotation_segments(segments: Vec<AnnotationSegment>) -> Vec<AnnotationSegment> {
     let mut merged: Vec<AnnotationSegment> = Vec::with_capacity(segments.len());
     for segment in segments {
@@ -142,7 +133,7 @@ fn project_single_annotation_segment(
                     )
                 };
                 let strand = if block.strand == Strand::Reverse {
-                    flip_strand(segment.strand)
+                    segment.strand.complement()
                 } else {
                     segment.strand
                 };
