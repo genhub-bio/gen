@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use r#gen::{
     core::HashId,
     get_connection,
-    graphs::graph_search::{GenGraphMatcher, SeedIndex},
+    graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
 };
 use gen_models::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
@@ -12,6 +12,17 @@ use super::{
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_and_display_widget},
 };
+
+fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
+    match s {
+        "dna" => Ok(SequenceKind::Dna),
+        "ssdna" => Ok(SequenceKind::SsDna),
+        "protein" => Ok(SequenceKind::Protein),
+        _ => Err(PyRuntimeError::new_err(format!(
+            "Unknown sequence_kind '{s}'; use 'dna', 'ssdna', or 'protein'"
+        ))),
+    }
+}
 
 /// Exposes a BlockGroup to Python.
 #[pyclass]
@@ -132,18 +143,26 @@ impl PyBlockGroup {
     /// Returns a list of `GraphLocus` objects. Each locus exposes:
     ///   - `.start()` / `.end()` → `GraphPos` (node + byte offset)
     ///   - `.blocks` → `list[Block]`
-    #[pyo3(signature = (query, case_sensitive=false))]
+    ///
+    /// Parameters
+    /// ----------
+    /// query : str
+    ///     The sequence to search for.
+    /// sequence_kind : {"dna", "ssdna", "protein"}, optional
+    ///     Biological interpretation of the query (default: ``"dna"``).
+    #[pyo3(signature = (query, sequence_kind="dna"))]
     pub fn search(
         &self,
         query: &str,
-        case_sensitive: bool,
+        sequence_kind: &str,
     ) -> PyResult<Vec<crate::python_api::graph_search::PyGraphLocus>> {
+        let kind = parse_sequence_kind(sequence_kind)?;
         let db_path = self.db_path.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("search() requires a db_path; obtain BlockGroup via Repository")
         })?;
         let conn = get_connection(db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let graph = BlockGroup::get_graph(&conn, &self.id);
-        let matcher = GenGraphMatcher::new(&conn, graph, case_sensitive);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(&conn, graph, kind);
 
         let gen_dir = db_path.parent().ok_or_else(|| {
             PyRuntimeError::new_err("Cannot determine .gen directory from db_path")
@@ -151,19 +170,17 @@ impl PyBlockGroup {
         let index_path = gen_dir
             .join("search_index")
             .join(format!("{}.bin", self.id));
+        let case_sensitive = kind == SequenceKind::Protein;
         let index = fs::read(&index_path)
             .ok()
             .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16, case_sensitive).ok());
 
-        let query_bytes = if case_sensitive {
-            query.as_bytes().to_vec()
-        } else {
-            query.to_ascii_uppercase().into_bytes()
-        };
-
+        let query_bytes = query.as_bytes();
         let matches = match index {
-            Some(idx) => matcher.find_all_with_seed_index(&idx, &query_bytes),
-            None => matcher.find_all(&query_bytes),
+            Some(idx) => matcher
+                .find_all_with_seed_index(&idx, query_bytes)
+                .unwrap_or_else(|_| matcher.find_all(query_bytes)),
+            None => matcher.find_all(query_bytes),
         };
 
         Ok(matches
@@ -190,12 +207,13 @@ impl PyBlockGroup {
     ///
     /// Parameters
     /// ----------
-    /// case_sensitive : bool, optional
-    ///     Perform case-sensitive search (default: false).
+    /// sequence_kind : {"dna", "ssdna", "protein"}, optional
+    ///     Biological interpretation of the sequences (default: ``"dna"``).
     /// k : int, optional
     ///     k-mer size. Defaults to 16.
-    #[pyo3(signature = (case_sensitive=false, k=16))]
-    pub fn build_index(&self, case_sensitive: bool, k: usize) -> PyResult<()> {
+    #[pyo3(signature = (sequence_kind="dna", k=16))]
+    pub fn build_index(&self, sequence_kind: &str, k: usize) -> PyResult<()> {
+        let kind = parse_sequence_kind(sequence_kind)?;
         let db_path = self.db_path.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "build_index() requires a db_path; obtain BlockGroup via Repository",
@@ -209,8 +227,9 @@ impl PyBlockGroup {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
         let conn = get_connection(db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let graph = BlockGroup::get_graph(&conn, &self.id);
-        let matcher = GenGraphMatcher::new(&conn, graph, case_sensitive);
-        let index = SeedIndex::build(&matcher, k, case_sensitive);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(&conn, graph, kind);
+        let index = SeedIndex::build(&matcher, k);
+        let case_sensitive = kind == SequenceKind::Protein;
         let path = index_dir.join(format!("{}.bin", self.id));
         let bytes = index
             .to_bytes_with_header(case_sensitive)

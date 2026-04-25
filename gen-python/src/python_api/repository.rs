@@ -6,7 +6,7 @@ use r#gen::{
     fasta::FastaError,
     graphs::{
         combinatorial_library::{SequencePart, parse_library},
-        graph_search::{GenGraphMatcher, SeedIndex},
+        graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
     },
     imports::{gfa::GFAImportError, library::LibraryImportError},
     updates::vcf::VcfError,
@@ -27,6 +27,17 @@ use super::{
     sequence_part::PySequencePart,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
+
+fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
+    match s {
+        "dna" => Ok(SequenceKind::Dna),
+        "ssdna" => Ok(SequenceKind::SsDna),
+        "protein" => Ok(SequenceKind::Protein),
+        _ => Err(PyRuntimeError::new_err(format!(
+            "Unknown sequence_kind '{s}'; use 'dna', 'ssdna', or 'protein'"
+        ))),
+    }
+}
 
 /// Wraps all transaction boilerplate for write operations.
 ///
@@ -939,13 +950,15 @@ impl PyRepository {
     ///
     /// If `block_groups` is None or empty, indexes all block groups.
     /// Subsequent calls to `search()` will load this index automatically.
-    #[pyo3(signature = (case_sensitive=false, k=16, bgs=None))]
+    #[pyo3(signature = (sequence_kind="dna", k=16, bgs=None))]
     fn build_index(
         &self,
-        case_sensitive: bool,
+        sequence_kind: &str,
         k: usize,
         bgs: Option<Vec<PyBlockGroup>>,
     ) -> PyResult<()> {
+        let kind = parse_sequence_kind(sequence_kind)?;
+        let case_sensitive = kind == SequenceKind::Protein;
         let conn = self.context.graph().conn();
         let index_dir = self
             .context
@@ -971,8 +984,8 @@ impl PyRepository {
 
         for bg in bgs {
             let graph = BlockGroup::get_graph(conn, &bg.id);
-            let matcher = GenGraphMatcher::new(conn, graph, case_sensitive);
-            let index = SeedIndex::build(&matcher, k, case_sensitive);
+            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+            let index = SeedIndex::build(&matcher, k);
             let path = index_dir.join(format!("{}.bin", bg.id));
             let bytes = index
                 .to_bytes_with_header(case_sensitive)
@@ -996,13 +1009,15 @@ impl PyRepository {
     /// If a seed index was previously built with `build_index()`, it is loaded
     /// automatically to accelerate the search. Falls back to a full scan
     /// when no index is found.
-    #[pyo3(signature = (query, bgs=None, case_sensitive=false))]
+    #[pyo3(signature = (query, bgs=None, sequence_kind="dna"))]
     fn search(
         &self,
         query: &str,
         bgs: Option<Vec<PyBlockGroup>>,
-        case_sensitive: bool,
+        sequence_kind: &str,
     ) -> PyResult<Vec<(PyBlockGroup, Vec<PyGraphLocus>)>> {
+        let kind = parse_sequence_kind(sequence_kind)?;
+        let case_sensitive = kind == SequenceKind::Protein;
         let conn = self.context.graph().conn();
 
         let bgs: Vec<_> = match bgs {
@@ -1019,16 +1034,11 @@ impl PyRepository {
                 .collect(),
         };
 
-        let query_bytes = if case_sensitive {
-            query.as_bytes().to_vec()
-        } else {
-            query.to_ascii_uppercase().into_bytes()
-        };
-
+        let query_bytes = query.as_bytes();
         let mut results = Vec::new();
         for bg in bgs {
             let graph = BlockGroup::get_graph(conn, &bg.id);
-            let matcher = GenGraphMatcher::new(conn, graph, case_sensitive);
+            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 
             let index_path = self
                 .context
@@ -1040,8 +1050,10 @@ impl PyRepository {
             });
 
             let matches = match index {
-                Some(idx) => matcher.find_all_with_seed_index(&idx, &query_bytes),
-                None => matcher.find_all(&query_bytes),
+                Some(idx) => matcher
+                    .find_all_with_seed_index(&idx, query_bytes)
+                    .unwrap_or_else(|_| matcher.find_all(query_bytes)),
+                None => matcher.find_all(query_bytes),
             };
 
             if !matches.is_empty() {
@@ -1263,7 +1275,7 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let hits = py_repo.borrow(py).search("ACGT", None, false).unwrap();
+            let hits = py_repo.borrow(py).search("ACGT", None, "dna").unwrap();
             assert!(!hits.is_empty(), "Expected at least one match for 'ACGT'");
             assert_eq!(hits.len(), 1);
             let (_, loci) = &hits[0];
@@ -1315,7 +1327,7 @@ mod python_tests {
             let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
             let bg = &block_groups[0];
 
-            py_repo.borrow(py).build_index(false, 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
 
             let index_dir = py_repo
                 .borrow(py)
@@ -1376,7 +1388,7 @@ mod python_tests {
             let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
             let bg = &block_groups[0];
 
-            py_repo.borrow(py).build_index(false, 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
             let index_dir = py_repo
                 .borrow(py)
                 .context
@@ -1424,7 +1436,7 @@ mod python_tests {
                 .join("search_index");
             let index_file = index_dir.join(format!("{}.bin", bg_id));
 
-            bg.build_index(true, 4).unwrap();
+            bg.build_index("protein", 4).unwrap();
             assert!(
                 index_file.exists(),
                 "Index should exist after PyBlockGroup::build_index"
