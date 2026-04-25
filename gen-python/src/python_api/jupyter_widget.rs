@@ -1,19 +1,32 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::BufReader,
+    path::PathBuf,
+    sync::Mutex,
+};
 
 use r#gen::{
     get_connection,
-    views::gen_graph_widget::{
-        GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
+    graphs::graph_search::GraphLocus,
+    views::{
+        annotation_track::{
+            AnnotationSpan, AnnotationTrack, annotation_panel_height, draw_annotations_to_buffer,
+        },
+        annotations::load_annotations_for_group,
+        gen_graph_widget::{
+            GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
+            locus_label_bounds, viewport_pos_map,
+        },
+        inline_label_placement::draw_label_near_pos,
     },
 };
-use gen_graph::GenGraph;
-use gen_models::{block_group::BlockGroup, db::GraphConnection};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
+use gen_graph::{GenGraph, GraphNode, project_path};
+use gen_models::{annotations::AnnotationError, block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
-    LineStyle::Bold,
-    graph_controller::GraphController,
-    graph_widget::GraphWidget,
-    layout::VisualDetail,
-    plotter::PathStyle,
+    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
+    plotter::PathStyle, theme::current_theme,
 };
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -25,7 +38,7 @@ use serde::Serialize;
 
 use crate::python_api::{
     block_group::PyBlockGroup,
-    graph_search::{PyGraphLocus, PyGraphPos},
+    graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
     repository::PyRepository,
 };
 
@@ -79,14 +92,47 @@ fn indexed_to_hex(i: u8) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// Format by which the buffer is to be serialized
+/// Parse a CSS hex colour string like `"#rrggbb"` into a ratatui `Color`.
+fn parse_hex_color(hex: &str) -> PyResult<ratatui::style::Color> {
+    use ratatui::style::Color;
+    if hex.starts_with('#') && hex.len() == 7 {
+        let r = u8::from_str_radix(&hex[1..3], 16)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+        let g = u8::from_str_radix(&hex[3..5], 16)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+        let b = u8::from_str_radix(&hex[5..7], 16)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
+        Ok(Color::Rgb(r, g, b))
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid colour {hex:?}; expected a CSS hex string like \"#ff4444\""
+        )))
+    }
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+/// Format by which the buffer is to be serialized.
+///
+/// Only non-empty or non-neutral cells are emitted; `fg`/`bg` are omitted when
+/// equal to the frame-level neutral colours; `bold`/`italic`/`underline` are
+/// omitted when false.
 #[derive(Serialize)]
 struct RenderedCell {
+    x: u16,
+    y: u16,
     text: String,
-    fg: String,
-    bg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fg: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bg: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
     bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
     italic: bool,
+    #[serde(skip_serializing_if = "is_false")]
     underline: bool,
 }
 
@@ -94,26 +140,67 @@ struct RenderedCell {
 struct RenderedFrame {
     cols: u16,
     rows: u16,
+    /// CSS hex colour for the canvas background and neutral edge/text colour
+    /// (theme slot 0x00 and 0x05).  Sent per-frame so the frontend always
+    /// reflects the active theme without requiring a page reload.
+    neutral_fg: String,
+    neutral_bg: String,
     cells: Vec<RenderedCell>,
 }
 
 fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
-    let mut cells = Vec::with_capacity(cols as usize * rows as usize);
+    let theme = current_theme();
+    // slot 0x00 = canvas bg / edge bg; slot 0x05 = main text / edge fg.
+    let neutral_bg = color_to_hex(Some(theme[0x00]), "#000000");
+    let neutral_fg = color_to_hex(Some(theme[0x05]), "#ffffff");
+
+    let mut cells = Vec::new();
     for row in 0..rows {
         for col in 0..cols {
             let cell = buf.cell((col, row)).expect("cell index in bounds");
+            let text = cell.symbol().to_string();
             let style = cell.style();
+            let fg_str = color_to_hex(style.fg, &neutral_fg);
+            let bg_str = color_to_hex(style.bg, &neutral_bg);
+            let bold = style.add_modifier.contains(Modifier::BOLD);
+            let italic = style.add_modifier.contains(Modifier::ITALIC);
+            let underline = style.add_modifier.contains(Modifier::UNDERLINED);
+
+            let is_empty = text == " " || text.is_empty();
+            let is_neutral = fg_str == neutral_fg && bg_str == neutral_bg;
+
+            // Skip blank cells that carry no styling information.
+            if is_empty && is_neutral {
+                continue;
+            }
+
             cells.push(RenderedCell {
-                text: cell.symbol().to_string(),
-                fg: color_to_hex(style.fg, "#cdd6f4"), // Catppuccin text default
-                bg: color_to_hex(style.bg, "#1e1e2e"), // Catppuccin base default
-                bold: style.add_modifier.contains(Modifier::BOLD),
-                italic: style.add_modifier.contains(Modifier::ITALIC),
-                underline: style.add_modifier.contains(Modifier::UNDERLINED),
+                x: col,
+                y: row,
+                text,
+                fg: if fg_str == neutral_fg {
+                    None
+                } else {
+                    Some(fg_str)
+                },
+                bg: if bg_str == neutral_bg {
+                    None
+                } else {
+                    Some(bg_str)
+                },
+                bold,
+                italic,
+                underline,
             });
         }
     }
-    RenderedFrame { cols, rows, cells }
+    RenderedFrame {
+        cols,
+        rows,
+        neutral_fg,
+        neutral_bg,
+        cells,
+    }
 }
 
 /// Internal graph controller for the Jupyter notebook widget.
@@ -123,21 +210,59 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
 #[pyclass]
 pub struct PyGraphController {
     db_path: PathBuf,
+    pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: Mutex<Option<GraphConnection>>,
+    track_annotations: Vec<AnnotationTrack>,
+    /// Each entry: (track_name, [(locus, label)], style).
+    /// Loci are stored so the label midpoint can be recomputed each render
+    /// as the viewport changes.
+    inline_annotations: Vec<(String, Vec<(GraphLocus, String)>, PathStyle)>,
 }
 
 impl PyGraphController {
     pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
-        let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new(graph, node_sizer);
+        let mut controller = GraphController::new(graph, GenGraphNodeSizer);
         controller.set_detail_level(VisualDetail::Truncated);
         controller.hide_cursor();
         Self {
             db_path,
+            block_group_id: None,
             controller,
             conn: Mutex::new(None),
+            track_annotations: Vec::new(),
+            inline_annotations: Vec::new(),
         }
+    }
+
+    /// Build the set of all non-special node IDs in the current graph.
+    fn all_node_ids(&self) -> HashSet<HashId> {
+        self.controller
+            .graph()
+            .nodes()
+            .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+            .map(|n| n.node_id)
+            .collect()
+    }
+
+    /// Build a ranges map covering the full sequence of every graph node.
+    fn all_node_ranges(&self) -> HashMap<HashId, Vec<(i64, i64)>> {
+        self.controller
+            .graph()
+            .nodes()
+            .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+            .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
+            .collect()
+    }
+
+    fn load_group_as_track(
+        &self,
+        conn: &GraphConnection,
+        group: &str,
+    ) -> Result<AnnotationTrack, AnnotationError> {
+        let ranges = self.all_node_ranges();
+        let spans = load_annotations_for_group(conn, group, &ranges)?;
+        Ok(AnnotationTrack::new(group.to_string(), spans))
     }
 
     fn ensure_connection(&self) -> PyResult<()> {
@@ -169,7 +294,9 @@ impl PyGraphController {
             .path()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        Ok(Self::new(db_path, graph))
+        let mut ctrl = Self::new(db_path, graph);
+        ctrl.block_group_id = Some(bg_id);
+        Ok(ctrl)
     }
 
     /// Set the level of node detail.
@@ -191,32 +318,117 @@ impl PyGraphController {
             }
         };
         self.controller.set_detail_level(level);
+        self.reapply_inline_highlight_ranges();
         Ok(())
     }
 
     fn render_frame(&mut self, cols: u16, rows: u16) -> PyResult<String> {
         self.ensure_connection()?;
 
-        let area = Rect::new(0, 0, cols, rows);
-        let mut buf = Buffer::empty(area);
+        // Reserve rows at the bottom for each track-panel annotation.
+        let track_height: u16 = self
+            .track_annotations
+            .iter()
+            .map(|t| annotation_panel_height(t, rows))
+            .sum::<u16>()
+            .min(rows.saturating_sub(4));
+        let graph_rows = rows.saturating_sub(track_height);
+        let graph_area = Rect::new(0, 0, cols, graph_rows);
+
+        let total_area = Rect::new(0, 0, cols, rows);
+        let mut buf = Buffer::empty(total_area);
 
         {
             let guard = self.conn.lock().unwrap();
             let conn = guard.as_ref().unwrap();
             let renderer = GenGraphNodeRenderer::new(conn);
-            GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut self.controller);
+            GraphWidget::with_renderer(renderer).render(graph_area, &mut buf, &mut self.controller);
+        }
+
+        // Draw inline annotation labels (tinting was applied at add time via highlight system).
+        // Midpoints are recomputed each render because the viewport may have changed.
+        if !self.inline_annotations.is_empty() {
+            let theme = current_theme();
+            let pos_map = viewport_pos_map(&self.controller);
+            let detail_level = self.controller.get_detail_level();
+            for (_, loci_with_labels, style) in &self.inline_annotations {
+                let color = match style.color {
+                    ratatui::style::Color::Reset => theme[0x06],
+                    c => c,
+                };
+                for (locus, label) in loci_with_labels {
+                    let Some((left_pos, right_pos)) =
+                        locus_label_bounds(locus, &pos_map, detail_level)
+                    else {
+                        continue;
+                    };
+                    let max_distance = if detail_level == gen_tui::layout::VisualDetail::Minimal {
+                        10
+                    } else {
+                        5
+                    };
+                    draw_label_near_pos(
+                        &mut buf,
+                        graph_area,
+                        (left_pos, right_pos),
+                        label,
+                        color,
+                        &self.controller.viewport_state,
+                        max_distance,
+                    );
+                }
+            }
+        }
+
+        // Render track-panel annotations below the graph area.
+        if track_height > 0 {
+            let mut panel_y = graph_rows;
+            for track in &self.track_annotations.clone() {
+                let panel_height = annotation_panel_height(track, track_height);
+                if panel_height == 0 {
+                    continue;
+                }
+                let panel_area = Rect::new(0, panel_y, cols, panel_height);
+                draw_annotations_to_buffer(&mut buf, panel_area, track, &self.controller);
+                panel_y = panel_y.saturating_add(panel_height);
+                if panel_y >= rows {
+                    break;
+                }
+            }
         }
 
         let frame = serialize_buffer(&buf, cols, rows);
         serde_json::to_string(&frame).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Re-register all inline annotation highlights using the current detail level.
+    ///
+    /// Highlight column offsets are clamped at registration time, so they go stale
+    /// when the detail level changes. Call this after any zoom to re-clamp everything.
+    fn reapply_inline_highlight_ranges(&mut self) {
+        let styles: Vec<PathStyle> = self
+            .inline_annotations
+            .iter()
+            .map(|(_, _, style)| *style)
+            .collect();
+        for style in &styles {
+            self.controller.clear_highlight(style);
+        }
+        for (_, loci_with_labels, style) in &self.inline_annotations {
+            for (locus, _) in loci_with_labels {
+                highlight_match_range(&mut self.controller, locus, *style);
+            }
+        }
+    }
+
     fn zoom_in(&mut self) {
         self.controller.zoom_in();
+        self.reapply_inline_highlight_ranges();
     }
 
     fn zoom_out(&mut self) {
         self.controller.zoom_out();
+        self.reapply_inline_highlight_ranges();
     }
 
     fn handle_click(&mut self, col: u16, row: u16) -> bool {
@@ -245,10 +457,7 @@ impl PyGraphController {
             0.5
         };
         center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
-        // Fine mode: single-cell cursor at the exact byte, not a full-node overlay
-        // that would overwrite any subsequent rect highlights.
-        self.controller.show_cursor();
-        self.controller.cursor.set_coarse_mode(false);
+        self.controller.hide_cursor();
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.
@@ -268,15 +477,7 @@ impl PyGraphController {
                 "magenta" => Color::Magenta,
                 "cyan" => Color::Cyan,
                 "white" => Color::White,
-                hex if hex.starts_with('#') && hex.len() == 7 => {
-                    let r = u8::from_str_radix(&hex[1..3], 16)
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-                    let g = u8::from_str_radix(&hex[3..5], 16)
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-                    let b = u8::from_str_radix(&hex[5..7], 16)
-                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-                    Color::Rgb(r, g, b)
-                }
+                hex if hex.starts_with('#') => parse_hex_color(hex)?,
                 other => {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "unknown color {other:?}"
@@ -288,7 +489,7 @@ impl PyGraphController {
             &mut self.controller,
             &locus.inner,
             PathStyle::new(c)
-                .with_line_style(Bold)
+                .with_line_style(LineStyle::Bold)
                 .with_merge_glyphs(true),
         );
         Ok(())
@@ -298,7 +499,362 @@ impl PyGraphController {
     fn clear_highlights(&mut self) {
         self.controller.clear_all_highlights();
     }
+
+    /// Highlight the most recent path associated with this block group.
+    ///
+    /// Parameters
+    /// ----------
+    /// color : str, optional
+    ///     Colour for the highlight.  Accepts named colours
+    ///     (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
+    ///     (``"#ff4444"``).  When omitted the next unused theme accent
+    ///     colour is chosen automatically.
+    ///
+    /// Raises
+    /// ------
+    /// RuntimeError
+    ///     If no block group is associated with this widget, or if no path
+    ///     exists for the block group.
+    /// ValueError
+    ///     If ``color`` is not a recognised colour name or CSS hex string.
+    #[pyo3(signature = (color=None))]
+    pub fn show_path(&mut self, color: Option<&str>) -> PyResult<()> {
+        let block_group_id = self.block_group_id.ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "show_path() requires a block group; obtain the widget via BlockGroup.plot()",
+            )
+        })?;
+
+        self.ensure_connection()?;
+
+        use ratatui::style::Color;
+        let highlight_color = match color {
+            None => self.controller.next_accent_color(),
+            Some(s) => match s {
+                "red" => Color::Red,
+                "green" => Color::Green,
+                "yellow" => Color::Yellow,
+                "blue" => Color::Blue,
+                "magenta" => Color::Magenta,
+                "cyan" => Color::Cyan,
+                "white" => Color::White,
+                hex if hex.starts_with('#') => parse_hex_color(hex)?,
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown color {other:?}"
+                    )));
+                }
+            },
+        };
+
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+
+        let path = BlockGroup::get_current_path(conn, &block_group_id);
+        let path_blocks = path.blocks(conn);
+        let projected_path = project_path(self.controller.graph(), &path_blocks);
+
+        let path_nodes: Vec<GraphNode> = projected_path
+            .iter()
+            .filter_map(|(node, _)| {
+                if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
+                    Some(*node)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if path_nodes.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "Path nodes not found in current graph state",
+            ));
+        }
+
+        let style = PathStyle::new(highlight_color)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+
+        self.controller.set_path_highlight(style, path_nodes);
+        Ok(())
+    }
+
+    /// Clear path highlighting previously applied by `show_path`.
+    pub fn clear_path(&mut self) {
+        self.controller.clear_all_highlights();
+    }
+
+    /// Load annotations from the database by group name and add them as a
+    /// horizontal track panel below the graph.
+    pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
+        self.ensure_connection()?;
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        let track = self
+            .load_group_as_track(conn, group)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        self.track_annotations.push(track);
+        Ok(())
+    }
+
+    /// Build a track panel from a list of `Annotation` objects.
+    /// Each `Annotation` becomes one span; all are grouped under `name`.
+    pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
+        let spans: Vec<AnnotationSpan> = annotations.iter().map(|a| a.inner.clone()).collect();
+        self.track_annotations
+            .push(AnnotationTrack::new(name, spans));
+    }
+
+    /// Load annotations from a GFF3 or BED file and add them as a
+    /// horizontal track panel below the graph.
+    ///
+    /// Accepts both standard files (chromosome/contig names as reference) and
+    /// pre-translated files (node hash-IDs as reference).  Standard files are
+    /// translated in-memory against `from_sample` before parsing.  If
+    /// translation produces no output the file is parsed as-is, so
+    /// pre-translated files work without specifying `from_sample`.
+    pub fn add_track_file(
+        &mut self,
+        file_path: &str,
+        display_name: Option<&str>,
+        from_sample: Option<&str>,
+    ) -> PyResult<()> {
+        use std::io::Cursor;
+
+        use r#gen::views::annotations::{parse_translated_bed, parse_translated_gff};
+        use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
+        use gen_models::sample::Sample;
+
+        let name = display_name.unwrap_or(file_path);
+        let node_ids = self.all_node_ids();
+        let sample = from_sample.unwrap_or(Sample::DEFAULT_NAME);
+
+        let track = if let Some(bg_id) = self.block_group_id {
+            self.ensure_connection()?;
+            let guard = self.conn.lock().unwrap();
+            let conn = guard.as_ref().unwrap();
+            let bg = BlockGroup::get_by_id(conn, &bg_id);
+
+            let path = std::path::Path::new(file_path);
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let mut buffer: Vec<u8> = Vec::new();
+            let translate_result: Result<(), String> = match ext.as_str() {
+                "gff" | "gff3" => translate_gff(
+                    conn,
+                    &bg.collection_name,
+                    sample,
+                    BufReader::new(
+                        File::open(file_path)
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                    ),
+                    &mut buffer,
+                )
+                .map_err(|e| e.to_string()),
+                "bed" => translate_bed(
+                    conn,
+                    &bg.collection_name,
+                    sample,
+                    File::open(file_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                    &mut buffer,
+                )
+                .map_err(|e| e.to_string()),
+                other => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "unsupported annotation file type: {other:?}; expected .gff, .gff3, or .bed"
+                    )));
+                }
+            };
+
+            if let Err(e) = translate_result {
+                return Err(PyRuntimeError::new_err(e.to_string()));
+            }
+
+            let spans = if !buffer.is_empty() {
+                match ext.as_str() {
+                    "gff" | "gff3" => {
+                        parse_translated_gff(Cursor::new(buffer), &node_ids, name, HashMap::new())
+                    }
+                    _ => parse_translated_bed(Cursor::new(buffer), &node_ids, name, HashMap::new()),
+                }
+            } else {
+                // Buffer empty means translation found no matching sequences —
+                // file may already be in translated (hash-ID) format.
+                load_track_from_file(file_path, name, &node_ids)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .annotations
+            };
+
+            AnnotationTrack::new(name.to_string(), spans)
+        } else {
+            load_track_from_file(file_path, name, &node_ids)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        };
+
+        self.track_annotations.push(track);
+        Ok(())
+    }
+
+    /// Navigate the camera to the first annotation span whose name matches
+    /// `annotation_name` across all loaded track panels.
+    ///
+    /// Returns `True` if a match was found, `False` otherwise.
+    ///
+    /// TODO: when multiple spans share the same name (across tracks or within
+    /// one track), expose a way to cycle through them.  That will require
+    /// surfacing the rank/index from `GraphController`, keeping a per-widget
+    /// match index in Python state, and wiring up next/previous helpers.
+    pub fn go_to_annotation(&mut self, annotation_name: &str) -> PyResult<PyGraphPos> {
+        let segment = self
+            .track_annotations
+            .iter()
+            .flat_map(|t| &t.annotations)
+            .find(|span| span.name == annotation_name)
+            .and_then(|span| span.segments.first())
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(format!(
+                    "no annotation named {annotation_name:?} found in loaded tracks"
+                ))
+            })?;
+
+        let node = self
+            .controller
+            .graph()
+            .nodes()
+            .find(|n| n.node_id == segment.node_id)
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "annotation {annotation_name:?} references a node not present in the current graph"
+                ))
+            })?;
+
+        let node_len = node.length();
+        let frac_x = if node_len > 0 {
+            (segment.start as f64) / (node_len as f64)
+        } else {
+            0.0
+        };
+        self.controller.set_detail_level(VisualDetail::Full);
+        center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
+        self.controller.hide_cursor();
+
+        Ok(PyGraphPos::new(node, segment.start as usize))
+    }
+
+    /// Return a JSON list of track-panel annotation names currently loaded.
+    pub fn get_track_names(&self) -> PyResult<String> {
+        let names: Vec<&str> = self
+            .track_annotations
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Remove a track-panel annotation by name.
+    pub fn remove_track(&mut self, name: &str) {
+        self.track_annotations.retain(|t| t.name != name);
+    }
+
+    /// Clear all track-panel annotations.
+    pub fn clear_all_annotations(&mut self) {
+        self.track_annotations.clear();
+    }
+
+    /// Add a single inline annotation rendered directly on the graph canvas.
+    /// The annotation is tinted with an accent colour and labelled below its span.
+    pub fn add_inline_annotation(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
+        let theme = current_theme();
+        const ACCENT: [usize; 8] = [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F];
+        let color = theme[ACCENT[self.inline_annotations.len() % ACCENT.len()]];
+        let style = PathStyle::new(color)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        let mut loci_with_labels: Vec<(GraphLocus, String)> = Vec::new();
+        for ann in &annotations {
+            let label = ann.inner.name.clone();
+            for locus in &ann.loci {
+                highlight_match_range(&mut self.controller, locus, style);
+                loci_with_labels.push((locus.clone(), label.clone()));
+            }
+        }
+        self.inline_annotations
+            .push((name.to_string(), loci_with_labels, style));
+    }
+
+    /// Return a JSON list of inline annotation names currently loaded.
+    pub fn get_inline_annotation_names(&self) -> PyResult<String> {
+        let names: Vec<&str> = self
+            .inline_annotations
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Remove an inline annotation by name.
+    /// Remove all inline annotations whose name matches `name`.
+    /// If the same name was added more than once, all copies are removed.
+    pub fn remove_inline_annotation(&mut self, name: &str) {
+        let mut remaining = Vec::with_capacity(self.inline_annotations.len());
+        for (track_name, loci, style) in self.inline_annotations.drain(..) {
+            if track_name == name {
+                self.controller.clear_highlight(&style);
+            } else {
+                remaining.push((track_name, loci, style));
+            }
+        }
+        self.inline_annotations = remaining;
+    }
+
+    /// Clear all inline annotations.
+    pub fn clear_all_inline_annotations(&mut self) {
+        for (_, _, style) in &self.inline_annotations {
+            self.controller.clear_highlight(style);
+        }
+        self.inline_annotations.clear();
+    }
 }
+
+// --------------------------------------------------------------------------
+// File loading helper
+// --------------------------------------------------------------------------
+
+/// Parse a translated GFF3 or BED file into an `AnnotationTrack`.
+///
+/// The file must use node hash-ID strings as reference names (i.e. the
+/// "translated" format produced by gen's GFF/BED translation step).
+fn load_track_from_file(
+    file_path: &str,
+    display_name: &str,
+    node_filter: &HashSet<HashId>,
+) -> Result<AnnotationTrack, Box<dyn std::error::Error>> {
+    use r#gen::views::annotations::{parse_translated_bed_file, parse_translated_gff_file};
+    let path = std::path::Path::new(file_path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let spans = match ext.as_str() {
+        "gff" | "gff3" => parse_translated_gff_file(path, node_filter, display_name)?,
+        "bed" => parse_translated_bed_file(path, node_filter, display_name)?,
+        other => {
+            return Err(format!(
+                "unsupported annotation file type: {other:?}; expected .gff, .gff3, or .bed"
+            )
+            .into());
+        }
+    };
+    Ok(AnnotationTrack::new(display_name.to_string(), spans))
+}
+
+// --------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -307,7 +863,7 @@ mod tests {
     use pyo3::{exceptions::PyValueError, prelude::*};
     use serde_json::Value;
 
-    use super::PyGraphController;
+    use super::{PyGraphController, current_theme};
 
     /// Shared setup: on-disk DB + a minimal block group, returning the
     /// controller and the db path.
@@ -352,8 +908,22 @@ mod tests {
             let v: Value = serde_json::from_str(&json_str).expect("output must be valid JSON");
             assert_eq!(v["cols"], 80);
             assert_eq!(v["rows"], 24);
+            // Neutral colours come from the active theme (slots 0x00 / 0x05).
+            let theme = current_theme();
+            let expected_fg = super::color_to_hex(Some(theme[0x05]), "#ffffff");
+            let expected_bg = super::color_to_hex(Some(theme[0x00]), "#000000");
+            assert_eq!(v["neutral_fg"], expected_fg);
+            assert_eq!(v["neutral_bg"], expected_bg);
+            // Sparse: only non-empty / non-neutral cells are emitted.
             let cells = v["cells"].as_array().expect("cells must be an array");
-            assert_eq!(cells.len(), 80 * 24);
+            assert!(cells.len() < 80 * 24, "sparse frame must omit blank cells");
+            assert!(!cells.is_empty(), "a graph must produce at least one cell");
+            // Every cell must have x/y coordinates within bounds.
+            for cell in cells {
+                let x = cell["x"].as_u64().expect("x must be present");
+                let y = cell["y"].as_u64().expect("y must be present");
+                assert!(x < 80 && y < 24, "cell coordinates out of bounds");
+            }
         });
     }
 }
