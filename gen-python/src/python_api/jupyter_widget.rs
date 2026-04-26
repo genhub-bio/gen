@@ -356,7 +356,8 @@ impl PyGraphController {
                     ratatui::style::Color::Reset => theme[0x06],
                     c => c,
                 };
-                for (locus, label) in loci_with_labels {
+                // Anonymous highlights (from highlight_match) have an empty label and are skipped here.
+                for (locus, label) in loci_with_labels.iter().filter(|(_, l)| !l.is_empty()) {
                     let Some((left_pos, right_pos)) =
                         locus_label_bounds(locus, &pos_map, detail_level)
                     else {
@@ -463,12 +464,12 @@ impl PyGraphController {
     /// Highlight the path of nodes covered by `match_obj` in the given colour.
     ///
     /// `color` must be a CSS hex string like `"#ffff00"` or one of the named
-    /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  Defaults to
-    /// bright cyan when omitted.
+    /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
+    /// next unused theme accent colour (slots 0x08–0x0F) is chosen automatically.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
         use ratatui::style::Color;
         let c = match color {
-            None => Color::Cyan,
+            None => self.controller.next_accent_color(),
             Some(s) => match s {
                 "red" => Color::Red,
                 "green" => Color::Green,
@@ -485,13 +486,12 @@ impl PyGraphController {
                 }
             },
         };
-        highlight_match_range(
-            &mut self.controller,
-            &locus.inner,
-            PathStyle::new(c)
-                .with_line_style(LineStyle::Bold)
-                .with_merge_glyphs(true),
-        );
+        let style = PathStyle::new(c)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        highlight_match_range(&mut self.controller, &locus.inner, style);
+        self.inline_annotations
+            .push((String::new(), vec![(locus.inner.clone(), String::new())], style));
         Ok(())
     }
 
