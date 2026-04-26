@@ -149,8 +149,10 @@ impl PyBlockGroup {
     /// ----------
     /// query : str
     ///     The sequence to search for.
-    /// sequence_kind : {"dna", "ssdna", "protein"}, optional
+    /// sequence_kind : {"exact", "dna", "ssdna", "protein"}, optional
     ///     Biological interpretation of the query (default: ``"dna"``).
+    ///     ``"exact"`` performs case-sensitive raw-byte matching with no IUPAC
+    ///     expansion and no reverse complement.
     #[pyo3(signature = (query, sequence_kind="dna"))]
     pub fn search(
         &self,
@@ -207,8 +209,10 @@ impl PyBlockGroup {
     ///
     /// Parameters
     /// ----------
-    /// sequence_kind : {"dna", "ssdna", "protein"}, optional
+    /// sequence_kind : {"exact", "dna", "ssdna", "protein"}, optional
     ///     Biological interpretation of the sequences (default: ``"dna"``).
+    ///     ``"exact"`` builds a case-sensitive index; must match the value
+    ///     used when calling ``search()``.
     /// k : int, optional
     ///     k-mer size. Defaults to 16.
     #[pyo3(signature = (sequence_kind="dna", k=16))]

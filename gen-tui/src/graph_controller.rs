@@ -312,24 +312,37 @@ where
         }
     }
 
-    /// Pick the next unused accent color from the theme (slots 0x08–0x0F).
+    /// Pick the next accent color from the theme (slots 0x08–0x0F), cycling
+    /// sequentially after each call.
     ///
-    /// Scans `self.highlights` for colors already in use and returns the first
-    /// accent slot that hasn't been claimed yet.  Wraps around to 0x08 once all
-    /// eight accent slots are occupied.
+    /// Walks `self.highlights` in reverse to find the last accent slot that was
+    /// used, then returns the next slot in the cycle.  Prints a warning to stderr
+    /// each time the cycle wraps around (all 8 slots exhausted).
     pub fn next_accent_color(&self) -> Color {
-        use std::collections::HashSet;
         let theme = current_theme();
-        let used: HashSet<Color> = self
+        const ACCENTS: [usize; 8] = [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F];
+        let accent_colors: Vec<Color> = ACCENTS.iter().map(|&i| theme[i]).collect();
+
+        let last_idx = self
             .highlights
             .iter()
-            .filter(|(_, s)| s.color != Color::Reset)
-            .map(|(_, s)| s.color)
-            .collect();
-        (0x08..=0x0F)
-            .map(|i| theme[i])
-            .find(|c| !used.contains(c))
-            .unwrap_or(theme[0x08])
+            .rev()
+            .find_map(|(_, s)| accent_colors.iter().position(|&c| c == s.color));
+
+        let next_idx = match last_idx {
+            None => 0,
+            Some(i) => {
+                let n = (i + 1) % 8;
+                if n == 0 {
+                    eprintln!(
+                        "warning: all 8 accent colours have been used; cycling back to the first"
+                    );
+                }
+                n
+            }
+        };
+
+        accent_colors[next_idx]
     }
 
     /// Highlight a node using the next available theme accent color.
