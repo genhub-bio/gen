@@ -1,16 +1,18 @@
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use r#gen::{
     core::HashId,
     get_connection,
     graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
 };
-use gen_models::block_group::BlockGroup;
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use gen_graph::GraphNode;
+use gen_models::{block_group::BlockGroup, node::Node};
+use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_and_display_widget},
+    node_key::PyBlock,
 };
 
 fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
@@ -37,6 +39,34 @@ pub struct PyBlockGroup {
     pub name: String,
     /// Path to the SQLite database for the Repository that created this block group.
     pub db_path: Option<PathBuf>,
+}
+
+impl PyBlockGroup {
+    fn open_conn(&self, method: &str) -> PyResult<gen_models::db::GraphConnection> {
+        let db_path = self.db_path.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "{method}() requires a db_path; obtain BlockGroup via Repository"
+            ))
+        })?;
+        get_connection(db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn fetch_sequences(
+        conn: &gen_models::db::GraphConnection,
+        nodes: &[GraphNode],
+    ) -> HashMap<HashId, String> {
+        let ids: Vec<HashId> = nodes.iter().map(|n| n.node_id).collect();
+        let seqs = Node::get_sequences_by_node_ids(conn, &ids);
+        nodes
+            .iter()
+            .filter_map(|n| {
+                // Export full underlying sequence so sequence_start/sequence_end
+                // remain valid indices on reimport.
+                seqs.get(&n.node_id)
+                    .map(|s| (n.node_id, s.get_sequence(None::<i64>, None::<i64>)))
+            })
+            .collect()
+    }
 }
 
 #[pymethods]
@@ -262,5 +292,177 @@ impl PyBlockGroup {
                 .map_err(|e| PyRuntimeError::new_err(format!("Failed to delete index: {e}")))?;
         }
         Ok(())
+    }
+
+    /// Convert this block group's graph to a plain Python dictionary.
+    ///
+    /// Returns ``{"nodes": {Block: {...}}, "edges": {(Block, Block): [...]}}``.
+    /// Each node dict includes ``node_id`` (hex string), ``sequence_start``,
+    /// ``sequence_end``, and ``sequence``.
+    pub fn to_dict(&self) -> PyResult<PyObject> {
+        let conn = self.open_conn("to_dict")?;
+        let graph = BlockGroup::get_graph(&conn, &self.id);
+        let nodes: Vec<GraphNode> = graph.nodes().collect();
+        let seqs = Self::fetch_sequences(&conn, &nodes);
+
+        Python::with_gil(|py| {
+            let dict = PyDict::new(py);
+
+            let nodes_dict = PyDict::new(py);
+            for node in &nodes {
+                let node_dict = PyDict::new(py);
+                node_dict.set_item("node_id", node.node_id.to_string())?;
+                node_dict.set_item("sequence_start", node.sequence_start)?;
+                node_dict.set_item("sequence_end", node.sequence_end)?;
+                if let Some(seq) = seqs.get(&node.node_id) {
+                    node_dict.set_item("sequence", seq)?;
+                }
+                let node_key = PyBlock::new(node.node_id, node.sequence_start, node.sequence_end);
+                nodes_dict.set_item(node_key, node_dict)?;
+            }
+            dict.set_item("nodes", nodes_dict)?;
+
+            let edges_dict = PyDict::new(py);
+            for (src, dst, edge_weights) in graph.all_edges() {
+                let mut weights: Vec<_> = vec![];
+                for weight in edge_weights {
+                    let w = PyDict::new(py);
+                    w.set_item("edge_id", weight.edge_id)?;
+                    w.set_item("source_strand", weight.source_strand.to_string())?;
+                    w.set_item("target_strand", weight.target_strand.to_string())?;
+                    w.set_item("chromosome_index", weight.chromosome_index)?;
+                    w.set_item("phased", weight.phased)?;
+                    weights.push(w);
+                }
+                let src_key = PyBlock::new(src.node_id, src.sequence_start, src.sequence_end);
+                let dst_key = PyBlock::new(dst.node_id, dst.sequence_start, dst.sequence_end);
+                edges_dict.set_item((src_key, dst_key), weights)?;
+            }
+            dict.set_item("edges", edges_dict)?;
+
+            Ok(dict.into_pyobject(py)?.into_any().unbind())
+        })
+    }
+
+    /// Convert this block group's graph to a NetworkX ``DiGraph``.
+    ///
+    /// Node attributes: ``node_id`` (hex string), ``sequence_start``,
+    /// ``sequence_end``, ``sequence``.
+    /// Edge attributes: ``source_strand``, ``target_strand``, ``weights``
+    /// (list of per-chromosome weight dicts for full fidelity).
+    ///
+    /// The result is compatible with
+    /// ``Repository.create_block_group_from_graph()`` for a round-trip.
+    pub fn to_networkx(&self) -> PyResult<PyObject> {
+        let conn = self.open_conn("to_networkx")?;
+        let graph = BlockGroup::get_graph(&conn, &self.id);
+        let nodes: Vec<GraphNode> = graph.nodes().collect();
+        let seqs = Self::fetch_sequences(&conn, &nodes);
+
+        Python::with_gil(|py| {
+            let networkx = PyModule::import(py, "networkx").map_err(|_| {
+                pyo3::exceptions::PyModuleNotFoundError::new_err(
+                    "The 'networkx' module is not installed. \
+                     Please install it using 'pip install networkx'.",
+                )
+            })?;
+            let nx_graph = networkx.getattr("DiGraph")?.call0()?;
+
+            for node in &nodes {
+                let attrs = PyDict::new(py);
+                attrs.set_item("node_id", node.node_id.to_string())?;
+                attrs.set_item("sequence_start", node.sequence_start)?;
+                attrs.set_item("sequence_end", node.sequence_end)?;
+                if let Some(seq) = seqs.get(&node.node_id) {
+                    attrs.set_item("sequence", seq)?;
+                }
+                let node_key = PyBlock::new(node.node_id, node.sequence_start, node.sequence_end);
+                nx_graph.call_method("add_node", (node_key,), Some(&attrs))?;
+            }
+
+            for (src, dst, edge_weights) in graph.all_edges() {
+                let src_key = PyBlock::new(src.node_id, src.sequence_start, src.sequence_end);
+                let dst_key = PyBlock::new(dst.node_id, dst.sequence_start, dst.sequence_end);
+
+                let edge_attrs = PyDict::new(py);
+                let mut weights: Vec<_> = vec![];
+                let mut first = true;
+                for weight in edge_weights {
+                    if first {
+                        edge_attrs.set_item("source_strand", weight.source_strand.to_string())?;
+                        edge_attrs.set_item("target_strand", weight.target_strand.to_string())?;
+                        first = false;
+                    }
+                    let w = PyDict::new(py);
+                    w.set_item("edge_id", weight.edge_id)?;
+                    w.set_item("source_strand", weight.source_strand.to_string())?;
+                    w.set_item("target_strand", weight.target_strand.to_string())?;
+                    w.set_item("chromosome_index", weight.chromosome_index)?;
+                    w.set_item("phased", weight.phased)?;
+                    weights.push(w);
+                }
+                edge_attrs.set_item("weights", weights)?;
+                nx_graph.call_method("add_edge", (src_key, dst_key), Some(&edge_attrs))?;
+            }
+
+            Ok(nx_graph.into_pyobject(py)?.into_any().unbind())
+        })
+    }
+
+    /// Convert this block group's graph to a rustworkx ``PyDiGraph``.
+    ///
+    /// Each node payload is a dict with ``node_id`` (hex string),
+    /// ``sequence_start``, ``sequence_end``, ``sequence``, and ``key``
+    /// (the ``Block`` object).
+    /// Each edge payload is a list of weight dicts (same fields as
+    /// ``to_dict``).
+    pub fn to_rustworkx(&self) -> PyResult<PyObject> {
+        let conn = self.open_conn("to_rustworkx")?;
+        let graph = BlockGroup::get_graph(&conn, &self.id);
+        let nodes: Vec<GraphNode> = graph.nodes().collect();
+        let seqs = Self::fetch_sequences(&conn, &nodes);
+
+        Python::with_gil(|py| {
+            let rustworkx = PyModule::import(py, "rustworkx").map_err(|_| {
+                pyo3::exceptions::PyModuleNotFoundError::new_err(
+                    "The 'rustworkx' module is not installed. \
+                     Please install it using 'pip install rustworkx'.",
+                )
+            })?;
+            let rx_graph = rustworkx.getattr("PyDiGraph")?.call0()?;
+
+            let mut node_map: HashMap<GraphNode, usize> = HashMap::new();
+            for node in &nodes {
+                let node_data = PyDict::new(py);
+                node_data.set_item("node_id", node.node_id.to_string())?;
+                node_data.set_item("sequence_start", node.sequence_start)?;
+                node_data.set_item("sequence_end", node.sequence_end)?;
+                if let Some(seq) = seqs.get(&node.node_id) {
+                    node_data.set_item("sequence", seq)?;
+                }
+                let node_key = PyBlock::new(node.node_id, node.sequence_start, node.sequence_end);
+                node_data.set_item("key", node_key)?;
+                let idx: usize = rx_graph.call_method1("add_node", (node_data,))?.extract()?;
+                node_map.insert(*node, idx);
+            }
+
+            for (src, dst, edge_weights) in graph.all_edges() {
+                let src_idx = *node_map.get(&src).unwrap();
+                let dst_idx = *node_map.get(&dst).unwrap();
+                let mut weights: Vec<_> = vec![];
+                for weight in edge_weights {
+                    let w = PyDict::new(py);
+                    w.set_item("edge_id", weight.edge_id)?;
+                    w.set_item("source_strand", weight.source_strand.to_string())?;
+                    w.set_item("target_strand", weight.target_strand.to_string())?;
+                    w.set_item("chromosome_index", weight.chromosome_index)?;
+                    w.set_item("phased", weight.phased)?;
+                    weights.push(w);
+                }
+                rx_graph.call_method1("add_edge", (src_idx, dst_idx, weights))?;
+            }
+
+            Ok(rx_graph.into_pyobject(py)?.into_any().unbind())
+        })
     }
 }

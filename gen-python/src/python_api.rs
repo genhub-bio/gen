@@ -2,7 +2,6 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 
 // Define modules for Python API components
 pub mod block_group;
-pub mod factory;
 pub mod graph_search;
 pub mod hash_id;
 pub mod jupyter_widget;

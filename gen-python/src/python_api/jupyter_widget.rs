@@ -490,8 +490,11 @@ impl PyGraphController {
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
         highlight_match_range(&mut self.controller, &locus.inner, style);
-        self.inline_annotations
-            .push((String::new(), vec![(locus.inner.clone(), String::new())], style));
+        self.inline_annotations.push((
+            String::new(),
+            vec![(locus.inner.clone(), String::new())],
+            style,
+        ));
         Ok(())
     }
 
