@@ -39,21 +39,26 @@ pub struct GraphLocus {
 /// Biological interpretation of the sequences being searched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SequenceKind {
+    /// Case-sensitive exact byte match.
+    ///
+    /// No case normalization, no IUPAC expansion, no reverse complement.
+    Exact,
     /// Double-stranded DNA search.
     ///
-    /// Searches the query as provided and as its reverse complement. Uses exact
-    /// byte matching unless the query contains an IUPAC degenerate nucleotide
-    /// code, in which case the query is matched with IUPAC semantics.
+    /// Case-insensitive (both sides uppercased). Searches the query as provided
+    /// and as its reverse complement. Uses IUPAC degenerate matching if the
+    /// query contains non-ACGT bases; otherwise uses normalized exact matching.
     Dna,
     /// Single-stranded DNA search.
     ///
-    /// Searches only the query as provided. Uses exact byte matching unless the
-    /// query contains an IUPAC degenerate nucleotide code, in which case the
-    /// query is matched with IUPAC semantics.
+    /// Case-insensitive (both sides uppercased). Searches only the query as
+    /// provided. Uses IUPAC degenerate matching if the query contains non-ACGT
+    /// bases; otherwise uses normalized exact matching.
     SsDna,
     /// Protein or other non-nucleotide sequence search.
     ///
-    /// Searches only the query as provided with exact byte matching.
+    /// Case-insensitive (both sides uppercased). No IUPAC expansion or reverse
+    /// complement.
     Protein,
 }
 
@@ -64,10 +69,6 @@ impl Default for SequenceKind {
 }
 
 impl SequenceKind {
-    pub fn uses_iupac_for_query(self, query: &[u8]) -> bool {
-        matches!(self, Self::Dna | Self::SsDna) && query_contains_degenerate_iupac(query)
-    }
-
     /// Compatibility helper for call sites that still use string sequence types.
     pub fn from_seq_type(seq_type: Option<&str>) -> Self {
         match seq_type {
@@ -77,31 +78,25 @@ impl SequenceKind {
             _ => Self::Dna,
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum ByteMatchMode {
-    Exact,
-    Iupac,
-}
-
-impl ByteMatchMode {
-    #[inline]
-    fn for_query(sequence_kind: SequenceKind, query: &[u8]) -> Self {
-        if sequence_kind.uses_iupac_for_query(query) {
-            Self::Iupac
-        } else {
-            Self::Exact
-        }
-    }
-
-    #[inline]
-    fn matches(self, query_byte: u8, graph_byte: u8) -> bool {
+    fn matcher_for_query(self, query: &[u8]) -> fn(u8, u8) -> bool {
         match self {
-            Self::Exact => query_byte == graph_byte,
-            Self::Iupac => iupac_matches(query_byte, graph_byte),
+            Self::Exact => |q: u8, g: u8| q == g,
+            Self::Protein => normalized_matches,
+            Self::Dna | Self::SsDna => {
+                if query_contains_degenerate_iupac(query) {
+                    degenerate_matches
+                } else {
+                    normalized_matches
+                }
+            }
         }
     }
+}
+
+#[inline]
+fn normalized_matches(query_byte: u8, graph_byte: u8) -> bool {
+    query_byte.eq_ignore_ascii_case(&graph_byte)
 }
 
 /// Complete search state: which query byte to match next, and where we are in
@@ -142,13 +137,12 @@ fn query_contains_degenerate_iupac(query: &[u8]) -> bool {
     query.iter().any(|&byte| is_degenerate_iupac(byte))
 }
 
-/// Case-insensitive IUPAC query matching against a concrete graph byte.
+/// IUPAC degenerate query matching against a concrete graph byte.
 ///
-/// Degenerate codes are interpreted in the query. Graph bytes are usually
-/// expected to be concrete bases, but if the graph contains non-standard bytes,
-/// exact fallback is used for unknown query codes.
+/// Both bytes are uppercased before comparison. Degenerate codes are
+/// interpreted in the query only; unknown query codes fall back to exact match.
 #[inline]
-fn iupac_matches(query_byte: u8, graph_byte: u8) -> bool {
+fn degenerate_matches(query_byte: u8, graph_byte: u8) -> bool {
     let query_byte = normalize_nucleotide_byte(query_byte);
     let graph_byte = normalize_nucleotide_byte(graph_byte);
 
@@ -279,15 +273,15 @@ impl GenGraphMatcher {
             return true;
         }
 
-        let byte_match_mode = ByteMatchMode::for_query(self.sequence_kind, query);
-        if self.contains_query_orientation(query, byte_match_mode) {
+        let matcher = self.sequence_kind.matcher_for_query(query);
+        if self.contains_query_orientation(query, matcher) {
             return true;
         }
 
         if self.sequence_kind == SequenceKind::Dna {
             let rc = reverse_complement(query);
-            let rc_byte_match_mode = ByteMatchMode::for_query(self.sequence_kind, &rc);
-            if self.contains_query_orientation(&rc, rc_byte_match_mode) {
+            let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
+            if self.contains_query_orientation(&rc, rc_matcher) {
                 return true;
             }
         }
@@ -306,27 +300,25 @@ impl GenGraphMatcher {
             return Vec::new();
         }
 
-        let byte_match_mode = ByteMatchMode::for_query(self.sequence_kind, query);
-        let mut out = self.find_all_query_orientation(query, byte_match_mode);
+        let matcher = self.sequence_kind.matcher_for_query(query);
+        let mut out = self.find_all_query_orientation(query, matcher);
 
         if self.sequence_kind == SequenceKind::Dna {
             let rc = reverse_complement(query);
-            let rc_byte_match_mode = ByteMatchMode::for_query(self.sequence_kind, &rc);
-            out.extend(self.find_all_query_orientation(&rc, rc_byte_match_mode));
+            let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
+            out.extend(self.find_all_query_orientation(&rc, rc_matcher));
         }
 
         out
     }
 
-    /// Returns every exact, forward-only match, using an exact seed index to
-    /// prune start positions.
+    /// Returns every forward-only match using a seed index to prune start positions.
     ///
-    /// This method ignores the matcher's `SequenceKind`. It does not perform
-    /// reverse-complement search for `SequenceKind::Dna`, and it does not expand
-    /// IUPAC-degenerate query seeds.
+    /// Does not perform reverse-complement search. Does not expand IUPAC-degenerate
+    /// bases. Returns an error if the query contains degenerate bases, because an
+    /// exact seed lookup would silently miss valid matches.
     ///
-    /// Returns an error if the query contains IUPAC-degenerate bases, because an
-    /// exact seed lookup would otherwise silently miss valid matches.
+    /// Normalization of the seed lookup and full match follows `seed_index.normalized`.
     pub fn find_all_with_seed_index(
         &self,
         seed_index: &SeedIndex,
@@ -340,53 +332,66 @@ impl GenGraphMatcher {
             return Ok(Vec::new());
         }
 
+        let matcher: fn(u8, u8) -> bool = if seed_index.normalized {
+            normalized_matches
+        } else {
+            |q: u8, g: u8| q == g
+        };
+
         if query.len() < seed_index.k {
-            return Ok(self.find_all_exact_forward(query));
+            return Ok(self.find_all_forward(query, matcher));
         }
 
-        let seed = &query[..seed_index.k];
-        let Some(positions) = seed_index.table.get(seed) else {
+        let seed: Vec<u8> = if seed_index.normalized {
+            query[..seed_index.k]
+                .iter()
+                .map(|&b| b.to_ascii_uppercase())
+                .collect()
+        } else {
+            query[..seed_index.k].to_vec()
+        };
+
+        let Some(positions) = seed_index.table.get(&seed) else {
             return Ok(Vec::new());
         };
 
         let mut out = Vec::new();
         for &pos in positions {
-            self.collect_matches_from(pos, query, ByteMatchMode::Exact, &mut out);
+            self.collect_matches_from(pos, query, matcher, &mut out);
         }
         Ok(out)
     }
 
-    fn find_all_exact_forward(&self, query: &[u8]) -> Vec<GraphLocus> {
+    fn find_all_forward(&self, query: &[u8], matcher: fn(u8, u8) -> bool) -> Vec<GraphLocus> {
         if query.is_empty() {
             return Vec::new();
         }
 
-        self.find_all_query_orientation(query, ByteMatchMode::Exact)
+        self.find_all_query_orientation(query, matcher)
     }
 
-    fn contains_query_orientation(&self, query: &[u8], byte_match_mode: ByteMatchMode) -> bool {
+    fn contains_query_orientation(&self, query: &[u8], matcher: fn(u8, u8) -> bool) -> bool {
         self.all_start_positions()
             .into_iter()
-            .any(|start| self.contains_from(start, query, byte_match_mode))
+            .any(|start| self.contains_from(start, query, matcher))
     }
 
     fn find_all_query_orientation(
         &self,
         query: &[u8],
-        byte_match_mode: ByteMatchMode,
+        matcher: fn(u8, u8) -> bool,
     ) -> Vec<GraphLocus> {
         let mut out = Vec::new();
 
         for start in self.all_start_positions() {
-            self.collect_matches_from(start, query, byte_match_mode, &mut out);
+            self.collect_matches_from(start, query, matcher, &mut out);
         }
 
         out
     }
 
-    /// DFS from a single start position; returns `true` on the first complete
-    /// match.
-    fn contains_from(&self, start: GraphPos, query: &[u8], byte_match_mode: ByteMatchMode) -> bool {
+    /// DFS from a single start position; returns `true` on the first complete match.
+    fn contains_from(&self, start: GraphPos, query: &[u8], matcher: fn(u8, u8) -> bool) -> bool {
         let initial = State {
             q_idx: 0,
             block: start.node,
@@ -405,7 +410,7 @@ impl GenGraphMatcher {
                 continue;
             }
 
-            match self.step(state, query[state.q_idx], byte_match_mode) {
+            match self.step(state, query[state.q_idx], matcher) {
                 StepResult::Advance(next) => stack.push(next),
                 StepResult::Branch(nexts) => stack.extend(nexts),
                 StepResult::Dead => {
@@ -422,7 +427,7 @@ impl GenGraphMatcher {
         &self,
         start: GraphPos,
         query: &[u8],
-        byte_match_mode: ByteMatchMode,
+        matcher: fn(u8, u8) -> bool,
         out: &mut Vec<GraphLocus>,
     ) {
         #[derive(Clone, Debug)]
@@ -454,7 +459,7 @@ impl GenGraphMatcher {
                 continue;
             }
 
-            match self.step(ts.state, query[ts.state.q_idx], byte_match_mode) {
+            match self.step(ts.state, query[ts.state.q_idx], matcher) {
                 StepResult::Advance(next) => {
                     let mut next_ts = ts;
 
@@ -482,11 +487,11 @@ impl GenGraphMatcher {
         }
     }
 
-    fn step(&self, state: State, query_byte: u8, byte_match_mode: ByteMatchMode) -> StepResult {
+    fn step(&self, state: State, query_byte: u8, matcher: fn(u8, u8) -> bool) -> StepResult {
         let text = self.graph_node_text(state.block);
 
         if state.offset < text.len() {
-            if byte_match_mode.matches(query_byte, text[state.offset]) {
+            if matcher(query_byte, text[state.offset]) {
                 return StepResult::Advance(State {
                     q_idx: state.q_idx + 1,
                     block: state.block,
@@ -547,29 +552,33 @@ impl GenGraphMatcher {
     }
 }
 
-/// Dense exact k-mer index over the graph, including k-mers that span node
-/// boundaries.
+/// Dense k-mer index over the graph, including k-mers that span node boundaries.
+///
+/// `normalized` controls whether k-mer bytes are uppercased at build time. An
+/// index built with `normalized = true` must be searched with normalized queries;
+/// an index built with `normalized = false` uses exact byte lookup.
 #[derive(Serialize, Deserialize)]
 pub struct SeedIndex {
     pub k: usize,
+    pub normalized: bool,
     pub table: HashMap<Vec<u8>, Vec<GraphPos>>,
 }
 
 /// Bumped whenever the index format or indexing behavior changes incompatibly.
-const SEED_INDEX_VERSION: u32 = 1;
+const SEED_INDEX_VERSION: u32 = 2;
 
 /// File header written before the `SeedIndex` payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SeedIndexHeader {
     version: u32,
     k: usize,
-    case_sensitive: bool,
+    normalized: bool,
 }
 
 /// Errors from indexed search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedIndexSearchError {
-    /// The exact seed index can only be used with exact, non-degenerate queries.
+    /// The seed index does not support degenerate (IUPAC) query bases.
     UnsupportedQuery,
 }
 
@@ -578,7 +587,7 @@ impl std::fmt::Display for SeedIndexSearchError {
         match self {
             Self::UnsupportedQuery => write!(
                 f,
-                "exact seed index can only be used with exact, non-degenerate queries"
+                "seed index search does not support degenerate (IUPAC) query bases"
             ),
         }
     }
@@ -604,11 +613,6 @@ pub enum SeedIndexIoError {
         got: usize,
         expected: usize,
     },
-    /// Header `case_sensitive` does not match the requested flag.
-    CaseSensitiveMismatch {
-        got: bool,
-        expected: bool,
-    },
 }
 
 impl std::fmt::Display for SeedIndexIoError {
@@ -624,9 +628,6 @@ impl std::fmt::Display for SeedIndexIoError {
             Self::KMismatch { got, expected } => {
                 write!(f, "k mismatch: got {got}, expected {expected}")
             }
-            Self::CaseSensitiveMismatch { got, expected } => {
-                write!(f, "case_sensitive mismatch: got {got}, expected {expected}")
-            }
         }
     }
 }
@@ -640,29 +641,33 @@ impl From<std::io::Error> for SeedIndexIoError {
 }
 
 impl SeedIndex {
-    /// Enumerate all exact strings of length `k` reachable from every start
-    /// position, including those that span node boundaries.
-    pub fn build(matcher: &GenGraphMatcher, k: usize) -> Self {
+    /// Build a k-mer index over the graph.
+    ///
+    /// When `normalized` is `true`, k-mer bytes are uppercased before insertion
+    /// so that the index supports case-insensitive lookup. When `false`, raw
+    /// graph bytes are stored and lookup is exact.
+    pub fn build(matcher: &GenGraphMatcher, k: usize, normalized: bool) -> Self {
         let mut table: HashMap<Vec<u8>, Vec<GraphPos>> = HashMap::new();
 
         for start in matcher.all_start_positions() {
-            for kmer in Self::collect_kmers_from(matcher, start, k) {
+            for kmer in Self::collect_kmers_from(matcher, start, k, normalized) {
                 table.entry(kmer).or_default().push(start);
             }
         }
 
-        Self { k, table }
+        Self {
+            k,
+            normalized,
+            table,
+        }
     }
 
-    /// Serialize `self` to bytes: 4-byte little-endian header length, header,
-    /// payload.
-    ///
-    /// `case_sensitive` is stored in the header and validated on load.
-    pub fn to_bytes_with_header(&self, case_sensitive: bool) -> Result<Vec<u8>, SeedIndexIoError> {
+    /// Serialize `self` to bytes: 4-byte little-endian header length, header, payload.
+    pub fn to_bytes_with_header(&self) -> Result<Vec<u8>, SeedIndexIoError> {
         let header = SeedIndexHeader {
             version: SEED_INDEX_VERSION,
             k: self.k,
-            case_sensitive,
+            normalized: self.normalized,
         };
 
         let header_bytes = postcard::to_allocvec(&header).map_err(SeedIndexIoError::Encode)?;
@@ -678,12 +683,11 @@ impl SeedIndex {
 
     /// Deserialize from bytes produced by `to_bytes_with_header`.
     ///
-    /// Returns an error if the header fields do not match `expected_k` or
-    /// `expected_case_sensitive`, or if the version has changed.
+    /// Returns an error if `version` or `k` do not match expectations.
+    /// `normalized` is read from the header and stored on the returned index.
     pub fn from_bytes_with_header(
         bytes: &[u8],
         expected_k: usize,
-        expected_case_sensitive: bool,
     ) -> Result<Self, SeedIndexIoError> {
         let (header, payload) = decode_seed_index_header_and_payload(bytes)?;
 
@@ -696,52 +700,35 @@ impl SeedIndex {
             });
         }
 
-        if header.case_sensitive != expected_case_sensitive {
-            return Err(SeedIndexIoError::CaseSensitiveMismatch {
-                got: header.case_sensitive,
-                expected: expected_case_sensitive,
-            });
-        }
-
         postcard::from_bytes(payload).map_err(SeedIndexIoError::Decode)
     }
 
-    /// Write index to `path`. Fails if the file cannot be created or written.
-    pub fn save_to_path<P: AsRef<Path>>(
-        &self,
-        path: P,
-        case_sensitive: bool,
-    ) -> Result<(), SeedIndexIoError> {
-        let bytes = self.to_bytes_with_header(case_sensitive)?;
+    /// Write index to `path`.
+    pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), SeedIndexIoError> {
+        let bytes = self.to_bytes_with_header()?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
 
-    /// Load index from `path`, validating `version` and `case_sensitive`.
-    ///
-    /// `k` is taken from the stored header; no k-check is performed.
-    pub fn load_from_path<P: AsRef<Path>>(
-        path: P,
-        expected_case_sensitive: bool,
-    ) -> Result<Self, SeedIndexIoError> {
+    /// Load index from `path`. `normalized` and `k` are read from the stored header.
+    pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, SeedIndexIoError> {
         let bytes = std::fs::read(path)?;
         let (header, payload) = decode_seed_index_header_and_payload(&bytes)?;
 
         validate_seed_index_header_version(&header)?;
 
-        if header.case_sensitive != expected_case_sensitive {
-            return Err(SeedIndexIoError::CaseSensitiveMismatch {
-                got: header.case_sensitive,
-                expected: expected_case_sensitive,
-            });
-        }
-
         postcard::from_bytes(payload).map_err(SeedIndexIoError::Decode)
     }
 
-    /// Collect every exact string of exactly `k` bytes reachable by walking
-    /// forward through the graph from `start`.
-    fn collect_kmers_from(matcher: &GenGraphMatcher, start: GraphPos, k: usize) -> Vec<Vec<u8>> {
+    /// Collect every string of exactly `k` bytes reachable from `start`.
+    ///
+    /// Bytes are uppercased when `normalized` is `true`.
+    fn collect_kmers_from(
+        matcher: &GenGraphMatcher,
+        start: GraphPos,
+        k: usize,
+        normalized: bool,
+    ) -> Vec<Vec<u8>> {
         #[derive(Clone)]
         struct Frame {
             node: GraphNode,
@@ -766,7 +753,12 @@ impl SeedIndex {
 
             if frame.offset < text.len() {
                 let mut next = frame.clone();
-                next.buf.push(text[frame.offset]);
+                let byte = text[frame.offset];
+                next.buf.push(if normalized {
+                    byte.to_ascii_uppercase()
+                } else {
+                    byte
+                });
                 next.offset += 1;
                 stack.push(next);
                 continue;

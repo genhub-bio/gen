@@ -661,11 +661,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             for bg in block_groups {
                 let graph = BlockGroup::get_graph(graph_conn, &bg.id);
                 let matcher = GenGraphMatcher::new(graph_conn, graph);
-                let index = SeedIndex::build(&matcher, kmer_size);
+                let index = SeedIndex::build(&matcher, kmer_size, true);
                 let path = index_dir.join(format!("{}.bin", bg.id));
-                index
-                    .save_to_path(&path, false)
-                    .map_err(|e| anyhow!("{e}"))?;
+                index.save_to_path(&path).map_err(|e| anyhow!("{e}"))?;
                 println!("indexed {}/{}", bg.sample_name, bg.name);
             }
             Ok(())
@@ -720,7 +718,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .as_ref()
                     .and_then(|dir| {
                         let p = dir.join(format!("{}.bin", bg.id));
-                        SeedIndex::load_from_path(p, false).ok()
+                        SeedIndex::load_from_path(p).ok()
                     })
                     .map(|idx| matcher.find_all_with_seed_index(&idx, query_bytes))
                     .unwrap_or_else(|| Ok(matcher.find_all(query_bytes)))?;
