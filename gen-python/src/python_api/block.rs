@@ -67,13 +67,19 @@ impl PyBlock {
         for &b in &self.node_id.0 {
             hash = hash.wrapping_mul(31).wrapping_add(b as isize);
         }
+        hash = hash.wrapping_mul(31).wrapping_add(self.sequence_start as isize);
+        hash = hash.wrapping_mul(31).wrapping_add(self.sequence_end as isize);
         hash
     }
 
     fn __eq__(&self, py: Python<'_>, other: PyObject) -> bool {
         other
             .extract::<PyRef<PyBlock>>(py)
-            .map(|o| self.node_id == o.node_id)
+            .map(|o| {
+                self.node_id == o.node_id
+                    && self.sequence_start == o.sequence_start
+                    && self.sequence_end == o.sequence_end
+            })
             .unwrap_or(false)
     }
 }

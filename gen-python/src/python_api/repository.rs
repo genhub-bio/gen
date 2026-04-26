@@ -1493,7 +1493,7 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use r#gen::test_helpers::{setup_gen, setup_gen_on_disk};
     use pyo3::{prelude::*, py_run};
@@ -2052,6 +2052,86 @@ orig_seqs = {v["sequence"] for v in d_orig["nodes"].values()}
 mod_seqs  = {v["sequence"] for v in d_mod["nodes"].values()}
 assert orig_seqs != mod_seqs, "sequences should differ after modification"
 assert "TTTTTTTT" in mod_seqs, f"expected mutant seq 'TTTTTTTT' in {mod_seqs}"
+"#
+            );
+        });
+    }
+
+    #[test]
+    fn test_vcf_update_sub_blocks_are_distinct_networkx_nodes() {
+        // After a VCF update the original sequence node is carved into multiple
+        // sub-blocks that share the same node_id but differ in sequence_start /
+        // sequence_end.  Block.__hash__ and __eq__ must use all three fields so
+        // that NetworkX treats them as distinct nodes rather than collapsing them.
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            if PyModule::import(py, "networkx").is_err() {
+                eprintln!("networkx not available – skipping test_vcf_update_sub_blocks_are_distinct_networkx_nodes");
+                return;
+            }
+
+            let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("fixtures");
+            let fasta_path = fixture_dir.join("simple.fa");
+            let vcf_path = fixture_dir.join("simple.vcf");
+
+            let py_repo = make_repo(py);
+
+            py_repo
+                .borrow(py)
+                .import_fasta(
+                    fasta_path.to_str().unwrap().to_string(),
+                    Some("test".to_string()),
+                    None,
+                    false,
+                )
+                .unwrap();
+
+            // Capture original node_id before the graph is split by the VCF.
+            let ref_bgs = py_repo.borrow(py).get_block_groups().unwrap();
+            let ref_dict = ref_bgs[0].to_dict().unwrap();
+
+            py_repo
+                .borrow(py)
+                .update_with_vcf(
+                    vcf_path.to_str().unwrap().to_string(),
+                    Some("test".to_string()),
+                    None,
+                    None,
+                    Some(vec!["reference".to_string()]),
+                    false,
+                )
+                .unwrap();
+
+            // The "unknown" sample has 1/1 for both variants → most sub-blocks.
+            let all_bgs = py_repo.borrow(py).get_block_groups().unwrap();
+            let unknown_bg = all_bgs
+                .iter()
+                .find(|bg| bg.sample_name == "unknown")
+                .unwrap()
+                .clone();
+
+            let nx_graph = unknown_bg.to_networkx(false).unwrap();
+
+            py_run!(
+                py,
+                nx_graph ref_dict,
+                r#"
+orig_id = next(iter(ref_dict["nodes"].values()))["node_id"]
+
+nodes = list(nx_graph.nodes())
+# Sub-blocks carved from the original node share its node_id.
+orig_blocks = [b for b in nodes if str(b.node_id) == orig_id]
+assert len(orig_blocks) > 1, (
+    f"Expected multiple sub-blocks from the original node, got {len(orig_blocks)}"
+)
+# Each sub-block must have unique coordinates.
+coords = [(b.sequence_start, b.sequence_end) for b in orig_blocks]
+assert len(set(coords)) == len(coords), f"Duplicate coordinates among sub-blocks: {coords}"
+# NetworkX must see them all as distinct nodes (dict has one entry per unique key).
+assert len(nodes) == len(set(nodes)), "NetworkX collapsed sub-blocks with equal hash/eq"
 "#
             );
         });
