@@ -5,7 +5,7 @@ pub mod block_group;
 pub mod graph_search;
 pub mod hash_id;
 pub mod jupyter_widget;
-pub mod node_key;
+pub mod block;
 pub mod repository;
 pub mod sequence_part;
 pub mod utils;
@@ -22,7 +22,7 @@ use crate::{
         graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
         hash_id::PyHashId,
         jupyter_widget::PyGraphController,
-        node_key::PyBlock,
+        block::PyBlock,
         repository::PyRepository,
         sequence_part::PySequencePart,
         utils::get_gen_dir_py,

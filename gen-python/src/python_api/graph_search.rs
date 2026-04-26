@@ -6,7 +6,7 @@ use gen_core::HashId;
 use gen_graph::GraphNode;
 use pyo3::prelude::*;
 
-use super::node_key::PyBlock;
+use super::block::PyBlock;
 
 /// A position in the graph: a specific node plus a byte offset within that
 /// node's local text (`0..node.length()`).
@@ -33,7 +33,12 @@ impl PyGraphPos {
     #[getter]
     fn block(&self) -> PyBlock {
         let n = self.inner.node;
-        PyBlock::new(n.node_id, n.sequence_start, n.sequence_end)
+        PyBlock {
+            node_id: n.node_id,
+            sequence: String::new(),
+            sequence_start: n.sequence_start,
+            sequence_end: n.sequence_end,
+        }
     }
 
     /// Byte offset within the node's local text (`0..node.length()`).
@@ -98,7 +103,12 @@ impl PyGraphLocus {
         self.inner
             .blocks
             .iter()
-            .map(|n| PyBlock::new(n.node_id, n.sequence_start, n.sequence_end))
+            .map(|n| PyBlock {
+                node_id: n.node_id,
+                sequence: String::new(),
+                sequence_start: n.sequence_start,
+                sequence_end: n.sequence_end,
+            })
             .collect()
     }
 

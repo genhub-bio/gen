@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, fs, path::PathBuf};
 
 use r#gen::{
     self,
@@ -35,7 +35,7 @@ use super::{
     block_group::PyBlockGroup,
     graph_search::PyGraphLocus,
     jupyter_widget::{PyGraphController, build_and_display_widget},
-    node_key::PyBlock,
+    block::PyBlock,
     sequence_part::PySequencePart,
     utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
@@ -476,137 +476,131 @@ impl PyRepository {
                 },
             );
 
-            // node_map: Python node key → (node_hash hex, seq_len)
-            // Using a Python dict so lookups honour Python equality/hash,
-            // matching how networkx identifies nodes in edge lists.
-            let node_map = PyDict::new(py);
-
-            let nodes_with_data = graph.getattr("nodes")?.call1((true,))?;
-            for item in nodes_with_data.try_iter()? {
-                let item = item?;
-                let node_key = item.get_item(0)?;
-                let attrs = item.get_item(1)?;
-
-                let sequence_str: String = attrs
-                    .get_item("sequence")
-                    .ok()
-                    .ok_or_else(|| {
-                        PyRuntimeError::new_err("Node missing required 'sequence' attribute")
-                    })?
-                    .extract()?;
-
+            // Each node key is a PyBlock carrying sequence, node_id, start, end.
+            // "start" and "end" string nodes are sentinel placeholders — skip them.
+            let mut all_blocks: Vec<PyBlock> = Vec::new();
+            for node_obj in graph.getattr("nodes")?.call0()?.try_iter()? {
+                let node_obj = node_obj?;
+                if let Ok(s) = node_obj.extract::<String>() {
+                    if s == "start" || s == "end" {
+                        continue;
+                    }
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Unexpected string node {s:?}; only \"start\" and \"end\" are reserved"
+                    )));
+                }
+                let block: PyBlock = node_obj.extract()?;
+                if block.sequence.is_empty() {
+                    return Err(PyRuntimeError::new_err(
+                        "Block has empty sequence; construct with Block(\"ACGT\", ...)",
+                    ));
+                }
                 let seq = Sequence::new()
                     .sequence_type("DNA")
-                    .sequence(sequence_str.as_str())
+                    .sequence(&block.sequence)
                     .save(conn);
-                let seq_len = seq.length;
-
-                let node_hash = attrs
-                    .get_item("node_id")
-                    .ok()
-                    .and_then(|v| v.extract::<String>().ok())
-                    .and_then(|s| HashId::try_from(s).ok())
-                    .unwrap_or_else(HashId::uuid7);
-
-                let seq_start = attrs
-                    .get_item("sequence_start")
-                    .ok()
-                    .and_then(|v| v.extract::<i64>().ok())
-                    .unwrap_or(0);
-                let seq_end = attrs
-                    .get_item("sequence_end")
-                    .ok()
-                    .and_then(|v| v.extract::<i64>().ok())
-                    .unwrap_or(seq_len);
-
-                Node::create(conn, &seq.hash, &node_hash);
-                // Store (hex, sequence_start, sequence_end) — start/end control the
-                // edge coordinates (target_coordinate / source_coordinate) and thus
-                // which window of the sequence is visible in the graph.
-                node_map.set_item(node_key, (node_hash.to_string(), seq_start, seq_end))?;
+                Node::create(conn, &seq.hash, &block.node_id);
+                all_blocks.push(block);
             }
 
-            // Process user edges, tracking in/out degrees by node hex.
+            // Process edges.  Edges from/to the "start"/"end" sentinel string
+            // nodes are explicit sentinel connections; all others are user edges.
             let mut user_edge_data: Vec<EdgeData> = Vec::new();
-            let mut in_degrees: HashMap<String, usize> = HashMap::new();
-            let mut out_degrees: HashMap<String, usize> = HashMap::new();
+            let mut explicit_sentinel_edges: Vec<EdgeData> = Vec::new();
+            let mut explicit_start_targets: HashSet<HashId> = HashSet::new();
+            let mut explicit_end_sources: HashSet<HashId> = HashSet::new();
+            let mut in_degrees: HashMap<HashId, usize> = HashMap::new();
+            let mut out_degrees: HashMap<HashId, usize> = HashMap::new();
 
-            let edges_with_data = graph.getattr("edges")?.call1((true,))?;
-            for item in edges_with_data.try_iter()? {
+            let kw_data = PyDict::new(py);
+            kw_data.set_item("data", true)?;
+            for item in graph.getattr("edges")?.call((), Some(&kw_data))?.try_iter()? {
                 let item = item?;
-                let src_key = item.get_item(0)?;
-                let dst_key = item.get_item(1)?;
+                let src_obj = item.get_item(0)?;
+                let dst_obj = item.get_item(1)?;
                 let attrs = item.get_item(2)?;
 
-                let (src_hex, _src_start, src_end): (String, i64, i64) = node_map
-                    .get_item(&src_key)?
-                    .ok_or_else(|| {
-                        PyRuntimeError::new_err("Edge source node not found in graph nodes")
-                    })?
-                    .extract()?;
-                let src_node_id = HashId::try_from(src_hex.clone())
-                    .map_err(|_| PyRuntimeError::new_err("Invalid source node_id hex"))?;
+                let src_sentinel = src_obj.extract::<String>().ok();
+                let dst_sentinel = dst_obj.extract::<String>().ok();
 
-                let (dst_hex, dst_start, _dst_end): (String, i64, i64) = node_map
-                    .get_item(&dst_key)?
-                    .ok_or_else(|| {
-                        PyRuntimeError::new_err("Edge target node not found in graph nodes")
-                    })?
-                    .extract()?;
-                let dst_node_id = HashId::try_from(dst_hex.clone())
-                    .map_err(|_| PyRuntimeError::new_err("Invalid target node_id hex"))?;
-
-                let source_strand = attrs
-                    .get_item("source_strand")
-                    .ok()
-                    .and_then(|s| s.extract::<String>().ok())
-                    .map(|s| parse_strand(s.as_str()))
-                    .unwrap_or(Strand::Forward);
                 let target_strand = attrs
                     .get_item("target_strand")
                     .ok()
                     .and_then(|s| s.extract::<String>().ok())
-                    .map(|s| parse_strand(s.as_str()))
+                    .map(|s| parse_strand(&s))
+                    .unwrap_or(Strand::Forward);
+                let source_strand = attrs
+                    .get_item("source_strand")
+                    .ok()
+                    .and_then(|s| s.extract::<String>().ok())
+                    .map(|s| parse_strand(&s))
                     .unwrap_or(Strand::Forward);
 
-                user_edge_data.push(EdgeData {
-                    source_node_id: src_node_id,
-                    source_coordinate: src_end,
-                    source_strand,
-                    target_node_id: dst_node_id,
-                    target_coordinate: dst_start,
-                    target_strand,
-                });
-
-                *out_degrees.entry(src_hex).or_insert(0) += 1;
-                *in_degrees.entry(dst_hex).or_insert(0) += 1;
+                match (src_sentinel.as_deref(), dst_sentinel.as_deref()) {
+                    (Some("start"), _) => {
+                        let dst: PyBlock = dst_obj.extract()?;
+                        explicit_start_targets.insert(dst.node_id);
+                        explicit_sentinel_edges.push(EdgeData {
+                            source_node_id: PATH_START_NODE_ID,
+                            source_coordinate: 0,
+                            source_strand: Strand::Forward,
+                            target_node_id: dst.node_id,
+                            target_coordinate: dst.sequence_start,
+                            target_strand,
+                        });
+                    }
+                    (_, Some("end")) => {
+                        let src: PyBlock = src_obj.extract()?;
+                        explicit_end_sources.insert(src.node_id);
+                        explicit_sentinel_edges.push(EdgeData {
+                            source_node_id: src.node_id,
+                            source_coordinate: src.sequence_end,
+                            source_strand,
+                            target_node_id: PATH_END_NODE_ID,
+                            target_coordinate: 0,
+                            target_strand: Strand::Forward,
+                        });
+                    }
+                    _ => {
+                        let src: PyBlock = src_obj.extract()?;
+                        let dst: PyBlock = dst_obj.extract()?;
+                        user_edge_data.push(EdgeData {
+                            source_node_id: src.node_id,
+                            source_coordinate: src.sequence_end,
+                            source_strand,
+                            target_node_id: dst.node_id,
+                            target_coordinate: dst.sequence_start,
+                            target_strand,
+                        });
+                        *out_degrees.entry(src.node_id).or_insert(0) += 1;
+                        *in_degrees.entry(dst.node_id).or_insert(0) += 1;
+                    }
+                }
             }
 
-            // Build full edge list: user edges + sentinel edges for sources/sinks.
+            // Build full edge list: user edges + explicit sentinel edges + auto-
+            // generated sentinel edges for any block not already connected.
             let mut all_edge_data = user_edge_data.clone();
-
-            for (node_hex, seq_start, seq_end) in node_map
-                .iter()
-                .map(|(_, v)| v.extract::<(String, i64, i64)>())
-                .collect::<PyResult<Vec<_>>>()?
-            {
-                let node_id = HashId::try_from(node_hex.clone())
-                    .map_err(|_| PyRuntimeError::new_err("Invalid node_id in map"))?;
-
-                if in_degrees.get(&node_hex).copied().unwrap_or(0) == 0 {
+            all_edge_data.extend(explicit_sentinel_edges);
+            for block in &all_blocks {
+                if !explicit_start_targets.contains(&block.node_id)
+                    && in_degrees.get(&block.node_id).copied().unwrap_or(0) == 0
+                {
                     all_edge_data.push(EdgeData {
                         source_node_id: PATH_START_NODE_ID,
                         source_coordinate: 0,
                         source_strand: Strand::Forward,
-                        target_node_id: node_id,
-                        target_coordinate: seq_start,
+                        target_node_id: block.node_id,
+                        target_coordinate: block.sequence_start,
                         target_strand: Strand::Forward,
                     });
                 }
-                if out_degrees.get(&node_hex).copied().unwrap_or(0) == 0 {
+                if !explicit_end_sources.contains(&block.node_id)
+                    && out_degrees.get(&block.node_id).copied().unwrap_or(0) == 0
+                {
                     all_edge_data.push(EdgeData {
-                        source_node_id: node_id,
-                        source_coordinate: seq_end,
+                        source_node_id: block.node_id,
+                        source_coordinate: block.sequence_end,
                         source_strand: Strand::Forward,
                         target_node_id: PATH_END_NODE_ID,
                         target_coordinate: 0,
@@ -631,39 +625,32 @@ impl PyRepository {
 
             // Optional path creation for linear chains.
             if let Some(pname) = &path_name {
-                let mut source_nodes: Vec<(String, i64, i64)> = Vec::new();
-                let mut sink_nodes: Vec<(String, i64, i64)> = Vec::new();
-                for (node_hex, seq_start, seq_end) in node_map
+                let source_blocks: Vec<&PyBlock> = all_blocks
                     .iter()
-                    .map(|(_, v)| v.extract::<(String, i64, i64)>())
-                    .collect::<PyResult<Vec<_>>>()?
-                {
-                    if in_degrees.get(&node_hex).copied().unwrap_or(0) == 0 {
-                        source_nodes.push((node_hex.clone(), seq_start, seq_end));
-                    }
-                    if out_degrees.get(&node_hex).copied().unwrap_or(0) == 0 {
-                        sink_nodes.push((node_hex.clone(), seq_start, seq_end));
-                    }
-                }
+                    .filter(|b| in_degrees.get(&b.node_id).copied().unwrap_or(0) == 0)
+                    .collect();
+                let sink_blocks: Vec<&PyBlock> = all_blocks
+                    .iter()
+                    .filter(|b| out_degrees.get(&b.node_id).copied().unwrap_or(0) == 0)
+                    .collect();
 
-                if source_nodes.len() != 1 || sink_nodes.len() != 1 {
+                if source_blocks.len() != 1 || sink_blocks.len() != 1 {
                     return Err(PyRuntimeError::new_err(
                         "path_name requires a linear chain: exactly one source and one sink node",
                     ));
                 }
 
-                let (src_hex, src_start, _) = &source_nodes[0];
-                let (sink_hex, _, sink_end) = &sink_nodes[0];
-                let src_id = HashId::try_from(src_hex.clone()).unwrap();
-                let sink_id = HashId::try_from(sink_hex.clone()).unwrap();
+                let src_id = source_blocks[0].node_id;
+                let src_start = source_blocks[0].sequence_start;
+                let sink_id = sink_blocks[0].node_id;
+                let sink_end = sink_blocks[0].sequence_end;
 
-                // Walk source → sink collecting edge data in order.
                 let mut path_edge_data: Vec<EdgeData> = vec![EdgeData {
                     source_node_id: PATH_START_NODE_ID,
                     source_coordinate: 0,
                     source_strand: Strand::Forward,
                     target_node_id: src_id,
-                    target_coordinate: *src_start,
+                    target_coordinate: src_start,
                     target_strand: Strand::Forward,
                 }];
 
@@ -683,14 +670,13 @@ impl PyRepository {
 
                 path_edge_data.push(EdgeData {
                     source_node_id: sink_id,
-                    source_coordinate: *sink_end,
+                    source_coordinate: sink_end,
                     source_strand: Strand::Forward,
                     target_node_id: PATH_END_NODE_ID,
                     target_coordinate: 0,
                     target_strand: Strand::Forward,
                 });
 
-                // Look up saved edge IDs for the path edges.
                 let saved_edges = Edge::query_by_ids(conn, &edge_ids);
                 let edge_id_by_data: HashMap<EdgeData, HashId> = saved_edges
                     .iter()
@@ -714,9 +700,9 @@ impl PyRepository {
                 &mut session,
                 &OperationInfo {
                     files: vec![],
-                    description: "python_block_group_create".to_string(),
+                    description: "python_graph_import".to_string(),
                 },
-                &format!("Created block group '{name}' from graph"),
+                &format!("Imported block group '{name}' from Python graph"),
                 None,
             )
             .map_err(|e| PyRuntimeError::new_err(format!("Operation error: {e}")))?;
@@ -1958,7 +1944,7 @@ assert window == "GTAC", f"expected window 'GTAC', got '{window}'"
     #[test]
     fn test_to_networkx_round_trip() {
         // DB ──► to_networkx() ──► create_block_group_from_graph() ──► DB
-        // Verify the re-imported block group has the same node_ids and sequences.
+        // PyBlock nodes carry node_id, so the round-trip preserves node_ids.
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             if PyModule::import(py, "networkx").is_err() {
@@ -1978,9 +1964,8 @@ assert window == "GTAC", f"expected window 'GTAC', got '{window}'"
                 )
                 .unwrap();
 
-            let nx_graph = bg.to_networkx().unwrap();
+            let nx_graph = bg.to_networkx(true).unwrap();
 
-            // Re-import the unmodified graph.
             let bg2 = py_repo
                 .borrow(py)
                 .create_block_group_from_graph(
@@ -2002,7 +1987,6 @@ assert window == "GTAC", f"expected window 'GTAC', got '{window}'"
                 r#"
 nodes1 = {v["node_id"] for v in d1["nodes"].values()}
 nodes2 = {v["node_id"] for v in d2["nodes"].values()}
-# All real content nodes must reappear with the same node_ids.
 assert nodes1 == nodes2, f"node_id sets differ: {nodes1} vs {nodes2}"
 
 seqs1 = {v["sequence"] for v in d1["nodes"].values()}
@@ -2015,9 +1999,8 @@ assert seqs1 == seqs2, f"sequence sets differ: {seqs1} vs {seqs2}"
 
     #[test]
     fn test_to_networkx_round_trip_with_modification() {
-        // DB ──► to_networkx() ──► mutate one node's sequence ──► create ──► DB
-        // The re-imported block group must have the new sequence and a fresh
-        // node_id for the modified node (old node_id cleared by the user).
+        // Build a fresh graph with a new Block("TTTTTTTT") — gets new UUID-7.
+        // Re-imported block group must have different sequence than original.
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             if PyModule::import(py, "networkx").is_err() {
@@ -2039,27 +2022,18 @@ assert seqs1 == seqs2, f"sequence sets differ: {seqs1} vs {seqs2}"
                 )
                 .unwrap();
 
-            let nx_graph = bg.to_networkx().unwrap();
-
-            // Mutate via Python: change sequence, clear node_id so a fresh one
-            // is generated on reimport.
-            py_run!(
-                py,
-                nx_graph,
-                r#"
-for node, attrs in nx_graph.nodes(data=True):
-    attrs["sequence"] = "TTTTTTTT"
-    attrs["sequence_start"] = 0
-    attrs["sequence_end"] = 8
-    del attrs["node_id"]
-"#
-            );
+            // Build a new networkx graph with a fresh Block (new UUID-7, new sequence).
+            use crate::python_api::block::PyBlock;
+            let networkx = PyModule::import(py, "networkx").unwrap();
+            let new_graph = networkx.getattr("DiGraph").unwrap().call0().unwrap();
+            let new_block = PyBlock::new("TTTTTTTT".to_string(), None, None, None);
+            new_graph.call_method1("add_node", (new_block,)).unwrap();
 
             let bg2 = py_repo
                 .borrow(py)
                 .create_block_group_from_graph(
                     py,
-                    nx_graph.into_bound(py),
+                    new_graph,
                     "modified".to_string(),
                     None,
                     None,
@@ -2076,7 +2050,6 @@ for node, attrs in nx_graph.nodes(data=True):
                 r#"
 orig_seqs = {v["sequence"] for v in d_orig["nodes"].values()}
 mod_seqs  = {v["sequence"] for v in d_mod["nodes"].values()}
-# Modified block group must not share sequence content with original.
 assert orig_seqs != mod_seqs, "sequences should differ after modification"
 assert "TTTTTTTT" in mod_seqs, f"expected mutant seq 'TTTTTTTT' in {mod_seqs}"
 "#
@@ -2085,55 +2058,42 @@ assert "TTTTTTTT" in mod_seqs, f"expected mutant seq 'TTTTTTTT' in {mod_seqs}"
     }
 
     #[test]
-    fn test_node_id_not_provided_creates_new_node() {
-        // When node_id is absent the importer generates a UUID-7, so the
-        // resulting block group has different node_ids even for identical seqs.
+    fn test_new_block_gets_fresh_node_id() {
+        // Two Block("ACGTACGT") calls produce different UUID-7 node_ids.
+        // Two block groups built from independent Blocks must have disjoint node_ids
+        // even though sequences are identical.
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             if PyModule::import(py, "networkx").is_err() {
                 eprintln!(
-                    "networkx not available – skipping test_node_id_not_provided_creates_new_node"
+                    "networkx not available – skipping test_new_block_gets_fresh_node_id"
                 );
                 return;
             }
+            use crate::python_api::block::PyBlock;
             let py_repo = make_repo(py);
-            let bg = py_repo
+            let networkx = PyModule::import(py, "networkx").unwrap();
+
+            let make_single_node_graph = |seq: &str| {
+                let g = networkx.getattr("DiGraph").unwrap().call0().unwrap();
+                let b = PyBlock::new(seq.to_string(), None, None, None);
+                g.call_method1("add_node", (b,)).unwrap();
+                g
+            };
+
+            let g1 = make_single_node_graph("ACGTACGT");
+            let g2 = make_single_node_graph("ACGTACGT");
+
+            let bg1 = py_repo
                 .borrow(py)
-                .create_block_group_from_sequence(
-                    "original".to_string(),
-                    "ACGTACGT".to_string(),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                .create_block_group_from_graph(py, g1, "first".to_string(), None, None, None)
                 .unwrap();
-
-            let nx_graph = bg.to_networkx().unwrap();
-
-            // Strip all node_id attributes before reimport.
-            py_run!(
-                py,
-                nx_graph,
-                r#"
-for node, attrs in nx_graph.nodes(data=True):
-    attrs.pop("node_id", None)
-"#
-            );
-
             let bg2 = py_repo
                 .borrow(py)
-                .create_block_group_from_graph(
-                    py,
-                    nx_graph.into_bound(py),
-                    "no_ids".to_string(),
-                    None,
-                    None,
-                    None,
-                )
+                .create_block_group_from_graph(py, g2, "second".to_string(), None, None, None)
                 .unwrap();
 
-            let d1 = bg.to_dict().unwrap();
+            let d1 = bg1.to_dict().unwrap();
             let d2 = bg2.to_dict().unwrap();
 
             py_run!(
@@ -2142,13 +2102,14 @@ for node, attrs in nx_graph.nodes(data=True):
                 r#"
 ids1 = {v["node_id"] for v in d1["nodes"].values()}
 ids2 = {v["node_id"] for v in d2["nodes"].values()}
+print(f"ids1 ({len(ids1)}): {ids1}")
+print(f"ids2 ({len(ids2)}): {ids2}")
 assert ids1.isdisjoint(ids2), \
-    f"Expected new node_ids when none were provided, but got overlap: {ids1 & ids2}"
+    f"Expected disjoint node_ids for independent Blocks, got overlap: {ids1 & ids2}"
 
-# Sequences ARE the same though (content-addressed dedup).
 seqs1 = {v["sequence"] for v in d1["nodes"].values()}
 seqs2 = {v["sequence"] for v in d2["nodes"].values()}
-assert seqs1 == seqs2, f"sequence content should match even without node_id: {seqs1} vs {seqs2}"
+assert seqs1 == seqs2, f"sequences should match: {seqs1} vs {seqs2}"
 "#
             );
         });

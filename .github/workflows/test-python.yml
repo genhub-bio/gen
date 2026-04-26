@@ -27,5 +27,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install capnproto
+      - name: Install Python dependencies
+        run: pip install networkx
       - name: Test
         run: cd gen-python && cargo test
