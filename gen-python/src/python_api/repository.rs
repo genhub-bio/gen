@@ -15,7 +15,7 @@ use super::{
     factory::Factory,
     jupyter_widget::{PyGraphController, build_and_display_widget},
     node_key::PyNodeKey,
-    utils::{path_to_py_path, py_query, sqlite_err_to_pyerr},
+    utils::{block_group_err_to_pyerr, path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
 
 /// The main entry point for the gen Python module.
@@ -103,7 +103,16 @@ impl PyRepository {
     ///     A PyBlockGroup instance representing the requested BlockGroup
     fn get_block_group_by_id(&self, id: &HashId) -> PyResult<PyBlockGroup> {
         self.with_connection(|conn| {
-            let block_group = BlockGroup::get_by_id(conn, id);
+            let block_group = match BlockGroup::get_by_id(conn, id) {
+                Ok(bg) => bg,
+                Err(r#gen::models::block_group::BlockGroupError::QueryError(_)) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "BlockGroup with id {:?} not found",
+                        id
+                    )));
+                }
+                Err(e) => return Err(block_group_err_to_pyerr(e)),
+            };
 
             Ok(PyBlockGroup {
                 id: block_group.id,
@@ -260,7 +269,7 @@ impl PyRepository {
         sample_name: String,
     ) -> PyResult<PyBlockGroup> {
         self.with_connection(|conn| {
-            let block_group = BlockGroup::create(
+            let block_group = match BlockGroup::create(
                 conn,
                 NewBlockGroup {
                     collection_name: &collection_name,
@@ -268,7 +277,10 @@ impl PyRepository {
                     name: &name,
                     ..Default::default()
                 },
-            );
+            ) {
+                Ok(bg) => bg,
+                Err(e) => return Err(block_group_err_to_pyerr(e)),
+            };
 
             Ok(PyBlockGroup {
                 id: block_group.id,
