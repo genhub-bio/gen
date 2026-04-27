@@ -6,7 +6,7 @@ use gen_core::{
 };
 use gen_graph::GenGraph;
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::{DbContext, GraphConnection, OperationsConnection},
@@ -107,7 +107,7 @@ pub fn setup_gen_on_disk() -> DbContext {
     DbContext::new(workspace, graph_conn, operation_conn)
 }
 
-pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), BlockGroupError> {
+pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
@@ -117,7 +117,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &a_seq.hash,
         &HashId::convert_str(&format!("test-a-node.{}", a_seq.hash)),
-    )?;
+    )
+    .unwrap();
     let t_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("TTTTTTTTTT")
@@ -127,7 +128,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &t_seq.hash,
         &HashId::convert_str(&format!("test-t-node.{}", a_seq.hash)),
-    )?;
+    )
+    .unwrap();
     let c_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("CCCCCCCCCC")
@@ -137,7 +139,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &c_seq.hash,
         &HashId::convert_str(&format!("test-c-node.{}", a_seq.hash)),
-    )?;
+    )
+    .unwrap();
     let g_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("GGGGGGGGGG")
@@ -147,7 +150,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         conn,
         &g_seq.hash,
         &HashId::convert_str(&format!("test-g-node.{}", a_seq.hash)),
-    )?;
+    )
+    .unwrap();
     let _collection = Collection::create(conn, "test");
     Sample::get_or_create(conn, "test").unwrap();
     let block_group = create_bg(conn, "test", "test", "chr1");
@@ -159,7 +163,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         a_node_id,
         0,
         Strand::Forward,
-    )?;
+    )
+    .unwrap();
     let edge1 = Edge::create(
         conn,
         a_node_id,
@@ -168,7 +173,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         t_node_id,
         0,
         Strand::Forward,
-    )?;
+    )
+    .unwrap();
     let edge2 = Edge::create(
         conn,
         t_node_id,
@@ -177,7 +183,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         c_node_id,
         0,
         Strand::Forward,
-    )?;
+    )
+    .unwrap();
     let edge3 = Edge::create(
         conn,
         c_node_id,
@@ -186,7 +193,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         g_node_id,
         0,
         Strand::Forward,
-    )?;
+    )
+    .unwrap();
     let edge4 = Edge::create(
         conn,
         g_node_id,
@@ -195,7 +203,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         PATH_END_NODE_ID,
         0,
         Strand::Forward,
-    )?;
+    )
+    .unwrap();
 
     let block_group_edges = vec![
         BlockGroupEdgeData {
@@ -238,7 +247,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
         &[edge0.id, edge1.id, edge2.id, edge3.id, edge4.id],
     )
     .unwrap();
-    Ok((block_group.id, path))
+    (block_group.id, path)
 }
 
 pub fn save_graph(graph: &GenGraph, path: &str) {

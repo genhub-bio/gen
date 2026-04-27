@@ -884,7 +884,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_group::{BlockGroup, BlockGroupError, PathCache},
+        block_group::{BlockGroup, PathCache},
         errors::OperationError,
         files::GenDatabase,
         metadata,
@@ -893,9 +893,9 @@ mod tests {
     };
 
     #[test]
-    fn create_annotation_with_samples() -> Result<(), BlockGroupError> {
+    fn create_annotation_with_samples() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn)?;
+        let (block_group_id, path) = setup_block_group(&conn);
 
         let _ = Sample::create(&conn, "sample-1").unwrap();
         let _ = Sample::create(&conn, "sample-2").unwrap();
@@ -925,8 +925,6 @@ mod tests {
 
         let by_group = Annotation::query_by_group(&conn, "project-tracks").unwrap();
         assert_eq!(by_group, vec![annotation]);
-
-        Ok(())
     }
 
     #[test]

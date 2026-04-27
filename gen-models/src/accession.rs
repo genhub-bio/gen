@@ -550,10 +550,7 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
-    use crate::{
-        block_group::BlockGroupError,
-        test_helpers::{get_connection, setup_block_group},
-    };
+    use crate::test_helpers::{get_connection, setup_block_group};
 
     #[test]
     fn test_accession_capnp_serialization() {
@@ -625,9 +622,9 @@ mod tests {
     }
 
     #[test]
-    fn test_accession_create_query() -> Result<(), BlockGroupError> {
+    fn test_accession_create_query() {
         let conn = &get_connection(None).unwrap();
-        let (_bg, path) = setup_block_group(conn)?;
+        let (_bg, path) = setup_block_group(conn);
         let accession = Accession::create(conn, "test", &path.id, None).unwrap();
         let _accession_2 = Accession::create(conn, "test2", &path.id, None).unwrap();
         assert_eq!(
@@ -643,7 +640,5 @@ mod tests {
                 parent_accession_id: None,
             }]
         );
-
-        Ok(())
     }
 }

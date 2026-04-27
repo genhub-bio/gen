@@ -511,7 +511,7 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        let (bg_id, _path) = setup_block_group(conn).unwrap();
+        let (bg_id, _path) = setup_block_group(conn);
         let all_sequences = BlockGroup::get_all_sequences(conn, &bg_id, false);
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -695,7 +695,7 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        let (block_group_id, path) = setup_block_group(conn).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")

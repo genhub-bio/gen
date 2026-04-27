@@ -118,7 +118,7 @@ mod tests {
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     };
     use gen_models::{
-        block_group::{BlockGroup, BlockGroupError, NewBlockGroup, PathChange},
+        block_group::{BlockGroup, NewBlockGroup, PathChange},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db::GraphConnection,
@@ -135,14 +135,15 @@ mod tests {
     use super::propagate_gff;
     use crate::test_helpers::get_connection;
 
-    fn create_block_group(conn: &GraphConnection) -> Result<(), BlockGroupError> {
+    fn create_block_group(conn: &GraphConnection) {
         let collection = Collection::create(conn, "test").unwrap();
         Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence(sequence)
-            .save(conn)?;
+            .save(conn)
+            .unwrap();
         let node_id = Node::create(
             conn,
             &reference_sequence.hash,
@@ -151,7 +152,8 @@ mod tests {
                 collection = collection.name,
                 hash = reference_sequence.hash
             )),
-        )?;
+        )
+        .unwrap();
         let block_group = BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -172,7 +174,8 @@ mod tests {
             node_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge_out_of = Edge::create(
             conn,
             node_id,
@@ -181,7 +184,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
@@ -206,13 +210,9 @@ mod tests {
             &[edge_into.id, edge_out_of.id],
         )
         .unwrap();
-
-        Ok(())
     }
 
-    fn apply_child_sample_update_from_aa_fasta(
-        conn: &GraphConnection,
-    ) -> Result<(), BlockGroupError> {
+    fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
         Sample::get_or_create(conn, "child sample").unwrap();
         let _ = Sample::get_or_create_child(
             conn,
@@ -237,7 +237,8 @@ mod tests {
         let replacement = Sequence::new()
             .sequence_type("DNA")
             .sequence(replacement_sequence)
-            .save(conn)?;
+            .save(conn)
+            .unwrap();
         let node_id = Node::create(
             conn,
             &replacement.hash,
@@ -246,7 +247,8 @@ mod tests {
                 path_id = sample_path.id,
                 sequence_hash = replacement.hash,
             )),
-        )?;
+        )
+        .unwrap();
         let change = PathChange {
             block_group_id: sample_bg_id,
             path: sample_path.clone(),
@@ -285,15 +287,13 @@ mod tests {
         sample_path
             .new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert)
             .unwrap();
-
-        Ok(())
     }
 
     #[test]
-    fn simple_propagate() -> Result<(), Box<dyn std::error::Error>> {
+    fn simple_propagate() {
         let conn = get_connection();
-        let _ = create_block_group(&conn);
-        apply_child_sample_update_from_aa_fasta(&conn)?;
+        create_block_group(&conn);
+        apply_child_sample_update_from_aa_fasta(&conn);
 
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
         let temp_dir = tempdir().expect("should create temp directory");
@@ -331,7 +331,5 @@ mod tests {
                 assert_eq!(record.end().get(), 15);
             }
         }
-
-        Ok(())
     }
 }

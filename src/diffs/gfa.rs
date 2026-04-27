@@ -247,7 +247,7 @@ mod tests {
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
-        edge::{Edge, EdgeError},
+        edge::Edge,
         node::Node,
         sequence::Sequence,
     };
@@ -261,7 +261,7 @@ mod tests {
     };
 
     #[test]
-    fn test_gfa_diff() -> Result<(), EdgeError> {
+    fn test_gfa_diff() {
         // Sets up a basic graph and then exports it to a GFA file
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -287,8 +287,8 @@ mod tests {
             .sequence("TTTTTTTT")
             .save(conn)
             .unwrap();
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -298,7 +298,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -307,7 +308,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -316,7 +318,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -345,7 +348,7 @@ mod tests {
             .sequence("CCCC")
             .save(conn)
             .unwrap();
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"))?;
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge4 = Edge::create(
             conn,
             node1_id,
@@ -354,7 +357,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -363,7 +367,8 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let child_block_groups = Sample::get_block_groups(conn, collection_name, "child");
         let child_block_group = child_block_groups.first().unwrap();
@@ -427,7 +432,7 @@ mod tests {
             .sequence("GGGG")
             .save(conn)
             .unwrap();
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"))?;
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
         let edge6 = Edge::create(
             conn,
             node2_id,
@@ -436,7 +441,8 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge7 = Edge::create(
             conn,
             node4_id,
@@ -445,7 +451,8 @@ mod tests {
             node2_id,
             6,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection_name, "grandchild");
         let grandchild_block_group = grandchild_block_groups.first().unwrap();
@@ -523,12 +530,10 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<HashSet<String>>()
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_gfa_diff_against_nothing() -> Result<(), EdgeError> {
+    fn test_gfa_diff_against_nothing() {
         // Confirm diff of a sample against nothing is just the sample
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -550,8 +555,8 @@ mod tests {
             .sequence("TTTTTTTT")
             .save(conn)
             .unwrap();
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -561,7 +566,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -570,7 +576,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -579,7 +586,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -625,12 +633,10 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<HashSet<String>>()
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_self_diff() -> Result<(), EdgeError> {
+    fn test_self_diff() {
         // Confirm diff of a sample to itself just results in a graph that's a single path
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -652,8 +658,8 @@ mod tests {
             .sequence("TTTTTTTT")
             .save(conn)
             .unwrap();
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -663,7 +669,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -672,7 +679,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -681,7 +689,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -727,12 +736,10 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<HashSet<String>>()
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_gfa_diff_unrelated_paths() -> Result<(), EdgeError> {
+    fn test_gfa_diff_unrelated_paths() {
         // Confirm diff of a sample to totally unrelated sample produces two separate paths
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -754,8 +761,8 @@ mod tests {
             .sequence("TTTTTTTT")
             .save(conn)
             .unwrap();
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -765,7 +772,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -774,7 +782,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -783,7 +792,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -811,8 +821,8 @@ mod tests {
             .sequence("CCCCCCCC")
             .save(conn)
             .unwrap();
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"))?;
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"))?;
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
 
         let edge4 = Edge::create(
             conn,
@@ -822,7 +832,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -831,7 +842,8 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge6 = Edge::create(
             conn,
             node4_id,
@@ -840,7 +852,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge4.id, edge5.id, edge6.id];
         let block_group_edges = edge_ids
@@ -879,12 +892,10 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<HashSet<String>>()
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_gfa_diff_unrelated_paths_matching_block_group_names() -> Result<(), EdgeError> {
+    fn test_gfa_diff_unrelated_paths_matching_block_group_names() {
         // Confirm diff of two paths that are in the same block group but don't share any nodes
         // results in two disjoint sequences
         let context = setup_gen();
@@ -907,8 +918,8 @@ mod tests {
             .sequence("TTTTTTTT")
             .save(conn)
             .unwrap();
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -918,7 +929,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -927,7 +939,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -936,7 +949,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -964,8 +978,8 @@ mod tests {
             .sequence("CCCCCCCC")
             .save(conn)
             .unwrap();
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"))?;
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"))?;
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
 
         let edge4 = Edge::create(
             conn,
@@ -975,7 +989,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -984,7 +999,8 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge6 = Edge::create(
             conn,
             node4_id,
@@ -993,7 +1009,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge4.id, edge5.id, edge6.id];
         let block_group_edges = edge_ids
@@ -1032,12 +1049,10 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<HashSet<String>>()
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_gfa_diff_overlapping_replacements() -> Result<(), EdgeError> {
+    fn test_gfa_diff_overlapping_replacements() {
         // Set up a child with a replacement, then a grandchild with a replacement on the child that
         // partially overlaps the child's replacement, and confirm diffs between all pairs from
         // (original, child, grandchild)
@@ -1060,7 +1075,7 @@ mod tests {
             .sequence("AAAAAAAAAAAAAAAA")
             .save(conn)
             .unwrap();
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -1070,7 +1085,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1079,7 +1095,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1108,7 +1125,7 @@ mod tests {
             .sequence("CCCC")
             .save(conn)
             .unwrap();
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge3 = Edge::create(
             conn,
             node1_id,
@@ -1117,7 +1134,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge4 = Edge::create(
             conn,
             node2_id,
@@ -1126,7 +1144,8 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let child_block_groups = Sample::get_block_groups(conn, collection_name, "child");
         let child_block_group = child_block_groups.first().unwrap();
@@ -1190,7 +1209,7 @@ mod tests {
             .sequence("GGGG")
             .save(conn)
             .unwrap();
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"))?;
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -1199,7 +1218,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge6 = Edge::create(
             conn,
             node3_id,
@@ -1208,7 +1228,8 @@ mod tests {
             node1_id,
             10,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection_name, "grandchild");
         let grandchild_block_group = grandchild_block_groups.first().unwrap();
@@ -1286,7 +1307,5 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<HashSet<String>>()
         );
-
-        Ok(())
     }
 }

@@ -840,17 +840,11 @@ pub fn apply_changeset(
     }
 
     for sample in dependencies.samples.iter() {
-        match Sample::get_or_create(conn, &sample.name) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::SampleError(err)),
-        }
+        Sample::get_or_create(conn, &sample.name)?;
     }
 
     for sequence in dependencies.sequences.iter() {
-        match NewSequence::from(sequence).save(conn) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::SequenceError(err)),
-        }
+        NewSequence::from(sequence).save(conn)?;
     }
     for node in dependencies.nodes.iter() {
         if !is_terminal(node.id) {
@@ -859,7 +853,7 @@ pub fn apply_changeset(
     }
 
     for bg in block_groups_parent_first(&dependencies.block_group) {
-        match BlockGroup::create(
+        BlockGroup::create(
             conn,
             NewBlockGroup {
                 collection_name: &bg.collection_name,
@@ -868,10 +862,7 @@ pub fn apply_changeset(
                 parent_block_group_id: bg.parent_block_group_id.as_ref(),
                 is_default: bg.is_default,
             },
-        ) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::BlockGroupError(err)),
-        }
+        )?;
     }
 
     for node in dependencies.nodes.iter() {
@@ -901,28 +892,19 @@ pub fn apply_changeset(
     );
 
     for accession in dependencies.accessions.iter() {
-        match Accession::get_or_create(
+        Accession::get_or_create(
             conn,
             &accession.name,
             &accession.path_id,
             accession.parent_accession_id.as_ref(),
-        ) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::AccessionError(err)),
-        }
+        )?;
     }
 
     for collection in &changeset.collections {
-        match Collection::create(conn, &collection.name) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::CollectionError(err)),
-        }
+        Collection::create(conn, &collection.name)?;
     }
     for sample in &changeset.samples {
-        match Sample::get_or_create(conn, &sample.name) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::SampleError(err)),
-        }
+        Sample::get_or_create(conn, &sample.name)?;
     }
     for sample_lineage in &changeset.sample_lineages {
         SampleLineage::create(
@@ -932,13 +914,10 @@ pub fn apply_changeset(
         )?;
     }
     for sequence in &changeset.sequences {
-        match NewSequence::from(sequence).save(conn) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::SequenceError(err)),
-        }
+        NewSequence::from(sequence).save(conn)?;
     }
     for bg in block_groups_parent_first(&changeset.block_groups) {
-        match BlockGroup::create(
+        BlockGroup::create(
             conn,
             NewBlockGroup {
                 collection_name: &bg.collection_name,
@@ -947,10 +926,7 @@ pub fn apply_changeset(
                 parent_block_group_id: bg.parent_block_group_id.as_ref(),
                 is_default: bg.is_default,
             },
-        ) {
-            Ok(_) => {}
-            Err(err) => return Err(ChangesetError::BlockGroupError(err)),
-        }
+        )?;
     }
     for node in &changeset.nodes {
         Node::create(conn, &node.sequence_hash, &node.id)?;
@@ -1294,7 +1270,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_group::BlockGroupError,
         file_types::FileTypes,
         operations::{OperationFile, OperationInfo},
         session_operations::{end_operation, start_operation},
@@ -1587,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_changeset_includes_annotations() -> Result<(), BlockGroupError> {
+    fn test_changeset_includes_annotations() {
         use crate::block_group::PathCache;
 
         let context = setup_gen();
@@ -1598,7 +1573,7 @@ mod tests {
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
         let _ = Sample::create(conn, "sample-1").unwrap();
-        let (block_group_id, path) = setup_block_group(conn)?;
+        let (block_group_id, path) = setup_block_group(conn);
         let mut cache = PathCache::new(conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
         let accession =
@@ -1642,8 +1617,6 @@ mod tests {
         assert_eq!(dependencies.samples[0].name, "sample-1");
         assert_eq!(dependencies.accessions.len(), 1);
         assert_eq!(dependencies.accessions[0].id, accession.id);
-
-        Ok(())
     }
 
     #[test]
@@ -1780,8 +1753,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn test_tracks_nodes_and_sequences_from_previous_block_group_edges()
-        -> Result<(), BlockGroupError> {
+        fn test_tracks_nodes_and_sequences_from_previous_block_group_edges() {
             let context = setup_gen();
             let conn = context.graph().conn();
             let op_conn = context.operations().conn();
@@ -1790,7 +1762,7 @@ mod tests {
             crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")
                 .unwrap();
 
-            let (bg_id, _path_id) = setup_block_group(conn)?;
+            let (bg_id, _path_id) = setup_block_group(conn);
             let old_edges = BlockGroupEdge::edges_for_block_group(conn, &bg_id);
 
             let mut session = start_operation(conn);
@@ -1834,12 +1806,10 @@ mod tests {
             let nodes = Node::query_by_ids(conn, &[shared_edge.target_node_id]);
             assert_eq!(dependencies.sequences[0].hash, nodes[0].sequence_hash);
             assert_eq!(dependencies.sequences.len(), 1);
-
-            Ok(())
         }
 
         #[test]
-        fn test_records_patch_dependencies() -> Result<(), BlockGroupError> {
+        fn test_records_patch_dependencies() {
             let context = setup_gen();
             let conn = context.graph().conn();
             let op_conn = context.operations().conn();
@@ -1849,7 +1819,7 @@ mod tests {
                 .unwrap();
 
             // create some stuff before we attach to our main session that will be required as extra information
-            let (bg_id, _path_id) = setup_block_group(conn)?;
+            let (bg_id, _path_id) = setup_block_group(conn);
             let dep_bg = BlockGroup::get_by_id(conn, &bg_id).unwrap();
 
             let existing_seq = Sequence::new()
@@ -1858,7 +1828,7 @@ mod tests {
                 .save(conn)
                 .unwrap();
             let existing_node_id =
-                Node::create(conn, &existing_seq.hash, &HashId::convert_str("1"))?;
+                Node::create(conn, &existing_seq.hash, &HashId::convert_str("1")).unwrap();
 
             let mut session = start_operation(conn);
 
@@ -1867,7 +1837,8 @@ mod tests {
                 .sequence("ATCG")
                 .save(conn)
                 .unwrap();
-            let random_node_id = Node::create(conn, &random_seq.hash, &HashId::convert_str("2"))?;
+            let random_node_id =
+                Node::create(conn, &random_seq.hash, &HashId::convert_str("2")).unwrap();
 
             let new_edge = Edge::create(
                 conn,
@@ -1877,7 +1848,8 @@ mod tests {
                 existing_node_id,
                 0,
                 Strand::Forward,
-            )?;
+            )
+            .unwrap();
             let block_group_edge = BlockGroupEdgeData {
                 block_group_id: bg_id,
                 edge_id: new_edge.id,
@@ -1908,8 +1880,6 @@ mod tests {
             );
             assert_eq!(dependencies.block_group[0].name, dep_bg.name);
             assert_eq!(dependencies.block_group[0].sample_name, dep_bg.sample_name);
-
-            Ok(())
         }
     }
 }

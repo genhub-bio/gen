@@ -718,7 +718,7 @@ mod tests {
     #[test]
     fn test_blocks_from_edges() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
 
         let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
         let blocks = Edge::blocks_from_edges(&conn, &edges);

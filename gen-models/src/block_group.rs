@@ -1867,7 +1867,7 @@ mod tests {
     #[test]
     fn test_blockgroup_clone_passes_accessions() {
         let conn = &get_connection(None).unwrap();
-        let (_bg_1, path) = setup_block_group(conn).unwrap();
+        let (_bg_1, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);
         let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache).unwrap();
         assert_eq!(
@@ -1900,7 +1900,7 @@ mod tests {
     #[test]
     fn insert_and_deletion_get_all() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -1986,7 +1986,7 @@ mod tests {
     #[test]
     fn simple_insert_get_all() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2030,7 +2030,7 @@ mod tests {
     #[test]
     fn insert_on_block_boundary_middle() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2074,7 +2074,7 @@ mod tests {
     #[test]
     fn insert_within_block() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2118,7 +2118,7 @@ mod tests {
     #[test]
     fn insert_on_block_boundary_start() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2162,7 +2162,7 @@ mod tests {
     #[test]
     fn insert_on_block_boundary_end() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2206,7 +2206,7 @@ mod tests {
     #[test]
     fn insert_across_entire_block_boundary() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2250,7 +2250,7 @@ mod tests {
     #[test]
     fn insert_across_two_blocks() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2294,7 +2294,7 @@ mod tests {
     #[test]
     fn insert_spanning_blocks() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2338,7 +2338,7 @@ mod tests {
     #[test]
     fn simple_deletion() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("")
@@ -2384,7 +2384,7 @@ mod tests {
     #[test]
     fn doesnt_apply_same_insert_twice() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2440,7 +2440,7 @@ mod tests {
     #[test]
     fn insert_at_beginning_of_path() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2484,7 +2484,7 @@ mod tests {
     #[test]
     fn homozygous_insert_at_beginning_of_path() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2527,7 +2527,7 @@ mod tests {
     #[test]
     fn insert_at_end_of_path() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -2572,7 +2572,7 @@ mod tests {
     #[test]
     fn insert_at_one_bp_into_block() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2616,7 +2616,7 @@ mod tests {
     #[test]
     fn insert_at_one_bp_from_end_of_block() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2660,7 +2660,7 @@ mod tests {
     #[test]
     fn delete_at_beginning_of_path() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("")
@@ -2704,7 +2704,7 @@ mod tests {
     #[test]
     fn delete_at_end_of_path() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("")
@@ -2748,7 +2748,7 @@ mod tests {
     #[test]
     fn error_on_out_of_bounds_change() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("")
@@ -2797,7 +2797,7 @@ mod tests {
     #[test]
     fn deletion_starting_at_block_boundary() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("")
@@ -2841,7 +2841,7 @@ mod tests {
     #[test]
     fn deletion_ending_at_block_boundary() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("")
@@ -2885,7 +2885,7 @@ mod tests {
     #[test]
     fn test_blockgroup_interval_tree() {
         let conn = &get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(conn).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child").unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
@@ -3057,7 +3057,7 @@ mod tests {
     #[test]
     fn test_changes_against_derivative_blockgroups() {
         let conn = &get_connection(None).unwrap();
-        let (_block_group_id, _path) = setup_block_group(conn).unwrap();
+        let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child").unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
@@ -3151,7 +3151,7 @@ mod tests {
         // This test ensures that if we have heterozygous changes that do not introduce frameshifts,
         // we can modify regions downstream of them.
         let conn = &get_connection(None).unwrap();
-        let (_block_group_id, _path) = setup_block_group(conn).unwrap();
+        let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child").unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
@@ -3265,7 +3265,7 @@ mod tests {
     fn test_prohibits_out_of_frame_changes_against_derivative_diploid_blockgroups() {
         // This test ensures that we do not allow ambiguous changes by coordinates
         let conn = &get_connection(None).unwrap();
-        let (_block_group_id, _path) = setup_block_group(conn).unwrap();
+        let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(conn, "child").unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
@@ -3380,7 +3380,7 @@ mod tests {
             Sequences of the subgraph are TAAAAAAAAC, TTTTTCCCCC
              */
             let conn = &get_connection(None).unwrap();
-            let (block_group1_id, original_path) = setup_block_group(conn).unwrap();
+            let (block_group1_id, original_path) = setup_block_group(conn);
 
             let intervaltree = original_path.intervaltree(conn);
             let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
@@ -3515,7 +3515,7 @@ mod tests {
             Subgraph range:     |----------------------------------|
              */
             let conn = &get_connection(None).unwrap();
-            let (block_group1_id, original_path) = setup_block_group(conn).unwrap();
+            let (block_group1_id, original_path) = setup_block_group(conn);
 
             let intervaltree = original_path.intervaltree(conn);
             let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
@@ -3744,7 +3744,7 @@ mod tests {
             Confirms that deletion edge is ignored and not added to subgraph
              */
             let conn = &get_connection(None).unwrap();
-            let (block_group1_id, original_path) = setup_block_group(conn).unwrap();
+            let (block_group1_id, original_path) = setup_block_group(conn);
 
             let intervaltree = original_path.intervaltree(conn);
             let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;

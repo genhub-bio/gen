@@ -159,10 +159,6 @@ pub fn derive_chunks(
             create_block_group,
         )?;
 
-        println!(
-            "here90, new node ids by old size: {}",
-            new_node_ids_by_old.len()
-        );
         let child_block_group_edges =
             BlockGroupEdge::edges_for_block_group(conn, &child_block_group_id);
 
@@ -434,35 +430,20 @@ mod tests {
 
     use gen_core::Strand;
     use gen_models::{
-        block_group::BlockGroupError, block_group_edge::BlockGroupEdgeData, collection::Collection,
-        edge::Edge, node::Node, sequence::Sequence,
+        block_group_edge::BlockGroupEdgeData, collection::Collection, edge::Edge, node::Node,
+        sequence::Sequence,
     };
 
     use super::*;
     use crate::{
-        fasta::FastaError,
         imports::fasta::import_fasta,
         test_helpers::{setup_block_group, setup_gen},
         track_database,
         updates::fasta::update_with_fasta,
     };
 
-    #[derive(Debug, Error)]
-    enum FastaAndGraphOperationError {
-        #[error("Graph Operation Error: {0}")]
-        GraphOperation(#[from] GraphOperationError),
-        #[error("Fasta Error: {0}")]
-        Fasta(#[from] FastaError),
-        #[error("Block Group Error: {0}")]
-        BlockGroup(#[from] BlockGroupError),
-        #[error("Edge error: {0}")]
-        Edge(#[from] gen_models::edge::EdgeError),
-        #[error("Node error: {0}")]
-        Node(#[from] gen_models::node::NodeError),
-    }
-
     #[test]
-    fn test_derive_chunks_one_insertion() -> Result<(), FastaAndGraphOperationError> {
+    fn test_derive_chunks_one_insertion() {
         /*
         AAAAAAAAAA -> TTTTTTTTTT -> CCCCCCCCCC -> GGGGGGGGGG
                           \-> AAAAAAAA ->/
@@ -476,7 +457,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         Collection::create(conn, "test").unwrap();
-        let (block_group1_id, original_path) = setup_block_group(conn)?;
+        let (block_group1_id, original_path) = setup_block_group(conn);
 
         let intervaltree = original_path.intervaltree(conn);
         let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
@@ -491,7 +472,8 @@ mod tests {
             conn,
             &insert_sequence.hash,
             &HashId::convert_str(&format!("test-insert-a.{}", insert_sequence.hash)),
-        )?;
+        )
+        .unwrap();
         let edge_into_insert = Edge::create(
             conn,
             insert_start_node_id,
@@ -500,7 +482,8 @@ mod tests {
             insert_node_id,
             0,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let edge_out_of_insert = Edge::create(
             conn,
             insert_node_id,
@@ -509,7 +492,8 @@ mod tests {
             insert_end_node_id,
             4,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let ref_heal_1 = Edge::create(
             conn,
             insert_start_node_id,
@@ -518,7 +502,8 @@ mod tests {
             insert_start_node_id,
             6,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
         let ref_heal_2 = Edge::create(
             conn,
             insert_end_node_id,
@@ -527,7 +512,8 @@ mod tests {
             insert_end_node_id,
             4,
             Strand::Forward,
-        )?;
+        )
+        .unwrap();
 
         let edge_ids = [
             edge_into_insert.id,
@@ -574,7 +560,8 @@ mod tests {
             vec![Range { start: 15, end: 25 }],
             None,
             true,
-        )?;
+        )
+        .unwrap();
 
         let block_groups = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME);
         let block_group2 = block_groups.iter().find(|x| x.name == "chr1").unwrap();
@@ -587,12 +574,10 @@ mod tests {
 
         let new_path = BlockGroup::get_current_path(conn, &block_group2.id);
         assert_eq!(new_path.sequence(conn), "TAAAAAAAAC");
-
-        Ok(())
     }
 
     #[test]
-    fn derive_chunks_two_inserts() -> Result<(), FastaAndGraphOperationError> {
+    fn derive_chunks_two_inserts() {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -612,7 +597,8 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             false,
-        )?;
+        )
+        .unwrap();
 
         let _ = update_with_fasta(
             &context,
@@ -624,7 +610,8 @@ mod tests {
             5,
             fasta_update_path.to_str().unwrap(),
             false,
-        )?;
+        )
+        .unwrap();
 
         let _ = update_with_fasta(
             &context,
@@ -636,7 +623,8 @@ mod tests {
             20,
             fasta_update_path.to_str().unwrap(),
             false,
-        )?;
+        )
+        .unwrap();
 
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
@@ -677,7 +665,8 @@ mod tests {
             ],
             None,
             true,
-        )?;
+        )
+        .unwrap();
 
         let block_groups = Sample::get_block_groups(conn, collection, "test3");
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
@@ -703,12 +692,10 @@ mod tests {
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
         assert_eq!(path3.sequence(conn), "ATCGATCAAGGAACACA");
-
-        Ok(())
     }
 
     #[test]
-    fn derive_chunks_two_inserts_then_stitch() -> Result<(), FastaAndGraphOperationError> {
+    fn derive_chunks_two_inserts_then_stitch() {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -728,7 +715,8 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             false,
-        )?;
+        )
+        .unwrap();
 
         let _ = update_with_fasta(
             &context,
@@ -740,7 +728,8 @@ mod tests {
             5,
             fasta_update_path.to_str().unwrap(),
             false,
-        )?;
+        )
+        .unwrap();
 
         let _ = update_with_fasta(
             &context,
@@ -752,7 +741,8 @@ mod tests {
             20,
             fasta_update_path.to_str().unwrap(),
             false,
-        )?;
+        )
+        .unwrap();
 
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
@@ -793,7 +783,8 @@ mod tests {
             ],
             None,
             true,
-        )?;
+        )
+        .unwrap();
 
         let block_groups = Sample::get_block_groups(conn, collection, "test3");
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
@@ -828,7 +819,8 @@ mod tests {
             "test4",
             &vec!["m123.2", "m123.3"],
             "m123.stitched",
-        )?;
+        )
+        .unwrap();
 
         let block_groups = Sample::get_block_groups(conn, collection, "test4");
         let block_group4 = block_groups
@@ -859,7 +851,8 @@ mod tests {
             "test5",
             &vec!["m123.3", "m123.2"],
             "m123.reverse-stitched",
-        )?;
+        )
+        .unwrap();
 
         let block_groups = Sample::get_block_groups(conn, collection, "test5");
         let block_group5 = block_groups
@@ -881,7 +874,5 @@ mod tests {
         let path5 = BlockGroup::get_current_path(conn, &block_group5.id);
         // path3 + path2 concatenated
         assert_eq!(path5.sequence(conn), "ATCGATCAAGGAACACATCAATCG");
-
-        Ok(())
     }
 }
