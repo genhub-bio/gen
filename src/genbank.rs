@@ -16,6 +16,7 @@ use gen_models::{
     errors::{OperationError, SampleError},
     node::NodeError,
     path::PathError,
+    sequence::SequenceError,
 };
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
@@ -54,6 +55,8 @@ pub enum GenBankError {
     AccessionError(#[from] AccessionError),
     #[error("Accession path creation error: {0}")]
     AccessionPathError(#[from] AccessionPathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

@@ -346,7 +346,7 @@ fn create_new_path_from_existing(
             let sequence = Sequence::new()
                 .sequence_type("DNA")
                 .sequence(segment_sequence)
-                .save(conn);
+                .save(conn)?;
             let node_id = Node::create(
                 conn,
                 &sequence.hash,

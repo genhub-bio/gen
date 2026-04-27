@@ -81,12 +81,12 @@ pub fn import_fasta(
                 .name(&name)
                 .file_path(fasta)
                 .length(sequence_length)
-                .save(conn)
+                .save(conn)?
         } else {
             Sequence::new()
                 .sequence_type("DNA")
                 .sequence(&sequence)
-                .save(conn)
+                .save(conn)?
         };
         let node_id = Node::create(
             conn,

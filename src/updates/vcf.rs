@@ -15,7 +15,7 @@ use gen_models::{
     path::Path,
     reference_alias::ReferenceAlias,
     sample::Sample,
-    sequence::Sequence,
+    sequence::{Sequence, SequenceError},
     session_operations::{end_operation, start_operation},
 };
 use noodles::{
@@ -112,24 +112,24 @@ impl<'a> SequenceCache<'_> {
         sequence_cache: &mut SequenceCache<'a>,
         sequence_type: &'a str,
         sequence: String,
-    ) -> Sequence {
+    ) -> Result<Sequence, SequenceError> {
         let sequence_key = SequenceKey {
             sequence_type,
             sequence: sequence.clone(),
         };
         let sequence_lookup = sequence_cache.cache.get(&sequence_key);
         if let Some(found_sequence) = sequence_lookup {
-            found_sequence.clone()
+            Ok(found_sequence.clone())
         } else {
             let new_sequence = Sequence::new()
                 .sequence_type("DNA")
                 .sequence(&sequence)
-                .save(sequence_cache.conn);
+                .save(sequence_cache.conn)?;
 
             sequence_cache
                 .cache
                 .insert(sequence_key, new_sequence.clone());
-            new_sequence
+            Ok(new_sequence)
         }
     }
 }
@@ -196,6 +196,8 @@ pub enum VcfError {
     NodeError(#[from] NodeError),
     #[error("Block group creation error: {0}")]
     BlockGroupError(#[from] BlockGroupError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 fn resolve_parent_samples(
@@ -540,7 +542,7 @@ pub fn update_with_vcf(
             }
             let ref_start = vcf_entry.ref_start;
             let sequence =
-                SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string());
+                SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string())?;
             let sequence_string = sequence.get_sequence(None, None);
 
             let source_path_id = node_source_paths

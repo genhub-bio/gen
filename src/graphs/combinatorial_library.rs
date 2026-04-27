@@ -11,7 +11,7 @@ use gen_models::{
     db::GraphConnection,
     node::{Node, NodeError},
     path::{Path, PathError},
-    sequence::Sequence,
+    sequence::{Sequence, SequenceError},
 };
 use noodles::fasta;
 use thiserror::Error;
@@ -45,6 +45,8 @@ pub enum CombinatorialLibraryCreationError {
     NodeError(#[from] NodeError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 pub fn parse_library(
@@ -148,7 +150,7 @@ pub fn create_library(
         let seq = Sequence::new()
             .sequence_type("DNA")
             .sequence(&part.sequence)
-            .save(conn);
+            .save(conn)?;
 
         sequence_hashes_by_name.insert(part.name.clone(), seq.hash);
     }

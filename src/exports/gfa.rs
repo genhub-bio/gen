@@ -328,19 +328,23 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"))?;
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"))?;
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"))?;
@@ -683,7 +687,8 @@ mod tests {
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"))?;
         let insert = PathBlock {
             node_id: insert_node_id,

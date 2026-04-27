@@ -118,11 +118,11 @@ mod tests {
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     };
     use gen_models::{
-        block_group::{BlockGroup, NewBlockGroup, PathChange},
+        block_group::{BlockGroup, BlockGroupError, NewBlockGroup, PathChange},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db::GraphConnection,
-        edge::{Edge, EdgeError},
+        edge::Edge,
         node::Node,
         path::Path,
         sample::Sample,
@@ -135,14 +135,14 @@ mod tests {
     use super::propagate_gff;
     use crate::test_helpers::get_connection;
 
-    fn create_block_group(conn: &GraphConnection) -> Result<(), EdgeError> {
+    fn create_block_group(conn: &GraphConnection) -> Result<(), BlockGroupError> {
         let collection = Collection::create(conn, "test").unwrap();
         Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence(sequence)
-            .save(conn);
+            .save(conn)?;
         let node_id = Node::create(
             conn,
             &reference_sequence.hash,
@@ -209,7 +209,9 @@ mod tests {
         Ok(())
     }
 
-    fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) -> Result<(), EdgeError> {
+    fn apply_child_sample_update_from_aa_fasta(
+        conn: &GraphConnection,
+    ) -> Result<(), BlockGroupError> {
         Sample::get_or_create(conn, "child sample").unwrap();
         let _ = Sample::get_or_create_child(
             conn,
@@ -234,7 +236,7 @@ mod tests {
         let replacement = Sequence::new()
             .sequence_type("DNA")
             .sequence(replacement_sequence)
-            .save(conn);
+            .save(conn)?;
         let node_id = Node::create(
             conn,
             &replacement.hash,

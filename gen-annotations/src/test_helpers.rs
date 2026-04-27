@@ -1,10 +1,10 @@
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup, PathChange},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
-    edge::{Edge, EdgeError},
+    edge::Edge,
     migrations::run_migrations,
     node::Node,
     path::Path,
@@ -20,17 +20,17 @@ pub fn get_connection() -> GraphConnection {
     GraphConnection(conn)
 }
 
-pub fn setup_test_data(conn: &GraphConnection) -> Result<(), EdgeError> {
+pub fn setup_test_data(conn: &GraphConnection) -> Result<(), BlockGroupError> {
     let collection = Collection::create(conn, "test").unwrap();
     Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
     let seq1 = Sequence::new()
         .sequence_type("DNA")
         .sequence("ATCGATCGATCGATCGA")
-        .save(conn);
+        .save(conn)?;
     let seq2 = Sequence::new()
         .sequence_type("DNA")
         .sequence("TCGGGAACACACAGAGA")
-        .save(conn);
+        .save(conn)?;
     let node1 = Node::create(
         conn,
         &seq1.hash,
@@ -139,7 +139,7 @@ pub fn setup_test_data(conn: &GraphConnection) -> Result<(), EdgeError> {
     let sequence = Sequence::new()
         .sequence_type("DNA")
         .sequence(alt_seq)
-        .save(conn);
+        .save(conn)?;
     let node_id = Node::create(
         conn,
         &sequence.hash,

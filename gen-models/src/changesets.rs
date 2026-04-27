@@ -847,7 +847,10 @@ pub fn apply_changeset(
     }
 
     for sequence in dependencies.sequences.iter() {
-        NewSequence::from(sequence).save(conn);
+        match NewSequence::from(sequence).save(conn) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::SequenceError(err)),
+        }
     }
     for node in dependencies.nodes.iter() {
         if !is_terminal(node.id) {
@@ -926,7 +929,10 @@ pub fn apply_changeset(
         )?;
     }
     for sequence in &changeset.sequences {
-        NewSequence::from(sequence).save(conn);
+        match NewSequence::from(sequence).save(conn) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::SequenceError(err)),
+        }
     }
     for bg in block_groups_parent_first(&changeset.block_groups) {
         BlockGroup::create(
@@ -1842,7 +1848,8 @@ mod tests {
             let existing_seq = Sequence::new()
                 .sequence_type("DNA")
                 .sequence("AAAATTTT")
-                .save(conn);
+                .save(conn)
+                .unwrap();
             let existing_node_id =
                 Node::create(conn, &existing_seq.hash, &HashId::convert_str("1"))?;
 
@@ -1851,7 +1858,8 @@ mod tests {
             let random_seq = Sequence::new()
                 .sequence_type("DNA")
                 .sequence("ATCG")
-                .save(conn);
+                .save(conn)
+                .unwrap();
             let random_node_id = Node::create(conn, &random_seq.hash, &HashId::convert_str("2"))?;
 
             let new_edge = Edge::create(

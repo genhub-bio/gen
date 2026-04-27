@@ -513,7 +513,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = EdgeData {
             source_node_id: PATH_START_NODE_ID,
@@ -526,7 +527,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = EdgeData {
             source_node_id: node1_id,
@@ -576,7 +578,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = EdgeData {
             source_node_id: PATH_START_NODE_ID,
@@ -589,7 +592,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = EdgeData {
             source_node_id: node1_id,
@@ -634,7 +638,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         // NOTE: Create one edge ahead of time to confirm an existing row ID gets returned in the bulk create
         let existing_edge = Edge::create(
@@ -663,7 +668,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = EdgeData {
             source_node_id: node1_id,
@@ -725,7 +731,8 @@ mod tests {
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let insert_node_id =
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
@@ -779,14 +786,16 @@ mod tests {
         let template_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAAAA")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let template_node_id =
             Node::create(&conn, &template_sequence.hash, &HashId::convert_str("1")).unwrap();
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let insert_node_id =
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("2")).unwrap();
 
@@ -821,21 +830,24 @@ mod tests {
         let template_sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAAAA")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let template1_node_id =
             Node::create(&conn, &template_sequence1.hash, &HashId::convert_str("1")).unwrap();
 
         let template_sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTTTT")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let template2_node_id =
             Node::create(&conn, &template_sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let insert_node_id =
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("3")).unwrap();
 

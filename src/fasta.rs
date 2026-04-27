@@ -7,6 +7,7 @@ use gen_models::{
     errors::{OperationError, QueryError, SampleError},
     node::NodeError,
     path::PathError,
+    sequence::SequenceError,
 };
 use thiserror::Error;
 
@@ -30,4 +31,6 @@ pub enum FastaError {
     NodeError(#[from] NodeError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }

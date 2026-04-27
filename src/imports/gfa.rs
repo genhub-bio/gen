@@ -17,7 +17,7 @@ use gen_models::{
     operations::{Operation, OperationFile, OperationInfo},
     path::{Path, PathError},
     sample::Sample,
-    sequence::Sequence,
+    sequence::{Sequence, SequenceError},
     session_operations::{end_operation, start_operation},
     traits::Query,
 };
@@ -44,6 +44,8 @@ pub enum GFAImportError {
     NodeError(#[from] NodeError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 pub fn import_gfa(
@@ -89,7 +91,7 @@ pub fn import_gfa(
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence(input_sequence)
-            .save(conn);
+            .save(conn)?;
         sequences_by_segment_id.insert(&segment.id, sequence.clone());
         // TODO: Node hash is always new, it's sorted by insert time via being a v7 uuid but maybe want to
         // define the hash itself for idempotency?

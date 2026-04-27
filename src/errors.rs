@@ -5,6 +5,7 @@ use gen_models::{
     errors::{OperationError, QueryError},
     node::NodeError,
     path::PathError,
+    sequence::SequenceError,
 };
 use thiserror::Error;
 
@@ -29,4 +30,6 @@ pub enum SequenceUpdateError {
     PathError(#[from] PathError),
     #[error("Block group creation error: {0}")]
     BlockGroupError(#[from] BlockGroupError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }

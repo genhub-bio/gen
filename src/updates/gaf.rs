@@ -19,7 +19,7 @@ use gen_models::{
     node::{Node, NodeError},
     operations::{OperationFile, OperationInfo},
     sample::Sample,
-    sequence::Sequence,
+    sequence::{Sequence, SequenceError},
     traits::*,
 };
 use regex::Regex;
@@ -56,6 +56,8 @@ pub enum GafUpdateError {
     InvalidGafLine(String),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 pub fn transform_csv_to_fasta<R, W>(reader: R, writer: &mut W) -> Result<(), GafUpdateError>
@@ -278,7 +280,7 @@ where
             let sequence = Sequence::new()
                 .sequence(&change.sequence)
                 .sequence_type("DNA")
-                .save(conn);
+                .save(conn)?;
             let seq_node = Node::create(
                 conn,
                 &sequence.hash,

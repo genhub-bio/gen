@@ -2522,7 +2522,8 @@ mod tests {
             gen_models::sequence::Sequence::new()
                 .sequence("ATCG")
                 .sequence_type("DNA")
-                .save(conn);
+                .save(conn)
+                .unwrap();
             let op_info = OperationInfo {
                 files: vec![],
                 description: "first operation".to_string(),
@@ -2533,7 +2534,8 @@ mod tests {
             gen_models::sequence::Sequence::new()
                 .sequence("GCTA")
                 .sequence_type("DNA")
-                .save(conn);
+                .save(conn)
+                .unwrap();
             let op_info = OperationInfo {
                 files: vec![],
                 description: "second operation".to_string(),

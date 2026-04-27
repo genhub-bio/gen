@@ -51,7 +51,7 @@ where
                 if let Some(ref mol_type) = locus.molecule_type {
                     seq_model = seq_model.sequence_type(mol_type);
                 }
-                let sequence = seq_model.save(conn);
+                let sequence = seq_model.save(conn)?;
                 let wt_node_id = Node::create(
                     conn,
                     &sequence.hash,
@@ -158,7 +158,7 @@ where
                                     edit_type = edit.edit_type
                                 ))
                                 .sequence_type("DNA")
-                                .save(conn);
+                                .save(conn)?;
                             let change_node = Node::create(
                                 conn,
                                 &change_seq.hash,

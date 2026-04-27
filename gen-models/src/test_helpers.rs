@@ -90,22 +90,22 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
-        .save(conn);
+        .save(conn)?;
     let a_node_id = Node::create(conn, &a_seq.hash, &HashId::convert_str("test-a-node"))?;
     let t_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("TTTTTTTTTT")
-        .save(conn);
+        .save(conn)?;
     let t_node_id = Node::create(conn, &t_seq.hash, &HashId::convert_str("test-t-node"))?;
     let c_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("CCCCCCCCCC")
-        .save(conn);
+        .save(conn)?;
     let c_node_id = Node::create(conn, &c_seq.hash, &HashId::convert_str("test-c-node"))?;
     let g_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("GGGGGGGGGG")
-        .save(conn);
+        .save(conn)?;
     let g_node_id = Node::create(conn, &g_seq.hash, &HashId::convert_str("test-g-node"))?;
     Collection::get_or_create(conn, "test").unwrap();
     Sample::get_or_create(conn, "test").unwrap();

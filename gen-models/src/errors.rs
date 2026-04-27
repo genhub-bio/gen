@@ -8,6 +8,7 @@ use crate::{
     node::NodeError,
     path::PathError,
     sample::Sample,
+    sequence::SequenceError,
 };
 
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
@@ -50,6 +51,8 @@ pub enum ChangesetError {
     AccessionError(#[from] AccessionError),
     #[error("Accession path creation error: {0}")]
     AccessionPathError(#[from] AccessionPathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 #[derive(Debug, PartialEq, Error)]

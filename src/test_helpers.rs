@@ -109,7 +109,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let a_node_id = Node::create(
         conn,
         &a_seq.hash,
@@ -118,7 +119,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
     let t_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("TTTTTTTTTT")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let t_node_id = Node::create(
         conn,
         &t_seq.hash,
@@ -127,7 +129,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
     let c_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("CCCCCCCCCC")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let c_node_id = Node::create(
         conn,
         &c_seq.hash,
@@ -136,7 +139,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> Result<(HashId, Path), Block
     let g_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("GGGGGGGGGG")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let g_node_id = Node::create(
         conn,
         &g_seq.hash,

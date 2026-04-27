@@ -920,7 +920,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -961,7 +962,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -1016,7 +1018,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1031,7 +1034,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -1046,7 +1050,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -1061,7 +1066,8 @@ mod tests {
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -1108,7 +1114,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge5 = Edge::create(
             conn,
@@ -1123,7 +1130,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -1138,7 +1146,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -1153,7 +1162,8 @@ mod tests {
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -1207,7 +1217,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1222,7 +1233,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -1237,7 +1249,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -1252,7 +1265,8 @@ mod tests {
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -1331,7 +1345,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1346,7 +1361,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -1361,7 +1377,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -1376,7 +1393,8 @@ mod tests {
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -1461,7 +1479,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1525,7 +1544,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1564,7 +1584,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -1626,7 +1647,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1666,7 +1688,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -1746,7 +1769,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1786,7 +1810,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -1868,7 +1893,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -1908,7 +1934,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -1989,7 +2016,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2097,12 +2125,14 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2152,7 +2182,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -2235,12 +2266,14 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2290,7 +2323,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -2372,12 +2406,14 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2488,7 +2524,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2555,7 +2592,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2595,7 +2633,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -2662,7 +2701,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2702,7 +2742,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge3 = Edge::create(
             conn,
@@ -2785,7 +2826,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2825,7 +2867,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -2908,7 +2951,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -2948,7 +2992,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -3031,12 +3076,14 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3086,7 +3133,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -3169,12 +3217,14 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3278,7 +3328,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3293,7 +3344,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -3334,7 +3386,8 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge4 = Edge::create(
             conn,
@@ -3417,7 +3470,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3432,7 +3486,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -3502,7 +3557,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3550,7 +3606,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3587,7 +3644,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3602,7 +3660,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -3646,7 +3705,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3661,7 +3721,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -3700,7 +3761,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3715,7 +3777,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         // Source coordinate on node 1 is before target coordinate on node1 for edge1
         let edge2 = Edge::create(
@@ -3752,7 +3815,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3767,7 +3831,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,
@@ -3891,7 +3956,8 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = Edge::create(
             conn,
@@ -3906,7 +3972,8 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = Edge::create(
             conn,

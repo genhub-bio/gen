@@ -485,7 +485,8 @@ mod tests {
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let insert_node_id = Node::create(
             conn,
             &insert_sequence.hash,

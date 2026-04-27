@@ -118,7 +118,7 @@ pub fn update_with_fasta(
                 let seq = Sequence::new()
                     .sequence_type("DNA")
                     .sequence(sequence)
-                    .save(conn);
+                    .save(conn)?;
                 let node_id = Node::create(
                     conn,
                     &seq.hash,
