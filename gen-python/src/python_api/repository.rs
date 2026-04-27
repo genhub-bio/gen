@@ -13,6 +13,7 @@ use r#gen::{
 };
 use gen_core::{
     NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
+    is_terminal,
 };
 use gen_models::{
     block_group::BlockGroup,
@@ -477,28 +478,32 @@ impl PyRepository {
             );
 
             // Each node key is a PyBlock carrying sequence, node_id, start, end.
-            // "start" and "end" string nodes are sentinel placeholders — skip them.
+            // Sentinel nodes (PATH_START / PATH_END node_ids) are skipped.
             let mut all_blocks: Vec<PyBlock> = Vec::new();
             for node_obj in graph.getattr("nodes")?.call0()?.try_iter()? {
                 let node_obj = node_obj?;
-                if let Ok(s) = node_obj.extract::<String>() {
-                    if s == "start" || s == "end" {
-                        continue;
-                    }
-                    return Err(PyRuntimeError::new_err(format!(
-                        "Unexpected string node {s:?}; only \"start\" and \"end\" are reserved"
-                    )));
-                }
                 let block: PyBlock = node_obj.extract()?;
-                if block.sequence.is_empty() {
+                if is_terminal(block.node_id) {
+                    continue;
+                }
+                if block.node_sequence.is_empty() {
                     return Err(PyRuntimeError::new_err(
                         "Block has empty sequence; construct with Block(\"ACGT\", ...)",
                     ));
                 }
                 let seq = Sequence::new()
                     .sequence_type("DNA")
-                    .sequence(&block.sequence)
+                    .sequence(&block.node_sequence)
                     .save(conn);
+                if let Some(existing) = Node::get_by_id(conn, &block.node_id) {
+                    if existing.sequence_hash != seq.hash {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "node_id {} already exists in the database with a different \
+                             sequence; create a new Block without node_id to get a fresh node",
+                            block.node_id,
+                        )));
+                    }
+                }
                 Node::create(conn, &seq.hash, &block.node_id);
                 all_blocks.push(block);
             }
@@ -520,8 +525,8 @@ impl PyRepository {
                 let dst_obj = item.get_item(1)?;
                 let attrs = item.get_item(2)?;
 
-                let src_sentinel = src_obj.extract::<String>().ok();
-                let dst_sentinel = dst_obj.extract::<String>().ok();
+                let src: PyBlock = src_obj.extract()?;
+                let dst: PyBlock = dst_obj.extract()?;
 
                 let target_strand = attrs
                     .get_item("target_strand")
@@ -536,45 +541,37 @@ impl PyRepository {
                     .map(|s| parse_strand(&s))
                     .unwrap_or(Strand::Forward);
 
-                match (src_sentinel.as_deref(), dst_sentinel.as_deref()) {
-                    (Some("start"), _) => {
-                        let dst: PyBlock = dst_obj.extract()?;
-                        explicit_start_targets.insert(dst.node_id);
-                        explicit_sentinel_edges.push(EdgeData {
-                            source_node_id: PATH_START_NODE_ID,
-                            source_coordinate: 0,
-                            source_strand: Strand::Forward,
-                            target_node_id: dst.node_id,
-                            target_coordinate: dst.sequence_start,
-                            target_strand,
-                        });
-                    }
-                    (_, Some("end")) => {
-                        let src: PyBlock = src_obj.extract()?;
-                        explicit_end_sources.insert(src.node_id);
-                        explicit_sentinel_edges.push(EdgeData {
-                            source_node_id: src.node_id,
-                            source_coordinate: src.sequence_end,
-                            source_strand,
-                            target_node_id: PATH_END_NODE_ID,
-                            target_coordinate: 0,
-                            target_strand: Strand::Forward,
-                        });
-                    }
-                    _ => {
-                        let src: PyBlock = src_obj.extract()?;
-                        let dst: PyBlock = dst_obj.extract()?;
-                        user_edge_data.push(EdgeData {
-                            source_node_id: src.node_id,
-                            source_coordinate: src.sequence_end,
-                            source_strand,
-                            target_node_id: dst.node_id,
-                            target_coordinate: dst.sequence_start,
-                            target_strand,
-                        });
-                        *out_degrees.entry(src.node_id).or_insert(0) += 1;
-                        *in_degrees.entry(dst.node_id).or_insert(0) += 1;
-                    }
+                if src.node_id == PATH_START_NODE_ID {
+                    explicit_start_targets.insert(dst.node_id);
+                    explicit_sentinel_edges.push(EdgeData {
+                        source_node_id: PATH_START_NODE_ID,
+                        source_coordinate: 0,
+                        source_strand: Strand::Forward,
+                        target_node_id: dst.node_id,
+                        target_coordinate: dst.sequence_start,
+                        target_strand,
+                    });
+                } else if dst.node_id == PATH_END_NODE_ID {
+                    explicit_end_sources.insert(src.node_id);
+                    explicit_sentinel_edges.push(EdgeData {
+                        source_node_id: src.node_id,
+                        source_coordinate: src.sequence_end,
+                        source_strand,
+                        target_node_id: PATH_END_NODE_ID,
+                        target_coordinate: 0,
+                        target_strand: Strand::Forward,
+                    });
+                } else {
+                    user_edge_data.push(EdgeData {
+                        source_node_id: src.node_id,
+                        source_coordinate: src.sequence_end,
+                        source_strand,
+                        target_node_id: dst.node_id,
+                        target_coordinate: dst.sequence_start,
+                        target_strand,
+                    });
+                    *out_degrees.entry(src.node_id).or_insert(0) += 1;
+                    *in_degrees.entry(dst.node_id).or_insert(0) += 1;
                 }
             }
 

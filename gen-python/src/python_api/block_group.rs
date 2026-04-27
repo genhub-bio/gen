@@ -320,7 +320,7 @@ impl PyBlockGroup {
                 }
                 let node_key = PyBlock {
                     node_id: node.node_id,
-                    sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
+                    node_sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
                     sequence_start: node.sequence_start,
                     sequence_end: node.sequence_end,
                 };
@@ -342,13 +342,13 @@ impl PyBlockGroup {
                 }
                 let src_key = PyBlock {
                     node_id: src.node_id,
-                    sequence: seqs.get(&src.node_id).cloned().unwrap_or_default(),
+                    node_sequence: seqs.get(&src.node_id).cloned().unwrap_or_default(),
                     sequence_start: src.sequence_start,
                     sequence_end: src.sequence_end,
                 };
                 let dst_key = PyBlock {
                     node_id: dst.node_id,
-                    sequence: seqs.get(&dst.node_id).cloned().unwrap_or_default(),
+                    node_sequence: seqs.get(&dst.node_id).cloned().unwrap_or_default(),
                     sequence_start: dst.sequence_start,
                     sequence_end: dst.sequence_end,
                 };
@@ -401,7 +401,7 @@ impl PyBlockGroup {
                 }
                 let node_key = PyBlock {
                     node_id: node.node_id,
-                    sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
+                    node_sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
                     sequence_start: node.sequence_start,
                     sequence_end: node.sequence_end,
                 };
@@ -409,8 +409,20 @@ impl PyBlockGroup {
             }
 
             if include_sentinels {
-                nx_graph.call_method1("add_node", ("start",))?;
-                nx_graph.call_method1("add_node", ("end",))?;
+                let start_block = PyBlock {
+                    node_id: PATH_START_NODE_ID,
+                    node_sequence: String::new(),
+                    sequence_start: 0,
+                    sequence_end: 0,
+                };
+                let end_block = PyBlock {
+                    node_id: PATH_END_NODE_ID,
+                    node_sequence: String::new(),
+                    sequence_start: 0,
+                    sequence_end: 0,
+                };
+                nx_graph.call_method1("add_node", (start_block,))?;
+                nx_graph.call_method1("add_node", (end_block,))?;
             }
 
             for (src, dst, edge_weights) in graph.all_edges() {
@@ -421,34 +433,33 @@ impl PyBlockGroup {
                     continue;
                 }
 
-                let src_key: PyObject = if src_is_sentinel {
-                    let label = if src.node_id == PATH_START_NODE_ID { "start" } else { "end" };
-                    label.into_pyobject(py)?.into_any().unbind()
-                } else {
-                    PyBlock {
-                        node_id: src.node_id,
-                        sequence: seqs.get(&src.node_id).cloned().unwrap_or_default(),
-                        sequence_start: src.sequence_start,
-                        sequence_end: src.sequence_end,
-                    }
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind()
-                };
-                let dst_key: PyObject = if dst_is_sentinel {
-                    let label = if dst.node_id == PATH_END_NODE_ID { "end" } else { "start" };
-                    label.into_pyobject(py)?.into_any().unbind()
-                } else {
-                    PyBlock {
-                        node_id: dst.node_id,
-                        sequence: seqs.get(&dst.node_id).cloned().unwrap_or_default(),
-                        sequence_start: dst.sequence_start,
-                        sequence_end: dst.sequence_end,
-                    }
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind()
-                };
+                let src_key: PyObject = PyBlock {
+                    node_id: src.node_id,
+                    node_sequence: if src_is_sentinel {
+                        String::new()
+                    } else {
+                        seqs.get(&src.node_id).cloned().unwrap_or_default()
+                    },
+                    sequence_start: src.sequence_start,
+                    sequence_end: src.sequence_end,
+                }
+                .into_pyobject(py)?
+                .into_any()
+                .unbind();
+
+                let dst_key: PyObject = PyBlock {
+                    node_id: dst.node_id,
+                    node_sequence: if dst_is_sentinel {
+                        String::new()
+                    } else {
+                        seqs.get(&dst.node_id).cloned().unwrap_or_default()
+                    },
+                    sequence_start: dst.sequence_start,
+                    sequence_end: dst.sequence_end,
+                }
+                .into_pyobject(py)?
+                .into_any()
+                .unbind();
 
                 let edge_attrs = PyDict::new(py);
                 let mut weights: Vec<_> = vec![];
@@ -508,7 +519,7 @@ impl PyBlockGroup {
                 }
                 let node_key = PyBlock {
                     node_id: node.node_id,
-                    sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
+                    node_sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
                     sequence_start: node.sequence_start,
                     sequence_end: node.sequence_end,
                 };

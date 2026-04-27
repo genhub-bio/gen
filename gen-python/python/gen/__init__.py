@@ -14,14 +14,16 @@ try:
     # Directly from Rust
     from .gen import (
         Annotation,
+        Block,
         DbContext,
+        EndBlock,
         PyBlockGroup,
         PyHashId,
-        PyBlock,
         PyGraphPos,
         PyGraphLocus,
         Repository,
         PySequencePart,
+        StartBlock,
         derive_chunks,
         derive_subgraph,
         export_fasta,
@@ -43,6 +45,8 @@ try:
         update_with_vcf,
     )
 
+    from .graph import GenGraph
+
     # Jupyter widget — only available with `pip install gen[jupyter]`
     try:
         from .jupyter_widget import GenGraphWidget
@@ -53,10 +57,13 @@ try:
     __all__ = [
         "Annotation",
         "DbContext",
+        "EndBlock",
+        "GenGraph",
         "Repository",
+        "StartBlock",
         "PyBlockGroup",
         "PyHashId",
-        "PyBlock",
+        "Block",
         "PyGraphPos",
         "PyGraphLocus",
         "PySequencePart",

@@ -22,7 +22,7 @@ use crate::{
         graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
         hash_id::PyHashId,
         jupyter_widget::PyGraphController,
-        block::PyBlock,
+        block::{PyBlock, PyEndBlock, PyStartBlock},
         repository::PyRepository,
         sequence_part::PySequencePart,
         utils::get_gen_dir_py,
@@ -65,6 +65,8 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlockGroup>()?;
     m.add_class::<PyHashId>()?;
     m.add_class::<PyBlock>()?;
+    m.add_class::<PyStartBlock>()?;
+    m.add_class::<PyEndBlock>()?;
     m.add_class::<PyGraphPos>()?;
     m.add_class::<PyGraphLocus>()?;
     m.add_class::<PyAnnotation>()?;
