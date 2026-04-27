@@ -6,14 +6,14 @@ use r#gen::{
     graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
 };
 use gen_graph::GraphNode;
-use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, is_terminal};
+use gen_core::is_terminal;
 use gen_models::{block_group::BlockGroup, node::Node};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_and_display_widget},
-    block::PyBlock,
+    block::{PyBlock, PyEndBlock, PyStartBlock},
 };
 
 fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
@@ -320,9 +320,10 @@ impl PyBlockGroup {
                 }
                 let node_key = PyBlock {
                     node_id: node.node_id,
-                    node_sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
                     sequence_start: node.sequence_start,
                     sequence_end: node.sequence_end,
+                    node_seq: seqs.get(&node.node_id).cloned(),
+                    block_seq: None,
                 };
                 nodes_dict.set_item(node_key, node_dict)?;
             }
@@ -342,15 +343,17 @@ impl PyBlockGroup {
                 }
                 let src_key = PyBlock {
                     node_id: src.node_id,
-                    node_sequence: seqs.get(&src.node_id).cloned().unwrap_or_default(),
                     sequence_start: src.sequence_start,
                     sequence_end: src.sequence_end,
+                    node_seq: seqs.get(&src.node_id).cloned(),
+                    block_seq: None,
                 };
                 let dst_key = PyBlock {
                     node_id: dst.node_id,
-                    node_sequence: seqs.get(&dst.node_id).cloned().unwrap_or_default(),
                     sequence_start: dst.sequence_start,
                     sequence_end: dst.sequence_end,
+                    node_seq: seqs.get(&dst.node_id).cloned(),
+                    block_seq: None,
                 };
                 edges_dict.set_item((src_key, dst_key), weights)?;
             }
@@ -362,21 +365,19 @@ impl PyBlockGroup {
 
     /// Convert this block group's graph to a NetworkX ``DiGraph``.
     ///
-    /// Node attributes: ``node_id`` (hex string), ``sequence_start``,
-    /// ``sequence_end``, ``sequence``.
+    /// Node keys are ``Block`` objects carrying all identity and sequence data
+    /// as properties (``node_id``, ``sequence_start``, ``sequence_end``,
+    /// ``sequence``, ``_node_sequence``).  No redundant node attributes are set.
     /// Edge attributes: ``source_strand``, ``target_strand``, ``weights``
     /// (list of per-chromosome weight dicts for full fidelity).
     ///
-    /// When ``include_sentinels`` is ``True`` (the default), sentinel path
-    /// boundaries are represented as plain string nodes ``"start"`` and
-    /// ``"end"`` so that truncations and other structural sentinel edges are
-    /// preserved in the exported graph.  Pass ``include_sentinels=False`` to
-    /// drop all sentinel-involving edges (content nodes only).
+    /// ``StartBlock``/``EndBlock`` sentinel nodes and their edges are always
+    /// included.  To work with content nodes only, filter them out with
+    /// ``isinstance(node, (StartBlock, EndBlock))``.
     ///
     /// The result is compatible with
     /// ``Repository.create_block_group_from_graph()`` for a round-trip.
-    #[pyo3(signature = (include_sentinels=true))]
-    pub fn to_networkx(&self, include_sentinels: bool) -> PyResult<PyObject> {
+    pub fn to_networkx(&self) -> PyResult<PyObject> {
         let conn = self.open_conn("to_networkx")?;
         let graph = BlockGroup::get_graph(&conn, &self.id);
         let nodes: Vec<GraphNode> = graph.nodes().filter(|n| !is_terminal(n.node_id)).collect();
@@ -392,56 +393,33 @@ impl PyBlockGroup {
             let nx_graph = networkx.getattr("DiGraph")?.call0()?;
 
             for node in &nodes {
-                let attrs = PyDict::new(py);
-                attrs.set_item("node_id", node.node_id.to_string())?;
-                attrs.set_item("sequence_start", node.sequence_start)?;
-                attrs.set_item("sequence_end", node.sequence_end)?;
-                if let Some(seq) = seqs.get(&node.node_id) {
-                    attrs.set_item("sequence", seq)?;
-                }
                 let node_key = PyBlock {
                     node_id: node.node_id,
-                    node_sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
                     sequence_start: node.sequence_start,
                     sequence_end: node.sequence_end,
+                    node_seq: seqs.get(&node.node_id).cloned(),
+                    block_seq: None,
                 };
-                nx_graph.call_method("add_node", (node_key,), Some(&attrs))?;
+                nx_graph.call_method1("add_node", (node_key,))?;
             }
 
-            if include_sentinels {
-                let start_block = PyBlock {
-                    node_id: PATH_START_NODE_ID,
-                    node_sequence: String::new(),
-                    sequence_start: 0,
-                    sequence_end: 0,
-                };
-                let end_block = PyBlock {
-                    node_id: PATH_END_NODE_ID,
-                    node_sequence: String::new(),
-                    sequence_start: 0,
-                    sequence_end: 0,
-                };
-                nx_graph.call_method1("add_node", (start_block,))?;
-                nx_graph.call_method1("add_node", (end_block,))?;
-            }
+            let start_obj = Py::new(py, PyStartBlock::new())?;
+            let end_obj = Py::new(py, PyEndBlock::new())?;
+            nx_graph.call_method1("add_node", (start_obj,))?;
+            nx_graph.call_method1("add_node", (end_obj,))?;
 
             for (src, dst, edge_weights) in graph.all_edges() {
-                let src_is_sentinel = is_terminal(src.node_id);
-                let dst_is_sentinel = is_terminal(dst.node_id);
-
-                if !include_sentinels && (src_is_sentinel || dst_is_sentinel) {
-                    continue;
-                }
 
                 let src_key: PyObject = PyBlock {
                     node_id: src.node_id,
-                    node_sequence: if src_is_sentinel {
-                        String::new()
-                    } else {
-                        seqs.get(&src.node_id).cloned().unwrap_or_default()
-                    },
                     sequence_start: src.sequence_start,
                     sequence_end: src.sequence_end,
+                    node_seq: if is_terminal(src.node_id) {
+                        None
+                    } else {
+                        seqs.get(&src.node_id).cloned()
+                    },
+                    block_seq: None,
                 }
                 .into_pyobject(py)?
                 .into_any()
@@ -449,13 +427,14 @@ impl PyBlockGroup {
 
                 let dst_key: PyObject = PyBlock {
                     node_id: dst.node_id,
-                    node_sequence: if dst_is_sentinel {
-                        String::new()
-                    } else {
-                        seqs.get(&dst.node_id).cloned().unwrap_or_default()
-                    },
                     sequence_start: dst.sequence_start,
                     sequence_end: dst.sequence_end,
+                    node_seq: if is_terminal(dst.node_id) {
+                        None
+                    } else {
+                        seqs.get(&dst.node_id).cloned()
+                    },
+                    block_seq: None,
                 }
                 .into_pyobject(py)?
                 .into_any()
@@ -519,9 +498,10 @@ impl PyBlockGroup {
                 }
                 let node_key = PyBlock {
                     node_id: node.node_id,
-                    node_sequence: seqs.get(&node.node_id).cloned().unwrap_or_default(),
                     sequence_start: node.sequence_start,
                     sequence_end: node.sequence_end,
+                    node_seq: seqs.get(&node.node_id).cloned(),
+                    block_seq: None,
                 };
                 node_data.set_item("key", node_key)?;
                 let idx: usize = rx_graph.call_method1("add_node", (node_data,))?.extract()?;

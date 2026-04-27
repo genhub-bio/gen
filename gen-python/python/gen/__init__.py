@@ -45,8 +45,6 @@ try:
         update_with_vcf,
     )
 
-    from .graph import GenGraph
-
     # Jupyter widget — only available with `pip install gen[jupyter]`
     try:
         from .jupyter_widget import GenGraphWidget
@@ -58,7 +56,6 @@ try:
         "Annotation",
         "DbContext",
         "EndBlock",
-        "GenGraph",
         "Repository",
         "StartBlock",
         "PyBlockGroup",

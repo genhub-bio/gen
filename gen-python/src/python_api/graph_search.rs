@@ -35,9 +35,10 @@ impl PyGraphPos {
         let n = self.inner.node;
         PyBlock {
             node_id: n.node_id,
-            sequence: String::new(),
             sequence_start: n.sequence_start,
             sequence_end: n.sequence_end,
+            node_seq: None,
+            block_seq: None,
         }
     }
 
@@ -105,9 +106,10 @@ impl PyGraphLocus {
             .iter()
             .map(|n| PyBlock {
                 node_id: n.node_id,
-                sequence: String::new(),
                 sequence_start: n.sequence_start,
                 sequence_end: n.sequence_end,
+                node_seq: None,
+                block_seq: None,
             })
             .collect()
     }

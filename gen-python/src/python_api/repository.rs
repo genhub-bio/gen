@@ -477,8 +477,8 @@ impl PyRepository {
                 },
             );
 
-            // Each node key is a PyBlock carrying sequence, node_id, start, end.
-            // Sentinel nodes (PATH_START / PATH_END node_ids) are skipped.
+            // Each node key is a PyBlock carrying identity (node_id, start, end)
+            // and optional sequence payload. Sentinel nodes are skipped.
             let mut all_blocks: Vec<PyBlock> = Vec::new();
             for node_obj in graph.getattr("nodes")?.call0()?.try_iter()? {
                 let node_obj = node_obj?;
@@ -486,25 +486,32 @@ impl PyRepository {
                 if is_terminal(block.node_id) {
                     continue;
                 }
-                if block.node_sequence.is_empty() {
-                    return Err(PyRuntimeError::new_err(
-                        "Block has empty sequence; construct with Block(\"ACGT\", ...)",
-                    ));
-                }
-                let seq = Sequence::new()
-                    .sequence_type("DNA")
-                    .sequence(&block.node_sequence)
-                    .save(conn);
-                if let Some(existing) = Node::get_by_id(conn, &block.node_id) {
-                    if existing.sequence_hash != seq.hash {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "node_id {} already exists in the database with a different \
-                             sequence; create a new Block without node_id to get a fresh node",
-                            block.node_id,
-                        )));
+
+                let seq_str_opt = block.node_sequence_for_db().map(|s| s.to_string());
+
+                if let Some(seq_str) = seq_str_opt {
+                    let seq = Sequence::new()
+                        .sequence_type("DNA")
+                        .sequence(&seq_str)
+                        .save(conn);
+                    if let Some(existing) = Node::get_by_id(conn, &block.node_id) {
+                        if existing.sequence_hash != seq.hash {
+                            return Err(PyRuntimeError::new_err(format!(
+                                "node_id {} already exists in the database with a different \
+                                 sequence; create a new Block without node_id to get a fresh node",
+                                block.node_id,
+                            )));
+                        }
                     }
+                    Node::create(conn, &seq.hash, &block.node_id);
+                } else if Node::get_by_id(conn, &block.node_id).is_none() {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Block {}[{}:{}] has no sequence payload and does not exist \
+                         in this repository.",
+                        block.node_id, block.sequence_start, block.sequence_end
+                    )));
                 }
-                Node::create(conn, &seq.hash, &block.node_id);
+
                 all_blocks.push(block);
             }
 
@@ -1961,7 +1968,7 @@ assert window == "GTAC", f"expected window 'GTAC', got '{window}'"
                 )
                 .unwrap();
 
-            let nx_graph = bg.to_networkx(true).unwrap();
+            let nx_graph = bg.to_networkx().unwrap();
 
             let bg2 = py_repo
                 .borrow(py)
@@ -2023,7 +2030,7 @@ assert seqs1 == seqs2, f"sequence sets differ: {seqs1} vs {seqs2}"
             use crate::python_api::block::PyBlock;
             let networkx = PyModule::import(py, "networkx").unwrap();
             let new_graph = networkx.getattr("DiGraph").unwrap().call0().unwrap();
-            let new_block = PyBlock::new("TTTTTTTT".to_string(), None, None, None);
+            let new_block = PyBlock::new("TTTTTTTT".to_string(), None);
             new_graph.call_method1("add_node", (new_block,)).unwrap();
 
             let bg2 = py_repo
@@ -2110,22 +2117,30 @@ assert "TTTTTTTT" in mod_seqs, f"expected mutant seq 'TTTTTTTT' in {mod_seqs}"
                 .unwrap()
                 .clone();
 
-            let nx_graph = unknown_bg.to_networkx(false).unwrap();
+            let nx_graph = unknown_bg.to_networkx().unwrap();
 
             py_run!(
                 py,
                 nx_graph ref_dict,
                 r#"
+from gen import StartBlock, EndBlock
 orig_id = next(iter(ref_dict["nodes"].values()))["node_id"]
 
-nodes = list(nx_graph.nodes())
+all_nodes = list(nx_graph.nodes())
+nodes = [b for b in all_nodes if not isinstance(b, (StartBlock, EndBlock))]
 # Sub-blocks carved from the original node share its node_id.
-orig_blocks = [b for b in nodes if str(b.node_id) == orig_id]
+# Use a for loop (not list comprehension) to avoid exec() scoping issues.
+orig_blocks = []
+for b in nodes:
+    if str(b.node_id) == orig_id:
+        orig_blocks.append(b)
 assert len(orig_blocks) > 1, (
     f"Expected multiple sub-blocks from the original node, got {len(orig_blocks)}"
 )
 # Each sub-block must have unique coordinates.
-coords = [(b.sequence_start, b.sequence_end) for b in orig_blocks]
+coords = []
+for b in orig_blocks:
+    coords.append((b.sequence_start, b.sequence_end))
 assert len(set(coords)) == len(coords), f"Duplicate coordinates among sub-blocks: {coords}"
 # NetworkX must see them all as distinct nodes (dict has one entry per unique key).
 assert len(nodes) == len(set(nodes)), "NetworkX collapsed sub-blocks with equal hash/eq"
@@ -2153,7 +2168,7 @@ assert len(nodes) == len(set(nodes)), "NetworkX collapsed sub-blocks with equal 
 
             let make_single_node_graph = |seq: &str| {
                 let g = networkx.getattr("DiGraph").unwrap().call0().unwrap();
-                let b = PyBlock::new(seq.to_string(), None, None, None);
+                let b = PyBlock::new(seq.to_string(), None);
                 g.call_method1("add_node", (b,)).unwrap();
                 g
             };
