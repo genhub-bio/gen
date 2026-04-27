@@ -6,6 +6,7 @@ use std::{
 use gb_io::seq::{Feature, Location, Seq};
 use gen_core::Strand;
 use gen_models::{
+    accession::{AccessionError, AccessionPathError},
     annotations::{
         AnnotationError, AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier,
     },
@@ -49,6 +50,10 @@ pub enum GenBankError {
     NodeError(#[from] NodeError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
+    #[error("Accession creation error: {0}")]
+    AccessionError(#[from] AccessionError),
+    #[error("Accession path creation error: {0}")]
+    AccessionPathError(#[from] AccessionPathError),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

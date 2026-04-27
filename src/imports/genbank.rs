@@ -350,14 +350,9 @@ fn create_accession_for_segments(
     accession_name: &str,
     segments: &[NodeSequenceSegment],
 ) -> Result<HashId, GenBankError> {
-    let accession = match Accession::create(conn, accession_name, &path.id, None) {
+    let accession = match Accession::get_or_create(conn, accession_name, &path.id, None) {
         Ok(accession) => accession,
-        Err(rusqlite::Error::SqliteFailure(err, _details))
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            return Ok(Accession::get_or_create(conn, accession_name, &path.id, None).id);
-        }
-        Err(err) => return Err(err.into()),
+        Err(err) => return Err(GenBankError::AccessionError(err)),
     };
     let mut edges = Vec::with_capacity(segments.len() + 1);
 
@@ -400,7 +395,7 @@ fn create_accession_for_segments(
     });
 
     let edge_ids = AccessionEdge::bulk_create(conn, &edges);
-    AccessionPath::create(conn, &accession.id, &edge_ids);
+    AccessionPath::create(conn, &accession.id, &edge_ids)?;
     Ok(accession.id)
 }
 
@@ -602,7 +597,7 @@ where
                 for edit in wt_changes {
                     let start = edit.start;
                     let end = edit.end;
-                    let mut change_node_id = None;
+                    let change_node_id = None;
                     let change = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()
@@ -629,7 +624,7 @@ where
                                 start,
                                 end,
                                 block: PathBlock {
-                                    node_id: change_node,
+                                    node_id: change_node_id,
                                     block_sequence: edit.new_sequence.clone(),
                                     sequence_start: 0,
                                     sequence_end: change_seq.length,
