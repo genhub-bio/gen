@@ -11,14 +11,13 @@ use std::{
 };
 
 use gb_io::{self, seq::Location};
-use gen_core::{
-    Strand, is_terminal,
-    path::PathBlock,
-    range::{OrderedMerge, Range, merge_ordered_items},
+use gen_annotations::projection::{
+    AnnotationSegment, accession_edges_to_segments, project_annotation_segments,
 };
+use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
-    accession::{Accession, AccessionEdge},
+    accession::Accession,
     annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
@@ -35,141 +34,6 @@ use thiserror::Error;
 pub enum GenbankExportError {
     #[error("I/O error while exporting GenBank: {0}")]
     Io(#[from] std::io::Error),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AnnotationSegment {
-    node_id: gen_core::HashId,
-    range: Range,
-    strand: Strand,
-}
-
-impl OrderedMerge for AnnotationSegment {
-    fn should_merge_with(&self, next: &Self) -> bool {
-        self.strand == next.strand
-            && next.range.start >= self.range.start
-            && next.range.start <= self.range.end
-    }
-
-    fn merge_with(&mut self, next: &Self) {
-        self.range.end = max(self.range.end, next.range.end);
-    }
-}
-
-fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
-    let mut segments = Vec::new();
-    let mut current_node = None;
-    let mut current_start = None;
-    let mut current_strand = None;
-
-    for edge in edges {
-        if edge.source_coordinate < 0 {
-            current_node = Some(edge.target_node_id);
-            current_start = Some(edge.target_coordinate);
-            current_strand = Some(edge.target_strand);
-            continue;
-        }
-
-        if let (Some(node_id), Some(start), Some(strand)) =
-            (current_node, current_start, current_strand)
-        {
-            let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                (start, edge.source_coordinate)
-            } else {
-                (edge.source_coordinate, start)
-            };
-            if segment_end > segment_start {
-                segments.push(AnnotationSegment {
-                    node_id,
-                    range: Range {
-                        start: segment_start,
-                        end: segment_end,
-                    },
-                    strand,
-                });
-            }
-        }
-
-        if edge.target_coordinate < 0 {
-            break;
-        }
-
-        current_node = Some(edge.target_node_id);
-        current_start = Some(edge.target_coordinate);
-        current_strand = Some(edge.target_strand);
-    }
-
-    segments
-}
-
-fn merge_annotation_segments(segments: Vec<AnnotationSegment>) -> Vec<AnnotationSegment> {
-    merge_ordered_items(
-        segments
-            .into_iter()
-            .filter(|segment| segment.range.end > segment.range.start)
-            .collect(),
-    )
-}
-
-fn project_single_annotation_segment(
-    segment: &AnnotationSegment,
-    path_blocks: &[PathBlock],
-) -> Vec<AnnotationSegment> {
-    merge_annotation_segments(
-        path_blocks
-            .iter()
-            .filter_map(|block| {
-                if block.node_id != segment.node_id {
-                    return None;
-                }
-                let overlap_start = max(segment.range.start, block.sequence_start);
-                let overlap_end = min(segment.range.end, block.sequence_end);
-                if overlap_end <= overlap_start {
-                    return None;
-                }
-
-                let (start, end) = if block.strand == Strand::Reverse {
-                    (
-                        block.path_start + (block.sequence_end - overlap_end),
-                        block.path_start + (block.sequence_end - overlap_start),
-                    )
-                } else {
-                    (
-                        block.path_start + (overlap_start - block.sequence_start),
-                        block.path_start + (overlap_end - block.sequence_start),
-                    )
-                };
-                let strand = if block.strand == Strand::Reverse {
-                    segment.strand.complement()
-                } else {
-                    segment.strand
-                };
-
-                Some(AnnotationSegment {
-                    node_id: block.node_id,
-                    range: Range { start, end },
-                    strand,
-                })
-            })
-            .collect(),
-    )
-}
-
-fn project_annotation_segments(
-    accession_segments: &[AnnotationSegment],
-    path_blocks: &[PathBlock],
-    preserve_part_boundaries: bool,
-) -> Vec<AnnotationSegment> {
-    let projected = accession_segments
-        .iter()
-        .flat_map(|segment| project_single_annotation_segment(segment, path_blocks))
-        .collect::<Vec<_>>();
-
-    if preserve_part_boundaries {
-        projected
-    } else {
-        merge_annotation_segments(projected)
-    }
 }
 
 fn build_annotation_location(
