@@ -96,6 +96,12 @@ pub struct AccessionEdge {
     pub chromosome_index: i64,
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum AccessionEdgeError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+}
+
 impl<'a> Capnp<'a> for AccessionEdge {
     type Builder = accession_edge::Builder<'a>;
     type Reader = accession_edge::Reader<'a>;
@@ -362,7 +368,10 @@ impl Query for Accession {
 }
 
 impl AccessionEdge {
-    pub fn create(conn: &GraphConnection, edge: AccessionEdgeData) -> AccessionEdge {
+    pub fn create(
+        conn: &GraphConnection,
+        edge: AccessionEdgeData,
+    ) -> Result<AccessionEdge, AccessionEdgeError> {
         let hash = HashId(calculate_hash(&format!(
             "{}:{}:{}:{}:{}:{}:{}",
             edge.source_node_id,
@@ -387,12 +396,12 @@ impl AccessionEdge {
             edge.chromosome_index
         ]) {
             Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(_err, _details)) => {}
-            Err(_) => {
-                panic!("something bad happened querying the database")
+            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
+                if err.code == rusqlite::ErrorCode::ConstraintViolation {}
             }
+            Err(err) => return Err(AccessionEdgeError::DatabaseError(err)),
         };
-        AccessionEdge {
+        Ok(AccessionEdge {
             id: hash,
             source_node_id: edge.source_node_id,
             source_coordinate: edge.source_coordinate,
@@ -401,7 +410,7 @@ impl AccessionEdge {
             target_coordinate: edge.target_coordinate,
             target_strand: edge.target_strand,
             chromosome_index: edge.chromosome_index,
-        }
+        })
     }
 
     pub fn bulk_create(conn: &GraphConnection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
