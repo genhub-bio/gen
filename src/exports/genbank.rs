@@ -313,7 +313,11 @@ mod tests {
     use tempfile;
 
     use super::*;
-    use crate::{imports::genbank::import_genbank, test_helpers::setup_gen, track_database};
+    use crate::{
+        imports::genbank::{GenBankImportOptions, import_genbank},
+        test_helpers::setup_gen,
+        track_database,
+    };
 
     fn compare_genbanks(a: &PathBuf, b: &PathBuf) {
         let a = reader::parse_file(a).unwrap();
@@ -391,6 +395,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
+            GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
@@ -422,6 +427,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
+            GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
@@ -453,6 +459,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
+            GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();

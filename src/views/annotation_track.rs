@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
 };
 
-use gen_core::{HashId, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_graph::GenGraph;
 use gen_tui::{CroppedGraph, GraphController, ViewportState, VisualDetail, WorldPos, WorldRect};
 use petgraph::visit::NodeIndexable;
@@ -19,6 +19,7 @@ pub struct AnnotationSegment {
     pub node_id: HashId,
     pub start: i64,
     pub end: i64,
+    pub strand: Strand,
 }
 
 #[derive(Clone, Debug)]

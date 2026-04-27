@@ -142,6 +142,8 @@ pub fn import_genbank(
             }],
             description: "GenBank Import".to_string(),
         },
+        r#gen::imports::genbank::GenBankImportOptions::default()
+            .annotation_name_from_path(&filename),
     ) {
         Ok(_) => {
             conn.execute("END TRANSACTION;", []).unwrap();

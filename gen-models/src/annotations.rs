@@ -156,7 +156,7 @@ impl Query for Annotation {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum AnnotationError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
@@ -321,7 +321,7 @@ impl AnnotationGroupSample {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum AnnotationGroupError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),

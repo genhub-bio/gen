@@ -7,7 +7,7 @@ use std::{
 };
 
 use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
-use gen_core::{HashId, Workspace, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, Workspace, is_end_node, is_start_node};
 use gen_models::{
     accession::{Accession, AccessionEdge},
     annotations::{Annotation, AnnotationError},
@@ -27,16 +27,20 @@ fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment
     let mut segments = Vec::new();
     let mut current_node: Option<HashId> = None;
     let mut current_start: Option<i64> = None;
+    let mut current_strand: Option<Strand> = None;
 
     for edge in edges {
         if is_start_node(edge.source_node_id) {
             current_node = Some(edge.target_node_id);
             current_start = Some(edge.target_coordinate);
+            current_strand = Some(edge.target_strand);
             continue;
         }
 
         if is_end_node(edge.target_node_id) {
-            if let (Some(node_id), Some(start)) = (current_node, current_start) {
+            if let (Some(node_id), Some(start), Some(strand)) =
+                (current_node, current_start, current_strand)
+            {
                 let (segment_start, segment_end) = if start <= edge.source_coordinate {
                     (start, edge.source_coordinate)
                 } else {
@@ -46,12 +50,15 @@ fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment
                     node_id,
                     start: segment_start,
                     end: segment_end,
+                    strand,
                 });
             }
             break;
         }
 
-        if let (Some(node_id), Some(start)) = (current_node, current_start) {
+        if let (Some(node_id), Some(start), Some(strand)) =
+            (current_node, current_start, current_strand)
+        {
             let (segment_start, segment_end) = if start <= edge.source_coordinate {
                 (start, edge.source_coordinate)
             } else {
@@ -61,11 +68,13 @@ fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment
                 node_id,
                 start: segment_start,
                 end: segment_end,
+                strand,
             });
         }
 
         current_node = Some(edge.target_node_id);
         current_start = Some(edge.target_coordinate);
+        current_strand = Some(edge.target_strand);
     }
 
     segments
@@ -191,6 +200,7 @@ fn parse_translated_gff<R: BufRead>(
                 node_id,
                 start: seg_start,
                 end: seg_end,
+                strand: record.strand().into(),
             });
     }
     build_annotation_spans(track_label, segments_by_name)
@@ -203,8 +213,8 @@ fn parse_translated_bed<R: BufRead>(
     references_by_alias: HashMap<String, String>,
 ) -> Vec<AnnotationSpan> {
     let mut segments_by_name: HashMap<String, Vec<AnnotationSegment>> = HashMap::new();
-    let mut bed_reader = bed::io::reader::Builder::<3>.build_from_reader(reader);
-    let mut record = bed::Record::<3>::default();
+    let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
+    let mut record = bed::Record::<6>::default();
     while let Ok(read) = bed_reader.read_record(&mut record) {
         if read == 0 {
             break;
@@ -239,12 +249,16 @@ fn parse_translated_bed<R: BufRead>(
             (end, start)
         };
         let name = record
-            .other_fields()
-            .get(0)
-            .and_then(|value| std::str::from_utf8(value).ok())
+            .name()
+            .and_then(|value| std::str::from_utf8(value.as_ref()).ok())
             .filter(|value| !value.is_empty())
             .unwrap_or("feature")
             .to_string();
+        let strand = match record.strand() {
+            Ok(Some(bed::feature::record::Strand::Forward)) => Strand::Forward,
+            Ok(Some(bed::feature::record::Strand::Reverse)) => Strand::Reverse,
+            Ok(None) | Err(_) => Strand::Unknown,
+        };
         segments_by_name
             .entry(name)
             .or_default()
@@ -252,6 +266,7 @@ fn parse_translated_bed<R: BufRead>(
                 node_id,
                 start: seg_start,
                 end: seg_end,
+                strand,
             });
     }
     build_annotation_spans(track_label, segments_by_name)
@@ -486,4 +501,36 @@ pub fn load_annotation_file_track(
         index_available,
         loaded_window,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        io::Cursor,
+    };
+
+    use gen_core::{HashId, Strand};
+
+    use super::parse_translated_bed;
+
+    #[test]
+    fn parse_translated_bed_preserves_strand() {
+        let node_id = HashId::convert_str("node-1");
+        let bed = format!("{node_id}\t5\t8\tfeature-a\t0\t-\n");
+        let spans = parse_translated_bed(
+            Cursor::new(bed),
+            &HashSet::from([node_id]),
+            "bed",
+            HashMap::new(),
+        );
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "feature-a");
+        assert_eq!(spans[0].segments.len(), 1);
+        assert_eq!(spans[0].segments[0].node_id, node_id);
+        assert_eq!(spans[0].segments[0].start, 5);
+        assert_eq!(spans[0].segments[0].end, 8);
+        assert_eq!(spans[0].segments[0].strand, Strand::Reverse);
+    }
 }

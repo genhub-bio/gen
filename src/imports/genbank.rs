@@ -1,8 +1,15 @@
-use std::{io::Read, str};
+use std::{
+    cmp::{max, min},
+    io::Read,
+    path::Path as FsPath,
+    str,
+};
 
 use gb_io::reader;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
+    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    annotations::Annotation,
     block_group::{BlockGroup, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -17,9 +24,422 @@ use gen_models::{
 };
 
 use crate::{
-    genbank::{EditType, GenBankError, process_sequence},
+    genbank::{
+        EditType, GenBankAnnotation, GenBankAnnotationSegment, GenBankEdit, GenBankError,
+        process_sequence,
+    },
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
+
+#[derive(Clone, Debug)]
+pub struct GenBankImportOptions {
+    pub add_annotations: bool,
+    pub annotation_name: Option<String>,
+    pub annotation_group: Option<String>,
+}
+
+impl Default for GenBankImportOptions {
+    fn default() -> Self {
+        Self {
+            add_annotations: true,
+            annotation_name: None,
+            annotation_group: None,
+        }
+    }
+}
+
+impl GenBankImportOptions {
+    pub fn annotation_name_from_path(mut self, path: impl AsRef<FsPath>) -> Self {
+        self.annotation_name = path
+            .as_ref()
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .map(str::to_string);
+        self
+    }
+}
+
+/// Maps a half-open interval in the final edited GenBank sequence back to a canonical node range.
+///
+/// `final_start` and `final_end` are coordinates in the fully edited sequence from the imported
+/// GenBank record. `node_id`, `sequence_start`, and `sequence_end` identify the corresponding
+/// half-open range on the canonical node that stores that portion of sequence in the graph.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FinalSequenceSegment {
+    final_start: i64,
+    final_end: i64,
+    node_id: HashId,
+    sequence_start: i64,
+    sequence_end: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NodeSequenceSegment {
+    node_id: HashId,
+    sequence_start: i64,
+    sequence_end: i64,
+    strand: Strand,
+}
+
+struct LocusAnnotationImport<'a> {
+    path: &'a Path,
+    wt_node_id: HashId,
+    wt_length: i64,
+    final_sequence: &'a str,
+    annotations: &'a [GenBankAnnotation],
+    changes: &'a [(GenBankEdit, Option<HashId>)],
+    annotation_name: Option<&'a str>,
+    annotation_group: Option<&'a str>,
+    collection: &'a str,
+    sample: &'a str,
+    locus_name: &'a str,
+}
+
+fn annotation_file_label(annotation_name: Option<&str>, fallback: &str) -> String {
+    annotation_name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| (!fallback.is_empty()).then(|| fallback.to_string()))
+        .unwrap_or_else(|| "genbank".to_string())
+}
+
+fn annotation_group_name(
+    annotation_name: Option<&str>,
+    collection: &str,
+    sample: &str,
+    locus_name: &str,
+) -> String {
+    let file_label = annotation_file_label(annotation_name, locus_name);
+    format!("GenBank {collection}/{sample}/{file_label}")
+}
+
+/// Builds a coordinate translation table from the final imported GenBank sequence back to the
+/// graph nodes that store it.
+///
+/// GenBank annotations are expressed against the fully edited sequence from the file, but after
+/// import that sequence may be split across the WT node plus any inserted or replacement nodes
+/// created for edits. Each `FinalSequenceSegment` says which half-open range in the final sequence
+/// maps to which node and node-local coordinate range, and `map_annotation_segments` uses that to
+/// project annotation spans onto the correct graph nodes.
+///
+/// A confusing part of this code is that edit.start refers to the position in the wildtype sequence
+/// where an edit begins. That is how GenBankEdit defines start/end.
+fn build_final_sequence_segments(
+    wt_node_id: HashId,
+    wt_length: i64,
+    changes: &[(GenBankEdit, Option<HashId>)],
+) -> Vec<FinalSequenceSegment> {
+    let mut segments = Vec::new();
+    let mut wt_cursor = 0;
+    let mut final_cursor = 0;
+
+    for (edit, change_node_id) in changes {
+        // If we are not at the position of the edit, add the segment of the wildtype sequence
+        // to the chain
+        if wt_cursor < edit.start {
+            let reference_length = edit.start - wt_cursor;
+            segments.push(FinalSequenceSegment {
+                final_start: final_cursor,
+                final_end: final_cursor + reference_length,
+                node_id: wt_node_id,
+                sequence_start: wt_cursor,
+                sequence_end: edit.start,
+            });
+            wt_cursor = edit.start;
+            final_cursor += reference_length;
+        }
+
+        match edit.edit_type {
+            EditType::Insertion => {
+                if let Some(change_node_id) = change_node_id {
+                    let new_length = edit.new_sequence.len() as i64;
+                    if new_length > 0 {
+                        segments.push(FinalSequenceSegment {
+                            final_start: final_cursor,
+                            final_end: final_cursor + new_length,
+                            node_id: *change_node_id,
+                            sequence_start: 0,
+                            sequence_end: new_length,
+                        });
+                    }
+                    final_cursor += new_length;
+                }
+            }
+            EditType::Replacement => {
+                wt_cursor = edit.end;
+                if let Some(change_node_id) = change_node_id {
+                    let new_length = edit.new_sequence.len() as i64;
+                    if new_length > 0 {
+                        segments.push(FinalSequenceSegment {
+                            final_start: final_cursor,
+                            final_end: final_cursor + new_length,
+                            node_id: *change_node_id,
+                            sequence_start: 0,
+                            sequence_end: new_length,
+                        });
+                    }
+                    final_cursor += new_length;
+                }
+            }
+            EditType::Deletion => {
+                wt_cursor = edit.end;
+            }
+        }
+    }
+
+    if wt_cursor < wt_length {
+        let reference_length = wt_length - wt_cursor;
+        segments.push(FinalSequenceSegment {
+            final_start: final_cursor,
+            final_end: final_cursor + reference_length,
+            node_id: wt_node_id,
+            sequence_start: wt_cursor,
+            sequence_end: wt_length,
+        });
+    }
+
+    segments
+}
+
+/// Coalesces consecutive overlapping or adjacent node-local segments that are already ordered.
+///
+/// This is not a general interval merge. It assumes `segments` arrive in the correct traversal
+/// order, so only the most recently merged segment needs to be checked. When two consecutive
+/// segments are on the same node and strand and overlap or touch, the merged segment keeps the
+/// original `sequence_start` and extends `sequence_end` to the farthest right boundary.
+///
+/// For example:
+/// - `[0, 3)` then `[3, 5)` merges to `[0, 5)`
+/// - `[0, 3)` then `[2, 7)` merges to `[0, 7)`
+/// - `[0, 3)` then `[5, 7)` does not merge
+/// - Same coordinates on different nodes or strands do not merge
+fn merge_node_sequence_segments(
+    segments: Vec<NodeSequenceSegment>,
+) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
+    let mut merged: Vec<NodeSequenceSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if segment.sequence_end <= segment.sequence_start {
+            return Err(GenBankError::ParseError(format!(
+                "Invalid node sequence segment: start {} must be less than end {}",
+                segment.sequence_start, segment.sequence_end
+            )));
+        }
+        if let Some(last) = merged.last_mut()
+            && last.node_id == segment.node_id
+            && last.strand == segment.strand
+            && segment.sequence_start >= last.sequence_start
+            && segment.sequence_start <= last.sequence_end
+        {
+            last.sequence_end = last.sequence_end.max(segment.sequence_end);
+            continue;
+        }
+        merged.push(segment);
+    }
+    Ok(merged)
+}
+
+/// Maps annotation spans from final edited-sequence coordinates onto node-local coordinates.
+///
+/// `overlap_end <= overlap_start` means the annotation segment and the current final-sequence
+/// segment do not contribute a positive-width overlap, so that pair is skipped.
+///
+/// Completely before:
+/// ```text
+/// annotation: [----)
+/// final:           [----)
+///
+/// overlap_start = final.start
+/// overlap_end   = annotation.end
+///
+/// annotation.end <= final.start
+/// => overlap_end <= overlap_start
+/// ```
+///
+/// Completely after:
+/// ```text
+/// annotation:        [----)
+/// final:      [----)
+///
+/// overlap_start = annotation.start
+/// overlap_end   = final.end
+///
+/// final.end <= annotation.start
+/// => overlap_end <= overlap_start
+/// ```
+///
+/// Touching at a boundary:
+/// ```text
+/// annotation: [----)
+/// final:           [----)
+///
+/// annotation.end == final.start
+/// => overlap_end == overlap_start
+/// ```
+fn map_annotation_segments(
+    annotation_segments: &[GenBankAnnotationSegment],
+    final_segments: &[FinalSequenceSegment],
+) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
+    merge_node_sequence_segments(
+        annotation_segments
+            .iter()
+            .flat_map(|annotation_segment| {
+                final_segments.iter().filter_map(|final_segment| {
+                    let overlap_start = max(annotation_segment.start, final_segment.final_start);
+                    let overlap_end = min(annotation_segment.end, final_segment.final_end);
+                    if overlap_end <= overlap_start {
+                        return None;
+                    }
+
+                    let segment_start =
+                        final_segment.sequence_start + (overlap_start - final_segment.final_start);
+                    let segment_end =
+                        final_segment.sequence_start + (overlap_end - final_segment.final_start);
+
+                    Some(NodeSequenceSegment {
+                        node_id: final_segment.node_id,
+                        sequence_start: segment_start,
+                        sequence_end: segment_end,
+                        strand: annotation_segment.strand,
+                    })
+                })
+            })
+            .collect(),
+    )
+}
+
+fn create_accession_for_segments(
+    conn: &gen_models::db::GraphConnection,
+    path: &Path,
+    accession_name: &str,
+    segments: &[NodeSequenceSegment],
+) -> Result<HashId, GenBankError> {
+    let accession = match Accession::create(conn, accession_name, &path.id, None) {
+        Ok(accession) => accession,
+        Err(rusqlite::Error::SqliteFailure(err, _details))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Ok(Accession::get_or_create(conn, accession_name, &path.id, None).id);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let mut edges = Vec::with_capacity(segments.len() + 1);
+
+    let first = segments.first().ok_or_else(|| {
+        GenBankError::ParseError("Annotation has no mappable segments".to_string())
+    })?;
+    edges.push(AccessionEdgeData {
+        source_node_id: PATH_START_NODE_ID,
+        source_coordinate: -1,
+        source_strand: Strand::Forward,
+        target_node_id: first.node_id,
+        target_coordinate: first.sequence_start,
+        target_strand: first.strand,
+        chromosome_index: 0,
+    });
+
+    for window in segments.windows(2) {
+        let current = &window[0];
+        let next = &window[1];
+        edges.push(AccessionEdgeData {
+            source_node_id: current.node_id,
+            source_coordinate: current.sequence_end,
+            source_strand: current.strand,
+            target_node_id: next.node_id,
+            target_coordinate: next.sequence_start,
+            target_strand: next.strand,
+            chromosome_index: 0,
+        });
+    }
+
+    let last = segments.last().unwrap();
+    edges.push(AccessionEdgeData {
+        source_node_id: last.node_id,
+        source_coordinate: last.sequence_end,
+        source_strand: last.strand,
+        target_node_id: PATH_END_NODE_ID,
+        target_coordinate: -1,
+        target_strand: Strand::Forward,
+        chromosome_index: 0,
+    });
+
+    let edge_ids = AccessionEdge::bulk_create(conn, &edges);
+    AccessionPath::create(conn, &accession.id, &edge_ids);
+    Ok(accession.id)
+}
+
+fn import_locus_annotations(
+    conn: &gen_models::db::GraphConnection,
+    input: LocusAnnotationImport<'_>,
+) -> Result<(), GenBankError> {
+    if input.annotations.is_empty() {
+        return Ok(());
+    }
+
+    let final_segments =
+        build_final_sequence_segments(input.wt_node_id, input.wt_length, input.changes);
+    let annotation_group = input
+        .annotation_group
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            annotation_group_name(
+                input.annotation_name,
+                input.collection,
+                input.sample,
+                input.locus_name,
+            )
+        });
+
+    for annotation in input.annotations.iter() {
+        let mapped_segments = map_annotation_segments(&annotation.segments, &final_segments)?;
+        if mapped_segments.is_empty() {
+            continue;
+        }
+
+        let annotation_sequence_key = annotation
+            .segments
+            .iter()
+            .map(|segment| {
+                let segment_sequence =
+                    &input.final_sequence[segment.start as usize..segment.end as usize];
+                format!(
+                    "{}:{}:{}:{segment_sequence}",
+                    segment.start, segment.end, segment.strand
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let mapped_segment_key = mapped_segments
+            .iter()
+            .map(|segment| {
+                format!(
+                    "{}:{}:{}:{}",
+                    segment.node_id, segment.sequence_start, segment.sequence_end, segment.strand
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let annotation_sequence_hash = HashId::convert_str(&format!(
+            "{annotation_sequence_key};mapped_segments={mapped_segment_key}"
+        ));
+        let accession_name = format!(
+            "{annotation_group}:annotation_sequence_hash={annotation_sequence_hash}:{}",
+            annotation.name,
+        );
+        let accession_id =
+            create_accession_for_segments(conn, input.path, &accession_name, &mapped_segments)?;
+
+        let _ = Annotation::create_with_samples(
+            conn,
+            &annotation.name,
+            &annotation_group,
+            &accession_id,
+            &[input.sample],
+        )?;
+    }
+
+    Ok(())
+}
 
 pub fn import_genbank<'a, R>(
     context: &DbContext,
@@ -27,6 +447,7 @@ pub fn import_genbank<'a, R>(
     collection: impl Into<Option<&'a str>>,
     sample: &str,
     operation_info: OperationInfo,
+    options: GenBankImportOptions,
 ) -> Result<Operation, GenBankError>
 where
     R: Read,
@@ -116,9 +537,12 @@ where
                     &[edge_into.id, edge_out_of.id],
                 );
 
-                for edit in locus.changes_to_wt() {
+                let wt_changes = locus.changes_to_wt();
+                let mut applied_changes = Vec::with_capacity(wt_changes.len());
+                for edit in wt_changes {
                     let start = edit.start;
                     let end = edit.end;
+                    let mut change_node_id = None;
                     let change = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()
@@ -138,6 +562,7 @@ where
                                     new_hash = &change_seq.hash,
                                 )),
                             );
+                            change_node_id = Some(change_node);
                             PathChange {
                                 block_group_id: block_group.id,
                                 path: path.clone(),
@@ -180,6 +605,26 @@ where
                     };
                     let tree = path.intervaltree(conn);
                     BlockGroup::insert_change(conn, &change, &tree).unwrap();
+                    applied_changes.push((edit, change_node_id));
+                }
+
+                if options.add_annotations {
+                    import_locus_annotations(
+                        conn,
+                        LocusAnnotationImport {
+                            path: &path,
+                            wt_node_id,
+                            wt_length: sequence.length,
+                            final_sequence: &locus.sequence,
+                            annotations: &locus.annotations,
+                            changes: &applied_changes,
+                            annotation_name: options.annotation_name.as_deref(),
+                            annotation_group: options.annotation_group.as_deref(),
+                            collection: &collection.name,
+                            sample,
+                            locus_name: &locus.name,
+                        },
+                    )?;
                 }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
@@ -210,13 +655,26 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
+    use std::{
+        collections::{HashMap, HashSet},
+        fs::File,
+        io::BufReader,
+        path::PathBuf,
+    };
 
-    use gen_models::{file_types::FileTypes, operations::OperationFile, traits::Query};
+    use gen_core::is_terminal;
+    use gen_models::{
+        annotations::{Annotation, AnnotationGroup},
+        file_types::FileTypes,
+        operations::OperationFile,
+        traits::Query,
+    };
     use noodles::fasta;
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::{
+        test_helpers::setup_gen, track_database, views::annotations::load_annotations_for_group,
+    };
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -226,6 +684,265 @@ mod tests {
         let record = records.next().unwrap().unwrap();
         let seq = record.sequence();
         str::from_utf8(seq.as_ref()).unwrap().to_string()
+    }
+
+    fn import_puc19(
+        context: &DbContext,
+        sample_name: &str,
+        options: GenBankImportOptions,
+    ) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
+        let file = File::open(&path).unwrap();
+        let _ = import_genbank(
+            context,
+            BufReader::new(file),
+            Some("fixtures"),
+            sample_name,
+            OperationInfo {
+                files: vec![OperationFile {
+                    file_path: path.to_str().unwrap().to_string(),
+                    file_type: FileTypes::GenBank,
+                }],
+                description: "test".to_string(),
+            },
+            options.annotation_name_from_path(&path),
+        )
+        .unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn test_build_final_sequence_segments() {
+        let wt_node_id = HashId::convert_str("wt");
+        let insertion_node_id = HashId::convert_str("insertion");
+        let replacement_node_id = HashId::convert_str("replacement");
+        let segments = build_final_sequence_segments(
+            wt_node_id,
+            10,
+            &[
+                (
+                    GenBankEdit {
+                        start: 2,
+                        end: 2,
+                        old_sequence: String::new(),
+                        new_sequence: "GG".to_string(),
+                        edit_type: EditType::Insertion,
+                    },
+                    Some(insertion_node_id),
+                ),
+                (
+                    GenBankEdit {
+                        start: 5,
+                        end: 7,
+                        old_sequence: "AA".to_string(),
+                        new_sequence: "TTT".to_string(),
+                        edit_type: EditType::Replacement,
+                    },
+                    Some(replacement_node_id),
+                ),
+                (
+                    GenBankEdit {
+                        start: 8,
+                        end: 9,
+                        old_sequence: "C".to_string(),
+                        new_sequence: String::new(),
+                        edit_type: EditType::Deletion,
+                    },
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            segments,
+            vec![
+                FinalSequenceSegment {
+                    final_start: 0,
+                    final_end: 2,
+                    node_id: wt_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 2,
+                    final_end: 4,
+                    node_id: insertion_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 4,
+                    final_end: 7,
+                    node_id: wt_node_id,
+                    sequence_start: 2,
+                    sequence_end: 5,
+                },
+                FinalSequenceSegment {
+                    final_start: 7,
+                    final_end: 10,
+                    node_id: replacement_node_id,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                },
+                FinalSequenceSegment {
+                    final_start: 10,
+                    final_end: 11,
+                    node_id: wt_node_id,
+                    sequence_start: 7,
+                    sequence_end: 8,
+                },
+                FinalSequenceSegment {
+                    final_start: 11,
+                    final_end: 12,
+                    node_id: wt_node_id,
+                    sequence_start: 9,
+                    sequence_end: 10,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_node_sequence_segments() {
+        let node_id = HashId::convert_str("node");
+        let other_node_id = HashId::convert_str("other");
+
+        let merged = merge_node_sequence_segments(vec![
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 0,
+                sequence_end: 3,
+                strand: Strand::Forward,
+            },
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 3,
+                sequence_end: 5,
+                strand: Strand::Forward,
+            },
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 4,
+                sequence_end: 7,
+                strand: Strand::Forward,
+            },
+            NodeSequenceSegment {
+                node_id,
+                sequence_start: 1,
+                sequence_end: 2,
+                strand: Strand::Reverse,
+            },
+            NodeSequenceSegment {
+                node_id: other_node_id,
+                sequence_start: 0,
+                sequence_end: 1,
+                strand: Strand::Forward,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            merged,
+            vec![
+                NodeSequenceSegment {
+                    node_id,
+                    sequence_start: 0,
+                    sequence_end: 7,
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id,
+                    sequence_start: 1,
+                    sequence_end: 2,
+                    strand: Strand::Reverse,
+                },
+                NodeSequenceSegment {
+                    node_id: other_node_id,
+                    sequence_start: 0,
+                    sequence_end: 1,
+                    strand: Strand::Forward,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_node_sequence_segments_errors_on_invalid_range() {
+        let node_id = HashId::convert_str("node");
+
+        assert_eq!(
+            merge_node_sequence_segments(vec![NodeSequenceSegment {
+                node_id,
+                sequence_start: 7,
+                sequence_end: 7,
+                strand: Strand::Forward,
+            }]),
+            Err(GenBankError::ParseError(
+                "Invalid node sequence segment: start 7 must be less than end 7".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_map_annotation_segments() {
+        let wt_node_id = HashId::convert_str("wt");
+        let insertion_node_id = HashId::convert_str("insertion");
+
+        let mapped = map_annotation_segments(
+            &[GenBankAnnotationSegment {
+                start: 1,
+                end: 6,
+                strand: Strand::Forward,
+            }],
+            &[
+                FinalSequenceSegment {
+                    final_start: 0,
+                    final_end: 2,
+                    node_id: wt_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 2,
+                    final_end: 4,
+                    node_id: insertion_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                },
+                FinalSequenceSegment {
+                    final_start: 4,
+                    final_end: 7,
+                    node_id: wt_node_id,
+                    sequence_start: 2,
+                    sequence_end: 5,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            mapped,
+            vec![
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_start: 1,
+                    sequence_end: 2,
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id: insertion_node_id,
+                    sequence_start: 0,
+                    sequence_end: 2,
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_start: 2,
+                    sequence_end: 4,
+                    strand: Strand::Forward,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -248,7 +965,8 @@ mod tests {
                         file_type: FileTypes::GenBank,
                     }],
                     description: "test".to_string(),
-                }
+                },
+                GenBankImportOptions::default(),
             ),
             Err(GenBankError::ParseError(
                 "Failed to parse Syntax error: Error MapRes while parsing [this is not valid]"
@@ -280,6 +998,7 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
+            GenBankImportOptions::default(),
         )
         .unwrap();
         assert_eq!(
@@ -311,11 +1030,109 @@ mod tests {
                 }],
                 description: "test".to_string(),
             },
+            GenBankImportOptions::default(),
         );
         assert_eq!(
             Sample::get_by_name(conn, "new-sample").unwrap().name,
             "new-sample"
         );
+    }
+
+    #[test]
+    fn test_imports_puc19_annotations_by_default() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        let _ = import_puc19(&context, "puc19-sample", GenBankImportOptions::default());
+
+        let groups = AnnotationGroup::query_by_sample(conn, "puc19-sample");
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].name.contains("puc19"));
+
+        let annotations = Annotation::query_by_group(conn, &groups[0].name).unwrap();
+        assert_eq!(annotations.len(), 21);
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation.name == "AmpR")
+        );
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation.name == "lac promoter")
+        );
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation.name == "ori")
+        );
+
+        let block_group = Sample::get_block_groups(conn, "fixtures", "puc19-sample")
+            .into_iter()
+            .next()
+            .unwrap();
+        let path = BlockGroup::get_current_path(conn, &block_group.id);
+        let mut visible_ranges_by_node: HashMap<HashId, Vec<(i64, i64)>> = HashMap::new();
+        for block in path.blocks(conn) {
+            if is_terminal(block.node_id) {
+                continue;
+            }
+            visible_ranges_by_node
+                .entry(block.node_id)
+                .or_default()
+                .push((block.sequence_start, block.sequence_end));
+        }
+
+        let spans =
+            load_annotations_for_group(conn, &groups[0].name, &visible_ranges_by_node).unwrap();
+        let m13_forward = spans
+            .iter()
+            .find(|annotation| annotation.name == "M13 Forward")
+            .unwrap();
+        assert_eq!(m13_forward.segments.len(), 1);
+        assert_eq!(m13_forward.segments[0].start, 688);
+        assert_eq!(m13_forward.segments[0].end, 706);
+        assert_eq!(m13_forward.segments[0].strand, Strand::Reverse);
+
+        let ori = spans
+            .iter()
+            .find(|annotation| annotation.name == "ori")
+            .unwrap();
+        assert_eq!(ori.segments.len(), 2);
+        assert!(
+            ori.segments
+                .iter()
+                .any(|segment| segment.start == 2314 && segment.end == 2686)
+        );
+        assert!(
+            ori.segments
+                .iter()
+                .any(|segment| segment.start == 0 && segment.end == 217)
+        );
+    }
+
+    #[test]
+    fn test_skips_puc19_annotations_with_option() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        let _ = import_puc19(
+            &context,
+            "no-annotation-sample",
+            GenBankImportOptions {
+                add_annotations: false,
+                annotation_name: None,
+                annotation_group: None,
+            },
+        );
+
+        assert!(AnnotationGroup::query_by_sample(conn, "no-annotation-sample").is_empty());
+        let annotations = Annotation::query(conn, "select * from annotations", rusqlite::params!());
+        assert!(annotations.is_empty());
     }
 
     #[cfg(test)]
@@ -347,6 +1164,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
@@ -385,6 +1203,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
@@ -440,6 +1259,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
@@ -501,6 +1321,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
@@ -560,6 +1381,7 @@ mod tests {
                     }],
                     description: "test".to_string(),
                 },
+                GenBankImportOptions::default(),
             );
             // there would be 4! sequences so we just check we have the fully changed and unchanged sequence
             let f = reader::parse_file(&path).unwrap();

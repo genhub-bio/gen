@@ -10,7 +10,7 @@ use gen_models::{
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
-    imports::genbank::import_genbank,
+    imports::genbank::{GenBankImportOptions, import_genbank},
 };
 
 /// Import a Genbank file
@@ -25,6 +25,12 @@ pub struct Command {
     /// A sample name to associate the Genbank file with
     #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
     sample: String,
+    /// Override the annotation group name created for imported GenBank annotations
+    #[arg(long = "annotation-group")]
+    annotation_group: Option<String>,
+    /// Skip importing GenBank feature annotations
+    #[arg(long)]
+    no_annotations: bool,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -47,6 +53,9 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     } else {
         Box::new(File::open(cmd.path.clone()).unwrap())
     };
+    let mut options = GenBankImportOptions::default().annotation_name_from_path(&cmd.path);
+    options.add_annotations = !cmd.no_annotations;
+    options.annotation_group = cmd.annotation_group.clone();
     match import_genbank(
         context,
         &mut reader,
@@ -59,6 +68,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
             }],
             description: "GenBank Import".to_string(),
         },
+        options,
     ) {
         Ok(_) => {
             println!("GenBank imported.");
