@@ -3,10 +3,9 @@ use std::{
     borrow::Cow,
     cmp::{max, min},
     collections::HashSet,
-    fs::File,
     hash::Hash,
+    io::Write,
     iter::zip,
-    path::PathBuf,
     str,
 };
 
@@ -246,7 +245,7 @@ pub fn export_genbank(
     conn: &GraphConnection,
     collection_name: &str,
     sample_name: &str,
-    filename: &PathBuf,
+    writer: impl Write,
 ) -> Result<(), GenbankExportError> {
     // GenBank don't really support graph like structures. Programs like Geneious use features to
     // mark where changes have occurred, and for now we replicate this approach. However, we are
@@ -264,8 +263,7 @@ pub fn export_genbank(
     // assumption.
     let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
 
-    let file = File::create(filename)?;
-    let mut writer = gb_io::writer::SeqWriter::new(file);
+    let mut writer = gb_io::writer::SeqWriter::new(writer);
 
     for block_group in block_groups.iter() {
         let path = BlockGroup::get_current_path(conn, &block_group.id);
@@ -426,7 +424,7 @@ pub fn export_genbank(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use std::{io, io::BufReader, path::PathBuf, str};
+    use std::{fs::File, io, io::BufReader, path::PathBuf, str};
 
     use gb_io::reader;
     use gen_core::{
@@ -441,7 +439,6 @@ mod tests {
         operations::{OperationFile, OperationInfo},
         path::Path,
     };
-    use tempfile;
 
     use super::*;
     use crate::{
@@ -450,10 +447,10 @@ mod tests {
         track_database,
     };
 
-    fn compare_genbanks(a: &PathBuf, b: &PathBuf) {
+    fn compare_genbanks(a: &std::path::Path, b: &[u8]) {
         let a = reader::parse_file(a).unwrap();
         let a_seq = str::from_utf8(&a[0].seq).unwrap().to_string();
-        let b = reader::parse_file(b).unwrap();
+        let b = reader::parse_slice(b).unwrap();
         let b_seq = str::from_utf8(&b[0].seq).unwrap().to_string();
         assert_eq!(a_seq, b_seq);
 
@@ -622,10 +619,9 @@ mod tests {
             GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
-        compare_genbanks(&path, &filename);
+        let mut output = Vec::new();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        compare_genbanks(&path, &output);
     }
 
     #[test]
@@ -654,10 +650,9 @@ mod tests {
             GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
-        compare_genbanks(&path, &filename);
+        let mut output = Vec::new();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        compare_genbanks(&path, &output);
     }
 
     #[test]
@@ -686,10 +681,9 @@ mod tests {
             GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
-        compare_genbanks(&path, &filename);
+        let mut output = Vec::new();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        compare_genbanks(&path, &output);
     }
 
     #[test]
@@ -718,12 +712,11 @@ mod tests {
         )
         .unwrap();
 
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "fixtures", "puc19-export", &filename).unwrap();
+        let mut output = Vec::new();
+        export_genbank(conn, "fixtures", "puc19-export", &mut output).unwrap();
 
-        let output = reader::parse_file(&filename).unwrap();
-        let features = &output[0].features;
+        let parsed = reader::parse_slice(&output).unwrap();
+        let features = &parsed[0].features;
         let labels = features
             .iter()
             .filter_map(feature_label)
@@ -760,20 +753,6 @@ mod tests {
                 Location::simple_range(546, 564),
                 Location::simple_range(564, 571),
             ])
-        );
-
-        let exported_text = std::fs::read_to_string(&filename).unwrap();
-        assert!(
-            exported_text.contains(
-                "                     /note=\"CAP binding activates transcription in the presence\n                     of cAMP.\""
-            ),
-            "export should wrap the CAP binding site note without inserting a blank line"
-        );
-        assert!(
-            !exported_text.contains(
-                "                     /note=\"CAP binding activates transcription in the presence\n\n                     of cAMP.\""
-            ),
-            "export should not insert a blank line inside wrapped note text"
         );
 
         let m13_forward = features
@@ -853,12 +832,11 @@ mod tests {
             "test",
         );
 
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "test", "test", &filename).unwrap();
+        let mut output = Vec::new();
+        export_genbank(conn, "test", "test", &mut output).unwrap();
 
-        let output = reader::parse_file(&filename).unwrap();
-        let features = &output[0].features;
+        let parsed = reader::parse_slice(&output).unwrap();
+        let features = &parsed[0].features;
 
         let join_annotation = features
             .iter()
@@ -969,11 +947,10 @@ mod tests {
         )
         .unwrap();
 
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "test", "test", &filename).unwrap();
+        let mut output = Vec::new();
+        export_genbank(conn, "test", "test", &mut output).unwrap();
 
-        let exported_text = std::fs::read_to_string(&filename).unwrap();
+        let exported_text = String::from_utf8(output).unwrap();
         assert!(
             exported_text.contains(
                 "                     /note=\"CAP binding activates transcription in the presence\n                     of cAMP.\""
