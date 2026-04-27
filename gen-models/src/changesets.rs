@@ -859,7 +859,7 @@ pub fn apply_changeset(
     }
 
     for bg in block_groups_parent_first(&dependencies.block_group) {
-        BlockGroup::create(
+        match BlockGroup::create(
             conn,
             NewBlockGroup {
                 collection_name: &bg.collection_name,
@@ -868,7 +868,10 @@ pub fn apply_changeset(
                 parent_block_group_id: bg.parent_block_group_id.as_ref(),
                 is_default: bg.is_default,
             },
-        );
+        ) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::BlockGroupError(err)),
+        }
     }
 
     for node in dependencies.nodes.iter() {
@@ -935,7 +938,7 @@ pub fn apply_changeset(
         }
     }
     for bg in block_groups_parent_first(&changeset.block_groups) {
-        BlockGroup::create(
+        match BlockGroup::create(
             conn,
             NewBlockGroup {
                 collection_name: &bg.collection_name,
@@ -944,7 +947,10 @@ pub fn apply_changeset(
                 parent_block_group_id: bg.parent_block_group_id.as_ref(),
                 is_default: bg.is_default,
             },
-        );
+        ) {
+            Ok(_) => {}
+            Err(err) => return Err(ChangesetError::BlockGroupError(err)),
+        }
     }
     for node in &changeset.nodes {
         Node::create(conn, &node.sequence_hash, &node.id)?;
@@ -1798,7 +1804,8 @@ mod tests {
                     name: "new-bg",
                     ..Default::default()
                 },
-            );
+            )
+            .unwrap();
             let shared_edge = old_edges[0].edge.clone();
             BlockGroupEdge::bulk_create(
                 conn,
@@ -1843,7 +1850,7 @@ mod tests {
 
             // create some stuff before we attach to our main session that will be required as extra information
             let (bg_id, _path_id) = setup_block_group(conn)?;
-            let dep_bg = BlockGroup::get_by_id(conn, &bg_id);
+            let dep_bg = BlockGroup::get_by_id(conn, &bg_id).unwrap();
 
             let existing_seq = Sequence::new()
                 .sequence_type("DNA")

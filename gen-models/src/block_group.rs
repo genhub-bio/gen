@@ -219,8 +219,10 @@ impl<'a> PathCache<'a> {
 }
 
 impl BlockGroup {
-    pub fn create(conn: &GraphConnection, new_block_group: NewBlockGroup<'_>) -> BlockGroup {
-        Sample::get_or_create(conn, new_block_group.sample_name).unwrap();
+    pub fn create(
+        conn: &GraphConnection,
+        new_block_group: NewBlockGroup<'_>,
+    ) -> Result<BlockGroup, BlockGroupError> {
         let hash = BlockGroup::get_id(
             new_block_group.collection_name,
             new_block_group.sample_name,
@@ -237,7 +239,10 @@ impl BlockGroup {
                 parent_block_group_id,
                 is_default
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = match conn.prepare(query) {
+            Ok(stmt) => stmt,
+            Err(e) => return Err(BlockGroupError::DatabaseError(e)),
+        };
         let bg = BlockGroup {
             id: hash,
             collection_name: new_block_group.collection_name.to_string(),
@@ -256,17 +261,13 @@ impl BlockGroup {
             new_block_group.parent_block_group_id,
             new_block_group.is_default,
         ]) {
-            Ok(_) => bg,
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    bg
-                } else {
-                    panic!("something bad happened querying the database")
-                }
+            Ok(_) => Ok(bg),
+            Err(rusqlite::Error::SqliteFailure(err, _details))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Ok(bg)
             }
-            Err(_) => {
-                panic!("something bad happened querying the database")
-            }
+            Err(e) => Err(BlockGroupError::DatabaseError(e)),
         }
     }
 
@@ -283,15 +284,20 @@ impl BlockGroup {
         .unwrap();
     }
 
-    pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> BlockGroup {
+    pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> Result<BlockGroup, BlockGroupError> {
         let query = "SELECT * FROM block_groups WHERE id = ?1";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = match conn.prepare(query) {
+            Ok(stmt) => stmt,
+            Err(e) => return Err(BlockGroupError::DatabaseError(e)),
+        };
         match stmt.query_row([id], |row| Ok(Self::process_row(row))) {
-            Ok(res) => res,
-            Err(rusqlite::Error::QueryReturnedNoRows) => panic!("No block group with id {id}"),
-            Err(_) => {
-                panic!("something bad happened querying the database")
-            }
+            Ok(res) => Ok(res),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(BlockGroupError::QueryError(
+                QueryError::ResultsNotFound(format!("BlockGroup with id {id} not found")),
+            )),
+            Err(_) => Err(BlockGroupError::DatabaseError(
+                rusqlite::Error::QueryReturnedNoRows,
+            )),
         }
     }
 
@@ -385,7 +391,7 @@ impl BlockGroup {
                     name: group_name,
                     ..Default::default()
                 },
-            )]);
+            )?]);
         }
 
         let mut new_block_groups = vec![];
@@ -399,7 +405,7 @@ impl BlockGroup {
                     parent_block_group_id: Some(&parent_block_group.id),
                     ..Default::default()
                 },
-            );
+            )?;
             new_block_group.copy_contents_from(conn, parent_block_group)?;
             new_block_groups.push(new_block_group);
         }

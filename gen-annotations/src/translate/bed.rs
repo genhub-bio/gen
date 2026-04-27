@@ -123,9 +123,9 @@ mod tests {
     use crate::test_helpers::{get_connection, setup_test_data};
 
     #[test]
-    fn translates_coordinates_to_nodes() -> Result<(), Box<dyn std::error::Error>> {
+    fn translates_coordinates_to_nodes() {
         let conn = get_connection();
-        setup_test_data(&conn)?;
+        setup_test_data(&conn);
 
         let bed_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("./fixtures/simple.bed");
         let collection = "test".to_string();
@@ -173,14 +173,12 @@ mod tests {
                 "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
-
-        Ok(())
     }
 
     #[test]
-    fn translates_bed_using_reference_aliases() -> Result<(), Box<dyn std::error::Error>> {
+    fn translates_bed_using_reference_aliases() {
         let conn = get_connection();
-        setup_test_data(&conn)?;
+        setup_test_data(&conn);
 
         let bed_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("./fixtures/simple-with-reference-alias.bed");
@@ -220,7 +218,5 @@ mod tests {
                 "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
-
-        Ok(())
     }
 }

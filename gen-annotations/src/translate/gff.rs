@@ -119,9 +119,9 @@ mod tests {
     use crate::test_helpers::{get_connection, setup_test_data};
 
     #[test]
-    fn translates_coordinates_to_nodes() -> Result<(), Box<dyn std::error::Error>> {
+    fn translates_coordinates_to_nodes() {
         let conn = get_connection();
-        setup_test_data(&conn)?;
+        setup_test_data(&conn);
 
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("./fixtures/complex.gff3");
         let collection = "test".to_string();
@@ -186,14 +186,12 @@ mod tests {
                 "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
             )
         );
-
-        Ok(())
     }
 
     #[test]
-    fn translates_gff_using_reference_aliases() -> Result<(), Box<dyn std::error::Error>> {
+    fn translates_gff_using_reference_aliases() {
         let conn = get_connection();
-        setup_test_data(&conn)?;
+        setup_test_data(&conn);
 
         // Add a reference alias for the block group used in the fixture gff
         ReferenceAlias::create(
@@ -238,7 +236,5 @@ mod tests {
                 "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
             )
         );
-
-        Ok(())
     }
 }

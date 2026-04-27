@@ -6,7 +6,7 @@ use gen_core::{
 };
 use gen_graph::{GraphEdge, GraphNode};
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::{Collection, CollectionError},
     db::DbContext,
@@ -46,6 +46,8 @@ pub enum GFAImportError {
     PathError(#[from] PathError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 pub fn import_gfa(
@@ -76,7 +78,7 @@ pub fn import_gfa(
             name: "",
             ..Default::default()
         },
-    );
+    )?;
     let bar = progress_bar.add(get_time_elapsed_bar());
     bar.set_message("Parsing GFA");
     let gfa: Gfa<String, (), ()> = Gfa::parse_gfa_file(gfa_path.to_str().unwrap());

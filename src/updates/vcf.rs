@@ -43,6 +43,7 @@ use crate::{
 #[derive(Debug)]
 struct BlockGroupCache<'a> {
     pub cache: HashMap<BlockGroupData<'a>, Vec<HashId>>,
+    pub parent_block_group_id_cache: HashMap<HashId, Option<HashId>>,
     pub conn: &'a GraphConnection,
 }
 
@@ -50,6 +51,7 @@ impl<'a> BlockGroupCache<'_> {
     pub fn new(conn: &GraphConnection) -> BlockGroupCache<'_> {
         BlockGroupCache {
             cache: HashMap::<BlockGroupData, Vec<HashId>>::new(),
+            parent_block_group_id_cache: HashMap::<HashId, Option<HashId>>::new(),
             conn,
         }
     }
@@ -76,14 +78,21 @@ impl<'a> BlockGroupCache<'_> {
                 sample_name,
                 &name,
                 parent_samples.to_vec(),
-            )?
-            .into_iter()
-            .map(|block_group| block_group.id)
-            .collect::<Vec<_>>();
+            )?;
+
+            let block_group_ids = result
+                .iter()
+                .map(|block_group| block_group.id)
+                .collect::<Vec<_>>();
             block_group_cache
                 .cache
-                .insert(block_group_key, result.clone());
-            Ok(result)
+                .insert(block_group_key, block_group_ids.clone());
+            for block_group in &result {
+                block_group_cache
+                    .parent_block_group_id_cache
+                    .insert(block_group.id, block_group.parent_block_group_id);
+            }
+            Ok(block_group_ids)
         }
     }
 }
@@ -548,11 +557,14 @@ pub fn update_with_vcf(
             let source_path_id = node_source_paths
                 .entry(vcf_entry.path.id)
                 .or_insert_with(|| {
-                    let block_group = BlockGroup::get_by_id(conn, &vcf_entry.block_group_id);
-                    if let Some(parent_block_group_id) = block_group.parent_block_group_id {
+                    let parent_block_group_id = block_group_cache
+                        .parent_block_group_id_cache
+                        .get(&vcf_entry.block_group_id)
+                        .unwrap();
+                    if let Some(parent_block_group_id) = parent_block_group_id {
                         let parent_path = PathCache::lookup(
                             &mut path_cache,
-                            &parent_block_group_id,
+                            parent_block_group_id,
                             vcf_entry.path.name.clone(),
                         );
                         parent_path.id

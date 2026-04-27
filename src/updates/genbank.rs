@@ -88,7 +88,7 @@ where
                             name: &locus.name,
                             ..Default::default()
                         },
-                    )
+                    )?
                 };
                 let paths = Path::query(
                     conn,
@@ -291,6 +291,7 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
+        Sample::create(conn, Sample::DEFAULT_NAME).unwrap();
         let operation = update_with_genbank(
             &context,
             BufReader::new(file),

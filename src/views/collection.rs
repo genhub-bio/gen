@@ -981,7 +981,8 @@ mod tests {
                 name: "BG_ReferenceA",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -990,7 +991,8 @@ mod tests {
                 name: "BG_ReferenceB",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -999,7 +1001,8 @@ mod tests {
                 name: "BG_Alpha1",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -1008,7 +1011,8 @@ mod tests {
                 name: "BG_Beta1",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         // Call the function under test—notice we pass the full path
         let op_conn = context.operations().conn();

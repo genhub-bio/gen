@@ -549,7 +549,7 @@ where
                         name: &locus.name,
                         ..Default::default()
                     },
-                );
+                )?;
                 let edge_into = Edge::create(
                     conn,
                     PATH_START_NODE_ID,

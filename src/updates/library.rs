@@ -2,7 +2,7 @@ use core::ops::Range;
 use std::str;
 
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
     db::DbContext,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
@@ -23,6 +23,8 @@ use crate::graphs::{
 pub enum UpdateWithLibraryError {
     #[error("Failed to find block group")]
     BlockGroupLookupFailed(String),
+    #[error("Failed to create block group")]
+    BlockGroupCreationFailed(#[from] BlockGroupError),
     #[error("Failed to create output graph(s)")]
     GraphOperation(GraphOperationError),
     #[error("Failed to parse library files")]
@@ -96,7 +98,7 @@ pub fn update_with_library(
             name: new_sample_name,
             ..Default::default()
         },
-    );
+    )?;
 
     let derived_block_group_chunks = derive_chunks(
         context,

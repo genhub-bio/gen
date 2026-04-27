@@ -29,10 +29,10 @@ pub enum GraphOperationError {
     PathNotFound(String),
     #[error("Graph error: {0}")]
     GraphError(#[from] GraphError),
-    #[error("Error deriving subgraph: {0}")]
-    DeriveSubgraphError(#[from] BlockGroupError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 pub fn get_path(
@@ -118,7 +118,7 @@ pub fn derive_chunks(
                     parent_block_group_id: Some(&parent_block_group_id),
                     ..Default::default()
                 },
-            );
+            )?;
             child_block_group.id
         };
 
@@ -324,7 +324,7 @@ pub fn make_stitch(
             name: new_region_name,
             ..Default::default()
         },
-    );
+    )?;
 
     let mut block_group_chunks = vec![];
 

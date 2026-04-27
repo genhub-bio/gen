@@ -2,7 +2,7 @@ use std::str;
 
 use anyhow::Result;
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
     collection::{Collection, CollectionError},
     db::DbContext,
     errors::OperationError,
@@ -29,6 +29,8 @@ pub enum LibraryImportError {
     FileParse(CombinatorialLibraryParseError),
     #[error("Failed to create library")]
     LibraryCreation(CombinatorialLibraryCreationError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 impl From<CombinatorialLibraryParseError> for LibraryImportError {
@@ -80,7 +82,7 @@ pub fn import_library(
             name: library_name,
             ..Default::default()
         },
-    );
+    )?;
 
     let _block_group_boundaries =
         create_library(conn, new_block_group.id, library_name, parts_list, true)?;

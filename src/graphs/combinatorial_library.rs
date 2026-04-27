@@ -323,7 +323,8 @@ mod tests {
                 name: "test-block-group",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         match create_library(conn, block_group.id, "library", vec![], false) {
             Ok(_) => {

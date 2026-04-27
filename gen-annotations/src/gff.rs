@@ -161,7 +161,8 @@ mod tests {
                 parent_block_group_id: None,
                 is_default: false,
             },
-        );
+        )
+        .unwrap();
 
         let edge_into = Edge::create(
             conn,

@@ -53,6 +53,8 @@ pub enum ChangesetError {
     AccessionPathError(#[from] AccessionPathError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 #[derive(Debug, PartialEq, Error)]

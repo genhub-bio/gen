@@ -105,7 +105,7 @@ pub fn import_fasta(
                 name: &name,
                 ..Default::default()
             },
-        );
+        )?;
         let edge_into = Edge::create(
             conn,
             PATH_START_NODE_ID,

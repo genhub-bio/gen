@@ -27,6 +27,7 @@ pub fn create_bg(
     sample_name: &str,
     name: &str,
 ) -> BlockGroup {
+    Sample::get_or_create(conn, sample_name).unwrap();
     BlockGroup::create(
         conn,
         NewBlockGroup {
@@ -36,6 +37,7 @@ pub fn create_bg(
             ..Default::default()
         },
     )
+    .unwrap()
 }
 use intervaltree::IntervalTree;
 use rusqlite::Connection;
