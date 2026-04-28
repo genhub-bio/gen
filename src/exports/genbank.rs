@@ -17,7 +17,7 @@ use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
     accession::Accession,
-    annotations::{Annotation, GenBankLocationOperator},
+    annotations::{Annotation, AnnotationError, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
     node::Node,
@@ -29,10 +29,14 @@ use petgraph::{prelude::DiGraphMap, visit::Dfs};
 use rusqlite::{self, Connection};
 use thiserror::Error;
 
+use crate::genbank::normalize_qualifier_text;
+
 #[derive(Debug, Error)]
 pub enum GenbankExportError {
     #[error("I/O error while exporting GenBank: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Annotation error while exporting GenBank: {0}")]
+    Annotation(#[from] AnnotationError),
 }
 
 fn build_annotation_location(
@@ -55,23 +59,23 @@ fn annotation_location(
     segments: &[AnnotationSegment],
     operator: Option<&GenBankLocationOperator>,
 ) -> Option<Location> {
-    let mut locations = segments
+    let locations = segments
         .iter()
         .filter(|segment| segment.range.end > segment.range.start)
-        .map(|segment| Location::simple_range(segment.range.start, segment.range.end))
+        .map(|segment| {
+            let location = Location::simple_range(segment.range.start, segment.range.end);
+            if segment.strand == Strand::Reverse {
+                Location::Complement(Box::new(location))
+            } else {
+                location
+            }
+        })
         .collect::<Vec<_>>();
     if locations.is_empty() {
         return None;
     }
 
-    let strand = segments.first()?.strand;
-    let location = build_annotation_location(locations, operator)?;
-
-    Some(if strand == Strand::Reverse {
-        Location::Complement(Box::new(location))
-    } else {
-        location
-    })
+    build_annotation_location(locations, operator)
 }
 
 fn export_annotations(
@@ -80,11 +84,8 @@ fn export_annotations(
     path_blocks: &[PathBlock],
     seq: &mut gb_io::seq::Seq,
     sample_name: &str,
-) {
-    let normalize_qualifier_text =
-        |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let annotations = Annotation::query_by_sample(conn, sample_name)
-        .expect("should load sample annotations for GenBank export");
+) -> Result<(), GenbankExportError> {
+    let annotations = Annotation::query_by_sample(conn, sample_name)?;
     for annotation in annotations {
         let Some(accession) = Accession::get_by_id(conn, &annotation.accession_id) else {
             continue;
@@ -137,6 +138,8 @@ fn export_annotations(
             qualifiers,
         });
     }
+
+    Ok(())
 }
 
 fn merge_nodes(nodes: &[GraphNode]) -> Vec<GraphNode> {
@@ -275,7 +278,7 @@ pub fn export_genbank(
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
         seq.seq = path.sequence(conn).into_bytes();
-        export_annotations(conn, &path, &path_blocks, &mut seq, sample_name);
+        export_annotations(conn, &path, &path_blocks, &mut seq, sample_name)?;
 
         // Identify the node traversal corresponding to our path.
         let graph = BlockGroup::get_graph(conn, &block_group.id);
@@ -831,6 +834,14 @@ mod tests {
             None,
             "test",
         );
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "mixed-strand-annotation",
+            &[(0, 1, 3, Strand::Forward), (1, 6, 8, Strand::Reverse)],
+            Some(GenBankLocationOperator::Join),
+            "test",
+        );
 
         let mut output = Vec::new();
         export_genbank(conn, "test", "test", &mut output).unwrap();
@@ -892,10 +903,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             reverse_order_annotation.location,
-            Location::Complement(Box::new(Location::Order(vec![
-                Location::simple_range(7, 9),
-                Location::simple_range(10, 12),
-            ])))
+            Location::Order(vec![
+                Location::Complement(Box::new(Location::simple_range(7, 9))),
+                Location::Complement(Box::new(Location::simple_range(10, 12))),
+            ])
         );
 
         let reverse_single_annotation = features
@@ -905,6 +916,18 @@ mod tests {
         assert_eq!(
             reverse_single_annotation.location,
             Location::Complement(Box::new(Location::simple_range(34, 37)))
+        );
+
+        let mixed_strand_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("mixed-strand-annotation"))
+            .unwrap();
+        assert_eq!(
+            mixed_strand_annotation.location,
+            Location::Join(vec![
+                Location::simple_range(1, 3),
+                Location::Complement(Box::new(Location::simple_range(16, 18))),
+            ])
         );
     }
 

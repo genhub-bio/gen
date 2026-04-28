@@ -161,7 +161,7 @@ fn feature_qualifier_value(feature: &Feature, key: &str) -> Option<String> {
         })
 }
 
-fn normalize_qualifier_text(value: &str) -> String {
+pub(crate) fn normalize_qualifier_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

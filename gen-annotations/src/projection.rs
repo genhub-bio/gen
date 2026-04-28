@@ -81,50 +81,6 @@ pub fn merge_annotation_segments(segments: Vec<AnnotationSegment>) -> Vec<Annota
     )
 }
 
-pub fn project_single_annotation_segment(
-    segment: &AnnotationSegment,
-    path_blocks: &[PathBlock],
-) -> Vec<AnnotationSegment> {
-    merge_annotation_segments(
-        path_blocks
-            .iter()
-            .filter_map(|block| {
-                if block.node_id != segment.node_id {
-                    return None;
-                }
-                let overlap_start = max(segment.range.start, block.sequence_start);
-                let overlap_end = min(segment.range.end, block.sequence_end);
-                if overlap_end <= overlap_start {
-                    return None;
-                }
-
-                let (start, end) = if block.strand == Strand::Reverse {
-                    (
-                        block.path_start + (block.sequence_end - overlap_end),
-                        block.path_start + (block.sequence_end - overlap_start),
-                    )
-                } else {
-                    (
-                        block.path_start + (overlap_start - block.sequence_start),
-                        block.path_start + (overlap_end - block.sequence_start),
-                    )
-                };
-                let strand = if block.strand == Strand::Reverse {
-                    segment.strand.complement()
-                } else {
-                    segment.strand
-                };
-
-                Some(AnnotationSegment {
-                    node_id: block.node_id,
-                    range: Range { start, end },
-                    strand,
-                })
-            })
-            .collect(),
-    )
-}
-
 pub fn project_annotation_segments(
     accession_segments: &[AnnotationSegment],
     path_blocks: &[PathBlock],
@@ -132,7 +88,46 @@ pub fn project_annotation_segments(
 ) -> Vec<AnnotationSegment> {
     let projected = accession_segments
         .iter()
-        .flat_map(|segment| project_single_annotation_segment(segment, path_blocks))
+        .flat_map(|segment| {
+            merge_annotation_segments(
+                path_blocks
+                    .iter()
+                    .filter_map(|block| {
+                        if block.node_id != segment.node_id {
+                            return None;
+                        }
+                        let overlap_start = max(segment.range.start, block.sequence_start);
+                        let overlap_end = min(segment.range.end, block.sequence_end);
+                        if overlap_end <= overlap_start {
+                            return None;
+                        }
+
+                        let (start, end) = if block.strand == Strand::Reverse {
+                            (
+                                block.path_start + (block.sequence_end - overlap_end),
+                                block.path_start + (block.sequence_end - overlap_start),
+                            )
+                        } else {
+                            (
+                                block.path_start + (overlap_start - block.sequence_start),
+                                block.path_start + (overlap_end - block.sequence_start),
+                            )
+                        };
+                        let strand = if block.strand == Strand::Reverse {
+                            segment.strand.complement()
+                        } else {
+                            segment.strand
+                        };
+
+                        Some(AnnotationSegment {
+                            node_id: block.node_id,
+                            range: Range { start, end },
+                            strand,
+                        })
+                    })
+                    .collect(),
+            )
+        })
         .collect::<Vec<_>>();
 
     if preserve_part_boundaries {
@@ -193,15 +188,16 @@ mod tests {
     }
 
     #[test]
-    fn test_project_single_annotation_segment_complements_reverse_blocks() {
+    fn test_project_annotation_segments_complements_reverse_blocks() {
         let node_id = HashId::convert_str("node");
-        let projected = project_single_annotation_segment(
-            &AnnotationSegment {
+        let projected = project_annotation_segments(
+            &[AnnotationSegment {
                 node_id,
                 range: Range { start: 10, end: 20 },
                 strand: Strand::Forward,
-            },
+            }],
             &[block("node", 0, 30, 100, Strand::Reverse)],
+            false,
         );
 
         assert_eq!(

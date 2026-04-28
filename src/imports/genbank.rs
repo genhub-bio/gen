@@ -295,38 +295,6 @@ fn merge_node_sequence_segments(
 /// annotation.end == final.start
 /// => overlap_end == overlap_start
 /// ```
-fn map_single_annotation_segment(
-    annotation_segment: &GenBankAnnotationSegment,
-    final_segments: &[FinalSequenceSegment],
-) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
-    merge_node_sequence_segments(
-        final_segments
-            .iter()
-            .filter_map(|final_segment| {
-                let overlap_start = max(annotation_segment.start, final_segment.final_range.start);
-                let overlap_end = min(annotation_segment.end, final_segment.final_range.end);
-                if overlap_end <= overlap_start {
-                    return None;
-                }
-
-                let segment_start = final_segment.sequence_range.start
-                    + (overlap_start - final_segment.final_range.start);
-                let segment_end = final_segment.sequence_range.start
-                    + (overlap_end - final_segment.final_range.start);
-
-                Some(NodeSequenceSegment {
-                    node_id: final_segment.node_id,
-                    sequence_range: Range {
-                        start: segment_start,
-                        end: segment_end,
-                    },
-                    strand: annotation_segment.strand,
-                })
-            })
-            .collect(),
-    )
-}
-
 fn map_annotation_segments(
     annotation_segments: &[GenBankAnnotationSegment],
     final_segments: &[FinalSequenceSegment],
@@ -334,7 +302,36 @@ fn map_annotation_segments(
 ) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
     let mapped = annotation_segments
         .iter()
-        .map(|annotation_segment| map_single_annotation_segment(annotation_segment, final_segments))
+        .map(|annotation_segment| {
+            merge_node_sequence_segments(
+                final_segments
+                    .iter()
+                    .filter_map(|final_segment| {
+                        let overlap_start =
+                            max(annotation_segment.start, final_segment.final_range.start);
+                        let overlap_end =
+                            min(annotation_segment.end, final_segment.final_range.end);
+                        if overlap_end <= overlap_start {
+                            return None;
+                        }
+
+                        let segment_start = final_segment.sequence_range.start
+                            + (overlap_start - final_segment.final_range.start);
+                        let segment_end = final_segment.sequence_range.start
+                            + (overlap_end - final_segment.final_range.start);
+
+                        Some(NodeSequenceSegment {
+                            node_id: final_segment.node_id,
+                            sequence_range: Range {
+                                start: segment_start,
+                                end: segment_end,
+                            },
+                            strand: annotation_segment.strand,
+                        })
+                    })
+                    .collect(),
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
