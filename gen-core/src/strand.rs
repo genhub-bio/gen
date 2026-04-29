@@ -27,6 +27,15 @@ impl Strand {
         let b_ambig = Strand::is_ambiguous(b);
         (a_ambig || b_ambig) || a == b
     }
+
+    pub fn complement(self) -> Strand {
+        match self {
+            Strand::Forward => Strand::Reverse,
+            Strand::Reverse => Strand::Forward,
+            Strand::Unknown => Strand::Unknown,
+            Strand::ImportantButUnknown => Strand::ImportantButUnknown,
+        }
+    }
 }
 
 // example https://docs.rs/rusqlite/latest/rusqlite/types/index.html
@@ -167,6 +176,17 @@ mod tests {
         );
         assert_eq!(
             Strand::column_result(ValueRef::Text("?".as_bytes())).unwrap(),
+            Strand::ImportantButUnknown
+        );
+    }
+
+    #[test]
+    fn test_complement() {
+        assert_eq!(Strand::Forward.complement(), Strand::Reverse);
+        assert_eq!(Strand::Reverse.complement(), Strand::Forward);
+        assert_eq!(Strand::Unknown.complement(), Strand::Unknown);
+        assert_eq!(
+            Strand::ImportantButUnknown.complement(),
             Strand::ImportantButUnknown
         );
     }

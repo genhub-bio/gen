@@ -1,19 +1,145 @@
 #![allow(warnings)]
-use std::{borrow::Cow, collections::HashSet, fs::File, hash::Hash, iter::zip, path::PathBuf, str};
+use std::{
+    borrow::Cow,
+    cmp::{max, min},
+    collections::HashSet,
+    hash::Hash,
+    io::Write,
+    iter::zip,
+    str,
+};
 
 use gb_io::{self, seq::Location};
-use gen_core::{is_terminal, path::PathBlock};
+use gen_annotations::projection::{
+    AnnotationSegment, accession_edges_to_segments, project_annotation_segments,
+};
+use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, sample::Sample};
+use gen_models::{
+    accession::Accession,
+    annotations::{Annotation, AnnotationError, GenBankLocationOperator},
+    block_group::BlockGroup,
+    db::GraphConnection,
+    node::Node,
+    sample::Sample,
+    traits::Query,
+};
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};
 use rusqlite::{self, Connection};
 use thiserror::Error;
 
+use crate::genbank::normalize_qualifier_text;
+
 #[derive(Debug, Error)]
 pub enum GenbankExportError {
     #[error("I/O error while exporting GenBank: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Annotation error while exporting GenBank: {0}")]
+    Annotation(#[from] AnnotationError),
+}
+
+fn build_annotation_location(
+    locations: Vec<Location>,
+    operator: Option<&GenBankLocationOperator>,
+) -> Option<Location> {
+    match locations.len() {
+        0 => None,
+        1 => locations.into_iter().next(),
+        _ => Some(match operator {
+            Some(GenBankLocationOperator::Join) | None => Location::Join(locations),
+            Some(GenBankLocationOperator::Order) => Location::Order(locations),
+            Some(GenBankLocationOperator::Bond) => Location::Bond(locations),
+            Some(GenBankLocationOperator::OneOf) => Location::OneOf(locations),
+        }),
+    }
+}
+
+fn annotation_location(
+    segments: &[AnnotationSegment],
+    operator: Option<&GenBankLocationOperator>,
+) -> Option<Location> {
+    let locations = segments
+        .iter()
+        .filter(|segment| segment.range.end > segment.range.start)
+        .map(|segment| {
+            let location = Location::simple_range(segment.range.start, segment.range.end);
+            if segment.strand == Strand::Reverse {
+                Location::Complement(Box::new(location))
+            } else {
+                location
+            }
+        })
+        .collect::<Vec<_>>();
+    if locations.is_empty() {
+        return None;
+    }
+
+    build_annotation_location(locations, operator)
+}
+
+fn export_annotations(
+    conn: &GraphConnection,
+    path: &gen_models::path::Path,
+    path_blocks: &[PathBlock],
+    seq: &mut gb_io::seq::Seq,
+    sample_name: &str,
+) -> Result<(), GenbankExportError> {
+    let annotations = Annotation::query_by_sample(conn, sample_name)?;
+    for annotation in annotations {
+        let Some(accession) = Accession::get_by_id(conn, &annotation.accession_id) else {
+            continue;
+        };
+        if accession.path_id != path.id {
+            continue;
+        }
+
+        let accession_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
+            conn,
+            &annotation.accession_id,
+        ));
+        let genbank_extra = annotation
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.genbank.as_ref());
+        let projected_segments = project_annotation_segments(
+            &accession_segments,
+            path_blocks,
+            genbank_extra
+                .and_then(|extra| extra.location_operator.as_ref())
+                .is_some(),
+        );
+        let Some(location) = annotation_location(
+            &projected_segments,
+            genbank_extra.and_then(|extra| extra.location_operator.as_ref()),
+        ) else {
+            continue;
+        };
+        let kind = genbank_extra
+            .map(|extra| Cow::Owned(extra.kind.clone()))
+            .unwrap_or_else(|| Cow::Borrowed("misc_feature"));
+        let qualifiers = genbank_extra
+            .map(|extra| {
+                extra
+                    .qualifiers
+                    .iter()
+                    .map(|qualifier| {
+                        (
+                            Cow::Owned(qualifier.key.clone()),
+                            qualifier.value.as_deref().map(normalize_qualifier_text),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![(Cow::Borrowed("label"), Some(annotation.name.clone()))]);
+        seq.features.push(gb_io::seq::Feature {
+            kind,
+            location,
+            qualifiers,
+        });
+    }
+
+    Ok(())
 }
 
 fn merge_nodes(nodes: &[GraphNode]) -> Vec<GraphNode> {
@@ -122,7 +248,7 @@ pub fn export_genbank(
     conn: &GraphConnection,
     collection_name: &str,
     sample_name: &str,
-    filename: &PathBuf,
+    writer: impl Write,
 ) -> Result<(), GenbankExportError> {
     // GenBank don't really support graph like structures. Programs like Geneious use features to
     // mark where changes have occurred, and for now we replicate this approach. However, we are
@@ -140,8 +266,7 @@ pub fn export_genbank(
     // assumption.
     let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
 
-    let file = File::create(filename)?;
-    let mut writer = gb_io::writer::SeqWriter::new(file);
+    let mut writer = gb_io::writer::SeqWriter::new(writer);
 
     for block_group in block_groups.iter() {
         let path = BlockGroup::get_current_path(conn, &block_group.id);
@@ -153,6 +278,7 @@ pub fn export_genbank(
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
         seq.seq = path.sequence(conn).into_bytes();
+        export_annotations(conn, &path, &path_blocks, &mut seq, sample_name)?;
 
         // Identify the node traversal corresponding to our path.
         let graph = BlockGroup::get_graph(conn, &block_group.id);
@@ -301,28 +427,33 @@ pub fn export_genbank(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use std::{io, io::BufReader, path::PathBuf, str};
+    use std::{fs::File, io, io::BufReader, path::PathBuf, str};
 
     use gb_io::reader;
-    use gen_core::{HashId, strand::Strand::Forward};
+    use gen_core::{
+        HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal, strand::Strand::Forward,
+    };
     use gen_models::{
+        accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+        annotations::{Annotation, AnnotationExtra, GenBankExtra, GenBankLocationOperator},
+        block_group::BlockGroup,
         file_types::FileTypes,
         metadata,
         operations::{OperationFile, OperationInfo},
+        path::Path,
     };
-    use tempfile;
 
     use super::*;
     use crate::{
         imports::genbank::{GenBankImportOptions, import_genbank},
-        test_helpers::setup_gen,
+        test_helpers::{setup_block_group, setup_gen},
         track_database,
     };
 
-    fn compare_genbanks(a: &PathBuf, b: &PathBuf) {
+    fn compare_genbanks(a: &std::path::Path, b: &[u8]) {
         let a = reader::parse_file(a).unwrap();
         let a_seq = str::from_utf8(&a[0].seq).unwrap().to_string();
-        let b = reader::parse_file(b).unwrap();
+        let b = reader::parse_slice(b).unwrap();
         let b_seq = str::from_utf8(&b[0].seq).unwrap().to_string();
         assert_eq!(a_seq, b_seq);
 
@@ -372,6 +503,99 @@ mod tests {
         assert_eq!(a_features, b_features);
     }
 
+    fn feature_label(feature: &gb_io::seq::Feature) -> Option<String> {
+        feature
+            .qualifiers
+            .iter()
+            .find_map(|(key, value)| (*key == "label").then(|| value.clone()).flatten())
+    }
+
+    fn feature_qualifier(feature: &gb_io::seq::Feature, key: &str) -> Option<String> {
+        feature
+            .qualifiers
+            .iter()
+            .find_map(|(qualifier_key, value)| {
+                ((*qualifier_key).as_ref() == key)
+                    .then(|| value.clone())
+                    .flatten()
+            })
+    }
+
+    fn create_annotation_with_segments(
+        conn: &gen_models::db::GraphConnection,
+        path: &Path,
+        name: &str,
+        segments: &[(usize, i64, i64, Strand)],
+        operator: Option<GenBankLocationOperator>,
+        sample_name: &str,
+    ) {
+        let blocks = path
+            .blocks(conn)
+            .into_iter()
+            .filter(|block| !is_terminal(block.node_id))
+            .collect::<Vec<_>>();
+        let first = segments
+            .first()
+            .expect("should contain at least one annotation segment");
+        let mut edges = vec![AccessionEdgeData {
+            source_node_id: PATH_START_NODE_ID,
+            source_coordinate: -1,
+            source_strand: Strand::Forward,
+            target_node_id: blocks[first.0].node_id,
+            target_coordinate: first.1,
+            target_strand: first.3,
+            chromosome_index: 0,
+        }];
+        for window in segments.windows(2) {
+            let current = window[0];
+            let next = window[1];
+            edges.push(AccessionEdgeData {
+                source_node_id: blocks[current.0].node_id,
+                source_coordinate: current.2,
+                source_strand: current.3,
+                target_node_id: blocks[next.0].node_id,
+                target_coordinate: next.1,
+                target_strand: next.3,
+                chromosome_index: 0,
+            });
+        }
+        let last = segments
+            .last()
+            .expect("should contain at least one annotation segment");
+        edges.push(AccessionEdgeData {
+            source_node_id: blocks[last.0].node_id,
+            source_coordinate: last.2,
+            source_strand: last.3,
+            target_node_id: PATH_END_NODE_ID,
+            target_coordinate: -1,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+        });
+
+        let accession = Accession::get_or_create(conn, name, &path.id, None);
+        let edge_ids = AccessionEdge::bulk_create(conn, &edges);
+        AccessionPath::create(conn, &accession.id, &edge_ids);
+        Annotation::create_with_samples(
+            conn,
+            name,
+            "export-track",
+            &accession.id,
+            Some(&AnnotationExtra {
+                genbank: Some(GenBankExtra {
+                    kind: "misc_feature".to_string(),
+                    qualifiers: vec![gen_models::annotations::GenBankQualifier {
+                        key: "label".to_string(),
+                        value: Some(name.to_string()),
+                    }],
+                    location_operator: operator,
+                }),
+                ..AnnotationExtra::default()
+            }),
+            &[sample_name],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_import_then_export_insertion() {
         let context = setup_gen();
@@ -398,10 +622,9 @@ mod tests {
             GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
-        compare_genbanks(&path, &filename);
+        let mut output = Vec::new();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        compare_genbanks(&path, &output);
     }
 
     #[test]
@@ -430,10 +653,9 @@ mod tests {
             GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
-        compare_genbanks(&path, &filename);
+        let mut output = Vec::new();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        compare_genbanks(&path, &output);
     }
 
     #[test]
@@ -462,10 +684,308 @@ mod tests {
             GenBankImportOptions::default().annotation_name_from_path(&path),
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.gb");
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &filename).unwrap();
-        compare_genbanks(&path, &filename);
+        let mut output = Vec::new();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        compare_genbanks(&path, &output);
+    }
+
+    #[test]
+    fn test_import_then_export_annotations() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
+        let file = File::open(&path).unwrap();
+        import_genbank(
+            &context,
+            BufReader::new(file),
+            Some("fixtures"),
+            "puc19-export",
+            OperationInfo {
+                files: vec![OperationFile {
+                    file_path: path.to_str().unwrap().to_string(),
+                    file_type: FileTypes::GenBank,
+                }],
+                description: "test".to_string(),
+            },
+            GenBankImportOptions::default().annotation_name_from_path(&path),
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        export_genbank(conn, "fixtures", "puc19-export", &mut output).unwrap();
+
+        let parsed = reader::parse_slice(&output).unwrap();
+        let features = &parsed[0].features;
+        let labels = features
+            .iter()
+            .filter_map(feature_label)
+            .collect::<HashSet<_>>();
+        assert!(labels.contains("AmpR"), "export should include AmpR");
+        assert!(
+            labels.contains("lac promoter"),
+            "export should include lac promoter"
+        );
+        assert!(labels.contains("ori"), "export should include ori");
+        assert!(
+            labels.contains("M13 Forward"),
+            "export should include reverse-strand annotations"
+        );
+
+        let amp_r = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("AmpR"))
+            .unwrap();
+        assert_eq!(amp_r.kind.as_ref(), "CDS");
+        assert_eq!(
+            feature_qualifier(amp_r, "product").as_deref(),
+            Some("beta-lactamase")
+        );
+
+        let lac_promoter = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("lac promoter"))
+            .unwrap();
+        assert_eq!(
+            lac_promoter.location,
+            Location::Join(vec![
+                Location::simple_range(540, 546),
+                Location::simple_range(546, 564),
+                Location::simple_range(564, 571),
+            ])
+        );
+
+        let m13_forward = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("M13 Forward"))
+            .unwrap();
+        assert_eq!(
+            m13_forward.location,
+            Location::Complement(Box::new(Location::simple_range(688, 706)))
+        );
+
+        let ori = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("ori"))
+            .unwrap();
+        assert_eq!(
+            ori.location,
+            Location::Join(vec![
+                Location::simple_range(2314, 2686),
+                Location::simple_range(0, 217),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_export_genbank_annotations_preserves_location_operators() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (_block_group_id, path) = setup_block_group(conn);
+
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "join-annotation",
+            &[(0, 1, 3, Strand::Forward), (1, 2, 5, Strand::Forward)],
+            Some(GenBankLocationOperator::Join),
+            "test",
+        );
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "order-annotation",
+            &[(0, 4, 6, Strand::Forward), (1, 6, 8, Strand::Forward)],
+            Some(GenBankLocationOperator::Order),
+            "test",
+        );
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "bond-annotation",
+            &[(1, 1, 2, Strand::Forward), (2, 3, 4, Strand::Forward)],
+            Some(GenBankLocationOperator::Bond),
+            "test",
+        );
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "oneof-annotation",
+            &[(2, 5, 7, Strand::Forward), (3, 1, 3, Strand::Forward)],
+            Some(GenBankLocationOperator::OneOf),
+            "test",
+        );
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "reverse-order-annotation",
+            &[(0, 7, 9, Strand::Reverse), (1, 0, 2, Strand::Reverse)],
+            Some(GenBankLocationOperator::Order),
+            "test",
+        );
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "reverse-single-annotation",
+            &[(3, 4, 7, Strand::Reverse)],
+            None,
+            "test",
+        );
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "mixed-strand-annotation",
+            &[(0, 1, 3, Strand::Forward), (1, 6, 8, Strand::Reverse)],
+            Some(GenBankLocationOperator::Join),
+            "test",
+        );
+
+        let mut output = Vec::new();
+        export_genbank(conn, "test", "test", &mut output).unwrap();
+
+        let parsed = reader::parse_slice(&output).unwrap();
+        let features = &parsed[0].features;
+
+        let join_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("join-annotation"))
+            .unwrap();
+        assert_eq!(
+            join_annotation.location,
+            Location::Join(vec![
+                Location::simple_range(1, 3),
+                Location::simple_range(12, 15),
+            ])
+        );
+
+        let order_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("order-annotation"))
+            .unwrap();
+        assert_eq!(
+            order_annotation.location,
+            Location::Order(vec![
+                Location::simple_range(4, 6),
+                Location::simple_range(16, 18),
+            ])
+        );
+
+        let bond_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("bond-annotation"))
+            .unwrap();
+        assert_eq!(
+            bond_annotation.location,
+            Location::Bond(vec![
+                Location::simple_range(11, 12),
+                Location::simple_range(23, 24),
+            ])
+        );
+
+        let oneof_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("oneof-annotation"))
+            .unwrap();
+        assert_eq!(
+            oneof_annotation.location,
+            Location::OneOf(vec![
+                Location::simple_range(25, 27),
+                Location::simple_range(31, 33),
+            ])
+        );
+
+        let reverse_order_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("reverse-order-annotation"))
+            .unwrap();
+        assert_eq!(
+            reverse_order_annotation.location,
+            Location::Order(vec![
+                Location::Complement(Box::new(Location::simple_range(7, 9))),
+                Location::Complement(Box::new(Location::simple_range(10, 12))),
+            ])
+        );
+
+        let reverse_single_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("reverse-single-annotation"))
+            .unwrap();
+        assert_eq!(
+            reverse_single_annotation.location,
+            Location::Complement(Box::new(Location::simple_range(34, 37)))
+        );
+
+        let mixed_strand_annotation = features
+            .iter()
+            .find(|feature| feature_label(feature).as_deref() == Some("mixed-strand-annotation"))
+            .unwrap();
+        assert_eq!(
+            mixed_strand_annotation.location,
+            Location::Join(vec![
+                Location::simple_range(1, 3),
+                Location::Complement(Box::new(Location::simple_range(16, 18))),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_export_genbank_normalizes_legacy_qualifier_newlines() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (_block_group_id, path) = setup_block_group(conn);
+
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "legacy-note",
+            &[(0, 0, 25, Strand::Forward)],
+            None,
+            "test",
+        );
+
+        let annotation = Annotation::query_by_group(conn, "export-track")
+            .unwrap()
+            .into_iter()
+            .find(|annotation| annotation.name == "legacy-note")
+            .unwrap();
+        let mut extra = annotation.extra.unwrap();
+        extra.genbank.as_mut().unwrap().qualifiers = vec![
+            gen_models::annotations::GenBankQualifier {
+                key: "label".to_string(),
+                value: Some("legacy-note".to_string()),
+            },
+            gen_models::annotations::GenBankQualifier {
+                key: "note".to_string(),
+                value: Some(
+                    "CAP binding activates transcription in the presence\n\nof cAMP.".to_string(),
+                ),
+            },
+        ];
+        conn.execute(
+            "update annotations set extra = ?1 where id = ?2",
+            rusqlite::params![serde_json::to_string(&extra).unwrap(), annotation.id],
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        export_genbank(conn, "test", "test", &mut output).unwrap();
+
+        let exported_text = String::from_utf8(output).unwrap();
+        assert!(
+            exported_text.contains(
+                "                     /note=\"CAP binding activates transcription in the presence\n                     of cAMP.\""
+            ),
+            "export should collapse embedded qualifier newlines to plain spaces before normal wrapping"
+        );
+        assert!(
+            !exported_text.contains(
+                "                     /note=\"CAP binding activates transcription in the presence\n\n                     of cAMP.\""
+            ),
+            "export should not preserve blank lines from legacy stored qualifier text"
+        );
     }
 
     #[test]

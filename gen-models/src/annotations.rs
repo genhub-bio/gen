@@ -101,6 +101,83 @@ pub struct Annotation {
     pub name: String,
     pub group: String,
     pub accession_id: HashId,
+    pub extra: Option<AnnotationExtra>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AnnotationExtra {
+    pub genbank: Option<GenBankExtra>,
+    pub gff: Option<GffExtra>,
+    pub bed: Option<BedExtra>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GenBankExtra {
+    pub kind: String,
+    pub qualifiers: Vec<GenBankQualifier>,
+    pub location_operator: Option<GenBankLocationOperator>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GenBankQualifier {
+    pub key: String,
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum GenBankLocationOperator {
+    Join,
+    Order,
+    Bond,
+    OneOf,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GffExtra {
+    pub source: Option<String>,
+    pub ty: String,
+    pub score: Option<String>,
+    pub phase: Option<String>,
+    pub attributes: Vec<GffAttribute>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GffAttribute {
+    pub key: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BedExtra {
+    pub score: Option<String>,
+    pub thick_start: Option<i64>,
+    pub thick_end: Option<i64>,
+    pub item_rgb: Option<String>,
+    pub block_count: Option<u64>,
+    pub block_sizes: Option<Vec<i64>>,
+    pub block_starts: Option<Vec<i64>>,
+    pub other_fields: Vec<String>,
+}
+
+fn serialize_annotation_extra(extra: Option<&AnnotationExtra>) -> Result<String, AnnotationError> {
+    serde_json::to_string(extra.unwrap_or(&AnnotationExtra::default()))
+        .map_err(|err| AnnotationError::SerializationError(err.to_string()))
+}
+
+fn deserialize_annotation_extra(
+    value: Option<String>,
+) -> Result<Option<AnnotationExtra>, AnnotationError> {
+    value
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map(|value| value.filter(|extra| extra != &AnnotationExtra::default()))
+        .map_err(|err| AnnotationError::SerializationError(err.to_string()))
 }
 
 impl<'a> Capnp<'a> for Annotation {
@@ -112,6 +189,11 @@ impl<'a> Capnp<'a> for Annotation {
         builder.set_name(&self.name);
         builder.set_annotation_group(&self.group);
         builder.set_accession_id(&self.accession_id.0).unwrap();
+        builder.set_extra(
+            serialize_annotation_extra(self.extra.as_ref())
+                .unwrap_or_default()
+                .as_str(),
+        );
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -131,12 +213,21 @@ impl<'a> Capnp<'a> for Annotation {
             .unwrap()
             .try_into()
             .unwrap();
+        let extra = deserialize_annotation_extra(
+            reader
+                .get_extra()
+                .ok()
+                .map(|value| value.to_string().unwrap())
+                .filter(|value| !value.is_empty()),
+        )
+        .unwrap_or(None);
 
         Annotation {
             id,
             name,
             group,
             accession_id,
+            extra,
         }
     }
 }
@@ -152,6 +243,8 @@ impl Query for Annotation {
             name: row.get(1).unwrap(),
             group: row.get(2).unwrap(),
             accession_id: row.get(3).unwrap(),
+            extra: deserialize_annotation_extra(row.get(4).unwrap())
+                .expect("should deserialize annotation extra from database"),
         }
     }
 }
@@ -162,6 +255,8 @@ pub enum AnnotationError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Annotation group error: {0}")]
     AnnotationGroupError(#[from] AnnotationGroupError),
+    #[error("Annotation extra serialization error: {0}")]
+    SerializationError(String),
 }
 
 impl Annotation {
@@ -174,16 +269,19 @@ impl Annotation {
         name: &str,
         group: &str,
         accession_id: &HashId,
+        extra: Option<&AnnotationExtra>,
     ) -> Result<Annotation, AnnotationError> {
         let id = Annotation::generate_id(name, group, accession_id);
-        let query = "INSERT INTO annotations (id, name, annotation_group, accession_id) VALUES (?1, ?2, ?3, ?4);";
+        let query = "INSERT INTO annotations (id, name, annotation_group, accession_id, extra) VALUES (?1, ?2, ?3, ?4, ?5);";
         let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![id, name, group, accession_id])?;
+        let extra_json = serialize_annotation_extra(extra)?;
+        stmt.execute(params![id, name, group, accession_id, extra_json])?;
         Ok(Annotation {
             id,
             name: name.to_string(),
             group: group.to_string(),
             accession_id: *accession_id,
+            extra: extra.cloned(),
         })
     }
 
@@ -192,9 +290,10 @@ impl Annotation {
         name: &str,
         group: &str,
         accession_id: &HashId,
+        extra: Option<&AnnotationExtra>,
     ) -> Result<Annotation, AnnotationError> {
         AnnotationGroup::get_or_create(conn, group)?;
-        match Annotation::create(conn, name, group, accession_id) {
+        match Annotation::create(conn, name, group, accession_id, extra) {
             Ok(annotation) => Ok(annotation),
             Err(AnnotationError::DatabaseError(rusqlite::Error::SqliteFailure(err, _details)))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -205,6 +304,7 @@ impl Annotation {
                     name: name.to_string(),
                     group: group.to_string(),
                     accession_id: *accession_id,
+                    extra: extra.cloned(),
                 })
             }
             Err(err) => Err(err),
@@ -216,9 +316,10 @@ impl Annotation {
         name: &str,
         group: &str,
         accession_id: &HashId,
+        extra: Option<&AnnotationExtra>,
         sample_names: &[&str],
     ) -> Result<Annotation, AnnotationError> {
-        let annotation = Annotation::get_or_create(conn, name, group, accession_id)?;
+        let annotation = Annotation::get_or_create(conn, name, group, accession_id, extra)?;
         annotation.add_samples(conn, sample_names)?;
         Ok(annotation)
     }
@@ -454,7 +555,8 @@ pub fn add_annotation(
     let accession = BlockGroup::add_accession(graph_conn, &path, name, start, end, &mut cache);
 
     let annotation_group = group.unwrap_or("default");
-    let annotation = Annotation::get_or_create(graph_conn, name, annotation_group, &accession.id)?;
+    let annotation =
+        Annotation::get_or_create(graph_conn, name, annotation_group, &accession.id, None)?;
     AnnotationGroupSample::create(graph_conn, &annotation.group, sample)?;
 
     let operation = end_operation(
@@ -803,7 +905,8 @@ mod tests {
         let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache);
 
         let annotation =
-            Annotation::get_or_create(&conn, "gene-a", "project-tracks", &accession.id).unwrap();
+            Annotation::get_or_create(&conn, "gene-a", "project-tracks", &accession.id, None)
+                .unwrap();
         annotation
             .add_samples(&conn, &["sample-1", "sample-2"])
             .unwrap();
@@ -821,6 +924,69 @@ mod tests {
 
         let by_group = Annotation::query_by_group(&conn, "project-tracks").unwrap();
         assert_eq!(by_group, vec![annotation]);
+    }
+
+    #[test]
+    fn deserialize_annotation_extra_defaults_missing_fields() {
+        // Ensure that if we add new fields to the AnnotationExtra struct, like new_annotation_format we still parse old ones
+        let extra = deserialize_annotation_extra(Some(r#"{"genbank":{"kind":"CDS"}}"#.to_string()))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            extra.genbank,
+            Some(GenBankExtra {
+                kind: "CDS".to_string(),
+                ..GenBankExtra::default()
+            })
+        );
+        assert_eq!(extra.gff, None);
+        assert_eq!(extra.bed, None);
+    }
+
+    #[test]
+    fn deserialize_annotation_extra_ignores_unknown_fields() {
+        // ensure if we drop a format, removed_top_level key here, we still parse
+        let extra = deserialize_annotation_extra(Some(
+            r#"{"genbank":{"kind":"CDS","legacy_field":"value"},"removed_top_level":true}"#
+                .to_string(),
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            extra.genbank,
+            Some(GenBankExtra {
+                kind: "CDS".to_string(),
+                ..GenBankExtra::default()
+            })
+        );
+        assert_eq!(extra.gff, None);
+        assert_eq!(extra.bed, None);
+    }
+
+    #[test]
+    fn deserialize_and_reserialize_annotation_extra_keeps_compatible_fields() {
+        // Ensure that if we parse an older field, we can still reserialize it with the compatible fields kept.
+        let extra = deserialize_annotation_extra(Some(
+            r#"{"genbank":{"kind":"CDS","legacy_field":"value"},"removed_top_level":true}"#
+                .to_string(),
+        ))
+        .unwrap()
+        .unwrap();
+
+        let reserialized = serialize_annotation_extra(Some(&extra)).unwrap();
+        let reparsed: AnnotationExtra = serde_json::from_str(&reserialized).unwrap();
+
+        assert_eq!(
+            reparsed.genbank,
+            Some(GenBankExtra {
+                kind: "CDS".to_string(),
+                ..GenBankExtra::default()
+            })
+        );
+        assert_eq!(reparsed.gff, None);
+        assert_eq!(reparsed.bed, None);
     }
 
     #[test]

@@ -729,12 +729,18 @@ pub fn process_changesetiter(
                     let name = parse_string(item, 1);
                     let group = parse_string(item, 2);
                     let accession_id = parse_hashid(item, 3);
+                    let extra = parse_string(item, 4);
 
                     created_annotations.push(Annotation {
                         id,
                         name,
                         group,
                         accession_id,
+                        extra: if extra.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::from_str(&extra).unwrap())
+                        },
                     });
 
                     if !created_accessions_set.contains(&accession_id) {
@@ -987,11 +993,15 @@ pub fn apply_changeset(
             &annotation.name,
             &annotation.group,
             &annotation.accession_id,
+            annotation.extra.as_ref(),
         )
         .map_err(|err| match err {
-            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
-                inner
+                ChangesetError::SqliteError(inner)
+            }
+            AnnotationError::SerializationError(message) => {
+                ChangesetError::SerializationError(message)
             }
         })?;
     }
@@ -1003,9 +1013,12 @@ pub fn apply_changeset(
             &annotation_group_sample.sample_name,
         )
         .map_err(|err| match err {
-            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
-                inner
+                ChangesetError::SqliteError(inner)
+            }
+            AnnotationError::SerializationError(message) => {
+                ChangesetError::SerializationError(message)
             }
         })?;
     }
@@ -1030,9 +1043,12 @@ pub fn revert_changeset(
             &annotation_group_sample.sample_name,
         )
         .map_err(|err| match err {
-            AnnotationError::DatabaseError(inner) => inner,
+            AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
-                inner
+                ChangesetError::SqliteError(inner)
+            }
+            AnnotationError::SerializationError(message) => {
+                ChangesetError::SerializationError(message)
             }
         })?;
     }
@@ -1358,6 +1374,7 @@ mod tests {
                 name: "test_annotation".to_string(),
                 group: "gff3".to_string(),
                 accession_id: HashId::pad_str(1),
+                extra: None,
             }],
             annotation_group_samples: vec![AnnotationGroupSample {
                 annotation_group: "gff3".to_string(),
@@ -1523,6 +1540,7 @@ mod tests {
                 name: "test_annotation".to_string(),
                 group: "gff3".to_string(),
                 accession_id: HashId::pad_str(1),
+                extra: None,
             }],
             annotation_group_samples: vec![AnnotationGroupSample {
                 annotation_group: "gff3".to_string(),
@@ -1557,7 +1575,8 @@ mod tests {
         let accession = BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache);
 
         let mut session = start_operation(conn);
-        let annotation = Annotation::get_or_create(conn, "gene-a", "gff3", &accession.id).unwrap();
+        let annotation =
+            Annotation::get_or_create(conn, "gene-a", "gff3", &accession.id, None).unwrap();
         annotation.add_samples(conn, &["sample-1"]).unwrap();
 
         let operation = end_operation(

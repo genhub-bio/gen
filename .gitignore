@@ -18,6 +18,7 @@ target/
 fixtures/*.ipynb
 **/.ipynb_checkpoints/
 .venv/
+uv.lock
 
 # Mac droppings
 .DS_Store
@@ -39,4 +40,10 @@ gen-python/python/gen/*.so
 
 # Cap'n proto generated files
 **/generated/*capnp.rs
+
+# precommit stuff
+.cache
+
+# Agent stuff
+.codex
 **/.kiro/specs/*

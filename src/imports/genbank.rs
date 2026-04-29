@@ -6,7 +6,10 @@ use std::{
 };
 
 use gb_io::reader;
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
+use gen_core::{
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
+    range::{OrderedMerge, Range, merge_ordered_items},
+};
 use gen_models::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
     annotations::Annotation,
@@ -62,24 +65,34 @@ impl GenBankImportOptions {
 
 /// Maps a half-open interval in the final edited GenBank sequence back to a canonical node range.
 ///
-/// `final_start` and `final_end` are coordinates in the fully edited sequence from the imported
-/// GenBank record. `node_id`, `sequence_start`, and `sequence_end` identify the corresponding
+/// `final_range` is a coordinate interval in the fully edited sequence from the imported GenBank
+/// record. `node_id` and `sequence_range` identify the corresponding
 /// half-open range on the canonical node that stores that portion of sequence in the graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FinalSequenceSegment {
-    final_start: i64,
-    final_end: i64,
+    final_range: Range,
     node_id: HashId,
-    sequence_start: i64,
-    sequence_end: i64,
+    sequence_range: Range,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NodeSequenceSegment {
     node_id: HashId,
-    sequence_start: i64,
-    sequence_end: i64,
+    sequence_range: Range,
     strand: Strand,
+}
+
+impl OrderedMerge for NodeSequenceSegment {
+    fn should_merge_with(&self, next: &Self) -> bool {
+        self.node_id == next.node_id
+            && self.strand == next.strand
+            && next.sequence_range.start >= self.sequence_range.start
+            && next.sequence_range.start <= self.sequence_range.end
+    }
+
+    fn merge_with(&mut self, next: &Self) {
+        self.sequence_range.end = self.sequence_range.end.max(next.sequence_range.end);
+    }
 }
 
 struct LocusAnnotationImport<'a> {
@@ -140,11 +153,15 @@ fn build_final_sequence_segments(
         if wt_cursor < edit.start {
             let reference_length = edit.start - wt_cursor;
             segments.push(FinalSequenceSegment {
-                final_start: final_cursor,
-                final_end: final_cursor + reference_length,
+                final_range: Range {
+                    start: final_cursor,
+                    end: final_cursor + reference_length,
+                },
                 node_id: wt_node_id,
-                sequence_start: wt_cursor,
-                sequence_end: edit.start,
+                sequence_range: Range {
+                    start: wt_cursor,
+                    end: edit.start,
+                },
             });
             wt_cursor = edit.start;
             final_cursor += reference_length;
@@ -156,11 +173,15 @@ fn build_final_sequence_segments(
                     let new_length = edit.new_sequence.len() as i64;
                     if new_length > 0 {
                         segments.push(FinalSequenceSegment {
-                            final_start: final_cursor,
-                            final_end: final_cursor + new_length,
+                            final_range: Range {
+                                start: final_cursor,
+                                end: final_cursor + new_length,
+                            },
                             node_id: *change_node_id,
-                            sequence_start: 0,
-                            sequence_end: new_length,
+                            sequence_range: Range {
+                                start: 0,
+                                end: new_length,
+                            },
                         });
                     }
                     final_cursor += new_length;
@@ -172,11 +193,15 @@ fn build_final_sequence_segments(
                     let new_length = edit.new_sequence.len() as i64;
                     if new_length > 0 {
                         segments.push(FinalSequenceSegment {
-                            final_start: final_cursor,
-                            final_end: final_cursor + new_length,
+                            final_range: Range {
+                                start: final_cursor,
+                                end: final_cursor + new_length,
+                            },
                             node_id: *change_node_id,
-                            sequence_start: 0,
-                            sequence_end: new_length,
+                            sequence_range: Range {
+                                start: 0,
+                                end: new_length,
+                            },
                         });
                     }
                     final_cursor += new_length;
@@ -191,11 +216,15 @@ fn build_final_sequence_segments(
     if wt_cursor < wt_length {
         let reference_length = wt_length - wt_cursor;
         segments.push(FinalSequenceSegment {
-            final_start: final_cursor,
-            final_end: final_cursor + reference_length,
+            final_range: Range {
+                start: final_cursor,
+                end: final_cursor + reference_length,
+            },
             node_id: wt_node_id,
-            sequence_start: wt_cursor,
-            sequence_end: wt_length,
+            sequence_range: Range {
+                start: wt_cursor,
+                end: wt_length,
+            },
         });
     }
 
@@ -207,7 +236,7 @@ fn build_final_sequence_segments(
 /// This is not a general interval merge. It assumes `segments` arrive in the correct traversal
 /// order, so only the most recently merged segment needs to be checked. When two consecutive
 /// segments are on the same node and strand and overlap or touch, the merged segment keeps the
-/// original `sequence_start` and extends `sequence_end` to the farthest right boundary.
+/// original `sequence_range.start` and extends `sequence_range.end` to the farthest right boundary.
 ///
 /// For example:
 /// - `[0, 3)` then `[3, 5)` merges to `[0, 5)`
@@ -217,26 +246,16 @@ fn build_final_sequence_segments(
 fn merge_node_sequence_segments(
     segments: Vec<NodeSequenceSegment>,
 ) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
-    let mut merged: Vec<NodeSequenceSegment> = Vec::with_capacity(segments.len());
-    for segment in segments {
-        if segment.sequence_end <= segment.sequence_start {
+    for segment in &segments {
+        if segment.sequence_range.end <= segment.sequence_range.start {
             return Err(GenBankError::ParseError(format!(
                 "Invalid node sequence segment: start {} must be less than end {}",
-                segment.sequence_start, segment.sequence_end
+                segment.sequence_range.start, segment.sequence_range.end
             )));
         }
-        if let Some(last) = merged.last_mut()
-            && last.node_id == segment.node_id
-            && last.strand == segment.strand
-            && segment.sequence_start >= last.sequence_start
-            && segment.sequence_start <= last.sequence_end
-        {
-            last.sequence_end = last.sequence_end.max(segment.sequence_end);
-            continue;
-        }
-        merged.push(segment);
     }
-    Ok(merged)
+
+    Ok(merge_ordered_items(segments))
 }
 
 /// Maps annotation spans from final edited-sequence coordinates onto node-local coordinates.
@@ -279,33 +298,50 @@ fn merge_node_sequence_segments(
 fn map_annotation_segments(
     annotation_segments: &[GenBankAnnotationSegment],
     final_segments: &[FinalSequenceSegment],
+    preserve_part_boundaries: bool,
 ) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
-    merge_node_sequence_segments(
-        annotation_segments
-            .iter()
-            .flat_map(|annotation_segment| {
-                final_segments.iter().filter_map(|final_segment| {
-                    let overlap_start = max(annotation_segment.start, final_segment.final_start);
-                    let overlap_end = min(annotation_segment.end, final_segment.final_end);
-                    if overlap_end <= overlap_start {
-                        return None;
-                    }
+    let mapped = annotation_segments
+        .iter()
+        .map(|annotation_segment| {
+            merge_node_sequence_segments(
+                final_segments
+                    .iter()
+                    .filter_map(|final_segment| {
+                        let overlap_start =
+                            max(annotation_segment.start, final_segment.final_range.start);
+                        let overlap_end =
+                            min(annotation_segment.end, final_segment.final_range.end);
+                        if overlap_end <= overlap_start {
+                            return None;
+                        }
 
-                    let segment_start =
-                        final_segment.sequence_start + (overlap_start - final_segment.final_start);
-                    let segment_end =
-                        final_segment.sequence_start + (overlap_end - final_segment.final_start);
+                        let segment_start = final_segment.sequence_range.start
+                            + (overlap_start - final_segment.final_range.start);
+                        let segment_end = final_segment.sequence_range.start
+                            + (overlap_end - final_segment.final_range.start);
 
-                    Some(NodeSequenceSegment {
-                        node_id: final_segment.node_id,
-                        sequence_start: segment_start,
-                        sequence_end: segment_end,
-                        strand: annotation_segment.strand,
+                        Some(NodeSequenceSegment {
+                            node_id: final_segment.node_id,
+                            sequence_range: Range {
+                                start: segment_start,
+                                end: segment_end,
+                            },
+                            strand: annotation_segment.strand,
+                        })
                     })
-                })
-            })
-            .collect(),
-    )
+                    .collect(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    if preserve_part_boundaries {
+        Ok(mapped)
+    } else {
+        merge_node_sequence_segments(mapped)
+    }
 }
 
 fn create_accession_for_segments(
@@ -333,7 +369,7 @@ fn create_accession_for_segments(
         source_coordinate: -1,
         source_strand: Strand::Forward,
         target_node_id: first.node_id,
-        target_coordinate: first.sequence_start,
+        target_coordinate: first.sequence_range.start,
         target_strand: first.strand,
         chromosome_index: 0,
     });
@@ -343,10 +379,10 @@ fn create_accession_for_segments(
         let next = &window[1];
         edges.push(AccessionEdgeData {
             source_node_id: current.node_id,
-            source_coordinate: current.sequence_end,
+            source_coordinate: current.sequence_range.end,
             source_strand: current.strand,
             target_node_id: next.node_id,
-            target_coordinate: next.sequence_start,
+            target_coordinate: next.sequence_range.start,
             target_strand: next.strand,
             chromosome_index: 0,
         });
@@ -355,7 +391,7 @@ fn create_accession_for_segments(
     let last = segments.last().unwrap();
     edges.push(AccessionEdgeData {
         source_node_id: last.node_id,
-        source_coordinate: last.sequence_end,
+        source_coordinate: last.sequence_range.end,
         source_strand: last.strand,
         target_node_id: PATH_END_NODE_ID,
         target_coordinate: -1,
@@ -391,7 +427,16 @@ fn import_locus_annotations(
         });
 
     for annotation in input.annotations.iter() {
-        let mapped_segments = map_annotation_segments(&annotation.segments, &final_segments)?;
+        let mapped_segments = map_annotation_segments(
+            &annotation.segments,
+            &final_segments,
+            annotation
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.genbank.as_ref())
+                .and_then(|extra| extra.location_operator.as_ref())
+                .is_some(),
+        )?;
         if mapped_segments.is_empty() {
             continue;
         }
@@ -414,7 +459,10 @@ fn import_locus_annotations(
             .map(|segment| {
                 format!(
                     "{}:{}:{}:{}",
-                    segment.node_id, segment.sequence_start, segment.sequence_end, segment.strand
+                    segment.node_id,
+                    segment.sequence_range.start,
+                    segment.sequence_range.end,
+                    segment.strand
                 )
             })
             .collect::<Vec<_>>()
@@ -434,6 +482,7 @@ fn import_locus_annotations(
             &annotation.name,
             &annotation_group,
             &accession_id,
+            annotation.extra.as_ref(),
             &[input.sample],
         )?;
     }
@@ -664,7 +713,7 @@ mod tests {
 
     use gen_core::is_terminal;
     use gen_models::{
-        annotations::{Annotation, AnnotationGroup},
+        annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
         operations::OperationFile,
         traits::Query,
@@ -757,46 +806,34 @@ mod tests {
             segments,
             vec![
                 FinalSequenceSegment {
-                    final_start: 0,
-                    final_end: 2,
+                    final_range: Range { start: 0, end: 2 },
                     node_id: wt_node_id,
-                    sequence_start: 0,
-                    sequence_end: 2,
+                    sequence_range: Range { start: 0, end: 2 },
                 },
                 FinalSequenceSegment {
-                    final_start: 2,
-                    final_end: 4,
+                    final_range: Range { start: 2, end: 4 },
                     node_id: insertion_node_id,
-                    sequence_start: 0,
-                    sequence_end: 2,
+                    sequence_range: Range { start: 0, end: 2 },
                 },
                 FinalSequenceSegment {
-                    final_start: 4,
-                    final_end: 7,
+                    final_range: Range { start: 4, end: 7 },
                     node_id: wt_node_id,
-                    sequence_start: 2,
-                    sequence_end: 5,
+                    sequence_range: Range { start: 2, end: 5 },
                 },
                 FinalSequenceSegment {
-                    final_start: 7,
-                    final_end: 10,
+                    final_range: Range { start: 7, end: 10 },
                     node_id: replacement_node_id,
-                    sequence_start: 0,
-                    sequence_end: 3,
+                    sequence_range: Range { start: 0, end: 3 },
                 },
                 FinalSequenceSegment {
-                    final_start: 10,
-                    final_end: 11,
+                    final_range: Range { start: 10, end: 11 },
                     node_id: wt_node_id,
-                    sequence_start: 7,
-                    sequence_end: 8,
+                    sequence_range: Range { start: 7, end: 8 },
                 },
                 FinalSequenceSegment {
-                    final_start: 11,
-                    final_end: 12,
+                    final_range: Range { start: 11, end: 12 },
                     node_id: wt_node_id,
-                    sequence_start: 9,
-                    sequence_end: 10,
+                    sequence_range: Range { start: 9, end: 10 },
                 },
             ]
         );
@@ -810,32 +847,27 @@ mod tests {
         let merged = merge_node_sequence_segments(vec![
             NodeSequenceSegment {
                 node_id,
-                sequence_start: 0,
-                sequence_end: 3,
+                sequence_range: Range { start: 0, end: 3 },
                 strand: Strand::Forward,
             },
             NodeSequenceSegment {
                 node_id,
-                sequence_start: 3,
-                sequence_end: 5,
+                sequence_range: Range { start: 3, end: 5 },
                 strand: Strand::Forward,
             },
             NodeSequenceSegment {
                 node_id,
-                sequence_start: 4,
-                sequence_end: 7,
+                sequence_range: Range { start: 4, end: 7 },
                 strand: Strand::Forward,
             },
             NodeSequenceSegment {
                 node_id,
-                sequence_start: 1,
-                sequence_end: 2,
+                sequence_range: Range { start: 1, end: 2 },
                 strand: Strand::Reverse,
             },
             NodeSequenceSegment {
                 node_id: other_node_id,
-                sequence_start: 0,
-                sequence_end: 1,
+                sequence_range: Range { start: 0, end: 1 },
                 strand: Strand::Forward,
             },
         ])
@@ -846,20 +878,17 @@ mod tests {
             vec![
                 NodeSequenceSegment {
                     node_id,
-                    sequence_start: 0,
-                    sequence_end: 7,
+                    sequence_range: Range { start: 0, end: 7 },
                     strand: Strand::Forward,
                 },
                 NodeSequenceSegment {
                     node_id,
-                    sequence_start: 1,
-                    sequence_end: 2,
+                    sequence_range: Range { start: 1, end: 2 },
                     strand: Strand::Reverse,
                 },
                 NodeSequenceSegment {
                     node_id: other_node_id,
-                    sequence_start: 0,
-                    sequence_end: 1,
+                    sequence_range: Range { start: 0, end: 1 },
                     strand: Strand::Forward,
                 },
             ]
@@ -873,8 +902,7 @@ mod tests {
         assert_eq!(
             merge_node_sequence_segments(vec![NodeSequenceSegment {
                 node_id,
-                sequence_start: 7,
-                sequence_end: 7,
+                sequence_range: Range { start: 7, end: 7 },
                 strand: Strand::Forward,
             }]),
             Err(GenBankError::ParseError(
@@ -896,27 +924,22 @@ mod tests {
             }],
             &[
                 FinalSequenceSegment {
-                    final_start: 0,
-                    final_end: 2,
+                    final_range: Range { start: 0, end: 2 },
                     node_id: wt_node_id,
-                    sequence_start: 0,
-                    sequence_end: 2,
+                    sequence_range: Range { start: 0, end: 2 },
                 },
                 FinalSequenceSegment {
-                    final_start: 2,
-                    final_end: 4,
+                    final_range: Range { start: 2, end: 4 },
                     node_id: insertion_node_id,
-                    sequence_start: 0,
-                    sequence_end: 2,
+                    sequence_range: Range { start: 0, end: 2 },
                 },
                 FinalSequenceSegment {
-                    final_start: 4,
-                    final_end: 7,
+                    final_range: Range { start: 4, end: 7 },
                     node_id: wt_node_id,
-                    sequence_start: 2,
-                    sequence_end: 5,
+                    sequence_range: Range { start: 2, end: 5 },
                 },
             ],
+            false,
         )
         .unwrap();
 
@@ -925,20 +948,60 @@ mod tests {
             vec![
                 NodeSequenceSegment {
                     node_id: wt_node_id,
-                    sequence_start: 1,
-                    sequence_end: 2,
+                    sequence_range: Range { start: 1, end: 2 },
                     strand: Strand::Forward,
                 },
                 NodeSequenceSegment {
                     node_id: insertion_node_id,
-                    sequence_start: 0,
-                    sequence_end: 2,
+                    sequence_range: Range { start: 0, end: 2 },
                     strand: Strand::Forward,
                 },
                 NodeSequenceSegment {
                     node_id: wt_node_id,
-                    sequence_start: 2,
-                    sequence_end: 4,
+                    sequence_range: Range { start: 2, end: 4 },
+                    strand: Strand::Forward,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_map_annotation_segments_preserves_part_boundaries() {
+        let wt_node_id = HashId::convert_str("wt");
+
+        let mapped = map_annotation_segments(
+            &[
+                GenBankAnnotationSegment {
+                    start: 0,
+                    end: 2,
+                    strand: Strand::Forward,
+                },
+                GenBankAnnotationSegment {
+                    start: 2,
+                    end: 5,
+                    strand: Strand::Forward,
+                },
+            ],
+            &[FinalSequenceSegment {
+                final_range: Range { start: 0, end: 5 },
+                node_id: wt_node_id,
+                sequence_range: Range { start: 0, end: 5 },
+            }],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mapped,
+            vec![
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_range: Range { start: 0, end: 2 },
+                    strand: Strand::Forward,
+                },
+                NodeSequenceSegment {
+                    node_id: wt_node_id,
+                    sequence_range: Range { start: 2, end: 5 },
                     strand: Strand::Forward,
                 },
             ]
@@ -1067,6 +1130,36 @@ mod tests {
             annotations
                 .iter()
                 .any(|annotation| annotation.name == "ori")
+        );
+        let amp_r = annotations
+            .iter()
+            .find(|annotation| annotation.name == "AmpR")
+            .unwrap();
+        let amp_r_extra = amp_r
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.genbank.as_ref())
+            .unwrap();
+        assert_eq!(amp_r_extra.kind, "CDS");
+        assert!(
+            amp_r_extra
+                .qualifiers
+                .iter()
+                .any(|qualifier| qualifier.key == "product"
+                    && qualifier.value.as_deref() == Some("beta-lactamase"))
+        );
+
+        let ori_annotation = annotations
+            .iter()
+            .find(|annotation| annotation.name == "ori")
+            .unwrap();
+        assert_eq!(
+            ori_annotation
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.genbank.as_ref())
+                .and_then(|extra| extra.location_operator.as_ref()),
+            Some(&GenBankLocationOperator::Join)
         );
 
         let block_group = Sample::get_block_groups(conn, "fixtures", "puc19-sample")
