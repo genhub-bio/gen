@@ -160,9 +160,8 @@ pub fn update_with_fasta(
                     state.first_node = None;
                 }
             }
+            change_count += 1;
         }
-
-        change_count += 1;
     }
 
     for state in target_states {

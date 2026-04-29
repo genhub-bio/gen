@@ -249,6 +249,7 @@ pub fn view_block_group(
         block_group_id.map(|bg_id| match BlockGroup::get_by_id(conn, &bg_id) {
             Ok(bg) => bg,
             Err(err) => {
+                // TODO: Handle these with messages instead of panic'ing
                 panic!("Failed to load block group {bg_id}: {err}");
             }
         });
@@ -1042,6 +1043,7 @@ pub fn view_block_group(
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id) {
                 Ok(bg) => bg,
                 Err(err) => {
+                    // TODO: Handle these with messages instead of panic'ing
                     panic!("Failed to load block group {}: {err}", new_block_group_id);
                 }
             };
