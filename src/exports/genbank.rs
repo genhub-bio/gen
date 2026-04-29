@@ -572,7 +572,7 @@ mod tests {
             chromosome_index: 0,
         });
 
-        let accession = Accession::get_or_create(conn, name, &path.id, None);
+        let accession = Accession::get_or_create(conn, name, &path.id, None).unwrap();
         let edge_ids = AccessionEdge::bulk_create(conn, &edges);
         AccessionPath::create(conn, &accession.id, &edge_ids);
         Annotation::create_with_samples(
