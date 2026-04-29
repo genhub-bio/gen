@@ -1,0 +1,42 @@
+# VCS metadata
+.git/
+
+# Cargo build outputs
+target/
+debug/
+
+# SQLite repos and generated state
+.gen/
+
+# Editor and local tooling state
+.idea/
+.vscode/
+.cache/
+.codex
+.old/
+.zed/
+AGENTS.md
+
+# OS cruft
+.DS_Store
+
+# Rust and platform-specific build artifacts
+**/*.rs.bk
+*.pdb
+
+# Notebook and Python cache artifacts
+fixtures/*.ipynb
+**/.ipynb_checkpoints/
+.venv/
+**/__pycache__/
+gen-python/python/gen/*.so
+gen-python/target/
+gen-r/src/rust/target/
+
+# Generated sources
+**/generated/*capnp.rs
+
+# Local recordings and profiling output
+*.tape
+flamegraph.svg
+rust-analyzer.json

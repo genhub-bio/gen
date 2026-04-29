@@ -1,0 +1,3 @@
+LIBRARY genr
+EXPORTS
+  R_init_genr
