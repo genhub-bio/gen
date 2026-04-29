@@ -139,7 +139,7 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
                 // Truncated scale: Show sequence with truncation to max 12 chars
                 let sequence = self
                     .get_sequence(node_id)
-                    .unwrap_or_else(|_| "?".to_string());
+                    .unwrap_or_else(|_| "Unknown Sequence".to_string());
                 let max_width = 12u32;
                 let truncated = inner_truncation(&sequence, max_width);
                 buffer.set_string_styled(area.left_center(), &truncated, text_style);
@@ -148,7 +148,7 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
                 // Full scale: Show complete sequence (truncated only by area width)
                 let sequence = self
                     .get_sequence(node_id)
-                    .unwrap_or_else(|_| "?".to_string());
+                    .unwrap_or_else(|_| "Unknown Sequence".to_string());
                 buffer.set_string_styled(area.left_center(), &sequence, text_style);
             }
         }
