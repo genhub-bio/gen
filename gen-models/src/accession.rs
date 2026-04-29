@@ -271,21 +271,25 @@ impl From<&AugmentedEdgeData> for AccessionEdgeData {
 }
 
 impl Accession {
+    fn id_hash(path_id: &HashId, parent_accession_id: Option<&HashId>, name: &str) -> HashId {
+        HashId(calculate_hash(&format!(
+            "{path_id}:{parent_accession_id:?}:{name}"
+        )))
+    }
+
     pub fn create(
         conn: &GraphConnection,
         name: &str,
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
     ) -> Result<Accession, AccessionError> {
-        let hash = HashId(calculate_hash(&format!(
-            "{path_id}:{parent_accession_id:?}:{name}"
-        )));
         let query = "INSERT INTO accessions (id, name, path_id, parent_accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = match conn.prepare(query) {
             Ok(s) => s,
             Err(e) => return Err(AccessionError::DatabaseError(e)),
         };
 
+        let hash = Accession::id_hash(path_id, parent_accession_id, name);
         match stmt.execute((hash, name, path_id, parent_accession_id)) {
             Ok(_) => Ok(Accession {
                 id: hash,
@@ -313,29 +317,13 @@ impl Accession {
         match Accession::create(conn, name, path_id, parent_accession_id) {
             Ok(accession) => Ok(accession),
             Err(AccessionError::Duplicate(_)) => {
-                let results = if let Some(parent_accession_id) = parent_accession_id {
-                    let query = "select * from accessions where name = ?1 and path_id = ?2 and parent_accession_id = ?3;";
-                    Accession::query(
-                        conn,
-                        query,
-                        params![name.to_string(), path_id, parent_accession_id],
-                    )
-                } else {
-                    let query = "select * from accessions where name = ?1 and path_id = ?2 and parent_accession_id is null;";
-                    Accession::query(conn, query, params![name.to_string(), path_id])
-                };
-                if let Some(accession) = results.into_iter().next() {
-                    Ok(Accession {
-                        id: accession.id,
-                        name: name.to_string(),
-                        path_id: *path_id,
-                        parent_accession_id: parent_accession_id.copied(),
-                    })
-                } else {
-                    Err(AccessionError::DatabaseError(
-                        rusqlite::Error::QueryReturnedNoRows,
-                    ))
-                }
+                let hash = Accession::id_hash(path_id, parent_accession_id, name);
+                Ok(Accession {
+                    id: hash,
+                    name: name.to_string(),
+                    path_id: *path_id,
+                    parent_accession_id: parent_accession_id.copied(),
+                })
             }
             Err(e) => Err(e),
         }
