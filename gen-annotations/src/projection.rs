@@ -72,15 +72,6 @@ pub fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSeg
     segments
 }
 
-pub fn merge_annotation_segments(segments: Vec<AnnotationSegment>) -> Vec<AnnotationSegment> {
-    merge_ordered_items(
-        segments
-            .into_iter()
-            .filter(|segment| segment.range.end > segment.range.start)
-            .collect(),
-    )
-}
-
 pub fn project_annotation_segments(
     accession_segments: &[AnnotationSegment],
     path_blocks: &[PathBlock],
@@ -89,7 +80,7 @@ pub fn project_annotation_segments(
     let projected = accession_segments
         .iter()
         .flat_map(|segment| {
-            merge_annotation_segments(
+            merge_ordered_items(
                 path_blocks
                     .iter()
                     .filter_map(|block| {
@@ -133,7 +124,7 @@ pub fn project_annotation_segments(
     if preserve_part_boundaries {
         projected
     } else {
-        merge_annotation_segments(projected)
+        merge_ordered_items(projected)
     }
 }
 
@@ -162,9 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_annotation_segments_merges_overlapping_ranges() {
+    fn test_merges_overlapping_ranges() {
         let node_id = HashId::convert_str("node");
-        let merged = merge_annotation_segments(vec![
+        let merged = merge_ordered_items(vec![
             AnnotationSegment {
                 node_id,
                 range: Range { start: 2, end: 5 },
