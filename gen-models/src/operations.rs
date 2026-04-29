@@ -8,8 +8,7 @@ use std::{
     string::ToString,
 };
 
-use anyhow::anyhow;
-use gen_core::{HashId, Workspace, calculate_hash, traits::Capnp};
+use gen_core::{HashId, Workspace, calculate_hash, errors::ConfigError, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
 use itertools::Itertools;
 use petgraph::{Direction, graphmap::UnGraphMap};
@@ -24,7 +23,7 @@ use crate::{
         get_changeset_from_path, write_changeset,
     },
     db::{DbContext, OperationsConnection},
-    errors::{BranchError, FileAdditionError, OperationError, RemoteError},
+    errors::{AddFilesOperationError, BranchError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
     files::GenDatabase,
     gen_models_capnp::operation,
@@ -397,7 +396,7 @@ pub fn add_files_operation(
     context: &DbContext,
     files: &[String],
     message: Option<&str>,
-) -> Result<Operation, Box<dyn std::error::Error>> {
+) -> Result<Operation, AddFilesOperationError> {
     let workspace = context.workspace();
     let operation_conn = context.operations().conn();
     let graph_conn = context.graph().conn();
@@ -434,7 +433,9 @@ pub fn add_files_operation(
         Err(rusqlite::Error::SqliteFailure(err, _details))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
-            return Err(OperationError::NoChanges.into());
+            return Err(AddFilesOperationError::OperationError(
+                OperationError::NoChanges,
+            ));
         }
         Err(err) => return Err(err.into()),
     };
@@ -467,7 +468,7 @@ pub fn add_files_operation(
 
     let gen_dir = workspace
         .find_gen_dir()
-        .ok_or_else(|| anyhow!("No .gen directory found. Please run 'gen init' first."))?;
+        .ok_or(ConfigError::GenDirectoryNotFound)?;
     let assets_dir = gen_dir.join("assets");
     fs::create_dir_all(&assets_dir)?;
 
