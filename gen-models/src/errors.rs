@@ -5,12 +5,16 @@ use thiserror::Error;
 pub enum QueryError {
     #[error("Results not found: {0}")]
     ResultsNotFound(String),
+    #[error("Sequence Error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 #[derive(Debug, Error, PartialEq)]
 pub enum SampleError {
     #[error("Query Error: {0}")]
     QueryError(#[from] QueryError),
+    #[error("Sequence Error: {0}")]
+    SequenceError(#[from] SequenceError),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
 }
@@ -19,6 +23,20 @@ pub enum SampleError {
 pub enum ChangeError {
     #[error("Operation Error: {0}")]
     OutOfBounds(String),
+    #[error("Sequence Error: {0}")]
+    SequenceError(#[from] SequenceError),
+}
+
+#[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
+pub enum SequenceError {
+    #[error("Sequence slice out of bounds: start={start}, end={end}, length={length}")]
+    OutOfBounds {
+        start: usize,
+        end: usize,
+        length: usize,
+    },
+    #[error("Sequence '{name}' not found in fasta file {file_path}")]
+    NotFound { file_path: String, name: String },
 }
 
 #[derive(Debug, Error, PartialEq)]

@@ -4,6 +4,7 @@ use std::str;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     db::DbContext,
+    errors::SequenceError,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
     sample::Sample,
@@ -29,6 +30,8 @@ pub enum UpdateWithLibraryError {
     FileParse(CombinatorialLibraryParseError),
     #[error("Failed to create library")]
     LibraryCreation(CombinatorialLibraryCreationError),
+    #[error("Sequence error")]
+    Sequence(#[from] SequenceError),
 }
 
 impl From<CombinatorialLibraryParseError> for UpdateWithLibraryError {
@@ -81,10 +84,10 @@ pub fn update_with_library(
         start: start_coordinate,
         end: end_coordinate,
     });
-    if end_coordinate < parent_path.length(conn) {
+    if end_coordinate < parent_path.length(conn)? {
         chunk_ranges.push(Range {
             start: end_coordinate,
-            end: parent_path.length(conn),
+            end: parent_path.length(conn)?,
         });
     }
 
@@ -142,7 +145,7 @@ pub fn update_with_library(
 
     chunk_index += 1;
 
-    if end_coordinate < parent_path.length(conn) {
+    if end_coordinate < parent_path.length(conn)? {
         let end_chunk = derived_block_group_chunks[chunk_index].clone();
         reference_block_group_chunks.push(end_chunk.clone());
         let pathless_end_chunk = BlockGroupChunk {
@@ -261,7 +264,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -323,7 +326,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -336,7 +339,7 @@ mod tests {
 
         let path = BlockGroup::get_current_path(conn, &block_group.id);
         assert_eq!(
-            path.sequence(conn),
+            path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
 
@@ -392,7 +395,7 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences
@@ -446,7 +449,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -509,7 +512,7 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences

@@ -499,7 +499,7 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
-        let graph = Sample::get_graph(conn, "test", "child");
+        let graph = Sample::get_graph(conn, "test", "child").unwrap();
 
         let query = Node::query(
             conn,
@@ -567,7 +567,7 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
-        let graph = Sample::get_graph(conn, "test", "child");
+        let graph = Sample::get_graph(conn, "test", "child").unwrap();
 
         // we should end up with a new edge putting our insert to the beginning of the graph, which is node 3.
         let query = Node::query(

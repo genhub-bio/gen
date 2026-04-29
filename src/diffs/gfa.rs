@@ -6,7 +6,9 @@ use std::{
 };
 
 use gen_core::{NodeIntervalBlock, range::Range};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path, sample::Sample};
+use gen_models::{
+    block_group::BlockGroup, db::GraphConnection, errors::SequenceError, path::Path, sample::Sample,
+};
 use itertools::Itertools;
 use thiserror::Error;
 
@@ -16,6 +18,8 @@ use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_s
 pub enum GfaDiffError {
     #[error("I/O error while writing GFA diff: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Sequence error while building GFA diff: {0}")]
+    Sequence(#[from] SequenceError),
 }
 
 pub fn gfa_sample_diff(
@@ -86,7 +90,7 @@ pub fn gfa_sample_diff(
         let mappings = if has_source_path && has_target_path {
             source_path_result
                 .unwrap()
-                .find_block_mappings(conn, target_path_result.unwrap())
+                .find_block_mappings(conn, target_path_result.unwrap())?
         } else {
             vec![]
         };
@@ -120,7 +124,7 @@ pub fn gfa_sample_diff(
 
         if has_source_path {
             let source_path = source_path_result.unwrap();
-            let source_sequence = source_path.sequence(conn);
+            let source_sequence = source_path.sequence(conn)?;
 
             let source_len = source_sequence.len() as i64;
             if last_source_position < source_len {
@@ -130,7 +134,7 @@ pub fn gfa_sample_diff(
                 });
             }
 
-            let source_node_blocks = source_path.node_block_partition(conn, source_ranges);
+            let source_node_blocks = source_path.node_block_partition(conn, source_ranges)?;
             let source_segments = segments_from_blocks(&source_node_blocks, &source_sequence);
             segments.extend(source_segments.iter().cloned());
 
@@ -144,7 +148,7 @@ pub fn gfa_sample_diff(
 
         if has_target_path {
             let target_path = target_path_result.unwrap();
-            let target_sequence = target_path.sequence(conn);
+            let target_sequence = target_path.sequence(conn)?;
 
             let target_len = target_sequence.len() as i64;
             if last_target_position < target_len {
@@ -154,7 +158,7 @@ pub fn gfa_sample_diff(
                 });
             }
 
-            let target_node_blocks = target_path.node_block_partition(conn, target_ranges);
+            let target_node_blocks = target_path.node_block_partition(conn, target_ranges)?;
             let target_segments = segments_from_blocks(&target_node_blocks, &target_sequence);
             segments.extend(target_segments.iter().cloned());
 
@@ -376,7 +380,9 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
         let original_child_path = BlockGroup::get_current_path(conn, &child_block_group.id);
-        let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge4, &edge5);
+        let _child_path = original_child_path
+            .new_path_with(conn, 2, 6, &edge4, &edge5)
+            .unwrap();
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
@@ -400,7 +406,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false).unwrap();
 
         // We've replaced the middle AAAA with CCCC, so expect that as the child sequence
         assert_eq!(
@@ -458,7 +464,9 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
             BlockGroup::get_current_path(conn, &grandchild_block_group.id);
-        let _grandchild_path = original_grandchild_path.new_path_with(conn, 10, 14, &edge6, &edge7);
+        let _grandchild_path = original_grandchild_path
+            .new_path_with(conn, 10, 14, &edge6, &edge7)
+            .unwrap();
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
         gfa_sample_diff(
@@ -480,7 +488,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 
         // We've replaced the middle AAAA with CCCC and the middle TTTT with GGGG, so four possible sequences
         assert_eq!(
@@ -510,7 +518,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 
         assert_eq!(
             all_grandchild_sequences,
@@ -608,7 +616,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
+        let all_sequences =
+            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
 
         assert_eq!(
             all_sequences,
@@ -706,7 +715,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
+        let all_sequences =
+            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
 
         assert_eq!(
             all_sequences,
@@ -852,7 +862,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
+        let all_sequences =
+            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
 
         assert_eq!(
             all_sequences,
@@ -999,7 +1010,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3")
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_block_group.id, false);
+        let all_sequences =
+            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
 
         assert_eq!(
             all_sequences,
@@ -1114,7 +1126,9 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
         let original_child_path = BlockGroup::get_current_path(conn, &child_block_group.id);
-        let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge3, &edge4);
+        let _child_path = original_child_path
+            .new_path_with(conn, 2, 6, &edge3, &edge4)
+            .unwrap();
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
@@ -1138,7 +1152,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false).unwrap();
 
         // We've replaced [2, 6) of AAAA with CCCC
         assert_eq!(
@@ -1196,7 +1210,9 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
             BlockGroup::get_current_path(conn, &grandchild_block_group.id);
-        let _grandchild_path = original_grandchild_path.new_path_with(conn, 4, 10, &edge5, &edge6);
+        let _grandchild_path = original_grandchild_path
+            .new_path_with(conn, 4, 10, &edge5, &edge6)
+            .unwrap();
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
         gfa_sample_diff(
@@ -1219,7 +1235,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 
         // Original is AAAAAAAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA
@@ -1246,7 +1262,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false);
+            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 
         // Child is      AACCCCAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA

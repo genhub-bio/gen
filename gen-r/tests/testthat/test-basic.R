@@ -371,10 +371,11 @@ test_that("repository and graph controller helpers work", {
     expect_true(length(graph_dict$edges) >= 1)
 
     node <- graph_dict$nodes[[1]]
-    key <- NodeKey(node$node_id, node$sequence_start, node$sequence_end)
+    node_width <- as.integer(node$sequence_end - node$sequence_start)
+    key <- NodeKey(node$node_id, 0L, node_width)
     expect_equal(
       repo$get_block_sequence(key),
-      genr:::repo_get_block_sequence(repo$db_path, node$node_id, node$sequence_start, node$sequence_end)
+      genr:::repo_get_block_sequence(repo$db_path, node$node_id, 0L, node_width)
     )
 
     expect_type(repo$block_group_to_rustworkx(groups[[1]]), "list")
@@ -438,8 +439,8 @@ test_that("low-level helper bindings are directly callable", {
       nzchar(genr:::repo_get_block_sequence(
         db_path,
         node$node_id,
-        node$sequence_start,
-        node$sequence_end
+        0L,
+        as.integer(node$sequence_end - node$sequence_start)
       ))
     )
 

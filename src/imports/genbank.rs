@@ -652,7 +652,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    let tree = path.intervaltree(conn);
+                    let tree = path.intervaltree(conn)?;
                     BlockGroup::insert_change(conn, &change, &tree).unwrap();
                     applied_changes.push((edit, change_node_id));
                 }
@@ -1168,7 +1168,7 @@ mod tests {
             .unwrap();
         let path = BlockGroup::get_current_path(conn, &block_group.id);
         let mut visible_ranges_by_node: HashMap<HashId, Vec<(i64, i64)>> = HashMap::new();
-        for block in path.blocks(conn) {
+        for block in path.blocks(conn).unwrap() {
             if is_terminal(block.node_id) {
                 continue;
             }
@@ -1262,7 +1262,7 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
+            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1314,7 +1314,7 @@ mod tests {
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
+            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1374,7 +1374,8 @@ mod tests {
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion", None),
                 false,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1436,7 +1437,8 @@ mod tests {
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution", None),
                 false,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1484,6 +1486,7 @@ mod tests {
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None),
                 false,
             )
+            .unwrap()
             .iter()
             .map(|s| s.to_lowercase())
             .collect();

@@ -158,12 +158,12 @@ mod tests {
             }
         }
 
-        let actual_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let actual_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(actual_sequences, expected_sequences);
 
         let current_path = BlockGroup::get_current_path(conn, &block_group.id);
         assert_eq!(
-            current_path.sequence(conn),
+            current_path.sequence(conn).unwrap(),
             "TCTAGAGAAAGAGGGGACAAACTAGATGCGTAAAGGAGAAGAACTTTAA"
         );
 
@@ -201,7 +201,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -251,7 +251,7 @@ mod tests {
                 expected_sequences.push(part1.to_string() + part2);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences

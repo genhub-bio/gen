@@ -72,7 +72,9 @@ fn get_block_group_path_nodes(
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
     // Get the path blocks from the database
-    let path_blocks = path.blocks(conn);
+    let path_blocks = path
+        .blocks(conn)
+        .map_err(|e| format!("Failed to load path blocks: {}", e))?;
 
     // Project the path blocks onto the current graph state
     let projected_path = project_path(graph, &path_blocks);
@@ -227,7 +229,7 @@ pub fn view_block_group(
 
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, &block_group.id);
+        block_graph = BlockGroup::get_graph(conn, &block_group.id)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -1030,7 +1032,7 @@ pub fn view_block_group(
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id)?;
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
             current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));

@@ -54,7 +54,7 @@ pub fn update_with_sequence(
 
     for target_block_group in &target_block_groups {
         let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-        let interval_tree = path.intervaltree(conn);
+        let interval_tree = path.intervaltree(conn)?;
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
@@ -146,7 +146,7 @@ pub fn update_with_sequence(
                     end_coordinate,
                     &edge_to_new_node,
                     &edge_from_new_node,
-                );
+                )?;
             }
         }
     }
@@ -227,7 +227,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -280,11 +280,11 @@ mod tests {
         let child_path = BlockGroup::get_current_path(conn, &child_blockgroup);
         let other_path = BlockGroup::get_current_path(conn, &other_blockgroup);
         assert_eq!(
-            child_path.sequence(conn),
+            child_path.sequence(conn).unwrap(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
         );
         assert_eq!(
-            other_path.sequence(conn),
+            other_path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
@@ -348,7 +348,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -412,7 +412,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -482,7 +482,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -546,7 +546,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -610,7 +610,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -661,13 +661,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
 
         let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
         assert_eq!(
-            latest_path.sequence(conn),
+            latest_path.sequence(conn).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
     }

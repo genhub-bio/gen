@@ -257,13 +257,16 @@ pub fn view_patches(
                 let len = end - start;
 
                 let formatted_seq = if len > 7 {
-                    format!(
-                        "{s}...{e}",
-                        s = seq.get_sequence(start, start + 3),
-                        e = seq.get_sequence(end - 3, end)
-                    )
+                    let start_seq = seq
+                        .get_sequence(start, start + 3)
+                        .unwrap_or_else(|_| "?".repeat(3));
+                    let end_seq = seq
+                        .get_sequence(end - 3, end)
+                        .unwrap_or_else(|_| "?".repeat(3));
+                    format!("{s}...{e}", s = start_seq, e = end_seq)
                 } else {
                     seq.get_sequence(start, end)
+                        .unwrap_or_else(|_| "?".repeat(len.max(0) as usize))
                 };
 
                 let coordinates = format!("{node_id}:{start}-{end}");

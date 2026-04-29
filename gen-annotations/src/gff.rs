@@ -58,14 +58,20 @@ pub fn propagate_gff(
     let mut path_mappings_by_bg_name = HashMap::new();
     for (name, target_path) in &target_paths_by_bg_name {
         let source_path = source_paths_by_bg_name.get(name).unwrap();
-        let mapping = source_path.get_mapping_tree(conn, target_path);
+        let mapping = source_path
+            .get_mapping_tree(conn, target_path)
+            .map_err(io::Error::other)?;
         path_mappings_by_bg_name.insert(name, mapping);
     }
 
     let sequence_lengths_by_path_name = target_paths_by_bg_name
         .iter()
-        .map(|(name, path)| (name.clone(), path.sequence(conn).len() as i64))
-        .collect::<HashMap<String, i64>>();
+        .map(|(name, path)| {
+            path.sequence(conn)
+                .map(|sequence| (name.clone(), sequence.len() as i64))
+        })
+        .collect::<Result<HashMap<String, i64>, gen_models::errors::SequenceError>>()
+        .map_err(io::Error::other)?;
 
     for result in reader.record_bufs() {
         let record = result?;
@@ -225,7 +231,7 @@ mod tests {
         .expect("should create child block group")[0]
             .id;
         let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
-        let tree = sample_path.intervaltree(conn);
+        let tree = sample_path.intervaltree(conn).unwrap();
         let replacement_sequence = "AA";
 
         let replacement = Sequence::new()
@@ -276,7 +282,9 @@ mod tests {
             rusqlite::params![node_id],
         )[0]
         .clone();
-        sample_path.new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert);
+        let _ = sample_path
+            .new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert)
+            .unwrap();
     }
 
     #[test]

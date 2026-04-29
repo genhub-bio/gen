@@ -22,7 +22,7 @@ use crate::{
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{Edge, EdgeData, GroupBlock},
-    errors::{ChangeError, QueryError},
+    errors::{ChangeError, QueryError, SequenceError},
     gen_models_capnp::block_group,
     node::Node,
     path::{Path, PathData},
@@ -156,14 +156,18 @@ impl<'a> PathCache<'a> {
         }
     }
 
-    pub fn lookup(path_cache: &mut PathCache, block_group_id: &HashId, name: String) -> Path {
+    pub fn lookup(
+        path_cache: &mut PathCache,
+        block_group_id: &HashId,
+        name: String,
+    ) -> Result<Path, SequenceError> {
         let path_key = PathData {
             name: name.clone(),
             block_group_id: *block_group_id,
         };
         let path_lookup = path_cache.cache.get(&path_key);
         if let Some(path) = path_lookup {
-            path.clone()
+            Ok(path.clone())
         } else {
             let conn = path_cache.conn;
             let new_path = Path::query(
@@ -174,22 +178,22 @@ impl<'a> PathCache<'a> {
             .clone();
 
             path_cache.cache.insert(path_key, new_path.clone());
-            let tree = new_path.intervaltree(conn);
+            let tree = new_path.intervaltree(conn)?;
             path_cache.intervaltree_cache.insert(new_path.clone(), tree);
-            new_path
+            Ok(new_path)
         }
     }
 
     pub fn get_intervaltree<'b>(
         path_cache: &'b mut PathCache<'_>,
         path: &Path,
-    ) -> &'b IntervalTree<i64, NodeIntervalBlock> {
+    ) -> Result<&'b IntervalTree<i64, NodeIntervalBlock>, SequenceError> {
         if !path_cache.intervaltree_cache.contains_key(path) {
-            let tree = path.intervaltree(path_cache.conn);
+            let tree = path.intervaltree(path_cache.conn)?;
             path_cache.intervaltree_cache.insert(path.clone(), tree);
         }
 
-        path_cache.intervaltree_cache.get(path).unwrap()
+        Ok(path_cache.intervaltree_cache.get(path).unwrap())
     }
 }
 
@@ -445,11 +449,14 @@ impl BlockGroup {
         )))
     }
 
-    pub fn get_graph(conn: &GraphConnection, block_group_id: &HashId) -> GenGraph {
+    pub fn get_graph(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+    ) -> Result<GenGraph, SequenceError> {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
-        let blocks = Edge::blocks_from_edges(conn, &edges);
+        let blocks = Edge::blocks_from_edges(conn, &edges)?;
         let (graph, _) = Edge::build_graph(&edges, &blocks);
-        graph
+        Ok(graph)
     }
 
     pub fn prune_graph(graph: &mut GenGraph) {
@@ -511,12 +518,12 @@ impl BlockGroup {
         conn: &GraphConnection,
         block_group_id: &HashId,
         _prune: bool,
-    ) -> HashSet<String> {
+    ) -> Result<HashSet<String>, SequenceError> {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id)
             .into_iter()
             .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
             .collect::<Vec<_>>();
-        let blocks = Edge::blocks_from_edges(conn, &edges);
+        let blocks = Edge::blocks_from_edges(conn, &edges)?;
 
         let (mut graph, _) = Edge::build_graph(&edges, &blocks);
         BlockGroup::prune_graph(&mut graph);
@@ -551,14 +558,14 @@ impl BlockGroup {
                 if start_node == *end_node {
                     let block = blocks_by_node.get(&start_node).unwrap();
                     if block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID {
-                        sequences.insert(block.sequence());
+                        sequences.insert(block.sequence()?);
                     }
                 } else {
                     for path in all_simple_paths(&graph, start_node, *end_node) {
                         let mut current_sequence = "".to_string();
                         for node in path {
                             let block = blocks_by_node.get(&node).unwrap();
-                            let block_sequence = block.sequence();
+                            let block_sequence = block.sequence()?;
                             current_sequence.push_str(&block_sequence);
                         }
                         sequences.insert(current_sequence);
@@ -567,7 +574,7 @@ impl BlockGroup {
             }
         }
 
-        sequences
+        Ok(sequences)
     }
 
     pub fn add_accession(
@@ -577,8 +584,8 @@ impl BlockGroup {
         start: i64,
         end: i64,
         cache: &mut PathCache,
-    ) -> Accession {
-        let tree = PathCache::get_intervaltree(cache, path);
+    ) -> Result<Accession, SequenceError> {
+        let tree = PathCache::get_intervaltree(cache, path)?;
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
@@ -645,7 +652,7 @@ impl BlockGroup {
             &accession.id,
             &AccessionEdge::bulk_create(conn, &path_edges),
         );
-        accession
+        Ok(accession)
     }
 
     pub fn insert_changes(
@@ -660,11 +667,15 @@ impl BlockGroup {
         let mut tree_map = HashMap::new();
         for change in changes {
             let tree = if modify_blockgroup {
-                tree_map.entry(change.block_group_id).or_insert_with(|| {
-                    BlockGroup::intervaltree_for(conn, &change.block_group_id, true)
-                })
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    tree_map.entry(change.block_group_id)
+                {
+                    let tree = BlockGroup::intervaltree_for(conn, &change.block_group_id, true)?;
+                    e.insert(tree);
+                }
+                tree_map.get(&change.block_group_id).unwrap()
             } else {
-                PathCache::get_intervaltree(cache, &change.path)
+                PathCache::get_intervaltree(cache, &change.path)?
             };
             let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
             new_augmented_edges_by_block_group
@@ -1002,11 +1013,11 @@ impl BlockGroup {
         conn: &GraphConnection,
         block_group_id: &HashId,
         remove_ambiguous_positions: bool,
-    ) -> IntervalTree<i64, NodeIntervalBlock> {
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, SequenceError> {
         // make a tree where every node has a span in the graph.
-        let mut graph = BlockGroup::get_graph(conn, block_group_id);
+        let mut graph = BlockGroup::get_graph(conn, block_group_id)?;
         BlockGroup::prune_graph(&mut graph);
-        flatten_to_interval_tree(&graph, remove_ambiguous_positions)
+        Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
     }
 
     pub fn get_current_path(conn: &GraphConnection, block_group_id: &HashId) -> Path {
@@ -1050,8 +1061,8 @@ impl BlockGroup {
         end_node_coordinate: i64,
         target_block_group_id: &HashId,
         create_terminal_edges: bool,
-    ) -> HashMap<HashId, HashId> {
-        let current_graph = BlockGroup::get_graph(conn, source_block_group_id);
+    ) -> Result<HashMap<HashId, HashId>, SequenceError> {
+        let current_graph = BlockGroup::get_graph(conn, source_block_group_id)?;
         let start_node = current_graph
             .nodes()
             .find(|node| {
@@ -1240,7 +1251,7 @@ impl BlockGroup {
 
         BlockGroupEdge::bulk_create(conn, &all_edges);
 
-        new_node_ids_by_old
+        Ok(new_node_ids_by_old)
     }
 }
 
@@ -1530,15 +1541,15 @@ mod tests {
         );
 
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &child_a.id, false),
+            BlockGroup::get_all_sequences(conn, &child_a.id, false).unwrap(),
             HashSet::from_iter(vec!["AAAA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &child_b.id, false),
+            BlockGroup::get_all_sequences(conn, &child_b.id, false).unwrap(),
             HashSet::from_iter(vec!["CCCC".to_string()])
         );
         assert_eq!(
-            Sample::get_all_sequences(conn, "test", "child", false),
+            Sample::get_all_sequences(conn, "test", "child", false).unwrap(),
             HashSet::from_iter(vec!["AAAA".to_string(), "CCCC".to_string()])
         );
     }
@@ -1706,9 +1717,9 @@ mod tests {
         );
 
         let mut path_cache = PathCache::new(conn);
-        let parent_a_path_len = parent_a_path.length(conn);
-        let parent_b_path_len = parent_b_path.length(conn);
-        let parent_b_alt_path_len = parent_b_alt_path.length(conn);
+        let parent_a_path_len = parent_a_path.length(conn).unwrap();
+        let parent_b_path_len = parent_b_path.length(conn).unwrap();
+        let parent_b_alt_path_len = parent_b_alt_path.length(conn).unwrap();
         BlockGroup::add_accession(
             conn,
             &parent_a_path,
@@ -1716,7 +1727,8 @@ mod tests {
             0,
             parent_a_path_len,
             &mut path_cache,
-        );
+        )
+        .unwrap();
         BlockGroup::add_accession(
             conn,
             &parent_b_path,
@@ -1724,7 +1736,8 @@ mod tests {
             0,
             parent_b_path_len,
             &mut path_cache,
-        );
+        )
+        .unwrap();
         BlockGroup::add_accession(
             conn,
             &parent_b_alt_path,
@@ -1732,7 +1745,8 @@ mod tests {
             0,
             parent_b_alt_path_len,
             &mut path_cache,
-        );
+        )
+        .unwrap();
 
         let child_block_groups = BlockGroup::get_or_create_sample_block_groups(
             conn,
@@ -1807,7 +1821,7 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (_bg_1, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);
-        let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache);
+        let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache).unwrap();
         assert_eq!(
             Accession::query(
                 conn,
@@ -1846,7 +1860,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -1864,10 +1878,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -1884,7 +1898,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("2"));
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 19,
@@ -1904,9 +1918,9 @@ mod tests {
             preserve_edge: true,
         };
         // take out an entire block.
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -1929,7 +1943,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -1947,10 +1961,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -1971,7 +1985,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 15,
@@ -1989,10 +2003,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2013,7 +2027,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 12,
@@ -2031,10 +2045,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2055,7 +2069,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 10,
@@ -2073,10 +2087,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2097,7 +2111,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 9,
@@ -2115,10 +2129,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2139,7 +2153,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 10,
@@ -2157,10 +2171,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2181,7 +2195,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 15,
@@ -2199,10 +2213,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2223,7 +2237,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 5,
@@ -2241,10 +2255,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2266,7 +2280,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1"));
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 19,
@@ -2287,9 +2301,9 @@ mod tests {
         };
 
         // take out an entire block.
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2310,7 +2324,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -2328,10 +2342,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2340,10 +2354,10 @@ mod tests {
             ])
         );
 
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2364,7 +2378,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 0,
@@ -2382,10 +2396,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2406,7 +2420,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 0,
@@ -2424,10 +2438,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2448,7 +2462,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 40,
@@ -2466,10 +2480,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2490,7 +2504,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 10,
@@ -2508,10 +2522,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2532,7 +2546,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 19,
@@ -2550,10 +2564,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2575,7 +2589,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1"));
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 0,
@@ -2593,10 +2607,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2618,7 +2632,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1"));
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 35,
@@ -2636,10 +2650,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2661,7 +2675,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1"));
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 350,
@@ -2690,7 +2704,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         let res = BlockGroup::insert_change(&conn, &after_end_change, &tree);
         assert!(matches!(res, Err(ChangeError::OutOfBounds(_))));
         let res = BlockGroup::insert_change(&conn, &before_start_change, &tree);
@@ -2709,7 +2723,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1"));
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 10,
@@ -2727,10 +2741,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2752,7 +2766,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1"));
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 18,
@@ -2770,10 +2784,10 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2805,7 +2819,7 @@ mod tests {
         );
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -2823,11 +2837,11 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(conn);
+        let tree = path.intervaltree(conn).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
 
-        let tree = BlockGroup::intervaltree_for(conn, &block_group_id, false);
-        let tree2 = BlockGroup::intervaltree_for(conn, &block_group_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &block_group_id, false).unwrap();
+        let tree2 = BlockGroup::intervaltree_for(conn, &block_group_id, true).unwrap();
         interval_tree_verify(
             &tree,
             3,
@@ -2878,8 +2892,8 @@ mod tests {
         );
 
         // This blockgroup has a change from positions 7-15 of 4 base pairs -- so any changes after this will be ambiguous
-        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, false);
-        let tree2 = BlockGroup::intervaltree_for(conn, &new_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, false).unwrap();
+        let tree2 = BlockGroup::intervaltree_for(conn, &new_bg_id, true).unwrap();
         interval_tree_verify(
             &tree,
             3,
@@ -2971,7 +2985,7 @@ mod tests {
         let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -2990,9 +3004,9 @@ mod tests {
             preserve_edge: false,
         };
         // note we are making our change against the new blockgroup, and not the parent blockgroup
-        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, true).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAAAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),])
@@ -3015,7 +3029,7 @@ mod tests {
 
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3034,9 +3048,9 @@ mod tests {
             preserve_edge: false,
         };
         // take out an entire block.
-        let tree = BlockGroup::intervaltree_for(conn, &gc_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &gc_bg_id, true).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAAAAAANNNNTCCCCCCCCCCGGGGGGGGGG".to_string(),])
@@ -3063,7 +3077,7 @@ mod tests {
         let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3082,9 +3096,9 @@ mod tests {
             preserve_edge: true,
         };
         // note we are making our change against the new blockgroup, and not the parent blockgroup
-        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, true).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3120,7 +3134,7 @@ mod tests {
 
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 20,
@@ -3139,9 +3153,9 @@ mod tests {
             preserve_edge: true,
         };
         // take out an entire block.
-        let tree = BlockGroup::intervaltree_for(conn, &gc_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &gc_bg_id, true).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3175,7 +3189,7 @@ mod tests {
         let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3194,9 +3208,9 @@ mod tests {
             preserve_edge: true,
         };
         // note we are making our change against the new blockgroup, and not the parent blockgroup
-        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, true).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3229,7 +3243,7 @@ mod tests {
 
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 20,
@@ -3248,7 +3262,7 @@ mod tests {
             preserve_edge: true,
         };
         // take out an entire block.
-        let tree = BlockGroup::intervaltree_for(conn, &gc_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &gc_bg_id, true).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
     }
 
@@ -3274,7 +3288,7 @@ mod tests {
             Collection::create(conn, "test");
             let (block_group1_id, original_path) = setup_block_group(conn);
 
-            let intervaltree = original_path.intervaltree(conn);
+            let intervaltree = original_path.intervaltree(conn).unwrap();
             let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
             let insert_end_node_id = intervaltree.query_point(24).next().unwrap().value.node_id;
 
@@ -3345,14 +3359,16 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert_path =
-                original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+            let insert_path = original_path
+                .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+                .unwrap();
             assert_eq!(
-                insert_path.sequence(conn),
+                insert_path.sequence(conn).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
             );
 
-            let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false);
+            let all_sequences =
+                BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
             assert_eq!(
                 all_sequences,
                 HashSet::from_iter(vec![
@@ -3372,7 +3388,7 @@ mod tests {
             let end_node_coordinate = 25 - end_block.start + end_block.sequence_start;
 
             let block_group2 = create_bg(conn, "test", "test", "chr1.1");
-            BlockGroup::derive_subgraph(
+            let _ = BlockGroup::derive_subgraph(
                 conn,
                 "test",
                 "test",
@@ -3384,7 +3400,8 @@ mod tests {
                 &block_group2.id,
                 true,
             );
-            let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
+            let all_sequences2 =
+                BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
             assert_eq!(
                 all_sequences2,
                 HashSet::from_iter(vec!["TTTTTCCCCC".to_string(), "TAAAAAAAAC".to_string(),])
@@ -3402,7 +3419,7 @@ mod tests {
             Collection::create(conn, "test");
             let (block_group1_id, original_path) = setup_block_group(conn);
 
-            let intervaltree = original_path.intervaltree(conn);
+            let intervaltree = original_path.intervaltree(conn).unwrap();
             let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
             let insert_end_node_id = intervaltree.query_point(24).next().unwrap().value.node_id;
 
@@ -3473,10 +3490,11 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert_path =
-                original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+            let insert_path = original_path
+                .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+                .unwrap();
             assert_eq!(
-                insert_path.sequence(conn),
+                insert_path.sequence(conn).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
             );
 
@@ -3550,14 +3568,16 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert2_path =
-                insert_path.new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2);
+            let insert2_path = insert_path
+                .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
+                .unwrap();
             assert_eq!(
-                insert2_path.sequence(conn),
+                insert2_path.sequence(conn).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
             );
 
-            let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false);
+            let all_sequences =
+                BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
             assert_eq!(
                 all_sequences,
                 HashSet::from_iter(vec![
@@ -3579,7 +3599,7 @@ mod tests {
             let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
             let block_group2 = create_bg(conn, "test", "test", "chr1.1");
-            BlockGroup::derive_subgraph(
+            let _ = BlockGroup::derive_subgraph(
                 conn,
                 "test",
                 "test",
@@ -3591,7 +3611,8 @@ mod tests {
                 &block_group2.id,
                 true,
             );
-            let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
+            let all_sequences2 =
+                BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
             assert_eq!(
                 all_sequences2,
                 HashSet::from_iter(vec![
@@ -3617,7 +3638,7 @@ mod tests {
             Collection::create(conn, "test");
             let (block_group1_id, original_path) = setup_block_group(conn);
 
-            let intervaltree = original_path.intervaltree(conn);
+            let intervaltree = original_path.intervaltree(conn).unwrap();
             let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
             let insert_end_node_id = intervaltree.query_point(24).next().unwrap().value.node_id;
 
@@ -3687,10 +3708,11 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert_path =
-                original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+            let insert_path = original_path
+                .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+                .unwrap();
             assert_eq!(
-                insert_path.sequence(conn),
+                insert_path.sequence(conn).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
             );
 
@@ -3763,10 +3785,11 @@ mod tests {
                 .collect::<Vec<BlockGroupEdgeData>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let insert2_path =
-                insert_path.new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2);
+            let insert2_path = insert_path
+                .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
+                .unwrap();
             assert_eq!(
-                insert2_path.sequence(conn),
+                insert2_path.sequence(conn).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
             );
 
@@ -3820,7 +3843,8 @@ mod tests {
             ];
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false);
+            let all_sequences =
+                BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
             assert_eq!(
                 all_sequences,
                 HashSet::from_iter(vec![
@@ -3843,7 +3867,7 @@ mod tests {
             let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
             let block_group2 = create_bg(conn, "test", "test", "chr1.1");
-            BlockGroup::derive_subgraph(
+            let _ = BlockGroup::derive_subgraph(
                 conn,
                 "test",
                 "test",
@@ -3855,7 +3879,8 @@ mod tests {
                 &block_group2.id,
                 true,
             );
-            let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
+            let all_sequences2 =
+                BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
             assert_eq!(
                 all_sequences2,
                 // The deletion is not included in the cloned subgraph since one end of it is

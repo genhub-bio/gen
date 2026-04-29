@@ -1,6 +1,6 @@
 use std::io::Error as IOError;
 
-use gen_models::errors::{OperationError, QueryError};
+use gen_models::errors::{OperationError, QueryError, SequenceError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -11,4 +11,6 @@ pub enum FastaError {
     IOError(#[from] IOError),
     #[error("SQL query Error: {0}")]
     SQLQueryError(#[from] QueryError),
+    #[error("Sequence Error: {0}")]
+    SequenceError(#[from] SequenceError),
 }

@@ -11,7 +11,7 @@ use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{db::GraphConnection, gen_models_capnp::sequence, traits::*};
+use crate::{db::GraphConnection, errors::SequenceError, gen_models_capnp::sequence, traits::*};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Sequence {
@@ -244,7 +244,12 @@ fn fasta_gzi_index(path: &str) -> Option<gzi::Index> {
     None
 }
 
-pub fn cached_sequence(file_path: &str, name: &str, start: usize, end: usize) -> Option<String> {
+pub fn cached_sequence(
+    file_path: &str,
+    name: &str,
+    start: usize,
+    end: usize,
+) -> Result<String, SequenceError> {
     static SEQUENCE_CACHE: sync::LazyLock<sync::RwLock<HashMap<String, Option<String>>>> =
         sync::LazyLock::new(|| sync::RwLock::new(HashMap::new()));
     let key = format!("{file_path}-{name}");
@@ -253,9 +258,19 @@ pub fn cached_sequence(file_path: &str, name: &str, start: usize, end: usize) ->
         let cache = SEQUENCE_CACHE.read().unwrap();
         if let Some(cached_sequence) = cache.get(&key) {
             if let Some(sequence) = cached_sequence {
-                return Some(sequence[start..end].to_string());
+                if start > end || end > sequence.len() {
+                    return Err(SequenceError::OutOfBounds {
+                        start,
+                        end,
+                        length: sequence.len(),
+                    });
+                }
+                return Ok(sequence[start..end].to_string());
             }
-            return None;
+            return Err(SequenceError::NotFound {
+                file_path: file_path.to_string(),
+                name: name.to_string(),
+            });
         }
     }
 
@@ -306,9 +321,19 @@ pub fn cached_sequence(file_path: &str, name: &str, start: usize, end: usize) ->
     cache.insert(key.clone(), sequence);
     // we do this to avoid a clone of potentially large data.
     if let Some(seq) = &cache[&key] {
-        return Some(seq[start..end].to_string());
+        if start > end || end > seq.len() {
+            return Err(SequenceError::OutOfBounds {
+                start,
+                end,
+                length: seq.len(),
+            });
+        }
+        return Ok(seq[start..end].to_string());
     }
-    None
+    Err(SequenceError::NotFound {
+        file_path: file_path.to_string(),
+        name: name.to_string(),
+    })
 }
 
 impl Sequence {
@@ -321,7 +346,7 @@ impl Sequence {
         &self,
         start: impl Into<Option<i64>>,
         end: impl Into<Option<i64>>,
-    ) -> String {
+    ) -> Result<String, SequenceError> {
         // todo: handle circles
 
         let start: Option<i64> = start.into();
@@ -329,20 +354,19 @@ impl Sequence {
         let start = start.unwrap_or(0) as usize;
         let end = end.unwrap_or(self.length) as usize;
         if self.external_sequence {
-            if let Some(sequence) = cached_sequence(&self.file_path, &self.name, start, end) {
-                return sequence;
-            } else {
-                panic!(
-                    "{name} not found in fasta file {file_path}",
-                    name = self.name,
-                    file_path = self.file_path
-                );
-            }
+            return cached_sequence(&self.file_path, &self.name, start, end);
+        }
+        if start > end || end > self.sequence.len() {
+            return Err(SequenceError::OutOfBounds {
+                start,
+                end,
+                length: self.sequence.len(),
+            });
         }
         if start == 0 && end as i64 == self.length {
-            return self.sequence.clone();
+            return Ok(self.sequence.clone());
         }
-        self.sequence[start..end].to_string()
+        Ok(self.sequence[start..end].to_string())
     }
 
     pub fn delete_by_hash(conn: &GraphConnection, hash: &HashId) {
@@ -481,16 +505,24 @@ mod tests {
             .sequence("ATCGATCGATCGATCGATCGGGAACACACAGAGA")
             .save(conn);
         assert_eq!(
-            sequence.get_sequence(None, None),
+            sequence.get_sequence(None, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
-        assert_eq!(sequence.get_sequence(0, 5), "ATCGA");
-        assert_eq!(sequence.get_sequence(10, 15), "CGATC");
+        assert_eq!(sequence.get_sequence(0, 5).unwrap(), "ATCGA");
+        assert_eq!(sequence.get_sequence(10, 15).unwrap(), "CGATC");
         assert_eq!(
-            sequence.get_sequence(3, None),
+            sequence.get_sequence(3, None).unwrap(),
             "GATCGATCGATCGATCGGGAACACACAGAGA"
         );
-        assert_eq!(sequence.get_sequence(None, 5), "ATCGA");
+        assert_eq!(sequence.get_sequence(None, 5).unwrap(), "ATCGA");
+        assert_eq!(
+            sequence.get_sequence(100, 110),
+            Err(SequenceError::OutOfBounds {
+                start: 100,
+                end: 110,
+                length: 34,
+            })
+        );
     }
 
     #[test]
@@ -510,13 +542,43 @@ mod tests {
             .length(34)
             .save(conn);
         assert_eq!(
-            seq.get_sequence(None, None),
+            seq.get_sequence(None, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
-        assert_eq!(seq.get_sequence(0, 5), "ATCGA");
-        assert_eq!(seq.get_sequence(10, 15), "CGATC");
-        assert_eq!(seq.get_sequence(3, None), "GATCGATCGATCGATCGGGAACACACAGAGA");
-        assert_eq!(seq.get_sequence(None, 5), "ATCGA");
+        assert_eq!(seq.get_sequence(0, 5).unwrap(), "ATCGA");
+        assert_eq!(seq.get_sequence(10, 15).unwrap(), "CGATC");
+        assert_eq!(
+            seq.get_sequence(3, None).unwrap(),
+            "GATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        assert_eq!(seq.get_sequence(None, 5).unwrap(), "ATCGA");
+        assert_eq!(
+            seq.get_sequence(100, 110),
+            Err(SequenceError::OutOfBounds {
+                start: 100,
+                end: 110,
+                length: 34,
+            })
+        );
+    }
+
+    #[test]
+    fn test_get_sequence_returns_bounds_error_for_stale_length() {
+        let conn = &get_connection(None).unwrap();
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("TCGATCGGG")
+            .length(10)
+            .save(conn);
+
+        assert_eq!(
+            sequence.get_sequence(0, 10),
+            Err(SequenceError::OutOfBounds {
+                start: 0,
+                end: 10,
+                length: 9,
+            })
+        );
     }
 
     #[test]
@@ -551,7 +613,7 @@ mod tests {
         for _ in 1..1_000_000 {
             let start = rand::rng().random_range(1..200_000_000);
 
-            sequence.get_sequence(start, start + 20);
+            let _ = sequence.get_sequence(start, start + 20);
         }
         let elapsed = s.elapsed().as_secs();
         assert!(

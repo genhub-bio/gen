@@ -8,7 +8,7 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
     db::{DbContext, GraphConnection},
-    errors::{OperationError, QueryError, SampleError},
+    errors::{OperationError, QueryError, SampleError, SequenceError},
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -190,8 +190,12 @@ pub enum VcfError {
     OperationError(#[from] OperationError),
     #[error("Sample Error: {0}")]
     SampleError(#[from] SampleError),
+    #[error("Query Error: {0}")]
+    Query(#[from] QueryError),
     #[error("Invalid Record: {0}")]
     InvalidRecord(String),
+    #[error("Sequence Error: {0}")]
+    Sequence(#[from] SequenceError),
 }
 
 fn resolve_parent_samples(
@@ -360,10 +364,12 @@ pub fn update_with_vcf(
                         };
                         for sample_bg_id in &sample_bg_ids {
                             let sample_path =
-                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone());
+                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone())?;
+                            let sample_path_id = sample_path.id;
+                            let sample_path_length = sample_path.length(conn)?;
                             let path_length = path_lengths
-                                .entry(sample_path.id)
-                                .or_insert_with(|| sample_path.length(conn));
+                                .entry(sample_path_id)
+                                .or_insert(sample_path_length);
 
                             if ref_start > *path_length {
                                 return Err(VcfError::InvalidRecord(format!(
@@ -386,7 +392,7 @@ pub fn update_with_vcf(
                     } else if let Some(ref_accession) = allele_accession {
                         for sample_bg_id in &sample_bg_ids {
                             let sample_path =
-                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone());
+                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone())?;
 
                             let key = (sample_path, ref_accession.clone());
 
@@ -421,8 +427,7 @@ pub fn update_with_vcf(
                     sample_name,
                     seq_name.clone(),
                     &sample_parent_samples,
-                )
-                .expect("can't find sample bg....check this out more");
+                )?;
                 let genotype = sample.get(&header, "GT");
                 if let Some(Ok(Some(Value::Genotype(genotypes)))) = genotype {
                     // what needs to be done is when it is a cnv, we need to check that ref_start is the same for all variants
@@ -475,15 +480,12 @@ pub fn update_with_vcf(
                                             &mut path_cache,
                                             sample_bg_id,
                                             seq_name.clone(),
-                                        );
-                                        let path_length =
-                                            if let Some(l) = path_lengths.get(&sample_path.id) {
-                                                l
-                                            } else {
-                                                let l = sample_path.sequence(conn).len();
-                                                path_lengths.insert(sample_path.id, l as i64);
-                                                &path_lengths[&sample_path.id]
-                                            };
+                                        )?;
+                                        let sample_path_id = sample_path.id;
+                                        let sample_path_length = sample_path.sequence(conn)?.len();
+                                        let path_length = path_lengths
+                                            .entry(sample_path_id)
+                                            .or_insert(sample_path_length as i64);
 
                                         if ref_start > *path_length {
                                             return Err(VcfError::InvalidRecord(format!(
@@ -510,7 +512,7 @@ pub fn update_with_vcf(
                                             &mut path_cache,
                                             sample_bg_id,
                                             seq_name.clone(),
-                                        );
+                                        )?;
 
                                         let key = (sample_path, ref_accession.clone());
 
@@ -537,23 +539,27 @@ pub fn update_with_vcf(
             let ref_start = vcf_entry.ref_start;
             let sequence =
                 SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string());
-            let sequence_string = sequence.get_sequence(None, None);
+            let sequence_string = sequence.get_sequence(None, None)?;
 
-            let source_path_id = node_source_paths
-                .entry(vcf_entry.path.id)
-                .or_insert_with(|| {
+            let source_path_id =
+                if let Some(source_path_id) = node_source_paths.get(&vcf_entry.path.id) {
+                    *source_path_id
+                } else {
                     let block_group = BlockGroup::get_by_id(conn, &vcf_entry.block_group_id);
-                    if let Some(parent_block_group_id) = block_group.parent_block_group_id {
-                        let parent_path = PathCache::lookup(
-                            &mut path_cache,
-                            &parent_block_group_id,
-                            vcf_entry.path.name.clone(),
-                        );
-                        parent_path.id
-                    } else {
-                        vcf_entry.path.id
-                    }
-                });
+                    let source_path_id =
+                        if let Some(parent_block_group_id) = block_group.parent_block_group_id {
+                            let parent_path = PathCache::lookup(
+                                &mut path_cache,
+                                &parent_block_group_id,
+                                vcf_entry.path.name.clone(),
+                            )?;
+                            parent_path.id
+                        } else {
+                            vcf_entry.path.id
+                        };
+                    node_source_paths.insert(vcf_entry.path.id, source_path_id);
+                    source_path_id
+                };
 
             let node_id = Node::create(
                 conn,
@@ -611,7 +617,7 @@ pub fn update_with_vcf(
             *acc_start,
             *acc_end,
             &mut path_cache,
-        );
+        )?;
     }
     let mut summary_str = "".to_string();
     for (sample_name, sample_changes) in summary.iter() {
@@ -697,17 +703,20 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `G1` genotype has no changes
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "G1").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "G1").id, false)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `foo` is homozygous for the first variant and does not contain the second
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
     }
@@ -747,12 +756,14 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `bar` sample has the refrence + a deletion of the C
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "bar").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "bar").id, false)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATGATCGATCGGGAACACACAGAGA".to_string()
@@ -760,7 +771,8 @@ mod tests {
         );
         // `baz` sample has a deletion of CG and an insertion of A
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "baz").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "baz").id, false)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATCAGATCGATCGGGAACACACAGAGA".to_string(),
@@ -804,7 +816,8 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
@@ -812,7 +825,8 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(
                 [
                     "ATCGATCGATAGAGATCGATCGGGAACACACAGAGA",
@@ -896,7 +910,8 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, "unknown").id,
                 false
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(
                 ["ATCGATCGATAGACGATCGATCGGGAACACACAGAGA",]
                     .iter()
@@ -937,7 +952,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false)
+                .unwrap(),
             HashSet::from_iter(
                 ["ATCATCGATCGATCGATCGGGAACACACAGAGA",]
                     .iter()
@@ -979,7 +995,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, true)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATCGATCATCATCGATCGGGAACACACAGAGA".to_string()
@@ -1324,19 +1341,23 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 true,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f1").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f1").id, true)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCTCGATCGATCGCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f2").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f2").id, true)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCTGGATCGATCGCGGAATCAGAACACACAGGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f3").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f3").id, true)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCGGGATCGATCGCTCAGAACACACAGGA".to_string()])
         );
     }
@@ -1380,7 +1401,8 @@ mod tests {
             conn,
             &get_sample_bg(conn, &collection, "child").id,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(
             child_sequences,
             HashSet::from_iter(vec![
@@ -1438,7 +1460,8 @@ mod tests {
             conn,
             &get_sample_bg(conn, &collection, "child").id,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(
             child_sequences,
             HashSet::from_iter(vec![

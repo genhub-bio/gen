@@ -6,8 +6,12 @@ use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    block_group::BlockGroup, db::GraphConnection, errors::SampleError, gen_models_capnp::sample,
-    sample_lineage::SampleLineage, traits::Query,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    errors::{SampleError, SequenceError},
+    gen_models_capnp::sample,
+    sample_lineage::SampleLineage,
+    traits::Query,
 };
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -79,11 +83,15 @@ impl Sample {
         stmt.execute([name]).unwrap();
     }
 
-    pub fn get_graph(conn: &GraphConnection, collection: &str, name: &str) -> GenGraph {
+    pub fn get_graph(
+        conn: &GraphConnection,
+        collection: &str,
+        name: &str,
+    ) -> Result<GenGraph, SequenceError> {
         let block_groups = Sample::get_block_groups(conn, collection, name);
         let mut sample_graph = GenGraph::new();
         for bg in block_groups {
-            let bg_graph = BlockGroup::get_graph(conn, &bg.id);
+            let bg_graph = BlockGroup::get_graph(conn, &bg.id)?;
             // Add nodes and edges from block group graph to sample graph
             for node in bg_graph.nodes() {
                 sample_graph.add_node(node);
@@ -96,7 +104,7 @@ impl Sample {
                 }
             }
         }
-        sample_graph
+        Ok(sample_graph)
     }
 
     pub fn get_all_sequences(
@@ -104,11 +112,12 @@ impl Sample {
         collection_name: &str,
         sample_name: &str,
         prune: bool,
-    ) -> HashSet<String> {
-        Sample::get_block_groups(conn, collection_name, sample_name)
-            .into_iter()
-            .flat_map(|block_group| BlockGroup::get_all_sequences(conn, &block_group.id, prune))
-            .collect()
+    ) -> Result<HashSet<String>, SequenceError> {
+        let mut sequences = HashSet::new();
+        for block_group in Sample::get_block_groups(conn, collection_name, sample_name) {
+            sequences.extend(BlockGroup::get_all_sequences(conn, &block_group.id, prune)?);
+        }
+        Ok(sequences)
     }
 
     pub fn get_or_create_child(

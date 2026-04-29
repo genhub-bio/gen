@@ -81,7 +81,9 @@ impl<'a> GenGraphNodeRenderer<'a> {
         );
         let sequences = Node::get_sequences_by_node_ids(self.conn, &[db_node_id]);
         let sequence = match sequences.get(&db_node_id) {
-            Some(seq) => seq.get_sequence(start, end),
+            Some(seq) => seq
+                .get_sequence(start, end)
+                .unwrap_or_else(|_| "?".repeat((end - start).max(0) as usize)),
             None => "?".repeat((end - start).max(0) as usize),
         };
 

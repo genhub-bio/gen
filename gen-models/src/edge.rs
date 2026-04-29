@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
+    errors::SequenceError,
     gen_models_capnp::edge,
     node::Node,
     sequence::{Sequence, cached_sequence},
@@ -140,33 +141,39 @@ pub struct GroupBlock {
 }
 
 impl GroupBlock {
-    pub fn new(id: i64, node_id: HashId, sequence: &Sequence, start: i64, end: i64) -> Self {
+    pub fn new(
+        id: i64,
+        node_id: HashId,
+        sequence: &Sequence,
+        start: i64,
+        end: i64,
+    ) -> Result<Self, SequenceError> {
         if sequence.external_sequence {
-            GroupBlock {
+            Ok(GroupBlock {
                 id,
                 node_id,
                 sequence: None,
                 external_sequence: Some((sequence.file_path.clone(), sequence.name.clone())),
                 start,
                 end,
-            }
+            })
         } else {
-            GroupBlock {
+            Ok(GroupBlock {
                 id,
                 node_id,
-                sequence: Some(sequence.get_sequence(start, end)),
+                sequence: Some(sequence.get_sequence(start, end)?),
                 external_sequence: None,
                 start,
                 end,
-            }
+            })
         }
     }
 
-    pub fn sequence(&self) -> String {
+    pub fn sequence(&self) -> Result<String, SequenceError> {
         if let Some(sequence) = &self.sequence {
-            sequence.to_string()
+            Ok(sequence.to_string())
         } else if let Some((path, name)) = &self.external_sequence {
-            cached_sequence(path, name, self.start as usize, self.end as usize).unwrap()
+            cached_sequence(path, name, self.start as usize, self.end as usize)
         } else {
             panic!("Sequence or external sequence is not set.")
         }
@@ -307,7 +314,10 @@ impl Edge {
             .collect::<Vec<i64>>()
     }
 
-    pub fn blocks_from_edges(conn: &GraphConnection, edges: &[AugmentedEdge]) -> Vec<GroupBlock> {
+    pub fn blocks_from_edges(
+        conn: &GraphConnection,
+        edges: &[AugmentedEdge],
+    ) -> Result<Vec<GroupBlock>, SequenceError> {
         let mut node_ids = IndexSet::new();
         let mut edges_by_source_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();
         let mut edges_by_target_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();
@@ -349,7 +359,7 @@ impl Edge {
 
             if !block_boundaries.is_empty() {
                 for (start, end) in block_boundaries.clone().into_iter().tuple_windows() {
-                    let block = GroupBlock::new(block_index, *node_id, sequence, start, end);
+                    let block = GroupBlock::new(block_index, *node_id, sequence, start, end)?;
                     blocks.push(block);
                     block_index += 1;
                 }
@@ -360,7 +370,7 @@ impl Edge {
                     sequence,
                     0,
                     sequence.length,
-                ));
+                )?);
                 block_index += 1;
             }
         }
@@ -375,7 +385,7 @@ impl Edge {
             &Sequence::new().sequence_type("DNA").sequence("").build(),
             0,
             0,
-        );
+        )?;
         blocks.push(start_block);
         let end_block = GroupBlock::new(
             block_index + 2,
@@ -383,9 +393,9 @@ impl Edge {
             &Sequence::new().sequence_type("DNA").sequence("").build(),
             0,
             0,
-        );
+        )?;
         blocks.push(end_block);
-        blocks
+        Ok(blocks)
     }
 
     pub fn build_graph(
@@ -696,7 +706,7 @@ mod tests {
         let (block_group_id, path) = setup_block_group(&conn);
 
         let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
-        let blocks = Edge::blocks_from_edges(&conn, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &edges).unwrap();
 
         // 4 actual sequences: 10-length ones of all A, all T, all C, all G
         // 2 terminal node blocks (start/end)
@@ -710,7 +720,7 @@ mod tests {
         let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -728,11 +738,11 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
         let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
 
-        let blocks = Edge::blocks_from_edges(&conn, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &edges).unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence
@@ -743,7 +753,7 @@ mod tests {
 
         // Confirm that ordering doesn't matter
         edges.reverse();
-        let blocks = Edge::blocks_from_edges(&conn, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &edges).unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence

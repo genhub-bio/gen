@@ -90,7 +90,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn) == path_sequence {
+            if existing_path.sequence(conn).map_err(io::Error::other)? == path_sequence {
                 existing_path_ids_by_new_path_name.insert(path.name.clone(), existing_path.id);
             }
         }
@@ -117,7 +117,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn) == walk_sequence {
+            if existing_path.sequence(conn).map_err(io::Error::other)? == walk_sequence {
                 existing_path_ids_by_new_path_name.insert(walk_name.clone(), existing_path.id);
             }
         }
@@ -198,7 +198,7 @@ pub fn update_with_gfa(
                 unmatched_path_strands,
                 &gfa,
                 &segments_by_id,
-            );
+            )?;
             new_paths_added += 1;
         } else {
             println!(
@@ -243,8 +243,8 @@ fn create_new_path_from_existing(
     unmatched_path_strands: &[bool],
     gfa: &Gfa<String, (), ()>,
     segments_by_id: &HashMap<String, &Segment<String, ()>>,
-) {
-    let interval_tree = existing_path.intervaltree(conn);
+) -> io::Result<()> {
+    let interval_tree = existing_path.intervaltree(conn).map_err(io::Error::other)?;
     let mut existing_path_ranges_by_segment_id = HashMap::new();
     let mut existing_path_position = 0;
     for segment_id in matched_path_segment_ids.iter() {
@@ -463,6 +463,7 @@ fn create_new_path_from_existing(
         .collect::<Vec<BlockGroupEdgeData>>();
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
     Path::create(conn, unmatched_path_name, &block_group_id, &new_edge_ids);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -528,7 +529,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -580,7 +581,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }

@@ -35,7 +35,7 @@ fn get_path_nodes(
     use gen_graph::project_path;
 
     // Get the path blocks from the database
-    let path_blocks = path.blocks(conn);
+    let path_blocks = path.blocks(conn).map_err(|e| Error::other(e.to_string()))?;
 
     // Project the path blocks onto the current graph state
     let projected_path = project_path(graph, &path_blocks);

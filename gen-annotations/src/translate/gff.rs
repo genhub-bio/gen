@@ -9,6 +9,7 @@ use gen_graph::{GraphNode, project_path};
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::SequenceError,
     reference_alias::{ReferenceAlias, ReferenceAliasError},
     sample::Sample,
 };
@@ -22,6 +23,8 @@ pub enum GffError {
     Io(#[from] std::io::Error),
     #[error("Error loading reference aliases: {0}")]
     ReferenceAliasError(#[from] ReferenceAliasError),
+    #[error("Sequence error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 pub fn translate_gff<R, W>(
@@ -61,12 +64,13 @@ where
         let start = record.start().get() as i64;
         let end = record.end().get() as i64;
         if let Some(bg) = sample_bgs.get(&ref_name) {
-            let projection = paths.entry(bg.id).or_insert_with(|| {
+            if let std::collections::hash_map::Entry::Vacant(e) = paths.entry(bg.id) {
                 let path = BlockGroup::get_current_path(conn, &bg.id);
-                let graph = BlockGroup::get_graph(conn, &bg.id);
+                let graph = BlockGroup::get_graph(conn, &bg.id)?;
+                let blocks = path.blocks(conn)?;
                 let mut tree = IntervalTree::default();
                 let mut position: i64 = 0;
-                for (node, strand) in project_path(&graph, &path.blocks(conn)) {
+                for (node, strand) in project_path(&graph, &blocks) {
                     if !is_terminal(node.node_id) {
                         // GFF indexing is one based, inclusive, so we add 1 to the start.
                         // Take a sequence that is 1-4 in our coordinates, this converts to:
@@ -79,8 +83,9 @@ where
                         position = end_position;
                     }
                 }
-                tree
-            });
+                e.insert(tree);
+            }
+            let projection = paths.get(&bg.id).unwrap();
             let range = start..end;
             for (overlap, (node, _overlap_strand)) in projection.iter_overlaps(&range) {
                 let overlap_start = max(start, overlap.start) as usize;

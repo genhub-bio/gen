@@ -20,6 +20,7 @@ use gen_models::{
     annotations::{Annotation, AnnotationError, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::SequenceError,
     node::Node,
     sample::Sample,
     traits::Query,
@@ -37,6 +38,8 @@ pub enum GenbankExportError {
     Io(#[from] std::io::Error),
     #[error("Annotation error while exporting GenBank: {0}")]
     Annotation(#[from] AnnotationError),
+    #[error("Sequence error while exporting GenBank: {0}")]
+    Sequence(#[from] SequenceError),
 }
 
 fn build_annotation_location(
@@ -271,17 +274,17 @@ pub fn export_genbank(
     for block_group in block_groups.iter() {
         let path = BlockGroup::get_current_path(conn, &block_group.id);
         let path_blocks = path
-            .blocks(conn)
+            .blocks(conn)?
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
-        seq.seq = path.sequence(conn).into_bytes();
+        seq.seq = path.sequence(conn)?.into_bytes();
         export_annotations(conn, &path, &path_blocks, &mut seq, sample_name)?;
 
         // Identify the node traversal corresponding to our path.
-        let graph = BlockGroup::get_graph(conn, &block_group.id);
+        let graph = BlockGroup::get_graph(conn, &block_group.id)?;
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();
@@ -318,7 +321,7 @@ pub fn export_genbank(
                         let seqs = Node::get_sequences_by_node_ids(conn, &[sub_node.node_id]);
                         let seq = &seqs[&sub_node.node_id];
                         sequence.push_str(
-                            &seq.get_sequence(sub_node.sequence_start, sub_node.sequence_end),
+                            &seq.get_sequence(sub_node.sequence_start, sub_node.sequence_end)?,
                         );
                     }
                     let mut qualifiers = vec![];
@@ -531,6 +534,7 @@ mod tests {
     ) {
         let blocks = path
             .blocks(conn)
+            .unwrap()
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
