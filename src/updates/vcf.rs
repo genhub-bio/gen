@@ -545,7 +545,7 @@ pub fn update_with_vcf(
             let ref_start = vcf_entry.ref_start;
             let sequence =
                 SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string())?;
-            let sequence_string = sequence.get_sequence(None, None);
+            let sequence_string = sequence.get_sequence(None, None)?;
 
             let source_path_id =
                 if let Some(source_path_id) = node_source_paths.get(&vcf_entry.path.id) {

@@ -1910,7 +1910,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -1949,7 +1949,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("2")).unwrap();
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 19,
@@ -1996,7 +1996,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -2040,7 +2040,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 15,
@@ -2084,7 +2084,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 12,
@@ -2128,7 +2128,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 10,
@@ -2172,7 +2172,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 9,
@@ -2216,7 +2216,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 10,
@@ -2260,7 +2260,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 15,
@@ -2304,7 +2304,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 5,
@@ -2348,7 +2348,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1")).unwrap();
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 19,
@@ -2394,7 +2394,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -2450,7 +2450,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 0,
@@ -2494,7 +2494,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 0,
@@ -2538,7 +2538,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 40,
@@ -2582,7 +2582,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 10,
@@ -2626,7 +2626,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 19,
@@ -2670,7 +2670,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1")).unwrap();
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 0,
@@ -2714,7 +2714,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1")).unwrap();
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 35,
@@ -2758,7 +2758,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1")).unwrap();
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 350,
@@ -2807,7 +2807,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1")).unwrap();
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 10,
@@ -2851,7 +2851,7 @@ mod tests {
             Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1")).unwrap();
         let deletion = PathBlock {
             node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None),
+            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
             sequence_start: 0,
             sequence_end: 0,
             path_start: 18,
@@ -2906,7 +2906,7 @@ mod tests {
         .unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3074,7 +3074,7 @@ mod tests {
             Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3118,7 +3118,7 @@ mod tests {
 
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3168,7 +3168,7 @@ mod tests {
             Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3227,7 +3227,7 @@ mod tests {
 
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 20,
@@ -3284,7 +3284,7 @@ mod tests {
             Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -3339,7 +3339,7 @@ mod tests {
 
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 20,

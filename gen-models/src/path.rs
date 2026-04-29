@@ -21,7 +21,7 @@ use crate::{
     gen_models_capnp::path as PathCapnp,
     node::Node,
     path_edge::PathEdge,
-    sequence::Sequence,
+    sequence::{Sequence, SequenceError},
     traits::*,
 };
 
@@ -43,6 +43,8 @@ pub enum PathError {
     PathEdges(#[from] PathEdgeError),
     #[error("Problem querying for path: {0}")]
     Query(#[from] QueryError),
+    #[error("Problem loading sequence for path: {0}")]
+    Sequence(#[from] SequenceError),
 }
 
 impl<'a> Capnp<'a> for Path {
@@ -289,9 +291,9 @@ impl Path {
         let block_sequence_length = end - start;
 
         let block_sequence = if strand == Strand::Reverse {
-            revcomp(&sequence.get_sequence(start, end))
+            revcomp(&sequence.get_sequence(start, end).unwrap())
         } else {
-            sequence.get_sequence(start, end)
+            sequence.get_sequence(start, end).unwrap()
         };
 
         PathBlock {

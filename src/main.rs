@@ -527,7 +527,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let patch_path = Path::new(&patch);
             let mut f = File::open(patch_path)?;
             let patches = patch::load_patches(&mut f);
-            let diagrams = view_patches(&workspace, &patches);
+            let diagrams = view_patches(&workspace, &patches)?;
             for (patch_hash, patch_diagrams) in diagrams.iter() {
                 for (bg_id, dot) in patch_diagrams.iter() {
                     let path = if let Some(ref p) = prefix {

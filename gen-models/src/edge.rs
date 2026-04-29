@@ -20,7 +20,7 @@ use crate::{
     errors::NodeError,
     gen_models_capnp::edge,
     node::Node,
-    sequence::{Sequence, cached_sequence},
+    sequence::{Sequence, SequenceError, cached_sequence},
     traits::*,
 };
 
@@ -156,7 +156,7 @@ impl GroupBlock {
             GroupBlock {
                 id,
                 node_id,
-                sequence: Some(sequence.get_sequence(start, end)),
+                sequence: Some(sequence.get_sequence(start, end).unwrap()),
                 external_sequence: None,
                 start,
                 end,
@@ -168,7 +168,7 @@ impl GroupBlock {
         if let Some(sequence) = &self.sequence {
             sequence.to_string()
         } else if let Some((path, name)) = &self.external_sequence {
-            cached_sequence(path, name, self.start as usize, self.end as usize).unwrap()
+            cached_sequence(path, name, self.start, self.end).unwrap()
         } else {
             panic!("Sequence or external sequence is not set.")
         }
@@ -199,6 +199,8 @@ pub enum EdgeError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
+    #[error("Sequence error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 impl Edge {
@@ -738,7 +740,7 @@ mod tests {
             Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,

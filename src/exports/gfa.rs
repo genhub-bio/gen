@@ -9,7 +9,7 @@ use gen_core::{HashId, is_terminal, strand::Strand};
 use gen_graph::{GenGraph, project_path};
 use gen_models::{
     block_group::BlockGroup, block_group_edge::BlockGroupEdge, db::GraphConnection, edge::Edge,
-    path::Path, sample::Sample,
+    errors::SequenceError, path::Path, sample::Sample,
 };
 use itertools::Itertools;
 use thiserror::Error;
@@ -20,6 +20,8 @@ use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_s
 pub enum GfaExportError {
     #[error("I/O error while exporting GFA: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Sequence error while exporting GFA: {0}")]
+    Sequence(#[from] SequenceError),
     #[error("No block groups found for collection {collection_name} and sample {sample_name}")]
     MissingBlockGroups {
         collection_name: String,
@@ -705,7 +707,7 @@ mod tests {
             Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,

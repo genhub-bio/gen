@@ -38,6 +38,18 @@ pub enum SequenceError {
     FilepathMissingSequenceName(),
     #[error("Sequence length must be specified.")]
     MissingSequenceLength(),
+    #[error("Sequence cache lock poisoned: {0}")]
+    CachePoisoned(String),
+    #[error("Invalid indexed sequence region '{name}': {reason}")]
+    InvalidRegion { name: String, reason: String },
+    #[error("Sequence I/O error: {0}")]
+    Io(String),
+    #[error("Invalid UTF-8 while reading sequence data: {0}")]
+    Utf8(String),
+    #[error("Sequence id '{name}' not found in fasta file {file_path}")]
+    IdMissing { file_path: String, name: String },
+    #[error("Sequence bounds out of range: start={start}, end={end}, length={length}")]
+    BoundsError { start: i64, end: i64, length: i64 },
 }
 
 impl<'a> Capnp<'a> for Sequence {
@@ -258,56 +270,105 @@ fn fasta_gzi_index(path: &str) -> Option<gzi::Index> {
     None
 }
 
-pub fn cached_sequence(file_path: &str, name: &str, start: usize, end: usize) -> Option<String> {
+fn validate_sequence_bounds(
+    start: i64,
+    end: i64,
+    length: i64,
+) -> Result<(usize, usize), SequenceError> {
+    if start < 0 || end < 0 || start > end || end > length {
+        return Err(SequenceError::BoundsError { start, end, length });
+    }
+
+    Ok((start as usize, end as usize))
+}
+
+pub fn cached_sequence(
+    file_path: &str,
+    name: &str,
+    start: i64,
+    end: i64,
+) -> Result<String, SequenceError> {
     static SEQUENCE_CACHE: sync::LazyLock<sync::RwLock<HashMap<String, Option<String>>>> =
         sync::LazyLock::new(|| sync::RwLock::new(HashMap::new()));
     let key = format!("{file_path}-{name}");
 
     {
-        let cache = SEQUENCE_CACHE.read().unwrap();
+        let cache = SEQUENCE_CACHE
+            .read()
+            .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
         if let Some(cached_sequence) = cache.get(&key) {
             if let Some(sequence) = cached_sequence {
-                return Some(sequence[start..end].to_string());
+                let (start, end) = validate_sequence_bounds(start, end, sequence.len() as i64)?;
+                return Ok(sequence[start..end].to_string());
             }
-            return None;
+            return Err(SequenceError::IdMissing {
+                file_path: file_path.to_string(),
+                name: name.to_string(),
+            });
         }
     }
 
-    let mut cache = SEQUENCE_CACHE.write().unwrap();
+    let mut cache = SEQUENCE_CACHE
+        .write()
+        .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
 
     let mut sequence: Option<String> = None;
-    let region = name.parse::<Region>().unwrap();
     if let Some(index) = fasta_index(file_path) {
+        let region = name
+            .parse::<Region>()
+            .map_err(|err| SequenceError::InvalidRegion {
+                name: name.to_string(),
+                reason: err.to_string(),
+            })?;
         let builder = IndexBuilder::default().set_index(index);
         if let Some(gzi_index) = fasta_gzi_index(file_path) {
             let bgzf_reader = bgzf::io::indexed_reader::Builder::default()
                 .set_index(gzi_index)
                 .build_from_path(file_path)
-                .unwrap();
-            let mut reader = builder.build_from_reader(bgzf_reader).unwrap();
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
+            let mut reader = builder
+                .build_from_reader(bgzf_reader)
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
             sequence = Some(
-                str::from_utf8(reader.query(&region).unwrap().sequence().as_ref())
-                    .unwrap()
-                    .to_string(),
+                str::from_utf8(
+                    reader
+                        .query(&region)
+                        .map_err(|err| SequenceError::Io(err.to_string()))?
+                        .sequence()
+                        .as_ref(),
+                )
+                .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                .to_string(),
             )
         } else {
-            let mut reader = builder.build_from_path(file_path).unwrap();
+            let mut reader = builder
+                .build_from_path(file_path)
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
             sequence = Some(
-                str::from_utf8(reader.query(&region).unwrap().sequence().as_ref())
-                    .unwrap()
-                    .to_string(),
+                str::from_utf8(
+                    reader
+                        .query(&region)
+                        .map_err(|err| SequenceError::Io(err.to_string()))?
+                        .sequence()
+                        .as_ref(),
+                )
+                .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                .to_string(),
             );
         }
     } else {
         let mut reader = fasta::io::reader::Builder
             .build_from_path(file_path)
-            .unwrap();
+            .map_err(|err| SequenceError::Io(err.to_string()))?;
         for result in reader.records() {
-            let record = result.unwrap();
-            if String::from_utf8(record.name().to_vec()).unwrap() == name {
+            let record = result.map_err(|err| SequenceError::Io(err.to_string()))?;
+            if String::from_utf8(record.name().to_vec())
+                .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                == name
+            {
                 sequence = Some(
                     str::from_utf8(record.sequence().as_ref())
-                        .unwrap()
+                        .map_err(|err| SequenceError::Utf8(err.to_string()))?
                         .to_string(),
                 );
                 break;
@@ -320,9 +381,13 @@ pub fn cached_sequence(file_path: &str, name: &str, start: usize, end: usize) ->
     cache.insert(key.clone(), sequence);
     // we do this to avoid a clone of potentially large data.
     if let Some(seq) = &cache[&key] {
-        return Some(seq[start..end].to_string());
+        let (start, end) = validate_sequence_bounds(start, end, seq.len() as i64)?;
+        return Ok(seq[start..end].to_string());
     }
-    None
+    Err(SequenceError::IdMissing {
+        file_path: file_path.to_string(),
+        name: name.to_string(),
+    })
 }
 
 impl Sequence {
@@ -335,28 +400,21 @@ impl Sequence {
         &self,
         start: impl Into<Option<i64>>,
         end: impl Into<Option<i64>>,
-    ) -> String {
+    ) -> Result<String, SequenceError> {
         // todo: handle circles
 
         let start: Option<i64> = start.into();
         let end: Option<i64> = end.into();
-        let start = start.unwrap_or(0) as usize;
-        let end = end.unwrap_or(self.length) as usize;
+        let start = start.unwrap_or(0);
+        let end = end.unwrap_or(self.length);
         if self.external_sequence {
-            if let Some(sequence) = cached_sequence(&self.file_path, &self.name, start, end) {
-                return sequence;
-            } else {
-                panic!(
-                    "{name} not found in fasta file {file_path}",
-                    name = self.name,
-                    file_path = self.file_path
-                );
-            }
+            return cached_sequence(&self.file_path, &self.name, start, end);
         }
+        let (start, end) = validate_sequence_bounds(start, end, self.length)?;
         if start == 0 && end as i64 == self.length {
-            return self.sequence.clone();
+            return Ok(self.sequence.clone());
         }
-        self.sequence[start..end].to_string()
+        Ok(self.sequence[start..end].to_string())
     }
 
     pub fn delete_by_hash(conn: &GraphConnection, hash: &HashId) {
@@ -500,16 +558,24 @@ mod tests {
             .save(conn)
             .unwrap();
         assert_eq!(
-            sequence.get_sequence(None, None),
+            sequence.get_sequence(None, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
-        assert_eq!(sequence.get_sequence(0, 5), "ATCGA");
-        assert_eq!(sequence.get_sequence(10, 15), "CGATC");
+        assert_eq!(sequence.get_sequence(0, 5).unwrap(), "ATCGA");
+        assert_eq!(sequence.get_sequence(10, 15).unwrap(), "CGATC");
         assert_eq!(
-            sequence.get_sequence(3, None),
+            sequence.get_sequence(3, None).unwrap(),
             "GATCGATCGATCGATCGGGAACACACAGAGA"
         );
-        assert_eq!(sequence.get_sequence(None, 5), "ATCGA");
+        assert_eq!(sequence.get_sequence(None, 5).unwrap(), "ATCGA");
+        assert_eq!(
+            sequence.get_sequence(0, 100),
+            Err(SequenceError::BoundsError {
+                start: 0,
+                end: 100,
+                length: 34,
+            })
+        );
     }
 
     #[test]
@@ -530,13 +596,16 @@ mod tests {
             .save(conn)
             .unwrap();
         assert_eq!(
-            seq.get_sequence(None, None),
+            seq.get_sequence(None, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
-        assert_eq!(seq.get_sequence(0, 5), "ATCGA");
-        assert_eq!(seq.get_sequence(10, 15), "CGATC");
-        assert_eq!(seq.get_sequence(3, None), "GATCGATCGATCGATCGGGAACACACAGAGA");
-        assert_eq!(seq.get_sequence(None, 5), "ATCGA");
+        assert_eq!(seq.get_sequence(0, 5).unwrap(), "ATCGA");
+        assert_eq!(seq.get_sequence(10, 15).unwrap(), "CGATC");
+        assert_eq!(
+            seq.get_sequence(3, None).unwrap(),
+            "GATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        assert_eq!(seq.get_sequence(None, 5).unwrap(), "ATCGA");
     }
 
     #[test]
@@ -572,7 +641,7 @@ mod tests {
         for _ in 1..1_000_000 {
             let start = rand::rng().random_range(1..200_000_000);
 
-            sequence.get_sequence(start, start + 20);
+            sequence.get_sequence(start, start + 20).unwrap();
         }
         let elapsed = s.elapsed().as_secs();
         assert!(

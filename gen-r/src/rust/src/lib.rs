@@ -1350,7 +1350,9 @@ fn repo_get_block_sequence(
     let sequence = sequences
         .get(&node_id)
         .ok_or_else(|| Error::Other(format!("Node with id {node_id} not found")))?;
-    Ok(sequence.get_sequence(sequence_start, sequence_end))
+    Ok(sequence
+        .get_sequence(sequence_start, sequence_end)
+        .map_err(|err| Error::Other(err.to_string()))?)
 }
 
 #[extendr]
