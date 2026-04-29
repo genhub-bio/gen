@@ -17,9 +17,10 @@ use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
     accession::Accession,
-    annotations::{Annotation, AnnotationError, GenBankLocationOperator},
+    annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::AnnotationError,
     node::Node,
     sample::Sample,
     traits::Query,
@@ -572,7 +573,7 @@ mod tests {
             chromosome_index: 0,
         });
 
-        let accession = Accession::get_or_create(conn, name, &path.id, None);
+        let accession = Accession::get_or_create(conn, name, &path.id, None).unwrap();
         let edge_ids = AccessionEdge::bulk_create(conn, &edges);
         AccessionPath::create(conn, &accession.id, &edge_ids);
         Annotation::create_with_samples(

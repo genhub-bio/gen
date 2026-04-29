@@ -8,7 +8,7 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
     db::{DbContext, GraphConnection},
-    errors::{OperationError, QueryError, SampleError},
+    errors::{BlockGroupError, NodeError, OperationError, SampleError, SequenceError},
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -60,7 +60,7 @@ impl<'a> BlockGroupCache<'_> {
         sample_name: &'a str,
         name: String,
         parent_samples: &[String],
-    ) -> Result<Vec<HashId>, QueryError> {
+    ) -> Result<Vec<HashId>, BlockGroupError> {
         let block_group_key = BlockGroupData {
             collection_name,
             sample_name,
@@ -76,14 +76,16 @@ impl<'a> BlockGroupCache<'_> {
                 sample_name,
                 &name,
                 parent_samples.to_vec(),
-            )?
-            .into_iter()
-            .map(|block_group| block_group.id)
-            .collect::<Vec<_>>();
+            )?;
+
+            let block_group_ids = result
+                .iter()
+                .map(|block_group| block_group.id)
+                .collect::<Vec<_>>();
             block_group_cache
                 .cache
-                .insert(block_group_key, result.clone());
-            Ok(result)
+                .insert(block_group_key, block_group_ids.clone());
+            Ok(block_group_ids)
         }
     }
 }
@@ -112,24 +114,24 @@ impl<'a> SequenceCache<'_> {
         sequence_cache: &mut SequenceCache<'a>,
         sequence_type: &'a str,
         sequence: String,
-    ) -> Sequence {
+    ) -> Result<Sequence, SequenceError> {
         let sequence_key = SequenceKey {
             sequence_type,
             sequence: sequence.clone(),
         };
         let sequence_lookup = sequence_cache.cache.get(&sequence_key);
         if let Some(found_sequence) = sequence_lookup {
-            found_sequence.clone()
+            Ok(found_sequence.clone())
         } else {
             let new_sequence = Sequence::new()
                 .sequence_type("DNA")
                 .sequence(&sequence)
-                .save(sequence_cache.conn);
+                .save(sequence_cache.conn)?;
 
             sequence_cache
                 .cache
                 .insert(sequence_key, new_sequence.clone());
-            new_sequence
+            Ok(new_sequence)
         }
     }
 }
@@ -192,6 +194,12 @@ pub enum VcfError {
     SampleError(#[from] SampleError),
     #[error("Invalid Record: {0}")]
     InvalidRecord(String),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 fn resolve_parent_samples(
@@ -536,24 +544,27 @@ pub fn update_with_vcf(
             }
             let ref_start = vcf_entry.ref_start;
             let sequence =
-                SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string());
+                SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string())?;
             let sequence_string = sequence.get_sequence(None, None);
 
-            let source_path_id = node_source_paths
-                .entry(vcf_entry.path.id)
-                .or_insert_with(|| {
-                    let block_group = BlockGroup::get_by_id(conn, &vcf_entry.block_group_id);
+            let source_path_id =
+                if let Some(source_path_id) = node_source_paths.get(&vcf_entry.path.id) {
+                    *source_path_id
+                } else {
+                    let block_group = BlockGroup::get_by_id(conn, &vcf_entry.block_group_id)?;
                     if let Some(parent_block_group_id) = block_group.parent_block_group_id {
                         let parent_path = PathCache::lookup(
                             &mut path_cache,
                             &parent_block_group_id,
                             vcf_entry.path.name.clone(),
                         );
+                        node_source_paths.insert(vcf_entry.path.id, parent_path.id);
                         parent_path.id
                     } else {
+                        node_source_paths.insert(vcf_entry.path.id, vcf_entry.path.id);
                         vcf_entry.path.id
                     }
-                });
+                };
 
             let node_id = Node::create(
                 conn,
@@ -563,7 +574,7 @@ pub fn update_with_vcf(
                     path_id = source_path_id,
                     sequence_hash = sequence.hash
                 )),
-            );
+            )?;
             let change = prepare_change(
                 &vcf_entry.block_group_id,
                 &vcf_entry.path,
@@ -611,7 +622,7 @@ pub fn update_with_vcf(
             *acc_start,
             *acc_end,
             &mut path_cache,
-        );
+        )?;
     }
     let mut summary_str = "".to_string();
     for (sample_name, sample_changes) in summary.iter() {
@@ -661,7 +672,7 @@ mod tests {
         track_database,
     };
     #[test]
-    fn test_update_fasta_with_vcf() {
+    fn test_update_fasta_with_vcf() -> Result<(), VcfError> {
         let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/simple.vcf");
@@ -690,8 +701,7 @@ mod tests {
             None,
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
-        )
-        .unwrap();
+        )?;
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
@@ -710,6 +720,8 @@ mod tests {
             BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false),
             HashSet::from_iter(vec!["ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
+
+        Ok(())
     }
 
     #[test]
@@ -1362,7 +1374,7 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child");
+        Sample::get_or_create(conn, "child").unwrap();
         SampleLineage::create(conn, "reference", "child").unwrap();
 
         update_with_vcf(
@@ -1471,7 +1483,7 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child");
+        Sample::get_or_create(conn, "child").unwrap();
 
         update_with_vcf(
             &context,

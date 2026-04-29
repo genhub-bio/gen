@@ -6,10 +6,11 @@ use std::{
 use gb_io::seq::{Feature, Location, Seq};
 use gen_core::Strand;
 use gen_models::{
-    annotations::{
-        AnnotationError, AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier,
+    annotations::{AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier},
+    errors::{
+        AccessionError, AccessionPathError, AnnotationError, BlockGroupError, CollectionError,
+        EdgeError, NodeError, OperationError, PathError, SampleError, SequenceError,
     },
-    errors::OperationError,
 };
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;
@@ -32,6 +33,24 @@ pub enum GenBankError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Regex Error: {0}")]
     Regex(#[from] RegexError),
+    #[error("Collection creation error: {0}")]
+    CollectionError(#[from] CollectionError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
+    #[error("Block group write error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
+    #[error("Edge write error: {0}")]
+    EdgeError(#[from] EdgeError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Accession creation error: {0}")]
+    AccessionError(#[from] AccessionError),
+    #[error("Accession path creation error: {0}")]
+    AccessionPathError(#[from] AccessionPathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

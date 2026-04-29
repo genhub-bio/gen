@@ -136,13 +136,14 @@ mod tests {
     use crate::test_helpers::get_connection;
 
     fn create_block_group(conn: &GraphConnection) {
-        let collection = Collection::create(conn, "test");
-        Sample::get_or_create(conn, Sample::DEFAULT_NAME);
+        let collection = Collection::create(conn, "test").unwrap();
+        Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence(sequence)
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node_id = Node::create(
             conn,
             &reference_sequence.hash,
@@ -151,7 +152,8 @@ mod tests {
                 collection = collection.name,
                 hash = reference_sequence.hash
             )),
-        );
+        )
+        .unwrap();
         let block_group = BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -161,7 +163,8 @@ mod tests {
                 parent_block_group_id: None,
                 is_default: false,
             },
-        );
+        )
+        .unwrap();
 
         let edge_into = Edge::create(
             conn,
@@ -171,7 +174,8 @@ mod tests {
             node_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge_out_of = Edge::create(
             conn,
             node_id,
@@ -180,7 +184,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
@@ -203,11 +208,12 @@ mod tests {
             "m123",
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
-        );
+        )
+        .unwrap();
     }
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
-        Sample::get_or_create(conn, "child sample");
+        Sample::get_or_create(conn, "child sample").unwrap();
         let _ = Sample::get_or_create_child(
             conn,
             "test",
@@ -231,7 +237,8 @@ mod tests {
         let replacement = Sequence::new()
             .sequence_type("DNA")
             .sequence(replacement_sequence)
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node_id = Node::create(
             conn,
             &replacement.hash,
@@ -240,7 +247,8 @@ mod tests {
                 path_id = sample_path.id,
                 sequence_hash = replacement.hash,
             )),
-        );
+        )
+        .unwrap();
         let change = PathChange {
             block_group_id: sample_bg_id,
             path: sample_path.clone(),
@@ -276,7 +284,9 @@ mod tests {
             rusqlite::params![node_id],
         )[0]
         .clone();
-        sample_path.new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert);
+        sample_path
+            .new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert)
+            .unwrap();
     }
 
     #[test]

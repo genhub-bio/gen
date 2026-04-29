@@ -13,6 +13,7 @@ use gen_models::{
     collection::Collection,
     db::DbContext,
     edge::Edge,
+    errors::{CollectionError, SampleError},
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -49,14 +50,19 @@ pub fn import_fasta(
     };
     let mut reader = fasta::io::reader::Builder.build_from_reader(reader_stream)?;
 
-    let collection = if !Collection::exists(conn, name) {
-        Collection::create(conn, name)
-    } else {
-        Collection {
-            name: name.to_string(),
-        }
+    let collection = match Collection::create(conn, name) {
+        Ok(collection) => collection,
+        Err(CollectionError::Duplicate(collection)) => collection,
+        Err(e) => return Err(FastaError::CollectionError(e)),
     };
-    Sample::get_or_create(conn, sample);
+
+    match Sample::get_or_create(conn, sample) {
+        Ok(_) => {}
+        Err(SampleError::Duplicate(_)) => {}
+        Err(e) => {
+            return Err(FastaError::SampleError(e));
+        }
+    }
     let mut summary: HashMap<String, i64> = HashMap::new();
 
     let _ = progress_bar.println("Parsing Fasta");
@@ -75,12 +81,12 @@ pub fn import_fasta(
                 .name(&name)
                 .file_path(fasta)
                 .length(sequence_length)
-                .save(conn)
+                .save(conn)?
         } else {
             Sequence::new()
                 .sequence_type("DNA")
                 .sequence(&sequence)
-                .save(conn)
+                .save(conn)?
         };
         let node_id = Node::create(
             conn,
@@ -90,7 +96,7 @@ pub fn import_fasta(
                 collection = collection.name,
                 hash = seq.hash
             )),
-        );
+        )?;
         let block_group = BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -99,7 +105,7 @@ pub fn import_fasta(
                 name: &name,
                 ..Default::default()
             },
-        );
+        )?;
         let edge_into = Edge::create(
             conn,
             PATH_START_NODE_ID,
@@ -108,7 +114,7 @@ pub fn import_fasta(
             node_id,
             0,
             Strand::Forward,
-        );
+        )?;
         let edge_out_of = Edge::create(
             conn,
             node_id,
@@ -117,7 +123,7 @@ pub fn import_fasta(
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )?;
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
@@ -140,7 +146,7 @@ pub fn import_fasta(
             &name,
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
-        );
+        )?;
         summary.entry(path.name).or_insert(sequence_length);
         bar.inc(1);
     }

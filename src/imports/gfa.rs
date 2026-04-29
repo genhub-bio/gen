@@ -11,7 +11,10 @@ use gen_models::{
     collection::Collection,
     db::DbContext,
     edge::{Edge, EdgeData},
-    errors::OperationError,
+    errors::{
+        BlockGroupError, CollectionError, NodeError, OperationError, PathError, SampleError,
+        SequenceError,
+    },
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -36,6 +39,18 @@ use crate::{
 pub enum GFAImportError {
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
+    #[error("Collection creation error: {0}")]
+    CollectionError(#[from] CollectionError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 pub fn import_gfa(
@@ -47,8 +62,17 @@ pub fn import_gfa(
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
-    Collection::create(conn, collection_name);
-    Sample::get_or_create(conn, sample_name);
+    match Collection::create(conn, collection_name) {
+        Ok(_) => {}
+        Err(CollectionError::Duplicate(_)) => {}
+        Err(e) => return Err(GFAImportError::CollectionError(e)),
+    }
+    match Sample::get_or_create(conn, sample_name) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(GFAImportError::SampleError(e));
+        }
+    }
     let block_group = BlockGroup::create(
         conn,
         NewBlockGroup {
@@ -57,7 +81,7 @@ pub fn import_gfa(
             name: "",
             ..Default::default()
         },
-    );
+    )?;
     let bar = progress_bar.add(get_time_elapsed_bar());
     bar.set_message("Parsing GFA");
     let gfa: Gfa<String, (), ()> = Gfa::parse_gfa_file(gfa_path.to_str().unwrap());
@@ -72,11 +96,11 @@ pub fn import_gfa(
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence(input_sequence)
-            .save(conn);
+            .save(conn)?;
         sequences_by_segment_id.insert(&segment.id, sequence.clone());
         // TODO: Node hash is always new, it's sorted by insert time via being a v7 uuid but maybe want to
         // define the hash itself for idempotency?
-        let node_id = Node::create(conn, &sequence.hash, &HashId::uuid7());
+        let node_id = Node::create(conn, &sequence.hash, &HashId::uuid7())?;
         node_ids_by_segment_id.insert(&segment.id, node_id);
         bar.inc(1);
     }
@@ -263,7 +287,7 @@ pub fn import_gfa(
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, &block_group.id, &path_edge_ids);
+        Path::create(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
 
     for input_walk in &gfa.walk {
@@ -312,7 +336,7 @@ pub fn import_gfa(
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, &block_group.id, &path_edge_ids);
+        Path::create(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
 
     // make any block group edges not in paths or walks

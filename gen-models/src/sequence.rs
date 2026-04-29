@@ -10,6 +10,7 @@ use noodles::{
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::{db::GraphConnection, gen_models_capnp::sequence, traits::*};
 
@@ -25,6 +26,18 @@ pub struct Sequence {
     // indicates whether the sequence is stored externally, a quick flag instead of having to
     // check sequence or file_path and do the logic in function calls.
     pub external_sequence: bool,
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum SequenceError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+    #[error("Sequence or file_path must be set.")]
+    NoSequence(),
+    #[error("A filepath must have an accompanying sequence name.")]
+    FilepathMissingSequenceName(),
+    #[error("Sequence length must be specified.")]
+    MissingSequenceLength(),
 }
 
 impl<'a> Capnp<'a> for Sequence {
@@ -171,20 +184,20 @@ impl<'a> NewSequence<'a> {
         }
     }
 
-    pub fn save(self, conn: &GraphConnection) -> Sequence {
+    pub fn save(self, conn: &GraphConnection) -> Result<Sequence, SequenceError> {
         let mut length = 0;
         if self.sequence.is_none() && self.file_path.is_none() {
-            panic!("Sequence or file_path must be set.");
+            return Err(SequenceError::NoSequence());
         }
         if self.file_path.is_some() && self.name.is_none() {
-            panic!("A filepath must have an accompanying sequence name");
+            return Err(SequenceError::FilepathMissingSequenceName());
         }
         if self.length.is_none() {
             if let Some(v) = self.sequence {
                 length = v.len() as i64;
             } else {
                 // TODO: if name/path specified, grab length automatically
-                panic!("Sequence length must be specified.");
+                return Err(SequenceError::MissingSequenceLength());
             }
         }
         let hash = self.hash();
@@ -195,8 +208,8 @@ impl<'a> NewSequence<'a> {
         ) {
             Ok(_) => {}
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, file_path, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);").unwrap();
-                stmt.execute(params![
+                let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, file_path, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);")?;
+                match stmt.execute(params![
                     hash,
                     self.sequence_type.unwrap().to_string(),
                     if self.shallow {
@@ -207,14 +220,15 @@ impl<'a> NewSequence<'a> {
                     self.name.unwrap_or(""),
                     self.file_path.unwrap_or(""),
                     self.length.unwrap_or(length)
-                ])
-                .unwrap();
+                ]) {
+                    Ok(_) => {}
+                    Err(err) => return Err(SequenceError::DatabaseError(err)),
+                }
             }
-            Err(_e) => {
-                panic!("something bad happened querying the database")
-            }
+            Err(err) => return Err(SequenceError::DatabaseError(err)),
         };
-        Sequence {
+
+        Ok(Sequence {
             hash,
             sequence_type: self.sequence_type.unwrap().to_string(),
             sequence: self.sequence.unwrap_or("").to_string(),
@@ -222,7 +236,7 @@ impl<'a> NewSequence<'a> {
             file_path: self.file_path.unwrap_or("").to_string(),
             length: self.length.unwrap_or(length),
             external_sequence: !self.file_path.unwrap_or("").is_empty(),
-        }
+        })
     }
 }
 
@@ -427,7 +441,8 @@ mod tests {
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AACCTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         assert_eq!(&sequence.sequence, "AACCTT");
         assert_eq!(sequence.sequence_type, "DNA");
         assert!(!sequence.external_sequence);
@@ -440,11 +455,13 @@ mod tests {
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AACCTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AACCTTAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
 
         let sequences = Sequence::all(conn);
         assert_eq!(sequences.len(), before_count + 2);
@@ -464,7 +481,8 @@ mod tests {
             .name("chr1")
             .file_path("/some/path.fa")
             .length(10)
-            .save(conn);
+            .save(conn)
+            .unwrap();
         assert_eq!(sequence.sequence_type, "DNA");
         assert_eq!(&sequence.sequence, "");
         assert_eq!(sequence.name, "chr1");
@@ -479,7 +497,8 @@ mod tests {
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCGATCGATCGATCGGGAACACACAGAGA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         assert_eq!(
             sequence.get_sequence(None, None),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
@@ -508,7 +527,8 @@ mod tests {
             .name("m123")
             .file_path(temp_file_path.to_str().unwrap())
             .length(34)
-            .save(conn);
+            .save(conn)
+            .unwrap();
         assert_eq!(
             seq.get_sequence(None, None),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
@@ -546,7 +566,8 @@ mod tests {
             .file_path(temp_file_path.to_str().unwrap())
             .name("chr22")
             .length(203_999_932)
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let s = time::Instant::now();
         for _ in 1..1_000_000 {
             let start = rand::rng().random_range(1..200_000_000);

@@ -78,6 +78,7 @@ pub fn update_with_fasta(
         .collect::<Vec<_>>();
 
     let mut change_count = 0;
+
     for (index, result) in fasta_reader.records().enumerate() {
         let record = result?;
         let sequence = str::from_utf8(record.sequence().as_ref()).unwrap();
@@ -117,7 +118,7 @@ pub fn update_with_fasta(
                 let seq = Sequence::new()
                     .sequence_type("DNA")
                     .sequence(sequence)
-                    .save(conn);
+                    .save(conn)?;
                 let node_id = Node::create(
                     conn,
                     &seq.hash,
@@ -128,7 +129,7 @@ pub fn update_with_fasta(
                         ref_end = seq.length,
                         sequence_hash = seq.hash
                     )),
-                );
+                )?;
 
                 let path_block = PathBlock {
                     node_id,
@@ -159,7 +160,6 @@ pub fn update_with_fasta(
                     state.first_node = None;
                 }
             }
-
             change_count += 1;
         }
     }
@@ -189,7 +189,7 @@ pub fn update_with_fasta(
                     end_coordinate,
                     &edge_to_new_node,
                     &edge_from_new_node,
-                );
+                )?;
             }
         }
     }

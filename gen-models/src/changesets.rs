@@ -17,15 +17,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
-    annotations::{
-        Annotation, AnnotationError, AnnotationGroup, AnnotationGroupError, AnnotationGroupSample,
-    },
+    annotations::{Annotation, AnnotationGroup, AnnotationGroupSample},
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
     edge::{Edge, EdgeData},
-    errors::ChangesetError,
+    errors::{AnnotationError, AnnotationGroupError, ChangesetError, CollectionError},
     gen_models_capnp::{changeset_models, database_changeset},
     node::Node,
     operations::Operation,
@@ -832,15 +830,19 @@ pub fn apply_changeset(
     dependencies: &DependencyModels,
 ) -> Result<(), ChangesetError> {
     for collection in dependencies.collections.iter() {
-        Collection::create(conn, &collection.name);
+        match Collection::create(conn, &collection.name) {
+            Ok(_) => {}
+            Err(CollectionError::Duplicate(_)) => {}
+            Err(err) => return Err(ChangesetError::CollectionError(err)),
+        }
     }
 
     for sample in dependencies.samples.iter() {
-        Sample::get_or_create(conn, &sample.name);
+        Sample::get_or_create(conn, &sample.name)?;
     }
 
     for sequence in dependencies.sequences.iter() {
-        NewSequence::from(sequence).save(conn);
+        NewSequence::from(sequence).save(conn)?;
     }
     for node in dependencies.nodes.iter() {
         if !is_terminal(node.id) {
@@ -858,11 +860,11 @@ pub fn apply_changeset(
                 parent_block_group_id: bg.parent_block_group_id.as_ref(),
                 is_default: bg.is_default,
             },
-        );
+        )?;
     }
 
     for node in dependencies.nodes.iter() {
-        Node::create(conn, &node.sequence_hash, &node.id);
+        Node::create(conn, &node.sequence_hash, &node.id)?;
     }
 
     Edge::bulk_create(
@@ -875,7 +877,7 @@ pub fn apply_changeset(
     );
 
     for path in dependencies.paths.iter() {
-        Path::create(conn, &path.name, &path.block_group_id, &[]);
+        Path::create(conn, &path.name, &path.block_group_id, &[])?;
     }
 
     AccessionEdge::bulk_create(
@@ -893,14 +895,14 @@ pub fn apply_changeset(
             &accession.name,
             &accession.path_id,
             accession.parent_accession_id.as_ref(),
-        );
+        )?;
     }
 
     for collection in &changeset.collections {
-        Collection::create(conn, &collection.name);
+        Collection::create(conn, &collection.name)?;
     }
     for sample in &changeset.samples {
-        Sample::get_or_create(conn, &sample.name);
+        Sample::get_or_create(conn, &sample.name)?;
     }
     for sample_lineage in &changeset.sample_lineages {
         SampleLineage::create(
@@ -910,7 +912,7 @@ pub fn apply_changeset(
         )?;
     }
     for sequence in &changeset.sequences {
-        NewSequence::from(sequence).save(conn);
+        NewSequence::from(sequence).save(conn)?;
     }
     for bg in block_groups_parent_first(&changeset.block_groups) {
         BlockGroup::create(
@@ -922,10 +924,10 @@ pub fn apply_changeset(
                 parent_block_group_id: bg.parent_block_group_id.as_ref(),
                 is_default: bg.is_default,
             },
-        );
+        )?;
     }
     for node in &changeset.nodes {
-        Node::create(conn, &node.sequence_hash, &node.id);
+        Node::create(conn, &node.sequence_hash, &node.id)?;
     }
 
     Edge::bulk_create(
@@ -946,14 +948,14 @@ pub fn apply_changeset(
     );
 
     for path in &changeset.paths {
-        Path::create(conn, &path.name, &path.block_group_id, &[]);
+        Path::create(conn, &path.name, &path.block_group_id, &[])?;
         let edges = changeset
             .path_edges
             .iter()
             .filter(|edge| edge.path_id == path.id)
             .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
             .map(|path_edge| path_edge.edge_id);
-        PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
+        let _ = PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
     }
 
     AccessionEdge::bulk_create(
@@ -971,14 +973,14 @@ pub fn apply_changeset(
             &accession.name,
             &accession.path_id,
             accession.parent_accession_id.as_ref(),
-        );
+        )?;
         let edges = changeset
             .accession_paths
             .iter()
             .filter(|ap| ap.accession_id == accession.id)
             .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
             .map(|ap| ap.edge_id);
-        AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>());
+        AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>())?;
     }
 
     for annotation_group in &changeset.annotation_groups {
@@ -1572,7 +1574,8 @@ mod tests {
         let (block_group_id, path) = setup_block_group(conn);
         let mut cache = PathCache::new(conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
-        let accession = BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
 
         let mut session = start_operation(conn);
         let annotation =
@@ -1771,7 +1774,8 @@ mod tests {
                     name: "new-bg",
                     ..Default::default()
                 },
-            );
+            )
+            .unwrap();
             let shared_edge = old_edges[0].edge.clone();
             BlockGroupEdge::bulk_create(
                 conn,
@@ -1814,22 +1818,25 @@ mod tests {
 
             // create some stuff before we attach to our main session that will be required as extra information
             let (bg_id, _path_id) = setup_block_group(conn);
-            let dep_bg = BlockGroup::get_by_id(conn, &bg_id);
+            let dep_bg = BlockGroup::get_by_id(conn, &bg_id).unwrap();
 
             let existing_seq = Sequence::new()
                 .sequence_type("DNA")
                 .sequence("AAAATTTT")
-                .save(conn);
+                .save(conn)
+                .unwrap();
             let existing_node_id =
-                Node::create(conn, &existing_seq.hash, &HashId::convert_str("1"));
+                Node::create(conn, &existing_seq.hash, &HashId::convert_str("1")).unwrap();
 
             let mut session = start_operation(conn);
 
             let random_seq = Sequence::new()
                 .sequence_type("DNA")
                 .sequence("ATCG")
-                .save(conn);
-            let random_node_id = Node::create(conn, &random_seq.hash, &HashId::convert_str("2"));
+                .save(conn)
+                .unwrap();
+            let random_node_id =
+                Node::create(conn, &random_seq.hash, &HashId::convert_str("2")).unwrap();
 
             let new_edge = Edge::create(
                 conn,
@@ -1839,7 +1846,8 @@ mod tests {
                 existing_node_id,
                 0,
                 Strand::Forward,
-            );
+            )
+            .unwrap();
             let block_group_edge = BlockGroupEdgeData {
                 block_group_id: bg_id,
                 edge_id: new_edge.id,

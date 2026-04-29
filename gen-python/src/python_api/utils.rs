@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use gen_core::config::Workspace;
+use gen_models::block_group::BlockGroupError;
 use pyo3::{
     prelude::*,
     types::{PyBytes, PyModule},
@@ -10,6 +11,11 @@ use rusqlite::{Connection, types::ValueRef};
 /// Helper function to convert SQLite errors to Python exceptions
 pub fn sqlite_err_to_pyerr(err: rusqlite::Error) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(format!("SQLite error: {err}"))
+}
+
+/// Helper function to convert SQLite errors to Python exceptions
+pub fn block_group_err_to_pyerr(err: BlockGroupError) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(format!("Block group error: {err}"))
 }
 
 /// Helper function to convert a Rust path to a Python pathlib.Path object

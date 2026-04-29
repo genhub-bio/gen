@@ -8,6 +8,7 @@ use gen_models::{
     collection::Collection,
     db::DbContext,
     edge::Edge,
+    errors::CollectionError,
     node::Node,
     operations::{Operation, OperationInfo},
     path::Path,
@@ -34,7 +35,11 @@ where
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let reader = reader::SeqReader::new(data);
-    let collection = Collection::create(conn, collection.into().unwrap_or_default());
+    let collection = match Collection::create(conn, collection.into().unwrap_or_default()) {
+        Ok(c) => c,
+        Err(CollectionError::Duplicate(c)) => c,
+        Err(e) => return Err(GenBankError::CollectionError(e)),
+    };
     for result in reader {
         match result {
             Ok(seq) => {
@@ -47,7 +52,7 @@ where
                 if let Some(ref mol_type) = locus.molecule_type {
                     seq_model = seq_model.sequence_type(mol_type);
                 }
-                let sequence = seq_model.save(conn);
+                let sequence = seq_model.save(conn)?;
                 let wt_node_id = Node::create(
                     conn,
                     &sequence.hash,
@@ -57,7 +62,7 @@ where
                         collection = &collection.name,
                         hash = sequence.hash
                     )),
-                );
+                )?;
 
                 let block_group = if let Ok(bg) = BlockGroup::get(
                     conn,
@@ -84,7 +89,7 @@ where
                             name: &locus.name,
                             ..Default::default()
                         },
-                    )
+                    )?
                 };
                 let paths = Path::query(
                     conn,
@@ -108,7 +113,7 @@ where
                         wt_node_id,
                         0,
                         Strand::Forward,
-                    );
+                    )?;
                     let edge_out_of = Edge::create(
                         conn,
                         wt_node_id,
@@ -117,7 +122,7 @@ where
                         PATH_END_NODE_ID,
                         0,
                         Strand::Forward,
-                    );
+                    )?;
                     BlockGroupEdge::bulk_create(
                         conn,
                         &[
@@ -140,7 +145,7 @@ where
                         &locus.name,
                         &block_group.id,
                         &[edge_into.id, edge_out_of.id],
-                    )
+                    )?
                 };
                 for edit in locus.changes_to_wt() {
                     let start = edit.start;
@@ -154,7 +159,7 @@ where
                                     edit_type = edit.edit_type
                                 ))
                                 .sequence_type("DNA")
-                                .save(conn);
+                                .save(conn)?;
                             let change_node = Node::create(
                                 conn,
                                 &change_seq.hash,
@@ -163,7 +168,7 @@ where
                                     parent_hash = &sequence.hash,
                                     new_hash = &change_seq.hash,
                                 )),
-                            );
+                            )?;
                             PathChange {
                                 block_group_id: block_group.id,
                                 path: path.clone(),
@@ -287,6 +292,7 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
+        Sample::create(conn, Sample::DEFAULT_NAME).unwrap();
         let operation = update_with_genbank(
             &context,
             BufReader::new(file),

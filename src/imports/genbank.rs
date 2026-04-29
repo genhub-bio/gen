@@ -18,6 +18,7 @@ use gen_models::{
     collection::Collection,
     db::DbContext,
     edge::Edge,
+    errors::CollectionError,
     node::Node,
     operations::{Operation, OperationInfo},
     path::Path,
@@ -350,14 +351,9 @@ fn create_accession_for_segments(
     accession_name: &str,
     segments: &[NodeSequenceSegment],
 ) -> Result<HashId, GenBankError> {
-    let accession = match Accession::create(conn, accession_name, &path.id, None) {
+    let accession = match Accession::get_or_create(conn, accession_name, &path.id, None) {
         Ok(accession) => accession,
-        Err(rusqlite::Error::SqliteFailure(err, _details))
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            return Ok(Accession::get_or_create(conn, accession_name, &path.id, None).id);
-        }
-        Err(err) => return Err(err.into()),
+        Err(err) => return Err(GenBankError::AccessionError(err)),
     };
     let mut edges = Vec::with_capacity(segments.len() + 1);
 
@@ -400,7 +396,7 @@ fn create_accession_for_segments(
     });
 
     let edge_ids = AccessionEdge::bulk_create(conn, &edges);
-    AccessionPath::create(conn, &accession.id, &edge_ids);
+    AccessionPath::create(conn, &accession.id, &edge_ids)?;
     Ok(accession.id)
 }
 
@@ -505,8 +501,19 @@ where
     let progress_bar = get_handler();
     let mut session = start_operation(conn);
     let reader = reader::SeqReader::new(data);
-    let collection = Collection::create(conn, collection.into().unwrap_or_default());
-    Sample::get_or_create(conn, sample);
+    let collection = match Collection::create(conn, collection.into().unwrap_or_default()) {
+        Ok(c) => c,
+        Err(CollectionError::Duplicate(c)) => c,
+        Err(e) => {
+            return Err(GenBankError::CollectionError(e));
+        }
+    };
+    match Sample::get_or_create(conn, sample) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(GenBankError::SampleError(e));
+        }
+    }
 
     let _ = progress_bar.println("Parsing GenBank");
     let bar = progress_bar.add(get_progress_bar(None));
@@ -523,7 +530,7 @@ where
                 if let Some(ref mol_type) = locus.molecule_type {
                     seq_model = seq_model.sequence_type(mol_type);
                 }
-                let sequence = seq_model.save(conn);
+                let sequence = seq_model.save(conn)?;
                 let wt_node_id = Node::create(
                     conn,
                     &sequence.hash,
@@ -533,7 +540,7 @@ where
                         contig = &locus.name,
                         hash = sequence.hash
                     )),
-                );
+                )?;
 
                 let block_group = BlockGroup::create(
                     conn,
@@ -543,7 +550,7 @@ where
                         name: &locus.name,
                         ..Default::default()
                     },
-                );
+                )?;
                 let edge_into = Edge::create(
                     conn,
                     PATH_START_NODE_ID,
@@ -552,7 +559,7 @@ where
                     wt_node_id,
                     0,
                     Strand::Forward,
-                );
+                )?;
                 let edge_out_of = Edge::create(
                     conn,
                     wt_node_id,
@@ -561,7 +568,7 @@ where
                     PATH_END_NODE_ID,
                     0,
                     Strand::Forward,
-                );
+                )?;
                 BlockGroupEdge::bulk_create(
                     conn,
                     &[
@@ -584,14 +591,14 @@ where
                     &locus.name,
                     &block_group.id,
                     &[edge_into.id, edge_out_of.id],
-                );
+                )?;
 
                 let wt_changes = locus.changes_to_wt();
                 let mut applied_changes = Vec::with_capacity(wt_changes.len());
                 for edit in wt_changes {
                     let start = edit.start;
                     let end = edit.end;
-                    let mut change_node_id = None;
+                    let change_node_id = None;
                     let change = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()
@@ -601,8 +608,8 @@ where
                                     edit_type = edit.edit_type
                                 ))
                                 .sequence_type("DNA")
-                                .save(conn);
-                            let change_node = Node::create(
+                                .save(conn)?;
+                            let change_node_id = Node::create(
                                 conn,
                                 &change_seq.hash,
                                 &HashId::convert_str(&format!(
@@ -610,8 +617,7 @@ where
                                     parent_hash = &sequence.hash,
                                     new_hash = &change_seq.hash,
                                 )),
-                            );
-                            change_node_id = Some(change_node);
+                            )?;
                             PathChange {
                                 block_group_id: block_group.id,
                                 path: path.clone(),
@@ -619,7 +625,7 @@ where
                                 start,
                                 end,
                                 block: PathBlock {
-                                    node_id: change_node,
+                                    node_id: change_node_id,
                                     block_sequence: edit.new_sequence.clone(),
                                     sequence_start: 0,
                                     sequence_end: change_seq.length,

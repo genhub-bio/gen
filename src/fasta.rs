@@ -1,6 +1,9 @@
 use std::io::Error as IOError;
 
-use gen_models::errors::{OperationError, QueryError};
+use gen_models::errors::{
+    BlockGroupError, CollectionError, EdgeError, NodeError, OperationError, PathError, QueryError,
+    SampleError, SequenceError,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -11,4 +14,18 @@ pub enum FastaError {
     IOError(#[from] IOError),
     #[error("SQL query Error: {0}")]
     SQLQueryError(#[from] QueryError),
+    #[error("Collection creation error: {0}")]
+    CollectionError(#[from] CollectionError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
+    #[error("Block group write error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
+    #[error("Edge write error: {0}")]
+    EdgeError(#[from] EdgeError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }

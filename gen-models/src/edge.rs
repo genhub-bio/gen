@@ -12,10 +12,12 @@ use indexmap::IndexSet;
 use itertools::Itertools;
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
+    errors::NodeError,
     gen_models_capnp::edge,
     node::Node,
     sequence::{Sequence, cached_sequence},
@@ -191,6 +193,14 @@ impl Query for Edge {
     }
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum EdgeError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+}
+
 impl Edge {
     #[allow(clippy::too_many_arguments)]
     pub fn create(
@@ -201,12 +211,15 @@ impl Edge {
         target_node_id: HashId,
         target_coordinate: i64,
         target_strand: Strand,
-    ) -> Edge {
+    ) -> Result<Edge, EdgeError> {
         let hash = HashId(calculate_hash(&format!(
             "{source_node_id}:{source_coordinate}:{source_strand}:{target_node_id}:{target_coordinate}:{target_strand}"
         )));
         let query = "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = match conn.prepare(query) {
+            Ok(s) => s,
+            Err(e) => return Err(EdgeError::DatabaseError(e)),
+        };
         match stmt.execute(params![
             hash,
             source_node_id,
@@ -216,24 +229,30 @@ impl Edge {
             target_coordinate,
             target_strand
         ]) {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code != rusqlite::ErrorCode::ConstraintViolation {
-                    panic!("something bad happened querying the database")
-                }
+            Ok(_) => Ok(Edge {
+                id: hash,
+                source_node_id,
+                source_coordinate,
+                source_strand,
+                target_node_id,
+                target_coordinate,
+                target_strand,
+            }),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                // Edge already exists, return the existing record
+                Ok(Edge {
+                    id: hash,
+                    source_node_id,
+                    source_coordinate,
+                    source_strand,
+                    target_node_id,
+                    target_coordinate,
+                    target_strand,
+                })
             }
-            Err(_) => {
-                panic!("something bad happened querying the database")
-            }
-        }
-        Edge {
-            id: hash,
-            source_node_id,
-            source_coordinate,
-            source_strand,
-            target_node_id,
-            target_coordinate,
-            target_strand,
+            Err(e) => Err(EdgeError::DatabaseError(e)),
         }
     }
 
@@ -491,12 +510,13 @@ mod tests {
     #[test]
     fn test_bulk_create() {
         let conn = &mut get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = EdgeData {
             source_node_id: PATH_START_NODE_ID,
             source_coordinate: -1,
@@ -508,8 +528,9 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = EdgeData {
             source_node_id: node1_id,
             source_coordinate: 2,
@@ -554,12 +575,13 @@ mod tests {
     #[test]
     fn test_bulk_create_returns_edges_in_order() {
         let conn = &mut get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         let edge1 = EdgeData {
             source_node_id: PATH_START_NODE_ID,
             source_coordinate: -1,
@@ -571,8 +593,9 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = EdgeData {
             source_node_id: node1_id,
             source_coordinate: 2,
@@ -612,12 +635,13 @@ mod tests {
     #[test]
     fn test_bulk_create_with_existing_edge() {
         let conn = &mut get_connection(None).unwrap();
-        Collection::create(conn, "test collection");
+        Collection::create(conn, "test collection").unwrap();
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("ATCGATCG")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
         // NOTE: Create one edge ahead of time to confirm an existing row ID gets returned in the bulk create
         let existing_edge = Edge::create(
             conn,
@@ -627,7 +651,8 @@ mod tests {
             node1_id,
             1,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         assert_eq!(existing_edge.source_node_id, PATH_START_NODE_ID);
         assert_eq!(existing_edge.source_coordinate, -1);
         assert_eq!(existing_edge.target_node_id, node1_id);
@@ -644,8 +669,9 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge2 = EdgeData {
             source_node_id: node1_id,
             source_coordinate: 2,
@@ -706,8 +732,10 @@ mod tests {
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(&conn);
-        let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1"));
+            .save(&conn)
+            .unwrap();
+        let insert_node_id =
+            Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
             block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
@@ -759,15 +787,18 @@ mod tests {
         let template_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAAAA")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let template_node_id =
-            Node::create(&conn, &template_sequence.hash, &HashId::convert_str("1"));
+            Node::create(&conn, &template_sequence.hash, &HashId::convert_str("1")).unwrap();
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(&conn);
-        let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("2"));
+            .save(&conn)
+            .unwrap();
+        let insert_node_id =
+            Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             &conn,
@@ -777,7 +808,8 @@ mod tests {
             insert_node_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             &conn,
             insert_node_id,
@@ -786,7 +818,8 @@ mod tests {
             template_node_id,
             3,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let boundaries = Edge::get_block_boundaries(Some(&vec![&edge1]), Some(&vec![&edge2]));
         assert_eq!(boundaries, vec![2, 3]);
@@ -798,22 +831,26 @@ mod tests {
         let template_sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAAAA")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let template1_node_id =
-            Node::create(&conn, &template_sequence1.hash, &HashId::convert_str("1"));
+            Node::create(&conn, &template_sequence1.hash, &HashId::convert_str("1")).unwrap();
 
         let template_sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTTTT")
-            .save(&conn);
+            .save(&conn)
+            .unwrap();
         let template2_node_id =
-            Node::create(&conn, &template_sequence2.hash, &HashId::convert_str("2"));
+            Node::create(&conn, &template_sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(&conn);
-        let insert_node_id = Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("3"));
+            .save(&conn)
+            .unwrap();
+        let insert_node_id =
+            Node::create(&conn, &insert_sequence.hash, &HashId::convert_str("3")).unwrap();
 
         let edge1 = Edge::create(
             &conn,
@@ -823,7 +860,8 @@ mod tests {
             insert_node_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             &conn,
             insert_node_id,
@@ -832,7 +870,8 @@ mod tests {
             template2_node_id,
             3,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let outgoing_boundaries = Edge::get_block_boundaries(Some(&vec![&edge1]), None);
         assert_eq!(outgoing_boundaries, vec![2]);

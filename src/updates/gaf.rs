@@ -14,7 +14,7 @@ use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
     edge::{Edge, EdgeData},
-    errors::{OperationError, SampleError},
+    errors::{NodeError, OperationError, SampleError, SequenceError},
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo},
@@ -54,6 +54,10 @@ pub enum GafUpdateError {
     ParseInt(#[from] ParseIntError),
     #[error("Line did not match expected GAF format: {0}")]
     InvalidGafLine(String),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 pub fn transform_csv_to_fasta<R, W>(reader: R, writer: &mut W) -> Result<(), GafUpdateError>
@@ -276,7 +280,7 @@ where
             let sequence = Sequence::new()
                 .sequence(&change.sequence)
                 .sequence_type("DNA")
-                .save(conn);
+                .save(conn)?;
             let seq_node = Node::create(
                 conn,
                 &sequence.hash,
@@ -294,7 +298,7 @@ where
                         -1
                     )),
                 )),
-            );
+            )?;
 
             let mut new_edges = vec![];
             let mut bg_nodes = vec![];

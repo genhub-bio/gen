@@ -85,7 +85,7 @@ pub fn update_with_sequence(
             let seq = Sequence::new()
                 .sequence_type("DNA")
                 .sequence(sequence)
-                .save(conn);
+                .save(conn)?;
             let node_id = Node::create(
                 conn,
                 &seq.hash,
@@ -96,7 +96,7 @@ pub fn update_with_sequence(
                     ref_end = seq.length,
                     sequence_hash = seq.hash
                 )),
-            );
+            )?;
 
             let path_block = PathBlock {
                 node_id,
@@ -146,7 +146,7 @@ pub fn update_with_sequence(
                     end_coordinate,
                     &edge_to_new_node,
                     &edge_from_new_node,
-                );
+                )?;
             }
         }
     }

@@ -270,7 +270,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let block_group = create_bg(
             conn,
             collection_name,
@@ -280,13 +280,15 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -296,7 +298,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -305,7 +308,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -314,7 +318,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -341,8 +346,9 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
-            .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
+            .save(conn)
+            .unwrap();
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge4 = Edge::create(
             conn,
             node1_id,
@@ -351,7 +357,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -360,7 +367,8 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let child_block_groups = Sample::get_block_groups(conn, collection_name, "child");
         let child_block_group = child_block_groups.first().unwrap();
@@ -422,8 +430,9 @@ mod tests {
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")
-            .save(conn);
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
+            .save(conn)
+            .unwrap();
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
         let edge6 = Edge::create(
             conn,
             node2_id,
@@ -432,7 +441,8 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge7 = Edge::create(
             conn,
             node4_id,
@@ -441,7 +451,8 @@ mod tests {
             node2_id,
             6,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection_name, "grandchild");
         let grandchild_block_group = grandchild_block_groups.first().unwrap();
@@ -531,19 +542,21 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample = Sample::get_or_create(conn, "test sample");
         let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -553,7 +566,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -562,7 +576,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -571,7 +586,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -629,19 +645,21 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample = Sample::get_or_create(conn, "test sample");
         let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -651,7 +669,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -660,7 +679,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -669,7 +689,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -727,19 +748,21 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample1 = Sample::get_or_create(conn, "sample1");
         let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -749,7 +772,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -758,7 +782,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -767,7 +792,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -788,13 +814,15 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
-            .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
+            .save(conn)
+            .unwrap();
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
 
         let edge4 = Edge::create(
             conn,
@@ -804,7 +832,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -813,7 +842,8 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge6 = Edge::create(
             conn,
             node4_id,
@@ -822,7 +852,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge4.id, edge5.id, edge6.id];
         let block_group_edges = edge_ids
@@ -874,19 +905,21 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let _sample1 = Sample::get_or_create(conn, "sample1");
         let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTTTTTT")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -896,7 +929,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -905,7 +939,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -914,7 +949,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id, edge3.id];
         let block_group_edges = edge_ids
@@ -935,13 +971,15 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGGGGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCCCCCC")
-            .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
+            .save(conn)
+            .unwrap();
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
 
         let edge4 = Edge::create(
             conn,
@@ -951,7 +989,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge5 = Edge::create(
             conn,
             node3_id,
@@ -960,7 +999,8 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge6 = Edge::create(
             conn,
             node4_id,
@@ -969,7 +1009,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge4.id, edge5.id, edge6.id];
         let block_group_edges = edge_ids
@@ -1022,7 +1063,7 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
         let block_group = create_bg(
             conn,
             collection_name,
@@ -1032,8 +1073,9 @@ mod tests {
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAAAAAAAAAA")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -1043,7 +1085,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -1052,7 +1095,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [edge1.id, edge2.id];
         let block_group_edges = edge_ids
@@ -1079,8 +1123,9 @@ mod tests {
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
-            .save(conn);
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
+            .save(conn)
+            .unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
         let edge3 = Edge::create(
             conn,
             node1_id,
@@ -1089,7 +1134,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge4 = Edge::create(
             conn,
             node2_id,
@@ -1098,7 +1144,8 @@ mod tests {
             node1_id,
             6,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let child_block_groups = Sample::get_block_groups(conn, collection_name, "child");
         let child_block_group = child_block_groups.first().unwrap();
@@ -1160,8 +1207,9 @@ mod tests {
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")
-            .save(conn);
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
+            .save(conn)
+            .unwrap();
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
         let edge5 = Edge::create(
             conn,
             node2_id,
@@ -1170,7 +1218,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge6 = Edge::create(
             conn,
             node3_id,
@@ -1179,7 +1228,8 @@ mod tests {
             node1_id,
             10,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection_name, "grandchild");
         let grandchild_block_group = grandchild_block_groups.first().unwrap();

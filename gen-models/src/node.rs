@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, calculate_hash, traits::Capnp};
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{db::GraphConnection, gen_models_capnp::node, sequence::Sequence, traits::*};
 
@@ -54,22 +55,32 @@ impl Query for Node {
     }
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum NodeError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+}
+
 impl Node {
-    pub fn create(conn: &GraphConnection, sequence_hash: &HashId, node_hash: &HashId) -> HashId {
+    pub fn create(
+        conn: &GraphConnection,
+        sequence_hash: &HashId,
+        node_hash: &HashId,
+    ) -> Result<HashId, NodeError> {
         let insert_statement = "INSERT INTO nodes (id, sequence_hash) VALUES (?1, ?2);";
-        let mut stmt = conn.prepare_cached(insert_statement).unwrap();
+        let mut stmt = match conn.prepare_cached(insert_statement) {
+            Ok(s) => s,
+            Err(e) => return Err(NodeError::DatabaseError(e)),
+        };
         match stmt.execute(params![node_hash, sequence_hash]) {
-            Ok(_) => *node_hash,
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    *node_hash
-                } else {
-                    panic!("something bad happened querying the database")
-                }
+            Ok(_) => Ok(*node_hash),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                // Node already exists, return the existing node hash
+                Ok(*node_hash)
             }
-            Err(_) => {
-                panic!("something bad happened querying the database")
-            }
+            Err(e) => Err(NodeError::DatabaseError(e)),
         }
     }
 

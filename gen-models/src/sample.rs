@@ -4,15 +4,32 @@ use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
 use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
-    block_group::BlockGroup, db::GraphConnection, errors::SampleError, gen_models_capnp::sample,
-    sample_lineage::SampleLineage, traits::Query,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    errors::{BlockGroupError, QueryError},
+    gen_models_capnp::sample,
+    sample_lineage::SampleLineage,
+    traits::Query,
 };
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
     pub name: String,
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum SampleError {
+    #[error("Query Error: {0}")]
+    QueryError(#[from] QueryError),
+    #[error("SQLite Error: {0}")]
+    SqliteError(#[from] rusqlite::Error),
+    #[error("Sample already exists")]
+    Duplicate(Sample),
+    #[error("Block group creation error: {0}")]
+    BlockGroup(#[from] BlockGroupError),
 }
 
 impl<'a> Capnp<'a> for Sample {
@@ -49,28 +66,31 @@ impl Sample {
         SampleLineage::get_parents(conn, sample_name)
     }
 
-    pub fn create(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
-        let mut stmt = conn
-            .prepare("INSERT INTO samples (name) VALUES (?1) returning (name);")
-            .unwrap();
-        stmt.query_row((name,), |row| Ok(Sample { name: row.get(0)? }))
+    pub fn create(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
+        let mut stmt =
+            match conn.prepare("INSERT INTO samples (name) VALUES (?1) returning (name);") {
+                Ok(stmt) => stmt,
+                Err(err) => return Err(SampleError::SqliteError(err)),
+            };
+
+        match stmt.query_row((name,), |row| Ok(Sample { name: row.get(0)? })) {
+            Ok(sample) => Ok(sample),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(SampleError::Duplicate(Sample {
+                    name: name.to_string(),
+                }))
+            }
+            Err(err) => Err(SampleError::SqliteError(err)),
+        }
     }
 
-    pub fn get_or_create(conn: &GraphConnection, name: &str) -> Sample {
+    pub fn get_or_create(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
         match Sample::create(conn, name) {
-            Ok(sample) => sample,
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    Sample {
-                        name: name.to_string(),
-                    }
-                } else {
-                    panic!("something bad happened querying the database")
-                }
-            }
-            Err(_) => {
-                panic!("something bad happened.")
-            }
+            Ok(sample) => Ok(sample),
+            Err(SampleError::Duplicate(sample)) => Ok(sample),
+            Err(e) => Err(e),
         }
     }
 
@@ -160,18 +180,8 @@ impl Sample {
 
                 Ok(new_sample)
             }
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    Ok(Sample {
-                        name: sample_name.to_string(),
-                    })
-                } else {
-                    Err(SampleError::SqliteError(rusqlite::Error::SqliteFailure(
-                        err, _details,
-                    )))
-                }
-            }
-            Err(err) => Err(SampleError::SqliteError(err)),
+            Err(SampleError::Duplicate(sample)) => Ok(sample),
+            Err(e) => Err(e),
         }
     }
 
@@ -271,8 +281,8 @@ mod tests {
     #[test]
     fn test_get_or_create_child_does_not_add_lineage_for_existing_sample() {
         let conn = &get_connection(None).unwrap();
-        Sample::get_or_create(conn, "parent");
-        Sample::get_or_create(conn, "child");
+        Sample::get_or_create(conn, "parent").unwrap();
+        Sample::get_or_create(conn, "child").unwrap();
 
         Sample::get_or_create_child(conn, "test", "child", vec!["parent".to_string()]).unwrap();
 
@@ -296,7 +306,7 @@ mod tests {
     #[test]
     fn test_get_or_create_child_multiple_parents() {
         let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "test");
+        Collection::create(conn, "test").unwrap();
 
         create_bg(conn, "test", "parent_a", "chr1");
         create_bg(conn, "test", "parent_a", "chr2");

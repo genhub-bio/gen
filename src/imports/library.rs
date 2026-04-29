@@ -5,7 +5,7 @@ use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     collection::Collection,
     db::DbContext,
-    errors::OperationError,
+    errors::{BlockGroupError, CollectionError, OperationError},
     file_types::FileTypes,
     operations::{Operation, OperationFile, OperationInfo},
     sample::Sample,
@@ -29,6 +29,8 @@ pub enum LibraryImportError {
     FileParse(CombinatorialLibraryParseError),
     #[error("Failed to create library")]
     LibraryCreation(CombinatorialLibraryCreationError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 impl From<CombinatorialLibraryParseError> for LibraryImportError {
@@ -54,11 +56,24 @@ pub fn import_library(
 ) -> Result<Operation, LibraryImportError> {
     let conn = context.graph().conn();
     let mut session = session_operations::start_operation(conn);
-    if !Collection::exists(conn, collection_name) {
-        Collection::create(conn, collection_name);
+    match Collection::create(conn, collection_name) {
+        Ok(_) => {}
+        Err(CollectionError::Duplicate(_)) => {}
+        Err(e) => {
+            return Err(LibraryImportError::ImportFailed(format!(
+                "Failed to get or create collection: {e}"
+            )));
+        }
     }
 
-    Sample::get_or_create(conn, sample);
+    match Sample::get_or_create(conn, sample) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(LibraryImportError::ImportFailed(format!(
+                "Failed to get or create sample: {e}"
+            )));
+        }
+    }
     let new_block_group = BlockGroup::create(
         conn,
         NewBlockGroup {
@@ -67,7 +82,7 @@ pub fn import_library(
             name: library_name,
             ..Default::default()
         },
-    );
+    )?;
 
     let _block_group_boundaries =
         create_library(conn, new_block_group.id, library_name, parts_list, true)?;

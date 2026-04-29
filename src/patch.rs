@@ -388,9 +388,11 @@ mod tests {
 
         operation_management::checkout(&context, &Some("main".to_string()), None).unwrap();
         let patches = load_patches(&write_stream[..]);
+
         apply_patches(&context, &patches).unwrap();
         let branch_ops = Branch::get_operations(operation_conn, main_branch.id);
         assert_eq!(branch_ops.len(), 2);
+
         // ensure if we apply the operation again it'll be a no-op
         let res = apply_patches(&context, &patches);
         assert_eq!(

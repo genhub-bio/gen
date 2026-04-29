@@ -1,24 +1,24 @@
 use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
+pub use crate::{
+    accession::{AccessionError, AccessionPathError},
+    annotations::{AnnotationError, AnnotationGroupError},
+    block_group::BlockGroupError,
+    collection::CollectionError,
+    edge::EdgeError,
+    node::NodeError,
+    operations::BranchError,
+    path::PathError,
+    path_edge::PathEdgeError,
+    sample::SampleError,
+    sequence::SequenceError,
+};
+
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
 pub enum QueryError {
     #[error("Results not found: {0}")]
     ResultsNotFound(String),
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum SampleError {
-    #[error("Query Error: {0}")]
-    QueryError(#[from] QueryError),
-    #[error("SQLite Error: {0}")]
-    SqliteError(#[from] rusqlite::Error),
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum ChangeError {
-    #[error("Operation Error: {0}")]
-    OutOfBounds(String),
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -31,6 +31,22 @@ pub enum ChangesetError {
     SerializationError(String),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Collection creation error: {0}")]
+    CollectionError(#[from] CollectionError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Accession creation error: {0}")]
+    AccessionError(#[from] AccessionError),
+    #[error("Accession path creation error: {0}")]
+    AccessionPathError(#[from] AccessionPathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 #[derive(Debug, PartialEq, Error)]
@@ -53,16 +69,6 @@ pub enum OperationError {
     ConfigError(#[from] ConfigError),
     #[error("Error storing data file")]
     IOError,
-}
-
-#[derive(Debug, PartialEq, Error)]
-pub enum BranchError {
-    #[error("Cannot delete branch: {0}")]
-    CannotDelete(String),
-    #[error("SQL Error: {0}")]
-    SQLError(String),
-    #[error("SQLite Error: {0}")]
-    SqliteError(#[from] rusqlite::Error),
 }
 
 #[derive(Debug, Error, PartialEq)]

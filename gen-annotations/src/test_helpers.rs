@@ -21,16 +21,18 @@ pub fn get_connection() -> GraphConnection {
 }
 
 pub fn setup_test_data(conn: &GraphConnection) {
-    let collection = Collection::create(conn, "test");
-    Sample::get_or_create(conn, Sample::DEFAULT_NAME);
+    let collection = Collection::create(conn, "test").unwrap();
+    Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
     let seq1 = Sequence::new()
         .sequence_type("DNA")
         .sequence("ATCGATCGATCGATCGA")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let seq2 = Sequence::new()
         .sequence_type("DNA")
         .sequence("TCGGGAACACACAGAGA")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let node1 = Node::create(
         conn,
         &seq1.hash,
@@ -39,7 +41,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
             collection = collection.name,
             hash = seq1.hash
         )),
-    );
+    )
+    .unwrap();
     let node2 = Node::create(
         conn,
         &seq2.hash,
@@ -48,7 +51,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
             collection = collection.name,
             hash = seq2.hash
         )),
-    );
+    )
+    .unwrap();
     let block_group = BlockGroup::create(
         conn,
         NewBlockGroup {
@@ -58,7 +62,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
             parent_block_group_id: None,
             is_default: false,
         },
-    );
+    )
+    .unwrap();
 
     let edge_into = Edge::create(
         conn,
@@ -68,7 +73,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
         node1,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
     let middle_edge = Edge::create(
         conn,
         node1,
@@ -77,7 +83,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
         node2,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
     let edge_out_of = Edge::create(
         conn,
         node2,
@@ -86,7 +93,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
         PATH_END_NODE_ID,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
 
     let new_block_group_edges = vec![
         BlockGroupEdgeData {
@@ -115,9 +123,10 @@ pub fn setup_test_data(conn: &GraphConnection) {
         "m123",
         &block_group.id,
         &[edge_into.id, middle_edge.id, edge_out_of.id],
-    );
+    )
+    .unwrap();
 
-    Sample::get_or_create(conn, "foo");
+    Sample::get_or_create(conn, "foo").unwrap();
     let _ =
         Sample::get_or_create_child(conn, "test", "foo", vec![Sample::DEFAULT_NAME.to_string()]);
 
@@ -138,7 +147,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
     let sequence = Sequence::new()
         .sequence_type("DNA")
         .sequence(alt_seq)
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let node_id = Node::create(
         conn,
         &sequence.hash,
@@ -147,7 +157,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
             path_id = sample_path.id,
             sequence_hash = sequence.hash,
         )),
-    );
+    )
+    .unwrap();
     let change = PathChange {
         block_group_id: sample_bg_id,
         path: sample_path,

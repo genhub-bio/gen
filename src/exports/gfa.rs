@@ -185,7 +185,7 @@ pub fn export_gfa(
         }
     }
 
-    let paths = get_paths(conn, collection_name, sample_name, &graph, &split_segments);
+    let paths = get_paths(conn, collection_name, sample_name, &graph, &split_segments)?;
     write_segments(&mut writer, &segments.iter().collect::<Vec<&Segment>>())?;
     write_links(&mut writer, &links.iter().collect::<Vec<&Link>>())?;
     write_paths(&mut writer, paths)?;
@@ -199,13 +199,21 @@ fn get_paths(
     sample_name: &str,
     graph: &GenGraph,
     split_segments: &HashMap<HashId, Vec<(i64, i64)>>,
-) -> HashMap<String, Vec<(String, Strand)>> {
+) -> Result<HashMap<String, Vec<(String, Strand)>>, GfaExportError> {
     let paths = Path::query_for_collection_and_sample(conn, collection_name, sample_name);
 
     let mut path_links: HashMap<String, Vec<(String, Strand)>> = HashMap::new();
 
     for path in paths {
-        let block_group = BlockGroup::get_by_id(conn, &path.block_group_id);
+        let block_group = match BlockGroup::get_by_id(conn, &path.block_group_id) {
+            Ok(block_group) => block_group,
+            Err(_) => {
+                return Err(GfaExportError::MissingBlockGroups {
+                    collection_name: collection_name.to_string(),
+                    sample_name: sample_name.to_string(),
+                });
+            }
+        };
         let sample_name = block_group.sample_name;
 
         let path_blocks = path.blocks(conn);
@@ -260,7 +268,7 @@ fn get_paths(
             );
         }
     }
-    path_links
+    Ok(path_links)
 }
 
 fn write_paths(
@@ -315,7 +323,9 @@ mod tests {
         track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
-        Collection::create(conn, collection_name);
+        Collection::create(conn, collection_name).unwrap();
+
+        Sample::create(conn, Sample::DEFAULT_NAME).unwrap();
         let block_group = BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -324,27 +334,32 @@ mod tests {
                 name: "test block group",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
             .sequence("TTTT")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
             .sequence("GGGG")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let sequence4 = Sequence::new()
             .sequence_type("DNA")
             .sequence("CCCC")
-            .save(conn);
-        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1"));
-        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2"));
-        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3"));
-        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4"));
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
+        let node3_id = Node::create(conn, &sequence3.hash, &HashId::convert_str("3")).unwrap();
+        let node4_id = Node::create(conn, &sequence4.hash, &HashId::convert_str("4")).unwrap();
 
         let edge1 = Edge::create(
             conn,
@@ -354,7 +369,8 @@ mod tests {
             node1_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge2 = Edge::create(
             conn,
             node1_id,
@@ -363,7 +379,8 @@ mod tests {
             node2_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge3 = Edge::create(
             conn,
             node2_id,
@@ -372,7 +389,8 @@ mod tests {
             node3_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge4 = Edge::create(
             conn,
             node3_id,
@@ -381,7 +399,8 @@ mod tests {
             node4_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge5 = Edge::create(
             conn,
             node4_id,
@@ -390,7 +409,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
@@ -431,7 +451,8 @@ mod tests {
             "1234",
             &block_group.id,
             &[edge1.id, edge2.id, edge3.id, edge4.id, edge5.id],
-        );
+        )
+        .unwrap();
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
 
@@ -678,8 +699,10 @@ mod tests {
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
-            .save(conn);
-        let insert_node_id = Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1"));
+            .save(conn)
+            .unwrap();
+        let insert_node_id =
+            Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
             block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
