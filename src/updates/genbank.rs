@@ -5,9 +5,10 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::{Collection, CollectionError},
+    collection::Collection,
     db::DbContext,
     edge::Edge,
+    errors::CollectionError,
     node::Node,
     operations::{Operation, OperationInfo},
     path::Path,

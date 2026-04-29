@@ -6,17 +6,11 @@ use std::{
 use gb_io::seq::{Feature, Location, Seq};
 use gen_core::Strand;
 use gen_models::{
-    accession::{AccessionError, AccessionPathError},
-    annotations::{
-        AnnotationError, AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier,
+    annotations::{AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier},
+    errors::{
+        AccessionError, AccessionPathError, AnnotationError, BlockGroupError, CollectionError,
+        EdgeError, NodeError, OperationError, PathError, SampleError, SequenceError,
     },
-    block_group::BlockGroupError,
-    collection::CollectionError,
-    edge::EdgeError,
-    errors::{OperationError, SampleError},
-    node::NodeError,
-    path::PathError,
-    sequence::SequenceError,
 };
 use regex::{Error as RegexError, Regex};
 use thiserror::Error;

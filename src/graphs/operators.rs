@@ -3,12 +3,12 @@ use std::collections::HashMap;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::Edge,
-    errors::OperationError,
-    path::{Path, PathError},
+    errors::{BlockGroupError, OperationError, PathError},
+    path::Path,
     path_edge::PathEdge,
     sample::Sample,
     traits::Query,

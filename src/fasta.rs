@@ -1,13 +1,8 @@
 use std::io::Error as IOError;
 
-use gen_models::{
-    block_group::BlockGroupError,
-    collection::CollectionError,
-    edge::EdgeError,
-    errors::{OperationError, QueryError, SampleError},
-    node::NodeError,
-    path::PathError,
-    sequence::SequenceError,
+use gen_models::errors::{
+    BlockGroupError, CollectionError, EdgeError, NodeError, OperationError, PathError, QueryError,
+    SampleError, SequenceError,
 };
 use thiserror::Error;
 

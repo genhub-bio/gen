@@ -1,13 +1,17 @@
 use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
-use crate::{
+pub use crate::{
     accession::{AccessionError, AccessionPathError},
+    annotations::{AnnotationError, AnnotationGroupError},
     block_group::BlockGroupError,
     collection::CollectionError,
+    edge::EdgeError,
     node::NodeError,
+    operations::BranchError,
     path::PathError,
-    sample::Sample,
+    path_edge::PathEdgeError,
+    sample::SampleError,
     sequence::SequenceError,
 };
 
@@ -15,18 +19,6 @@ use crate::{
 pub enum QueryError {
     #[error("Results not found: {0}")]
     ResultsNotFound(String),
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum SampleError {
-    #[error("Query Error: {0}")]
-    QueryError(#[from] QueryError),
-    #[error("SQLite Error: {0}")]
-    SqliteError(#[from] rusqlite::Error),
-    #[error("Sample already exists")]
-    Duplicate(Sample),
-    #[error("Block group creation error: {0}")]
-    BlockGroup(#[from] BlockGroupError),
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -77,20 +69,6 @@ pub enum OperationError {
     ConfigError(#[from] ConfigError),
     #[error("Error storing data file")]
     IOError,
-}
-
-#[derive(Debug, PartialEq, Error)]
-pub enum BranchError {
-    #[error("Cannot delete branch: {0}")]
-    CannotDelete(String),
-    #[error("SQL Error: {0}")]
-    SQLError(String),
-    #[error("SQLite Error: {0}")]
-    SqliteError(#[from] rusqlite::Error),
-    #[error("Duplicate entry: {0}")]
-    Duplicate(String),
-    #[error("Couldn't create branch: {0}")]
-    CannotCreate(String),
 }
 
 #[derive(Debug, Error, PartialEq)]

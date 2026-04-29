@@ -14,12 +14,12 @@ use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
     edge::{Edge, EdgeData},
-    errors::{OperationError, SampleError},
+    errors::{NodeError, OperationError, SampleError, SequenceError},
     file_types::FileTypes,
-    node::{Node, NodeError},
+    node::Node,
     operations::{OperationFile, OperationInfo},
     sample::Sample,
-    sequence::{Sequence, SequenceError},
+    sequence::Sequence,
     traits::*,
 };
 use regex::Regex;

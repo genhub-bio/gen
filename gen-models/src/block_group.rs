@@ -19,20 +19,19 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{
-        Accession, AccessionEdge, AccessionEdgeData, AccessionError, AccessionPath,
-        AccessionPathError,
-    },
+    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
-    edge::{Edge, EdgeData, EdgeError, GroupBlock},
-    errors::QueryError,
+    edge::{Edge, EdgeData, GroupBlock},
+    errors::{
+        AccessionError, AccessionPathError, EdgeError, NodeError, PathError, QueryError,
+        SequenceError,
+    },
     gen_models_capnp::block_group,
-    node::{Node, NodeError},
-    path::{Path, PathData, PathError},
+    node::Node,
+    path::{Path, PathData},
     path_edge::PathEdge,
     sample::Sample,
-    sequence::SequenceError,
     traits::*,
 };
 

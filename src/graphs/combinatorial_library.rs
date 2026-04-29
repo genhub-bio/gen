@@ -9,9 +9,10 @@ use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     db::GraphConnection,
-    node::{Node, NodeError},
-    path::{Path, PathError},
-    sequence::{Sequence, SequenceError},
+    errors::{NodeError, PathError, SequenceError},
+    node::Node,
+    path::Path,
+    sequence::Sequence,
 };
 use noodles::fasta;
 use thiserror::Error;

@@ -17,8 +17,9 @@ use thiserror::Error;
 use crate::{
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
+    errors::NodeError,
     gen_models_capnp::edge,
-    node::{Node, NodeError},
+    node::Node,
     sequence::{Sequence, cached_sequence},
     traits::*,
 };

@@ -10,10 +10,10 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
-    collection::{Collection, CollectionError},
+    collection::Collection,
     db::DbContext,
     edge::Edge,
-    errors::SampleError,
+    errors::{CollectionError, SampleError},
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},

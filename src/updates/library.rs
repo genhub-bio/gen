@@ -2,8 +2,9 @@ use core::ops::Range;
 use std::str;
 
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
+    block_group::{BlockGroup, NewBlockGroup},
     db::DbContext,
+    errors::BlockGroupError,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
     sample::Sample,

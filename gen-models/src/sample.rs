@@ -4,15 +4,32 @@ use gen_core::traits::Capnp;
 use gen_graph::GenGraph;
 use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
-    block_group::BlockGroup, db::GraphConnection, errors::SampleError, gen_models_capnp::sample,
-    sample_lineage::SampleLineage, traits::Query,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    errors::{BlockGroupError, QueryError},
+    gen_models_capnp::sample,
+    sample_lineage::SampleLineage,
+    traits::Query,
 };
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
     pub name: String,
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum SampleError {
+    #[error("Query Error: {0}")]
+    QueryError(#[from] QueryError),
+    #[error("SQLite Error: {0}")]
+    SqliteError(#[from] rusqlite::Error),
+    #[error("Sample already exists")]
+    Duplicate(Sample),
+    #[error("Block group creation error: {0}")]
+    BlockGroup(#[from] BlockGroupError),
 }
 
 impl<'a> Capnp<'a> for Sample {

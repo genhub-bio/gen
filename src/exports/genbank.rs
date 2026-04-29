@@ -17,9 +17,10 @@ use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
     accession::Accession,
-    annotations::{Annotation, AnnotationError, GenBankLocationOperator},
+    annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::AnnotationError,
     node::Node,
     sample::Sample,
     traits::Query,

@@ -20,7 +20,7 @@ use crate::{
         DatabaseChangeset, get_changeset_dependencies_from_path, get_changeset_from_path,
     },
     db::OperationsConnection,
-    errors::{BranchError, FileAdditionError, RemoteError},
+    errors::{FileAdditionError, RemoteError},
     file_types::FileTypes,
     gen_models_capnp::operation,
     session_operations::DependencyModels,
@@ -834,6 +834,20 @@ pub struct Branch {
     pub name: String,
     pub current_operation_hash: Option<HashId>,
     pub remote_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Error)]
+pub enum BranchError {
+    #[error("Cannot delete branch: {0}")]
+    CannotDelete(String),
+    #[error("SQL Error: {0}")]
+    SQLError(String),
+    #[error("SQLite Error: {0}")]
+    SqliteError(#[from] rusqlite::Error),
+    #[error("Duplicate entry: {0}")]
+    Duplicate(String),
+    #[error("Couldn't create branch: {0}")]
+    CannotCreate(String),
 }
 
 impl Query for Branch {

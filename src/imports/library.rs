@@ -2,10 +2,10 @@ use std::str;
 
 use anyhow::Result;
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
-    collection::{Collection, CollectionError},
+    block_group::{BlockGroup, NewBlockGroup},
+    collection::Collection,
     db::DbContext,
-    errors::OperationError,
+    errors::{BlockGroupError, CollectionError, OperationError},
     file_types::FileTypes,
     operations::{Operation, OperationFile, OperationInfo},
     sample::Sample,

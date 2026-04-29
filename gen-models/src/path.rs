@@ -17,10 +17,10 @@ use crate::{
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     edge::Edge,
-    errors::QueryError,
+    errors::{PathEdgeError, QueryError},
     gen_models_capnp::path as PathCapnp,
     node::Node,
-    path_edge::{PathEdge, PathEdgeError},
+    path_edge::PathEdge,
     sequence::Sequence,
     traits::*,
 };
