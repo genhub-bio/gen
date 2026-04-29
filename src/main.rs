@@ -1,7 +1,6 @@
 #![allow(warnings)]
 use std::{
     fmt::Debug,
-    fs,
     fs::File,
     io,
     io::{BufReader, Write},
@@ -35,27 +34,22 @@ use r#gen::{
     },
 };
 use gen_annotations::translate;
-use gen_core::{HashId, calculate_hash, config::Workspace, range::Range, region::Region};
+use gen_core::{config::Workspace, range::Range, region::Region};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
     annotations::{add_annotation, add_annotation_file},
     block_group::BlockGroup,
-    changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, OperationsConnection},
     errors::RemoteError,
-    file_types::FileTypes,
-    files::GenDatabase,
     metadata,
     operations::{
-        Branch, Defaults, FileAddition, Operation, OperationFile, OperationInfo, OperationState,
-        OperationSummary, parse_hash,
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
+        add_files_operation, parse_hash,
     },
     reference_alias::ReferenceAlias,
     sample::Sample,
-    session_operations::DependencyModels,
     traits::Query,
 };
-use itertools::Itertools;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
@@ -64,121 +58,6 @@ fn get_default_collection(conn: &OperationsConnection) -> Result<String, rusqlit
     Ok(stmt
         .query_row((), |row| row.get(0))
         .unwrap_or("default".to_string()))
-}
-
-fn infer_add_file_type(path: &str) -> FileTypes {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
-
-    match extension.as_deref() {
-        Some("gb") | Some("gbk") | Some("genbank") => FileTypes::GenBank,
-        Some("fa") | Some("fasta") | Some("fna") => FileTypes::Fasta,
-        Some("gfa") => FileTypes::GFA,
-        Some("gaf") => FileTypes::GAF,
-        Some("vcf") => FileTypes::VCF,
-        Some("csv") => FileTypes::CSV,
-        Some("gff") | Some("gff3") => FileTypes::Gff3,
-        Some("bed") => FileTypes::Bed,
-        Some("tbi") => FileTypes::Tabix,
-        _ => FileTypes::None,
-    }
-}
-
-fn add_files_operation(
-    context: &DbContext,
-    files: &[String],
-    message: Option<&str>,
-) -> Result<Operation, Box<dyn std::error::Error>> {
-    let workspace = context.workspace();
-    let operation_conn = context.operations().conn();
-    let graph_conn = context.graph().conn();
-    let db_uuid = metadata::get_db_uuid(graph_conn);
-
-    let file_additions = files
-        .iter()
-        .map(|path| {
-            FileAddition::get_or_create(
-                workspace,
-                operation_conn,
-                path,
-                infer_add_file_type(path),
-                None,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let unique_file_additions = file_additions
-        .into_iter()
-        .unique_by(|file_addition| file_addition.id)
-        .collect::<Vec<_>>();
-
-    let operation_hash = HashId(calculate_hash(
-        &unique_file_additions
-            .iter()
-            .map(|file_addition| file_addition.id.to_string())
-            .sorted()
-            .join(":"),
-    ));
-
-    let operation = match Operation::create(operation_conn, "add-file", &operation_hash) {
-        Ok(operation) => operation,
-        Err(rusqlite::Error::SqliteFailure(err, _details))
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            return Err(gen_models::errors::OperationError::NoChanges.into());
-        }
-        Err(err) => return Err(err.into()),
-    };
-
-    for file_addition in &unique_file_additions {
-        Operation::add_file(operation_conn, &operation.hash, &file_addition.id)?;
-    }
-
-    Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
-
-    let summary = message.map(str::to_string).unwrap_or_else(|| {
-        if files.len() == 1 {
-            format!("Add file {}", files[0])
-        } else {
-            format!("Add {} files", files.len())
-        }
-    });
-    OperationSummary::create(operation_conn, &operation.hash, &summary);
-
-    let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid)?;
-    write_changeset(
-        workspace,
-        &operation,
-        DatabaseChangeset {
-            db_path: gen_db.path,
-            changes: ChangesetModels::default(),
-        },
-        &DependencyModels::default(),
-    );
-
-    let gen_dir = workspace
-        .find_gen_dir()
-        .ok_or_else(|| anyhow!("No .gen directory found. Please run 'gen init' first."))?;
-    let assets_dir = gen_dir.join("assets");
-    fs::create_dir_all(&assets_dir)?;
-
-    for file_addition in unique_file_additions {
-        let asset_path = assets_dir.join(file_addition.clone().hashed_filename());
-        if asset_path.exists() {
-            continue;
-        }
-
-        let source_path = if Path::new(&file_addition.file_path).is_absolute() {
-            PathBuf::from(&file_addition.file_path)
-        } else {
-            workspace.repo_root()?.join(&file_addition.file_path)
-        };
-        fs::copy(source_path, asset_path)?;
-    }
-
-    Ok(operation)
 }
 
 fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
