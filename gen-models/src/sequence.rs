@@ -275,11 +275,35 @@ fn validate_sequence_bounds(
     end: i64,
     length: i64,
 ) -> Result<(usize, usize), SequenceError> {
-    if start < 0 || end < 0 || start > end || end > length {
+    if start < 0 || end < 0 || start > length || end > length {
         return Err(SequenceError::BoundsError { start, end, length });
     }
 
     Ok((start as usize, end as usize))
+}
+
+fn sequence_slice(
+    sequence: &str,
+    start: i64,
+    end: i64,
+    circular: bool,
+) -> Result<String, SequenceError> {
+    let length = sequence.len() as i64;
+    let (start, end) = validate_sequence_bounds(start, end, length)?;
+
+    if start <= end {
+        return Ok(sequence[start..end].to_string());
+    }
+
+    if circular {
+        return Ok(format!("{}{}", &sequence[start..], &sequence[..end]));
+    }
+
+    Err(SequenceError::BoundsError {
+        start: start as i64,
+        end: end as i64,
+        length,
+    })
 }
 
 pub fn cached_sequence(
@@ -287,6 +311,7 @@ pub fn cached_sequence(
     name: &str,
     start: i64,
     end: i64,
+    circular: bool,
 ) -> Result<String, SequenceError> {
     static SEQUENCE_CACHE: sync::LazyLock<sync::RwLock<HashMap<String, Option<String>>>> =
         sync::LazyLock::new(|| sync::RwLock::new(HashMap::new()));
@@ -298,8 +323,7 @@ pub fn cached_sequence(
             .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
         if let Some(cached_sequence) = cache.get(&key) {
             if let Some(sequence) = cached_sequence {
-                let (start, end) = validate_sequence_bounds(start, end, sequence.len() as i64)?;
-                return Ok(sequence[start..end].to_string());
+                return sequence_slice(sequence, start, end, circular);
             }
             return Err(SequenceError::IdMissing {
                 file_path: file_path.to_string(),
@@ -381,8 +405,7 @@ pub fn cached_sequence(
     cache.insert(key.clone(), sequence);
     // we do this to avoid a clone of potentially large data.
     if let Some(seq) = &cache[&key] {
-        let (start, end) = validate_sequence_bounds(start, end, seq.len() as i64)?;
-        return Ok(seq[start..end].to_string());
+        return sequence_slice(seq, start, end, circular);
     }
     Err(SequenceError::IdMissing {
         file_path: file_path.to_string(),
@@ -394,6 +417,10 @@ impl Sequence {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> NewSequence<'static> {
         NewSequence::new()
+    }
+
+    fn is_circular(&self) -> bool {
+        self.sequence_type.eq_ignore_ascii_case("circular")
     }
 
     pub fn get_sequence(
@@ -408,13 +435,12 @@ impl Sequence {
         let start = start.unwrap_or(0);
         let end = end.unwrap_or(self.length);
         if self.external_sequence {
-            return cached_sequence(&self.file_path, &self.name, start, end);
+            return cached_sequence(&self.file_path, &self.name, start, end, self.is_circular());
         }
-        let (start, end) = validate_sequence_bounds(start, end, self.length)?;
-        if start == 0 && end as i64 == self.length {
+        if start == 0 && end == self.length {
             return Ok(self.sequence.clone());
         }
-        Ok(self.sequence[start..end].to_string())
+        sequence_slice(&self.sequence, start, end, self.is_circular())
     }
 
     pub fn delete_by_hash(conn: &GraphConnection, hash: &HashId) {
@@ -576,6 +602,25 @@ mod tests {
                 length: 34,
             })
         );
+        assert_eq!(
+            sequence.get_sequence(5, 2),
+            Err(SequenceError::BoundsError {
+                start: 5,
+                end: 2,
+                length: 34,
+            })
+        );
+    }
+
+    #[test]
+    fn test_get_sequence_circular() {
+        let conn = &get_connection(None).unwrap();
+        let sequence = Sequence::new()
+            .sequence_type("circular")
+            .sequence("AAACCCTTT")
+            .save(conn)
+            .unwrap();
+        assert_eq!(sequence.get_sequence(4, 2).unwrap(), "CCTTTAA");
     }
 
     #[test]
@@ -606,6 +651,22 @@ mod tests {
             "GATCGATCGATCGATCGGGAACACACAGAGA"
         );
         assert_eq!(seq.get_sequence(None, 5).unwrap(), "ATCGA");
+    }
+
+    #[test]
+    fn test_get_sequence_from_disk_circular() {
+        let conn = &get_connection(None).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_file_path = temp_dir.path().join("simple.fa");
+        fs::write(&temp_file_path, ">m123\nAAACCCTTT\n").unwrap();
+        let seq = Sequence::new()
+            .sequence_type("circular")
+            .name("m123")
+            .file_path(temp_file_path.to_str().unwrap())
+            .length(9)
+            .save(conn)
+            .unwrap();
+        assert_eq!(seq.get_sequence(4, 2).unwrap(), "CCTTTAA");
     }
 
     #[test]

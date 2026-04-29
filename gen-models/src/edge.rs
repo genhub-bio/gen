@@ -136,7 +136,7 @@ pub struct GroupBlock {
     pub id: i64,
     pub node_id: HashId,
     sequence: Option<String>,
-    external_sequence: Option<(String, String)>,
+    external_sequence: Option<(String, String, bool)>,
     pub start: i64,
     pub end: i64,
 }
@@ -148,7 +148,11 @@ impl GroupBlock {
                 id,
                 node_id,
                 sequence: None,
-                external_sequence: Some((sequence.file_path.clone(), sequence.name.clone())),
+                external_sequence: Some((
+                    sequence.file_path.clone(),
+                    sequence.name.clone(),
+                    sequence.sequence_type.eq_ignore_ascii_case("circular"),
+                )),
                 start,
                 end,
             }
@@ -167,8 +171,8 @@ impl GroupBlock {
     pub fn sequence(&self) -> String {
         if let Some(sequence) = &self.sequence {
             sequence.to_string()
-        } else if let Some((path, name)) = &self.external_sequence {
-            cached_sequence(path, name, self.start, self.end).unwrap()
+        } else if let Some((path, name, circular)) = &self.external_sequence {
+            cached_sequence(path, name, self.start, self.end, *circular).unwrap()
         } else {
             panic!("Sequence or external sequence is not set.")
         }
