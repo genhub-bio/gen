@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::Read,
+    io::{BufWriter, Read},
     path::{Path, PathBuf},
 };
 
@@ -540,6 +540,8 @@ fn import_genbank(
             }],
             description: "GenBank Import".to_string(),
         },
+        r#gen::imports::genbank::GenBankImportOptions::default()
+            .annotation_name_from_path(&filename),
     ) {
         Ok(_) => {
             end_transactions(&context).map_err(Error::Other)?;
@@ -1092,11 +1094,15 @@ fn export_genbank(
     r#gen::track_database(context.graph().conn(), context.operations().conn())
         .map_err(|err| Error::Other(format!("Failed to track database: {err}")))?;
 
+    let writer = BufWriter::new(File::create(&filename).map_err(|err| {
+        Error::Other(format!("Failed to create GenBank file '{filename}': {err}"))
+    })?);
+
     r#gen::exports::genbank::export_genbank(
         context.graph().conn(),
         &collection_name,
         &sample,
-        &PathBuf::from(&filename),
+        writer,
     )
     .map_err(|err| Error::Other(format!("GenBank export failed: {err}")))?;
 

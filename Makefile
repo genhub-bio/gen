@@ -1,7 +1,8 @@
 python: venv
 	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module --extras jupyter
 r:
-	R CMD INSTALL gen-r
+	docker build -t gen-r -f ./gen-r/Dockerfile .
+	docker run --rm gen-r
 clean:
 	cargo clean
 build:
