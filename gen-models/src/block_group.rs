@@ -29,7 +29,7 @@ use crate::{
     errors::QueryError,
     gen_models_capnp::block_group,
     node::{Node, NodeError},
-    path::{Path, PathData},
+    path::{Path, PathData, PathError},
     path_edge::PathEdge,
     sample::Sample,
     sequence::SequenceError,
@@ -51,6 +51,8 @@ pub struct BlockGroup {
 pub enum BlockGroupError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
     #[error("Edge creation error: {0}")]
     EdgeError(#[from] EdgeError),
     #[error("Node creation error: {0}")]
@@ -318,8 +320,7 @@ impl BlockGroup {
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
-            let new_path =
-                Path::create(conn, &path.name, target_block_group_id, &edge_ids).unwrap();
+            let new_path = Path::create(conn, &path.name, target_block_group_id, &edge_ids)?;
             path_map.insert(path.id, new_path.id);
         }
 
