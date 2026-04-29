@@ -248,6 +248,16 @@ pub enum Commands {
         #[arg(short, long)]
         message: Option<String>,
     },
+    /// Add one or more files as an operation
+    #[command(name = "add-file", arg_required_else_help(true))]
+    AddFile {
+        /// Files to add to the operation
+        #[clap(index = 1, required = true, num_args = 1..)]
+        files: Vec<String>,
+        /// Optional operation summary message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
     /// List all samples in the current collection
     ListSamples {},
     #[command()]
