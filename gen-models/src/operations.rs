@@ -2816,7 +2816,7 @@ mod tests {
 
         let db_uuid = metadata::get_db_uuid(graph_conn);
         GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
-        let _ = Branch::get_or_create(operation_conn, "main");
+        Branch::get_or_create(operation_conn, "main").unwrap();
         OperationState::set_branch(operation_conn, "main");
 
         let repo_root = workspace.repo_root().unwrap();
