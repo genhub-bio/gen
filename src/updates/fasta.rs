@@ -65,17 +65,17 @@ pub fn update_with_fasta(
 
     let mut target_states = target_block_groups
         .iter()
-        .map(|target_block_group| {
+        .map(|target_block_group| -> Result<_, FastaError> {
             let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-            let interval_tree = path.intervaltree(conn);
-            TargetBlockGroupState {
+            let interval_tree = path.intervaltree(conn)?;
+            Ok(TargetBlockGroupState {
                 block_group_id: target_block_group.id,
                 path,
                 interval_tree,
                 first_node: None,
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut change_count = 0;
 
@@ -336,11 +336,11 @@ mod tests {
         let child_path = BlockGroup::get_current_path(conn, &child_blockgroup);
         let other_path = BlockGroup::get_current_path(conn, &other_blockgroup);
         assert_eq!(
-            child_path.sequence(conn),
+            child_path.sequence(conn).unwrap(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
         );
         assert_eq!(
-            other_path.sequence(conn),
+            other_path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
@@ -829,7 +829,7 @@ mod tests {
 
         let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
         assert_eq!(
-            latest_path.sequence(conn),
+            latest_path.sequence(conn).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
     }

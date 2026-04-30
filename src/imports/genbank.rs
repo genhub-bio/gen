@@ -668,7 +668,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    let tree = path.intervaltree(conn);
+                    let tree = path.intervaltree(conn)?;
                     BlockGroup::insert_change(conn, &change, &tree).unwrap();
                     applied_changes.push((edit, change_node_id));
                 }
@@ -1184,7 +1184,7 @@ mod tests {
             .unwrap();
         let path = BlockGroup::get_current_path(conn, &block_group.id);
         let mut visible_ranges_by_node: HashMap<HashId, Vec<(i64, i64)>> = HashMap::new();
-        for block in path.blocks(conn) {
+        for block in path.blocks(conn).unwrap() {
             if is_terminal(block.node_id) {
                 continue;
             }

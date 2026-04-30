@@ -178,7 +178,7 @@ mod tests {
 
         let current_path = BlockGroup::get_current_path(conn, &block_group.id);
         assert_eq!(
-            current_path.sequence(conn),
+            current_path.sequence(conn).unwrap(),
             "TCTAGAGAAAGAGGGGACAAACTAGATGCGTAAAGGAGAAGAACTTTAA"
         );
 

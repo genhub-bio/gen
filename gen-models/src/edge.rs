@@ -762,7 +762,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn);
+        let tree = path.intervaltree(&conn).unwrap();
         BlockGroup::insert_change(&conn, &change, &tree).unwrap();
         let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
 

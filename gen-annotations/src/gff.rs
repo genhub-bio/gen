@@ -3,10 +3,19 @@ use std::{collections::HashMap, fs::File, io, io::BufReader};
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::PathError,
     path::{Annotation, Path},
     sample::Sample,
 };
 use noodles::{core::Position, gff};
+
+#[derive(Debug, thiserror::Error)]
+pub enum PropagateGffError {
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Path error: {0}")]
+    Path(#[from] PathError),
+}
 
 pub fn gff_attribute_value_to_string(
     attrs: &gff::feature::record_buf::Attributes,
@@ -36,7 +45,7 @@ pub fn propagate_gff(
     to_sample_name: &str,
     gff_input_filename: &str,
     gff_output_filename: &str,
-) -> io::Result<()> {
+) -> Result<(), PropagateGffError> {
     let mut reader = File::open(gff_input_filename)
         .map(BufReader::new)
         .map(gff::io::Reader::new)?;
@@ -58,14 +67,14 @@ pub fn propagate_gff(
     let mut path_mappings_by_bg_name = HashMap::new();
     for (name, target_path) in &target_paths_by_bg_name {
         let source_path = source_paths_by_bg_name.get(name).unwrap();
-        let mapping = source_path.get_mapping_tree(conn, target_path);
+        let mapping = source_path.get_mapping_tree(conn, target_path)?;
         path_mappings_by_bg_name.insert(name, mapping);
     }
 
     let sequence_lengths_by_path_name = target_paths_by_bg_name
         .iter()
-        .map(|(name, path)| (name.clone(), path.sequence(conn).len() as i64))
-        .collect::<HashMap<String, i64>>();
+        .map(|(name, path)| Ok((name.clone(), path.sequence(conn)?.len() as i64)))
+        .collect::<Result<HashMap<String, i64>, PathError>>()?;
 
     for result in reader.record_bufs() {
         let record = result?;
@@ -231,7 +240,7 @@ mod tests {
         .expect("should create child block group")[0]
             .id;
         let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
-        let tree = sample_path.intervaltree(conn);
+        let tree = sample_path.intervaltree(conn).unwrap();
         let replacement_sequence = "AA";
 
         let replacement = Sequence::new()

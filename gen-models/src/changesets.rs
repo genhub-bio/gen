@@ -1573,7 +1573,7 @@ mod tests {
         let _ = Sample::create(conn, "sample-1").unwrap();
         let (block_group_id, path) = setup_block_group(conn);
         let mut cache = PathCache::new(conn);
-        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
+        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
         let accession =
             BlockGroup::add_accession(conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
 

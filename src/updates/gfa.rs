@@ -91,7 +91,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn) == path_sequence {
+            if existing_path.sequence(conn)? == path_sequence {
                 existing_path_ids_by_new_path_name.insert(path.name.clone(), existing_path.id);
             }
         }
@@ -118,7 +118,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn) == walk_sequence {
+            if existing_path.sequence(conn)? == walk_sequence {
                 existing_path_ids_by_new_path_name.insert(walk_name.clone(), existing_path.id);
             }
         }
@@ -245,13 +245,13 @@ fn create_new_path_from_existing(
     gfa: &Gfa<String, (), ()>,
     segments_by_id: &HashMap<String, &Segment<String, ()>>,
 ) -> Result<(), SequenceUpdateError> {
-    let interval_tree = existing_path.intervaltree(conn);
+    let interval_tree = existing_path.intervaltree(conn)?;
     let mut existing_path_ranges_by_segment_id = HashMap::new();
     let mut existing_path_position = 0;
     for segment_id in matched_path_segment_ids.iter() {
         let segment_sequence = segments_by_id
             .get(segment_id)
-            .unwrap()
+            .ok_or_else(|| SequenceUpdateError::MissingSegment(segment_id.clone()))?
             .sequence
             .get_string(&gfa.sequence);
         let segment_length = segment_sequence.len();
@@ -274,18 +274,30 @@ fn create_new_path_from_existing(
     let mut new_path_edges = vec![];
     let mut healing_edges = vec![];
     for (i, segment_id) in unmatched_path_segment_ids.iter().enumerate() {
-        if let Some((start, end)) = existing_path_ranges_by_segment_id.get(segment_id) {
+        if let Some((path_start, path_end)) = existing_path_ranges_by_segment_id.get(segment_id) {
             // Current segment matches something in the existing path.  Maybe add an edge from the
             // previous node to the next one, which already exists
             let block_with_start = interval_tree
-                .query_point(*start as i64)
+                .query_point(*path_start as i64)
                 .next()
-                .unwrap()
+                .ok_or(SequenceUpdateError::MissingPathBlock {
+                    path_id: existing_path.id.to_string(),
+                    coordinate: *path_start as i64,
+                })?
                 .value;
-            let block_with_end = interval_tree.query_point(*end as i64).next().unwrap().value;
+            let block_with_end = interval_tree
+                .query_point(*path_end as i64)
+                .next()
+                .ok_or(SequenceUpdateError::MissingPathBlock {
+                    path_id: existing_path.id.to_string(),
+                    coordinate: *path_end as i64,
+                })?
+                .value;
 
             let target_coordinate =
-                block_with_start.sequence_start + *start as i64 - block_with_start.start;
+                block_with_start.sequence_start + *path_start as i64 - block_with_start.start;
+            let end_coordinate =
+                block_with_end.sequence_start + *path_end as i64 - block_with_end.start;
             // NOTE: We're assuming that if the previous segment was on the same node ID as the
             // block with the start coordinate, they are contiguous, so no new edge is needed
             if previous_node_id != block_with_start.node_id {
@@ -303,14 +315,14 @@ fn create_new_path_from_existing(
                 });
 
                 // Create the boundary edges that will be interrupted by the new path
-                if !is_terminal(block_with_start.node_id) && *start > 0 {
+                if !is_terminal(block_with_start.node_id) && *path_start > 0 {
                     healing_edges.push(AugmentedEdgeData {
                         edge_data: EdgeData {
                             source_node_id: block_with_start.node_id,
-                            source_coordinate: *start as i64,
+                            source_coordinate: target_coordinate,
                             source_strand: previous_node_strand,
                             target_node_id: block_with_start.node_id,
-                            target_coordinate: *start as i64,
+                            target_coordinate,
                             target_strand: previous_node_strand,
                         },
                         chromosome_index: 0,
@@ -321,10 +333,10 @@ fn create_new_path_from_existing(
                     healing_edges.push(AugmentedEdgeData {
                         edge_data: EdgeData {
                             source_node_id: block_with_end.node_id,
-                            source_coordinate: *end as i64,
+                            source_coordinate: end_coordinate,
                             source_strand: previous_node_strand,
                             target_node_id: block_with_end.node_id,
-                            target_coordinate: *end as i64,
+                            target_coordinate: end_coordinate,
                             target_strand: previous_node_strand,
                         },
                         chromosome_index: 0,
@@ -333,7 +345,7 @@ fn create_new_path_from_existing(
                 }
             }
 
-            existing_path_position += (end - start) as i64;
+            existing_path_position += (path_end - path_start) as i64;
             previous_node_id = block_with_end.node_id;
             previous_node_coordinate =
                 block_with_end.sequence_start + existing_path_position - block_with_end.start;
@@ -341,7 +353,9 @@ fn create_new_path_from_existing(
         } else {
             // Current segment is new.  Create a sequence and node for it, then add an edge to the
             // new node
-            let segment = segments_by_id.get(segment_id).unwrap();
+            let segment = segments_by_id
+                .get(segment_id)
+                .ok_or_else(|| SequenceUpdateError::MissingSegment(segment_id.clone()))?;
             let segment_sequence = segment.sequence.get_string(&gfa.sequence);
             let sequence = Sequence::new()
                 .sequence_type("DNA")
@@ -355,7 +369,13 @@ fn create_new_path_from_existing(
                     hash = &sequence.hash
                 )),
             )?;
-            let next_node_strand = bool_to_strand(*unmatched_path_strands.get(i).unwrap());
+            let next_node_strand =
+                bool_to_strand(*unmatched_path_strands.get(i).ok_or_else(|| {
+                    SequenceUpdateError::MissingPathStrand {
+                        path_name: unmatched_path_name.to_string(),
+                        index: i,
+                    }
+                })?);
             new_path_edges.push(AugmentedEdgeData {
                 edge_data: EdgeData {
                     source_node_id: previous_node_id,
@@ -386,20 +406,22 @@ fn create_new_path_from_existing(
         }
     }
 
-    let last_segment_id = unmatched_path_segment_ids.last().unwrap();
-    if existing_path_ranges_by_segment_id.contains_key(last_segment_id) {
-        let (start, _end) = existing_path_ranges_by_segment_id
-            .get(last_segment_id)
-            .unwrap();
+    let last_segment_id = unmatched_path_segment_ids
+        .last()
+        .ok_or_else(|| SequenceUpdateError::EmptyPath(unmatched_path_name.to_string()))?;
+    if let Some((start, _end)) = existing_path_ranges_by_segment_id.get(last_segment_id) {
         let block_with_start = interval_tree
             .query_point(*start as i64)
             .next()
-            .unwrap()
+            .ok_or(SequenceUpdateError::MissingPathBlock {
+                path_id: existing_path.id.to_string(),
+                coordinate: *start as i64,
+            })?
             .value;
         new_path_edges.push(AugmentedEdgeData {
             edge_data: EdgeData {
                 source_node_id: block_with_start.node_id,
-                source_coordinate: block_with_start.end,
+                source_coordinate: block_with_start.sequence_end,
                 source_strand: block_with_start.strand,
                 target_node_id: PATH_END_NODE_ID,
                 target_coordinate: 0,

@@ -28,4 +28,12 @@ pub enum SequenceUpdateError {
     BlockGroupError(#[from] BlockGroupError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
+    #[error("Missing segment '{0}' in GFA input")]
+    MissingSegment(String),
+    #[error("Missing strand for path '{path_name}' at segment index {index}")]
+    MissingPathStrand { path_name: String, index: usize },
+    #[error("Path '{0}' has no segments")]
+    EmptyPath(String),
+    #[error("No path block found for path id {path_id} at coordinate {coordinate}")]
+    MissingPathBlock { path_id: String, coordinate: i64 },
 }

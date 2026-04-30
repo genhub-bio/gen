@@ -68,7 +68,7 @@ pub fn derive_chunks_operation(
         &region_name.to_string(),
         backbone.as_deref(),
     )?
-    .length(graph_conn);
+    .length(graph_conn)?;
 
     let chunk_points = if let Some(breakpoints) = breakpoints {
         let mut result = vec![];

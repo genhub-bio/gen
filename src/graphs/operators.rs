@@ -90,9 +90,9 @@ pub fn derive_chunks(
         backbone,
     )?;
 
-    let current_path_length = current_path.length(conn);
+    let current_path_length = current_path.length(conn)?;
 
-    let current_intervaltree = current_path.intervaltree(conn);
+    let current_intervaltree = current_path.intervaltree(conn)?;
     let current_path_edges = PathEdge::edges_for_path(conn, &current_path.id);
 
     let chunk_ranges_length = chunk_ranges.len();
@@ -459,7 +459,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         let (block_group1_id, original_path) = setup_block_group(conn);
 
-        let intervaltree = original_path.intervaltree(conn);
+        let intervaltree = original_path.intervaltree(conn).unwrap();
         let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
         let insert_end_node_id = intervaltree.query_point(24).next().unwrap().value.node_id;
 
@@ -537,7 +537,7 @@ mod tests {
             .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
             .unwrap();
         assert_eq!(
-            insert_path.sequence(conn),
+            insert_path.sequence(conn).unwrap(),
             "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
         );
 
@@ -573,7 +573,7 @@ mod tests {
         );
 
         let new_path = BlockGroup::get_current_path(conn, &block_group2.id);
-        assert_eq!(new_path.sequence(conn), "TAAAAAAAAC");
+        assert_eq!(new_path.sequence(conn).unwrap(), "TAAAAAAAAC");
     }
 
     #[test]
@@ -678,7 +678,7 @@ mod tests {
         );
 
         let path2 = BlockGroup::get_current_path(conn, &block_group2.id);
-        assert_eq!(path2.sequence(conn), "TCAATCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false);
@@ -691,7 +691,7 @@ mod tests {
         );
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
-        assert_eq!(path3.sequence(conn), "ATCGATCAAGGAACACA");
+        assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
     }
 
     #[test]
@@ -796,7 +796,7 @@ mod tests {
         );
 
         let path2 = BlockGroup::get_current_path(conn, &block_group2.id);
-        assert_eq!(path2.sequence(conn), "TCAATCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false);
@@ -809,7 +809,7 @@ mod tests {
         );
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
-        assert_eq!(path3.sequence(conn), "ATCGATCAAGGAACACA");
+        assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
 
         // Stitch the two main chunks back together in same order
         make_stitch(
@@ -841,7 +841,7 @@ mod tests {
 
         let path4 = BlockGroup::get_current_path(conn, &block_group4.id);
         // path2 + path3 concatenated
-        assert_eq!(path4.sequence(conn), "TCAATCGATCGATCAAGGAACACA");
+        assert_eq!(path4.sequence(conn).unwrap(), "TCAATCGATCGATCAAGGAACACA");
 
         // Stitch the two main chunks together but in reverse order
         make_stitch(
@@ -873,6 +873,6 @@ mod tests {
 
         let path5 = BlockGroup::get_current_path(conn, &block_group5.id);
         // path3 + path2 concatenated
-        assert_eq!(path5.sequence(conn), "ATCGATCAAGGAACACATCAATCG");
+        assert_eq!(path5.sequence(conn).unwrap(), "ATCGATCAAGGAACACATCAATCG");
     }
 }

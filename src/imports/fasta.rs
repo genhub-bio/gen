@@ -211,7 +211,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn),
+            path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
@@ -318,7 +318,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn),
+            path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
         assert_eq!(
@@ -353,7 +353,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn),
+            path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }

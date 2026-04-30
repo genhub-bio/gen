@@ -1,6 +1,6 @@
 use std::{
     cmp::{max, min},
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     io::{Read, Write},
 };
 
@@ -9,6 +9,7 @@ use gen_graph::{GraphNode, project_path};
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::PathError,
     reference_alias::{ReferenceAlias, ReferenceAliasError},
     sample::Sample,
 };
@@ -26,6 +27,8 @@ pub enum BedError {
     Io(#[from] std::io::Error),
     #[error("Error loading reference aliases: {0}")]
     ReferenceAliasError(#[from] ReferenceAliasError),
+    #[error("Error loading path blocks: {0}")]
+    PathError(#[from] PathError),
 }
 
 pub fn translate_bed<R, W>(
@@ -66,20 +69,23 @@ where
         let start = record.feature_start().unwrap().get() as i64 - 1;
         let end = record.feature_end().unwrap().unwrap().get() as i64;
         if let Some(bg) = sample_bgs.get(&ref_name) {
-            let projection = paths.entry(bg.id).or_insert_with(|| {
-                let path = BlockGroup::get_current_path(conn, &bg.id);
-                let graph = BlockGroup::get_graph(conn, &bg.id);
-                let mut tree = IntervalTree::default();
-                let mut position: i64 = 0;
-                for (node, strand) in project_path(&graph, &path.blocks(conn)) {
-                    if !is_terminal(node.node_id) {
-                        let end_position = position + node.length();
-                        tree.insert(position..end_position, (node, strand));
-                        position = end_position;
+            let projection = match paths.entry(bg.id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let path = BlockGroup::get_current_path(conn, &bg.id);
+                    let graph = BlockGroup::get_graph(conn, &bg.id);
+                    let mut tree = IntervalTree::default();
+                    let mut position: i64 = 0;
+                    for (node, strand) in project_path(&graph, &path.blocks(conn)?) {
+                        if !is_terminal(node.node_id) {
+                            let end_position = position + node.length();
+                            tree.insert(position..end_position, (node, strand));
+                            position = end_position;
+                        }
                     }
+                    entry.insert(tree)
                 }
-                tree
-            });
+            };
             let range = start..end;
             let values: Vec<_> = record.other_fields().iter().map(Value::from).collect();
             let other_fields = OtherFields::from(values);

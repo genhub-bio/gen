@@ -219,7 +219,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    let tree = path.intervaltree(conn);
+                    let tree = path.intervaltree(conn)?;
                     BlockGroup::insert_change(conn, &change, &tree).unwrap();
                 }
             }

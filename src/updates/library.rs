@@ -4,7 +4,7 @@ use std::str;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     db::DbContext,
-    errors::BlockGroupError,
+    errors::{BlockGroupError, PathError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
     sample::Sample,
@@ -28,6 +28,8 @@ pub enum UpdateWithLibraryError {
     BlockGroupCreationFailed(#[from] BlockGroupError),
     #[error("Failed to create output graph(s)")]
     GraphOperation(GraphOperationError),
+    #[error("Failed to read path")]
+    Path(#[from] PathError),
     #[error("Failed to parse library files")]
     FileParse(CombinatorialLibraryParseError),
     #[error("Failed to create library")]
@@ -72,6 +74,7 @@ pub fn update_with_library(
 
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
     let parent_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
+    let parent_path_length = parent_path.length(conn)?;
 
     let mut chunk_ranges = vec![];
     if start_coordinate > 0 {
@@ -84,10 +87,10 @@ pub fn update_with_library(
         start: start_coordinate,
         end: end_coordinate,
     });
-    if end_coordinate < parent_path.length(conn) {
+    if end_coordinate < parent_path_length {
         chunk_ranges.push(Range {
             start: end_coordinate,
-            end: parent_path.length(conn),
+            end: parent_path_length,
         });
     }
 
@@ -145,7 +148,7 @@ pub fn update_with_library(
 
     chunk_index += 1;
 
-    if end_coordinate < parent_path.length(conn) {
+    if end_coordinate < parent_path_length {
         let end_chunk = derived_block_group_chunks[chunk_index].clone();
         reference_block_group_chunks.push(end_chunk.clone());
         let pathless_end_chunk = BlockGroupChunk {
@@ -339,7 +342,7 @@ mod tests {
 
         let path = BlockGroup::get_current_path(conn, &block_group.id);
         assert_eq!(
-            path.sequence(conn),
+            path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
 

@@ -25,18 +25,6 @@ use crate::{
     traits::*,
 };
 
-fn slice_path_block_sequence(sequence: &Sequence, start: i64, end: i64) -> String {
-    match sequence.get_sequence(start, end) {
-        Ok(sequence) => sequence,
-        Err(SequenceError::BoundsError {
-            start: 0,
-            end,
-            length,
-        }) if end == length + 1 => sequence.get_sequence(0, length).unwrap(),
-        Err(err) => panic!("Unable to extract path block sequence: {err}"),
-    }
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Path {
     pub id: HashId,
@@ -49,6 +37,8 @@ pub struct Path {
 pub enum PathError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Path cache error: {0}")]
+    CachePoison(String),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
     #[error("Problem creating path edges: {0}")]
@@ -272,20 +262,20 @@ impl Path {
         Path::query(conn, query, params![collection_name, sample_name])
     }
 
-    pub fn sequence(&self, conn: &GraphConnection) -> String {
-        let blocks = self.blocks(conn);
-        blocks
+    pub fn sequence(&self, conn: &GraphConnection) -> Result<String, PathError> {
+        let blocks = self.blocks(conn)?;
+        Ok(blocks
             .into_iter()
             .map(|block| block.block_sequence)
             .collect::<Vec<_>>()
-            .join("")
+            .join(""))
     }
 
-    pub fn length(&self, conn: &GraphConnection) -> i64 {
-        let blocks = self.blocks(conn);
+    pub fn length(&self, conn: &GraphConnection) -> Result<i64, PathError> {
+        let blocks = self.blocks(conn)?;
         let end_block = blocks.last().unwrap();
         // the last block is the terminal node, which starts at the end of the path
-        end_block.path_start
+        Ok(end_block.path_start)
     }
 
     pub fn edge_pairs_to_block(
@@ -294,13 +284,13 @@ impl Path {
         out_of: Edge,
         sequences_by_node_id: &HashMap<HashId, Sequence>,
         current_path_length: i64,
-    ) -> PathBlock {
+    ) -> Result<PathBlock, PathError> {
         let start = into.target_coordinate;
         let end = out_of.source_coordinate;
         let strand = into.target_strand;
         let block_sequence_length = end - start;
         let Some(sequence) = sequences_by_node_id.get(&into.target_node_id) else {
-            return PathBlock {
+            return Ok(PathBlock {
                 node_id: into.target_node_id,
                 block_sequence: String::new(),
                 sequence_start: start,
@@ -308,16 +298,16 @@ impl Path {
                 path_start: current_path_length,
                 path_end: current_path_length + block_sequence_length,
                 strand,
-            };
+            });
         };
 
         let block_sequence = if strand == Strand::Reverse {
-            revcomp(&slice_path_block_sequence(sequence, start, end))
+            revcomp(&sequence.get_sequence(start, end)?)
         } else {
-            slice_path_block_sequence(sequence, start, end)
+            sequence.get_sequence(start, end)?
         };
 
-        PathBlock {
+        Ok(PathBlock {
             node_id: into.target_node_id,
             block_sequence,
             sequence_start: start,
@@ -325,10 +315,10 @@ impl Path {
             path_start: current_path_length,
             path_end: current_path_length + block_sequence_length,
             strand,
-        }
+        })
     }
 
-    pub fn blocks(&self, conn: &GraphConnection) -> Vec<PathBlock> {
+    pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<PathBlock>, PathError> {
         let edges = PathEdge::edges_for_path(conn, &self.id);
 
         let mut sequence_node_ids = HashSet::new();
@@ -362,7 +352,8 @@ impl Path {
         });
 
         for (into, out_of) in edges.into_iter().tuple_windows() {
-            let block = self.edge_pairs_to_block(into, out_of, &sequences_by_node_id, path_length);
+            let block =
+                self.edge_pairs_to_block(into, out_of, &sequences_by_node_id, path_length)?;
             path_length += block.block_sequence.len() as i64;
             blocks.push(block);
         }
@@ -380,11 +371,14 @@ impl Path {
             strand: Strand::Forward,
         });
 
-        blocks
+        Ok(blocks)
     }
 
-    pub fn intervaltree(&self, conn: &GraphConnection) -> IntervalTree<i64, NodeIntervalBlock> {
-        let blocks = self.blocks(conn);
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, PathError> {
+        let blocks = self.blocks(conn)?;
         let tree: IntervalTree<i64, NodeIntervalBlock> = blocks
             .into_iter()
             .map(|block| {
@@ -401,18 +395,18 @@ impl Path {
                 )
             })
             .collect();
-        tree
+        Ok(tree)
     }
 
     pub fn find_block_mappings(
         &self,
         conn: &GraphConnection,
         other_path: &Path,
-    ) -> Vec<RangeMapping> {
+    ) -> Result<Vec<RangeMapping>, PathError> {
         // Given two paths, find the overlapping parts of common nodes/blocks and return a list af
         // mappings from subranges of one path to corresponding shared subranges of the other path
-        let our_blocks = self.blocks(conn);
-        let their_blocks = other_path.blocks(conn);
+        let our_blocks = self.blocks(conn)?;
+        let their_blocks = other_path.blocks(conn)?;
 
         let our_node_ids = our_blocks
             .iter()
@@ -524,10 +518,10 @@ impl Path {
             }
         }
 
-        mappings
+        Ok(mappings
             .into_iter()
             .sorted_by(|a, b| a.source_range.start.cmp(&b.source_range.start))
-            .collect::<Vec<RangeMapping>>()
+            .collect::<Vec<RangeMapping>>())
     }
 
     pub fn propagate_annotation(
@@ -605,9 +599,9 @@ impl Path {
         &self,
         conn: &GraphConnection,
         path: &Path,
-    ) -> IntervalTree<i64, RangeMapping> {
-        let mappings = self.find_block_mappings(conn, path);
-        mappings
+    ) -> Result<IntervalTree<i64, RangeMapping>, PathError> {
+        let mappings = self.find_block_mappings(conn, path)?;
+        Ok(mappings
             .into_iter()
             .map(|mapping| {
                 (
@@ -615,7 +609,7 @@ impl Path {
                     mapping,
                 )
             })
-            .collect()
+            .collect())
     }
 
     pub fn propagate_annotations(
@@ -623,16 +617,16 @@ impl Path {
         conn: &GraphConnection,
         path: &Path,
         annotations: Vec<Annotation>,
-    ) -> Vec<Annotation> {
-        let mapping_tree = self.get_mapping_tree(conn, path);
-        let sequence_length = path.sequence(conn).len();
-        annotations
+    ) -> Result<Vec<Annotation>, PathError> {
+        let mapping_tree = self.get_mapping_tree(conn, path)?;
+        let sequence_length = path.sequence(conn)?.len();
+        Ok(annotations
             .into_iter()
             .filter_map(|annotation| {
                 Path::propagate_annotation(annotation, &mapping_tree, sequence_length as i64)
             })
             .clone()
-            .collect()
+            .collect())
     }
 
     pub fn new_path_with(
@@ -645,7 +639,7 @@ impl Path {
     ) -> Result<Path, PathError> {
         // Creates a new path from the current one by replacing all edges between path_start and
         // path_end with the input edges that are to and from a new node
-        let tree = self.intervaltree(conn);
+        let tree = self.intervaltree(conn)?;
         let block_with_start = tree.query_point(path_start).next().unwrap().value;
         let block_with_end = tree.query_point(path_end).next().unwrap().value;
 
@@ -716,7 +710,7 @@ impl Path {
     ) -> Result<Path, PathError> {
         // Creates a new path from the current one by replacing all edges between deletion_start and
         // deletion_end with a single edge spanning the deletion.
-        let tree = self.intervaltree(conn);
+        let tree = self.intervaltree(conn)?;
         let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
 
@@ -862,8 +856,8 @@ impl Path {
         &self,
         conn: &GraphConnection,
         ranges: Vec<Range>,
-    ) -> Vec<NodeIntervalBlock> {
-        let intervaltree = self.intervaltree(conn);
+    ) -> Result<Vec<NodeIntervalBlock>, PathError> {
+        let intervaltree = self.intervaltree(conn)?;
         let mut partitioned_nodes = vec![];
         for range in ranges {
             let node_blocks = self.node_blocks_for_range(&intervaltree, range.start, range.end);
@@ -871,7 +865,7 @@ impl Path {
                 partitioned_nodes.push(*node_block);
             }
         }
-        partitioned_nodes
+        Ok(partitioned_nodes)
     }
 }
 
@@ -1129,7 +1123,10 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        assert_eq!(path.sequence(conn), "ATCGATCGAAAAAAACCCCCCCGGGGGGG");
+        assert_eq!(
+            path.sequence(conn).unwrap(),
+            "ATCGATCGAAAAAAACCCCCCCGGGGGGG"
+        );
     }
 
     #[test]
@@ -1225,7 +1222,10 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        assert_eq!(path.sequence(conn), "CCCCCCCGGGGGGGTTTTTTTCGATCGAT");
+        assert_eq!(
+            path.sequence(conn).unwrap(),
+            "CCCCCCCGGGGGGGTTTTTTTCGATCGAT"
+        );
     }
 
     #[test]
@@ -1328,7 +1328,7 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        let tree = path.intervaltree(conn);
+        let tree = path.intervaltree(conn).unwrap();
         let blocks1: Vec<NodeIntervalBlock> = tree.query_point(2).map(|x| x.value).collect();
         assert_eq!(blocks1.len(), 1);
         let block1 = &blocks1[0];
@@ -1456,7 +1456,7 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        let tree = path.intervaltree(conn);
+        let tree = path.intervaltree(conn).unwrap();
         let blocks1: Vec<NodeIntervalBlock> = tree.query_point(2).map(|x| x.value).collect();
         assert_eq!(blocks1.len(), 1);
         let block1 = &blocks1[0];
@@ -1487,7 +1487,7 @@ mod tests {
         assert_eq!(block4.end, 24);
         assert_eq!(block4.strand, Strand::Forward);
 
-        assert_eq!(path.sequence(conn), "ATCGAAAAAAAACCCCCCCCGGGG");
+        assert_eq!(path.sequence(conn).unwrap(), "ATCGAAAAAAAACCCCCCCCGGGG");
     }
 
     #[test]
@@ -1543,7 +1543,7 @@ mod tests {
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
 
-        let mappings = path.find_block_mappings(conn, &path);
+        let mappings = path.find_block_mappings(conn, &path).unwrap();
         assert_eq!(mappings.len(), 1);
         let mapping = &mappings[0];
         assert_eq!(mapping.source_range, mapping.target_range);
@@ -1648,7 +1648,7 @@ mod tests {
 
         let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 0);
     }
 
@@ -1762,9 +1762,9 @@ mod tests {
 
         let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGTTTTTTTT");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGTTTTTTTT");
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 1);
         let mapping = &mappings[0];
         assert_eq!(mapping.source_range, mapping.target_range);
@@ -1880,9 +1880,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGTTTTTTTTATCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGTTTTTTTTATCG");
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
         let mapping1 = &mappings[0];
         assert_eq!(mapping1.source_range, mapping1.target_range);
@@ -2004,9 +2004,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATTTTTTTTTCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATTTTTTTTTCG");
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
         let mapping1 = &mappings[0];
         assert_eq!(mapping1.source_range, mapping1.target_range);
@@ -2111,9 +2111,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCG");
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
         let mapping1 = &mappings[0];
         assert_eq!(mapping1.source_range, mapping1.target_range);
@@ -2252,9 +2252,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGATCGAAAAAAAATTTTTTTT");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGATCGAAAAAAAATTTTTTTT");
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
         let mapping1 = &mappings[0];
         assert_eq!(mapping1.source_range, mapping1.target_range);
@@ -2393,9 +2393,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGAAAAAAAATTTT");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGAAAAAAAATTTT");
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
         let mapping1 = &mappings[0];
         assert_eq!(mapping1.source_range, mapping1.target_range);
@@ -2517,9 +2517,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGTTTT");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGTTTT");
 
-        let mappings = path1.find_block_mappings(conn, &path2);
+        let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
         let mapping1 = &mappings[0];
         assert_eq!(mapping1.source_range, mapping1.target_range);
@@ -2593,7 +2593,9 @@ mod tests {
             start: 0,
             end: 8,
         };
-        let annotations = path.propagate_annotations(conn, &path, vec![annotation]);
+        let annotations = path
+            .propagate_annotations(conn, &path, vec![annotation])
+            .unwrap();
         assert_eq!(annotations.len(), 1);
         let result_annotation = &annotations[0];
         assert_eq!(result_annotation.name, "foo");
@@ -2702,7 +2704,9 @@ mod tests {
             start: 0,
             end: 8,
         };
-        let annotations = path1.propagate_annotations(conn, &path2, vec![annotation]);
+        let annotations = path1
+            .propagate_annotations(conn, &path2, vec![annotation])
+            .unwrap();
         assert_eq!(annotations.len(), 0);
     }
 
@@ -2816,14 +2820,16 @@ mod tests {
 
         let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGTTTTTTTT");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGTTTTTTTT");
 
         let annotation = Annotation {
             name: "foo".to_string(),
             start: 0,
             end: 8,
         };
-        let annotations = path1.propagate_annotations(conn, &path2, vec![annotation]);
+        let annotations = path1
+            .propagate_annotations(conn, &path2, vec![annotation])
+            .unwrap();
         assert_eq!(annotations.len(), 1);
         let result_annotation = &annotations[0];
         assert_eq!(result_annotation.name, "foo");
@@ -2937,7 +2943,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGTTTTTTTTATCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGTTTTTTTTATCG");
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -2945,7 +2951,9 @@ mod tests {
             end: 8,
         };
 
-        let annotations = path1.propagate_annotations(conn, &path2, vec![annotation]);
+        let annotations = path1
+            .propagate_annotations(conn, &path2, vec![annotation])
+            .unwrap();
         assert_eq!(annotations.len(), 1);
 
         // Under the default propagation strategy, the annotation is expanded to cover anything in
@@ -3062,7 +3070,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATTTTTTTTTCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATTTTTTTTTCG");
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3070,7 +3078,9 @@ mod tests {
             end: 4,
         };
 
-        let annotations = path1.propagate_annotations(conn, &path2, vec![annotation]);
+        let annotations = path1
+            .propagate_annotations(conn, &path2, vec![annotation])
+            .unwrap();
         assert_eq!(annotations.len(), 1);
 
         // Under the default propagation strategy, the annotation is truncated
@@ -3203,7 +3213,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGATCGAAAAAAAATTTTTTTT");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGATCGAAAAAAAATTTTTTTT");
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3211,7 +3221,9 @@ mod tests {
             end: 16,
         };
 
-        let annotations = path1.propagate_annotations(conn, &path2, vec![annotation]);
+        let annotations = path1
+            .propagate_annotations(conn, &path2, vec![annotation])
+            .unwrap();
         assert_eq!(annotations.len(), 1);
 
         // Under the default propagation strategy, the annotation is extended across the inserted
@@ -3328,7 +3340,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn), "ATCGTTTT");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGTTTT");
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3336,7 +3348,9 @@ mod tests {
             end: 12,
         };
 
-        let annotations = path1.propagate_annotations(conn, &path2, vec![annotation]);
+        let annotations = path1
+            .propagate_annotations(conn, &path2, vec![annotation])
+            .unwrap();
         assert_eq!(annotations.len(), 1);
 
         // Under the default propagation strategy, the annotation is truncated
@@ -3407,7 +3421,7 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        assert_eq!(path1.sequence(conn), "ATCGATCGAAAAAAAA");
+        assert_eq!(path1.sequence(conn).unwrap(), "ATCGATCGAAAAAAAA");
 
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
@@ -3449,7 +3463,7 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path2 = path1.new_path_with(conn, 4, 11, &edge4, &edge5).unwrap();
-        assert_eq!(path2.sequence(conn), "ATCGCCCCCCCCAAAAA");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGCCCCCCCCAAAAA");
 
         let edge6 = Edge::create(
             conn,
@@ -3485,7 +3499,7 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path3 = path1.new_path_with(conn, 4, 7, &edge6, &edge7).unwrap();
-        assert_eq!(path3.sequence(conn), "ATCGCCCCCCCCGAAAAAAAA");
+        assert_eq!(path3.sequence(conn).unwrap(), "ATCGCCCCCCCCGAAAAAAAA");
     }
 
     #[test]
@@ -3549,7 +3563,7 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        assert_eq!(path1.sequence(conn), "ATCGATCGAAAAAAAA");
+        assert_eq!(path1.sequence(conn).unwrap(), "ATCGATCGAAAAAAAA");
 
         let deletion_edge = Edge::create(
             conn,
@@ -3572,7 +3586,7 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &[block_group_edge]);
 
         let path2 = path1.new_path_with_deletion(conn, 4, 11).unwrap();
-        assert_eq!(path2.sequence(conn), "ATCGAAAAA");
+        assert_eq!(path2.sequence(conn).unwrap(), "ATCGAAAAA");
     }
 
     #[test]
@@ -3895,7 +3909,7 @@ mod tests {
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
 
-        let intervaltree = path.intervaltree(conn);
+        let intervaltree = path.intervaltree(conn).unwrap();
 
         let node_blocks1 = path.node_blocks_for_range(&intervaltree, 0, 8);
         let expected_node_blocks1 = vec![NodeIntervalBlock {
@@ -4047,7 +4061,7 @@ mod tests {
         let path1 = Path::create(conn, "chr1.1", &block_group.id, &[edge1.id, edge4.id]).unwrap();
         let path2 = Path::create(conn, "chr1.2", &block_group.id, edge_ids).unwrap();
 
-        let intervaltree1 = path1.intervaltree(conn);
+        let intervaltree1 = path1.intervaltree(conn).unwrap();
 
         let node_blocks1 = path1.node_blocks_for_range(&intervaltree1, 0, 8);
         let expected_node_blocks1 = vec![NodeIntervalBlock {
@@ -4060,7 +4074,7 @@ mod tests {
         }];
         assert_eq!(node_blocks1, expected_node_blocks1);
 
-        let intervaltree2 = path2.intervaltree(conn);
+        let intervaltree2 = path2.intervaltree(conn).unwrap();
 
         let node_blocks2 = path2.node_blocks_for_range(&intervaltree2, 0, 8);
         let expected_node_blocks2 = vec![

@@ -512,7 +512,7 @@ mod tests {
         .clone();
 
         let result = path.sequence(conn);
-        assert_eq!(result, "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
+        assert_eq!(result.unwrap(), "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
         assert_eq!(node_count, 6);
@@ -576,7 +576,7 @@ mod tests {
         .clone();
 
         let result = path.sequence(conn);
-        assert_eq!(result, "ACCTACAAATTCAAAC");
+        assert_eq!(result.unwrap(), "ACCTACAAATTCAAAC");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
         assert_eq!(node_count, 6);
@@ -602,7 +602,7 @@ mod tests {
         .clone();
 
         let result = path.sequence(conn);
-        assert_eq!(result, "TATGCCAGCTGCGAATA");
+        assert_eq!(result.unwrap(), "TATGCCAGCTGCGAATA");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
         assert_eq!(node_count, 6);
@@ -654,7 +654,7 @@ mod tests {
         ];
 
         let expected_sequence = expected_sequence_parts.join("");
-        assert_eq!(result, expected_sequence);
+        assert_eq!(result.unwrap(), expected_sequence);
 
         let part1 = "T";
         let part3 = "T";
@@ -735,7 +735,7 @@ mod tests {
         .clone();
 
         let result = path.sequence(conn);
-        assert_eq!(result, "AA");
+        assert_eq!(result.unwrap(), "AA");
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false);
         assert_eq!(all_sequences, HashSet::from_iter(vec!["AA".to_string()]));
