@@ -85,15 +85,6 @@ pub enum AddFilesOperationError {
     IoError(#[from] std::io::Error),
 }
 
-#[derive(Debug, PartialEq, Error)]
-pub enum BranchError {
-    #[error("Cannot delete branch: {0}")]
-    CannotDelete(String),
-    #[error("SQL Error: {0}")]
-    SQLError(String),
-    #[error("SQLite Error: {0}")]
-    SqliteError(#[from] rusqlite::Error),
-}
 #[derive(Debug, Error, PartialEq)]
 pub enum RemoteError {
     #[error("Remote '{0}' already exists")]

@@ -23,7 +23,7 @@ use crate::{
         get_changeset_from_path, write_changeset,
     },
     db::{DbContext, OperationsConnection},
-    errors::{AddFilesOperationError, BranchError, FileAdditionError, OperationError, RemoteError},
+    errors::{AddFilesOperationError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
     files::GenDatabase,
     gen_models_capnp::operation,
