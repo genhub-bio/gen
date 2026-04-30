@@ -531,7 +531,7 @@ where
                     locus
                         .molecule_type
                         .as_ref()
-                        .map(|mol_type| format!("{mol_type} circular"))
+                        .map(|mol_type| format!("circular {mol_type}"))
                         .unwrap_or_else(|| "circular".to_string())
                 } else {
                     locus

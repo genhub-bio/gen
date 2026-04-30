@@ -1,6 +1,14 @@
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq)]
+pub enum HashError {
+    #[error("Invalid hex string: {0}")]
+    InvalidHex(#[from] hex::FromHexError),
+    #[error("Hash must be 32 bytes, got {0}")]
+    InvalidLength(usize),
+}
+
+#[derive(Debug, Error, PartialEq)]
 pub enum ConfigError {
     #[error("Failed to find Gen directory")]
     GenDirectoryNotFound,

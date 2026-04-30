@@ -1,6 +1,5 @@
 use std::{convert::TryFrom, fmt, hash::Hash};
 
-use hex::FromHex;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
@@ -15,6 +14,7 @@ pub mod strand;
 pub mod traits;
 
 pub use config::Workspace;
+use errors::HashError;
 pub use generated::gen_core_capnp;
 pub use path::PathBlock;
 #[cfg(feature = "python-bindings")]
@@ -103,11 +103,10 @@ impl fmt::Display for HashId {
 }
 
 impl TryFrom<String> for HashId {
-    type Error = hex::FromHexError;
+    type Error = HashError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        let bytes = <[u8; 32]>::from_hex(&s)?;
-        Ok(HashId(bytes))
+        HashId::try_from(s.as_str())
     }
 }
 
@@ -132,11 +131,14 @@ impl TryFrom<&[u8]> for HashId {
 }
 
 impl TryFrom<&str> for HashId {
-    type Error = &'static str;
+    type Error = HashError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let bytes = hex::decode(s).map_err(|_| "invalid hex string")?;
-        let array: [u8; 32] = bytes.try_into().map_err(|_| "not 32 bytes")?;
+        let bytes = hex::decode(s)?;
+        let len = bytes.len();
+        let array: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| HashError::InvalidLength(len))?;
         Ok(HashId(array))
     }
 }
