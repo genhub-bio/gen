@@ -77,6 +77,8 @@ pub enum AddFilesOperationError {
     OperationError(#[from] OperationError),
     #[error("File Addition Error: {0}")]
     FileAdditionError(#[from] FileAdditionError),
+    #[error("File Store Error: {0}")]
+    FileStoreError(#[from] FileStoreError),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
     #[error("Config Error: {0}")]
@@ -140,6 +142,14 @@ pub enum FileAdditionError {
 
     #[error("HashId generation failed: {0}")]
     HashIdError(String),
+}
+
+#[derive(Debug, Error)]
+pub enum FileStoreError {
+    #[error("Config Error: {0}")]
+    ConfigError(#[from] ConfigError),
+    #[error("I/O Error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 #[cfg(test)]

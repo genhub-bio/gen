@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -658,30 +657,9 @@ pub fn add_annotation_file(
     );
 
     if file_type != FileTypes::Changeset && file_type != FileTypes::None {
-        let gen_dir = workspace
-            .find_gen_dir()
-            .ok_or_else(|| anyhow!("No .gen directory found. Please run 'gen init' first."))?;
-        let assets_dir = gen_dir.join("assets");
-        fs::create_dir_all(&assets_dir)?;
-        let asset_path = assets_dir.join(file_addition.hashed_filename());
-        if !asset_path.exists() {
-            let source_path = if Path::new(path).is_absolute() {
-                PathBuf::from(path)
-            } else {
-                workspace.repo_root()?.join(path)
-            };
-            fs::copy(source_path, asset_path)?;
-        }
+        file_addition.store_file(workspace)?;
         if let Some(index_file_addition) = index_file_addition {
-            let index_asset_path = assets_dir.join(index_file_addition.clone().hashed_filename());
-            if !index_asset_path.exists() {
-                let index_source_path = if Path::new(&index_file_addition.file_path).is_absolute() {
-                    PathBuf::from(&index_file_addition.file_path)
-                } else {
-                    workspace.repo_root()?.join(&index_file_addition.file_path)
-                };
-                fs::copy(index_source_path, index_asset_path)?;
-            }
+            index_file_addition.store_file(workspace)?;
         }
     }
 

@@ -23,7 +23,9 @@ use crate::{
         get_changeset_from_path, write_changeset,
     },
     db::{DbContext, OperationsConnection},
-    errors::{AddFilesOperationError, FileAdditionError, OperationError, RemoteError},
+    errors::{
+        AddFilesOperationError, FileAdditionError, FileStoreError, OperationError, RemoteError,
+    },
     file_types::FileTypes,
     files::GenDatabase,
     gen_models_capnp::operation,
@@ -446,24 +448,8 @@ pub fn add_files_operation(
         &DependencyModels::default(),
     );
 
-    let gen_dir = workspace
-        .find_gen_dir()
-        .ok_or(ConfigError::GenDirectoryNotFound)?;
-    let assets_dir = gen_dir.join("assets");
-    fs::create_dir_all(&assets_dir)?;
-
     for file_addition in unique_file_additions {
-        let asset_path = assets_dir.join(file_addition.clone().hashed_filename());
-        if asset_path.exists() {
-            continue;
-        }
-
-        let source_path = if Path::new(&file_addition.file_path).is_absolute() {
-            PathBuf::from(&file_addition.file_path)
-        } else {
-            workspace.repo_root()?.join(&file_addition.file_path)
-        };
-        fs::copy(source_path, asset_path)?;
+        file_addition.store_file(workspace)?;
     }
 
     Ok(operation)
@@ -648,6 +634,27 @@ impl FileAddition {
                 acc.entry(hash).or_default().push(item);
                 Ok(acc)
             })
+    }
+
+    pub fn store_file(&self, workspace: &Workspace) -> Result<(), FileStoreError> {
+        let gen_dir = workspace
+            .find_gen_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?;
+        let assets_dir = gen_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        let asset_path = assets_dir.join(self.clone().hashed_filename());
+        if asset_path.exists() {
+            return Ok(());
+        }
+
+        let source_path = if Path::new(&self.file_path).is_absolute() {
+            PathBuf::from(&self.file_path)
+        } else {
+            workspace.repo_root()?.join(&self.file_path)
+        };
+        fs::copy(source_path, asset_path)?;
+        Ok(())
     }
 
     pub fn hashed_filename(self) -> String {
@@ -2809,7 +2816,7 @@ mod tests {
 
         let db_uuid = metadata::get_db_uuid(graph_conn);
         GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
-        Branch::get_or_create(operation_conn, "main");
+        let _ = Branch::get_or_create(operation_conn, "main");
         OperationState::set_branch(operation_conn, "main");
 
         let repo_root = workspace.repo_root().unwrap();
