@@ -372,26 +372,6 @@ pub struct OperationInfo {
     pub description: String,
 }
 
-fn infer_add_file_type(path: &str) -> FileTypes {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
-
-    match extension.as_deref() {
-        Some("gb") | Some("gbk") | Some("genbank") => FileTypes::GenBank,
-        Some("fa") | Some("fasta") | Some("fna") => FileTypes::Fasta,
-        Some("gfa") => FileTypes::GFA,
-        Some("gaf") => FileTypes::GAF,
-        Some("vcf") => FileTypes::VCF,
-        Some("csv") => FileTypes::CSV,
-        Some("gff") | Some("gff3") => FileTypes::Gff3,
-        Some("bed") => FileTypes::Bed,
-        Some("tbi") => FileTypes::Tabix,
-        _ => FileTypes::None,
-    }
-}
-
 pub fn add_files_operation(
     context: &DbContext,
     files: &[String],
@@ -409,7 +389,7 @@ pub fn add_files_operation(
                 workspace,
                 operation_conn,
                 path,
-                infer_add_file_type(path),
+                FileTypes::infer_from_path(path),
                 None,
             )
         })
