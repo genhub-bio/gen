@@ -135,8 +135,9 @@ impl TryFrom<&str> for HashId {
     type Error = &'static str;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let bytes = hex::decode(s).expect("invalid hex string");
-        Ok(HashId(bytes.try_into().expect("not 32 bytes")))
+        let bytes = hex::decode(s).map_err(|_| "invalid hex string")?;
+        let array: [u8; 32] = bytes.try_into().map_err(|_| "not 32 bytes")?;
+        Ok(HashId(array))
     }
 }
 

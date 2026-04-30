@@ -282,21 +282,48 @@ fn validate_sequence_bounds(
     Ok((start as usize, end as usize))
 }
 
+fn circular_sequence_slice(sequence: &str, start: i64, end: i64) -> Result<String, SequenceError> {
+    let length = sequence.len() as i64;
+    if start < 0 || end < 0 {
+        return Err(SequenceError::BoundsError { start, end, length });
+    }
+    if length == 0 {
+        if start == 0 && end == 0 {
+            return Ok(String::new());
+        }
+        return Err(SequenceError::BoundsError { start, end, length });
+    }
+
+    let normalized_start = (start % length) as usize;
+    let span = if end >= start {
+        end - start
+    } else {
+        length - (start % length) + (end % length)
+    };
+
+    let mut result = String::with_capacity(span as usize);
+    for offset in 0..span {
+        let idx = ((normalized_start as i64 + offset) % length) as usize;
+        result.push(sequence.as_bytes()[idx] as char);
+    }
+
+    Ok(result)
+}
+
 fn sequence_slice(
     sequence: &str,
     start: i64,
     end: i64,
     circular: bool,
 ) -> Result<String, SequenceError> {
-    let length = sequence.len() as i64;
-    let (start, end) = validate_sequence_bounds(start, end, length)?;
-
-    if start <= end {
-        return Ok(sequence[start..end].to_string());
+    if circular {
+        return circular_sequence_slice(sequence, start, end);
     }
 
-    if circular {
-        return Ok(format!("{}{}", &sequence[start..], &sequence[..end]));
+    let length = sequence.len() as i64;
+    let (start, end) = validate_sequence_bounds(start, end, length)?;
+    if start <= end {
+        return Ok(sequence[start..end].to_string());
     }
 
     Err(SequenceError::BoundsError {
@@ -420,7 +447,9 @@ impl Sequence {
     }
 
     fn is_circular(&self) -> bool {
-        self.sequence_type.eq_ignore_ascii_case("circular")
+        self.sequence_type
+            .split_whitespace()
+            .any(|part| part.eq_ignore_ascii_case("circular"))
     }
 
     pub fn get_sequence(
@@ -621,6 +650,7 @@ mod tests {
             .save(conn)
             .unwrap();
         assert_eq!(sequence.get_sequence(4, 2).unwrap(), "CCTTTAA");
+        assert_eq!(sequence.get_sequence(0, 10).unwrap(), "AAACCCTTTA");
     }
 
     #[test]
@@ -667,6 +697,7 @@ mod tests {
             .save(conn)
             .unwrap();
         assert_eq!(seq.get_sequence(4, 2).unwrap(), "CCTTTAA");
+        assert_eq!(seq.get_sequence(0, 10).unwrap(), "AAACCCTTTA");
     }
 
     #[test]

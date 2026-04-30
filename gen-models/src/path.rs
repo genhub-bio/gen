@@ -25,6 +25,18 @@ use crate::{
     traits::*,
 };
 
+fn slice_path_block_sequence(sequence: &Sequence, start: i64, end: i64) -> String {
+    match sequence.get_sequence(start, end) {
+        Ok(sequence) => sequence,
+        Err(SequenceError::BoundsError {
+            start: 0,
+            end,
+            length,
+        }) if end == length + 1 => sequence.get_sequence(0, length).unwrap(),
+        Err(err) => panic!("Unable to extract path block sequence: {err}"),
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Path {
     pub id: HashId,
@@ -283,17 +295,26 @@ impl Path {
         sequences_by_node_id: &HashMap<HashId, Sequence>,
         current_path_length: i64,
     ) -> PathBlock {
-        let sequence = sequences_by_node_id.get(&into.target_node_id).unwrap();
         let start = into.target_coordinate;
         let end = out_of.source_coordinate;
-
         let strand = into.target_strand;
         let block_sequence_length = end - start;
+        let Some(sequence) = sequences_by_node_id.get(&into.target_node_id) else {
+            return PathBlock {
+                node_id: into.target_node_id,
+                block_sequence: String::new(),
+                sequence_start: start,
+                sequence_end: end,
+                path_start: current_path_length,
+                path_end: current_path_length + block_sequence_length,
+                strand,
+            };
+        };
 
         let block_sequence = if strand == Strand::Reverse {
-            revcomp(&sequence.get_sequence(start, end).unwrap())
+            revcomp(&slice_path_block_sequence(sequence, start, end))
         } else {
-            sequence.get_sequence(start, end).unwrap()
+            slice_path_block_sequence(sequence, start, end)
         };
 
         PathBlock {
