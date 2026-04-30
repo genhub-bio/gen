@@ -284,9 +284,6 @@ fn validate_sequence_bounds(
 
 fn circular_sequence_slice(sequence: &str, start: i64, end: i64) -> Result<String, SequenceError> {
     let length = sequence.len() as i64;
-    if start < 0 || end < 0 {
-        return Err(SequenceError::BoundsError { start, end, length });
-    }
     if length == 0 {
         if start == 0 && end == 0 {
             return Ok(String::new());
@@ -294,18 +291,14 @@ fn circular_sequence_slice(sequence: &str, start: i64, end: i64) -> Result<Strin
         return Err(SequenceError::BoundsError { start, end, length });
     }
 
-    let normalized_start = (start % length) as usize;
-    let span = if end >= start {
-        end - start
-    } else {
-        length - (start % length) + (end % length)
-    };
-
-    let mut result = String::with_capacity(span as usize);
-    for offset in 0..span {
-        let idx = ((normalized_start as i64 + offset) % length) as usize;
-        result.push(sequence.as_bytes()[idx] as char);
+    let (start, end) = validate_sequence_bounds(start, end, length)?;
+    if start <= end {
+        return Ok(sequence[start..end].to_string());
     }
+
+    let mut result = String::with_capacity((length as usize - start) + end);
+    result.push_str(&sequence[start..]);
+    result.push_str(&sequence[..end]);
 
     Ok(result)
 }
@@ -650,7 +643,14 @@ mod tests {
             .save(conn)
             .unwrap();
         assert_eq!(sequence.get_sequence(4, 2).unwrap(), "CCTTTAA");
-        assert_eq!(sequence.get_sequence(0, 10).unwrap(), "AAACCCTTTA");
+        assert_eq!(
+            sequence.get_sequence(0, 10),
+            Err(SequenceError::BoundsError {
+                start: 0,
+                end: 10,
+                length: 9,
+            })
+        );
     }
 
     #[test]
@@ -697,7 +697,14 @@ mod tests {
             .save(conn)
             .unwrap();
         assert_eq!(seq.get_sequence(4, 2).unwrap(), "CCTTTAA");
-        assert_eq!(seq.get_sequence(0, 10).unwrap(), "AAACCCTTTA");
+        assert_eq!(
+            seq.get_sequence(0, 10),
+            Err(SequenceError::BoundsError {
+                start: 0,
+                end: 10,
+                length: 9,
+            })
+        );
     }
 
     #[test]

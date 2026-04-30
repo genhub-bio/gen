@@ -37,8 +37,8 @@ pub struct Path {
 pub enum PathError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
-    #[error("Path cache error: {0}")]
-    CachePoison(String),
+    #[error("Missing path data: {0}")]
+    Missing(String),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
     #[error("Problem creating path edges: {0}")]
@@ -290,15 +290,10 @@ impl Path {
         let strand = into.target_strand;
         let block_sequence_length = end - start;
         let Some(sequence) = sequences_by_node_id.get(&into.target_node_id) else {
-            return Ok(PathBlock {
-                node_id: into.target_node_id,
-                block_sequence: String::new(),
-                sequence_start: start,
-                sequence_end: end,
-                path_start: current_path_length,
-                path_end: current_path_length + block_sequence_length,
-                strand,
-            });
+            return Err(PathError::Missing(format!(
+                "Missing sequence for node {} while building path {}",
+                into.target_node_id, self.id
+            )));
         };
 
         let block_sequence = if strand == Strand::Reverse {

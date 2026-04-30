@@ -220,7 +220,7 @@ impl<'a> PathCache<'a> {
         }
 
         path_cache.intervaltree_cache.get(path).ok_or_else(|| {
-            PathError::CachePoison(format!("Missing interval tree for path {}", path.id))
+            PathError::Missing(format!("Missing interval tree for path {}", path.id))
         })
     }
 }
