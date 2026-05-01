@@ -1,14 +1,16 @@
 use std::{
     collections::HashMap,
     convert::TryInto,
+    fs,
     io::{self, BufReader},
     path::{Path, PathBuf},
     rc::Rc,
     string::ToString,
 };
 
-use gen_core::{HashId, Workspace, calculate_hash, traits::Capnp};
+use gen_core::{HashId, Workspace, calculate_hash, errors::ConfigError, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
+use itertools::Itertools;
 use petgraph::{Direction, graphmap::UnGraphMap};
 use rusqlite::{Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
@@ -17,12 +19,17 @@ use thiserror::Error;
 
 use crate::{
     changesets::{
-        DatabaseChangeset, get_changeset_dependencies_from_path, get_changeset_from_path,
+        ChangesetModels, DatabaseChangeset, get_changeset_dependencies_from_path,
+        get_changeset_from_path, write_changeset,
     },
-    db::OperationsConnection,
-    errors::{FileAdditionError, RemoteError},
+    db::{DbContext, OperationsConnection},
+    errors::{
+        AddFilesOperationError, FileAdditionError, FileStoreError, OperationError, RemoteError,
+    },
     file_types::FileTypes,
+    files::GenDatabase,
     gen_models_capnp::operation,
+    metadata,
     session_operations::DependencyModels,
     traits::*,
 };
@@ -367,6 +374,87 @@ pub struct OperationInfo {
     pub description: String,
 }
 
+pub fn add_files_operation(
+    context: &DbContext,
+    files: &[String],
+    message: Option<&str>,
+) -> Result<Operation, AddFilesOperationError> {
+    let workspace = context.workspace();
+    let operation_conn = context.operations().conn();
+    let graph_conn = context.graph().conn();
+    let db_uuid = metadata::get_db_uuid(graph_conn);
+
+    let file_additions = files
+        .iter()
+        .map(|path| {
+            FileAddition::get_or_create(
+                workspace,
+                operation_conn,
+                path,
+                FileTypes::infer_from_path(path),
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let unique_file_additions = file_additions
+        .into_iter()
+        .unique_by(|file_addition| file_addition.id)
+        .collect::<Vec<_>>();
+
+    let operation_hash = HashId(calculate_hash(
+        &unique_file_additions
+            .iter()
+            .map(|file_addition| file_addition.id.to_string())
+            .sorted()
+            .join(":"),
+    ));
+
+    let operation = match Operation::create(operation_conn, "add-file", &operation_hash) {
+        Ok(operation) => operation,
+        Err(rusqlite::Error::SqliteFailure(err, _details))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Err(AddFilesOperationError::OperationError(
+                OperationError::NoChanges,
+            ));
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    for file_addition in &unique_file_additions {
+        Operation::add_file(operation_conn, &operation.hash, &file_addition.id)?;
+    }
+
+    Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
+
+    let summary = message.map(str::to_string).unwrap_or_else(|| {
+        if files.len() == 1 {
+            format!("Add file {}", files[0])
+        } else {
+            format!("Add {} files", files.len())
+        }
+    });
+    OperationSummary::create(operation_conn, &operation.hash, &summary);
+
+    let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid)?;
+    write_changeset(
+        workspace,
+        &operation,
+        DatabaseChangeset {
+            db_path: gen_db.path,
+            changes: ChangesetModels::default(),
+        },
+        &DependencyModels::default(),
+    );
+
+    for file_addition in unique_file_additions {
+        file_addition.store_file(workspace)?;
+    }
+
+    Ok(operation)
+}
+
 pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<HashId, std::io::Error> {
     let file = std::fs::File::open(file_path)?;
     let reader = BufReader::new(file);
@@ -546,6 +634,27 @@ impl FileAddition {
                 acc.entry(hash).or_default().push(item);
                 Ok(acc)
             })
+    }
+
+    pub fn store_file(&self, workspace: &Workspace) -> Result<(), FileStoreError> {
+        let gen_dir = workspace
+            .find_gen_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?;
+        let assets_dir = gen_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        let asset_path = assets_dir.join(self.clone().hashed_filename());
+        if asset_path.exists() {
+            return Ok(());
+        }
+
+        let source_path = if Path::new(&self.file_path).is_absolute() {
+            PathBuf::from(&self.file_path)
+        } else {
+            workspace.repo_root()?.join(&self.file_path)
+        };
+        fs::copy(source_path, asset_path)?;
+        Ok(())
     }
 
     pub fn hashed_filename(self) -> String {
@@ -2696,5 +2805,66 @@ mod tests {
         .expect("Failed to create FileAddition");
 
         assert_ne!(fa1.id, fa1_new.id);
+    }
+
+    #[test]
+    fn test_add_files_operation_stores_shared_unmodified_asset_once_across_operations() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
+        let workspace = context.workspace();
+
+        let db_uuid = metadata::get_db_uuid(graph_conn);
+        GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
+        Branch::get_or_create(operation_conn, "main").unwrap();
+        OperationState::set_branch(operation_conn, "main");
+
+        let repo_root = workspace.repo_root().unwrap();
+        fs::write(repo_root.join("shared.txt"), "shared contents").unwrap();
+        fs::write(repo_root.join("unique.txt"), "unique contents").unwrap();
+
+        let operation_1 =
+            add_files_operation(&context, &["shared.txt".to_string()], Some("first")).unwrap();
+        let operation_2 = add_files_operation(
+            &context,
+            &["shared.txt".to_string(), "unique.txt".to_string()],
+            Some("second"),
+        )
+        .unwrap();
+
+        let operation_1_files =
+            FileAddition::get_files_for_operation(operation_conn, &operation_1.hash);
+        let operation_2_files =
+            FileAddition::get_files_for_operation(operation_conn, &operation_2.hash);
+
+        let shared_file_1 = operation_1_files
+            .iter()
+            .find(|file| file.file_path == "shared.txt")
+            .unwrap();
+        let shared_file_2 = operation_2_files
+            .iter()
+            .find(|file| file.file_path == "shared.txt")
+            .unwrap();
+
+        assert_eq!(shared_file_1.id, shared_file_2.id);
+
+        let assets_dir = workspace.find_gen_dir().unwrap().join("assets");
+        let asset_names = fs::read_dir(&assets_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(asset_names.len(), 2);
+        assert!(asset_names.contains(&shared_file_1.clone().hashed_filename()));
+        assert!(
+            asset_names.contains(
+                &operation_2_files
+                    .iter()
+                    .find(|file| file.file_path == "unique.txt")
+                    .unwrap()
+                    .clone()
+                    .hashed_filename()
+            )
+        );
     }
 }

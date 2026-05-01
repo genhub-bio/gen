@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rusqlite::{
     ToSql,
     types::{FromSql, FromSqlResult, ToSqlOutput, Value, ValueRef},
@@ -115,6 +117,27 @@ impl From<gen_models_capnp::FileType> for FileTypes {
 }
 
 impl FileTypes {
+    pub fn infer_from_path(path: impl AsRef<Path>) -> Self {
+        let extension = path
+            .as_ref()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+
+        match extension.as_deref() {
+            Some("gb") | Some("gbk") | Some("genbank") => FileTypes::GenBank,
+            Some("fa") | Some("fasta") | Some("fna") => FileTypes::Fasta,
+            Some("gfa") => FileTypes::GFA,
+            Some("gaf") => FileTypes::GAF,
+            Some("vcf") => FileTypes::VCF,
+            Some("csv") => FileTypes::CSV,
+            Some("gff") | Some("gff3") => FileTypes::Gff3,
+            Some("bed") => FileTypes::Bed,
+            Some("tbi") => FileTypes::Tabix,
+            _ => FileTypes::None,
+        }
+    }
+
     pub fn suffix(file_type: FileTypes) -> String {
         let result = match file_type {
             FileTypes::GenBank => "gb",
@@ -131,5 +154,29 @@ impl FileTypes {
         };
 
         result.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileTypes;
+
+    #[test]
+    fn infers_file_type_from_path_extension() {
+        assert_eq!(FileTypes::infer_from_path("sample.gb"), FileTypes::GenBank);
+        assert_eq!(FileTypes::infer_from_path("sample.GBK"), FileTypes::GenBank);
+        assert_eq!(FileTypes::infer_from_path("sample.fa"), FileTypes::Fasta);
+        assert_eq!(FileTypes::infer_from_path("sample.gfa"), FileTypes::GFA);
+        assert_eq!(FileTypes::infer_from_path("sample.gaf"), FileTypes::GAF);
+        assert_eq!(FileTypes::infer_from_path("sample.vcf"), FileTypes::VCF);
+        assert_eq!(FileTypes::infer_from_path("sample.csv"), FileTypes::CSV);
+        assert_eq!(FileTypes::infer_from_path("sample.gff3"), FileTypes::Gff3);
+        assert_eq!(FileTypes::infer_from_path("sample.bed"), FileTypes::Bed);
+        assert_eq!(FileTypes::infer_from_path("sample.tbi"), FileTypes::Tabix);
+        assert_eq!(
+            FileTypes::infer_from_path("sample.unknown"),
+            FileTypes::None
+        );
+        assert_eq!(FileTypes::infer_from_path("sample"), FileTypes::None);
     }
 }

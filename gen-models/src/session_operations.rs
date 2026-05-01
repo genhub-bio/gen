@@ -1,10 +1,6 @@
-use std::{
-    fs,
-    path::{Path as FilePath, PathBuf},
-    str,
-};
+use std::str;
 
-use gen_core::{HashId, errors::ConfigError, traits::Capnp};
+use gen_core::{HashId, traits::Capnp};
 use rusqlite::session;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -69,17 +65,6 @@ pub fn end_operation(
 
     match Operation::create(operation_conn, &operation_info.description, &hash) {
         Ok(operation) => {
-            let gen_dir = match context.workspace().find_gen_dir() {
-                Some(dir) => dir,
-                None => {
-                    return Err(OperationError::ConfigError(
-                        ConfigError::GenDirectoryNotFound,
-                    ));
-                }
-            };
-            let assets_dir = FilePath::new(&gen_dir).join("assets");
-            fs::create_dir_all(&assets_dir).map_err(|_| OperationError::IOError)?;
-
             for op_file in operation_info.files.iter() {
                 let fa = match FileAddition::get_or_create(
                     context.workspace(),
@@ -94,21 +79,14 @@ pub fn end_operation(
                 Operation::add_file(operation_conn, &operation.hash, &fa.id)
                     .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
-                    let asset_destination_path = assets_dir.join(fa.hashed_filename());
-                    if !asset_destination_path.exists() {
-                        let source_path = if FilePath::new(&op_file.file_path).is_absolute() {
-                            PathBuf::from(&op_file.file_path)
-                        } else {
-                            context
-                                .workspace()
-                                .repo_root()
-                                .map_err(OperationError::ConfigError)?
-                                .join(&op_file.file_path)
-                        };
-                        match fs::copy(source_path, asset_destination_path) {
-                            Ok(result) => result,
-                            Err(_) => return Err(OperationError::IOError),
-                        };
+                    match fa.store_file(context.workspace()) {
+                        Ok(()) => {}
+                        Err(crate::errors::FileStoreError::ConfigError(err)) => {
+                            return Err(OperationError::ConfigError(err));
+                        }
+                        Err(crate::errors::FileStoreError::IoError(_)) => {
+                            return Err(OperationError::IOError);
+                        }
                     }
                 }
             }

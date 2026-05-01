@@ -41,16 +41,15 @@ use gen_models::{
     block_group::BlockGroup,
     db::{DbContext, OperationsConnection},
     errors::RemoteError,
-    file_types::FileTypes,
     metadata,
     operations::{
-        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
+        add_files_operation, parse_hash,
     },
     reference_alias::ReferenceAlias,
     sample::Sample,
     traits::Query,
 };
-use itertools::Itertools;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
@@ -616,6 +615,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 message.as_deref(),
             )?;
             println!("Annotation file added in operation {}", operation.hash);
+            Ok(())
+        }
+        Some(Commands::AddFile { files, message }) => {
+            let operation = add_files_operation(&db_context, &files, message.as_deref())?;
+            println!("Files added in operation {}", operation.hash);
             Ok(())
         }
         Some(Commands::ListSamples {}) => {
