@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, calculate_hash, traits::Capnp};
-use rusqlite::{Row, params};
+use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{db::GraphConnection, gen_models_capnp::node, sequence::Sequence, traits::*};
+use crate::{
+    db::GraphConnection,
+    gen_models_capnp::node,
+    sequence::Sequence,
+    traits::{self, *},
+};
 
 #[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
 pub struct Node {
@@ -114,6 +119,44 @@ impl Node {
                 )
             })
             .collect::<HashMap<HashId, Sequence>>()
+    }
+
+    pub fn query_nodes_length(
+        conn: &GraphConnection,
+        node_ids: &[HashId],
+    ) -> Result<HashMap<HashId, i64>, NodeError> {
+        if node_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut lengths = HashMap::new();
+        let batch_size = traits::max_rows_per_batch(conn, 1);
+        let query = "
+            WITH arr AS (
+                SELECT value, rowid AS pos
+                FROM rarray(?1)
+            )
+            SELECT n.id, s.length
+            FROM nodes n
+            JOIN sequences s ON s.hash = n.sequence_hash
+            JOIN arr ON n.id = arr.value
+            ORDER BY arr.pos;
+        ";
+
+        for chunk in node_ids.chunks(batch_size) {
+            let values: Vec<Value> = chunk.iter().copied().map(Value::from).collect();
+            let mut stmt = conn.prepare_cached(query)?;
+            let rows = stmt.query_map(params![std::rc::Rc::new(values)], |row| {
+                Ok((row.get::<_, HashId>(0)?, row.get::<_, i64>(1)?))
+            })?;
+
+            for row in rows {
+                let (node_id, length) = row?;
+                lengths.insert(node_id, length);
+            }
+        }
+
+        Ok(lengths)
     }
 
     pub fn get_start_node() -> Node {

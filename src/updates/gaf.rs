@@ -124,14 +124,12 @@ where
         let node_info: Vec<&str> = node_id.rsplitn(2, '.').collect();
         let node_id = *node_info.last().unwrap();
         let id = HashId::try_from(node_id).ok()?;
-        let mut stmt = conn
-            .prepare_cached(
-                "select s.length from nodes n left join sequences s on (s.hash = n.sequence_hash) where n.id = ?1;",
-            )
-            .ok()?;
-        let res = stmt.query_row([id], |row| row.get(0)).ok()?;
-        node_lengths.insert(node_id.to_string(), (id, res));
-        Some((id, res))
+        let length = Node::query_nodes_length(conn, &[id])
+            .ok()?
+            .get(&id)
+            .copied()?;
+        node_lengths.insert(node_id.to_string(), (id, length));
+        Some((id, length))
     };
 
     // our GFA export encodes segments like node_id.sequence_start
