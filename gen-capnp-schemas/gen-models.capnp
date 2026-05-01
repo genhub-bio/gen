@@ -147,6 +147,17 @@ struct FileAddition {
   checksum @3 :List(UInt8);
 }
 
+struct OperationFile {
+  filename @0 :Text;
+  filePath @1 :Text;
+  fileType @2 :FileType;
+}
+
+struct OperationInfo {
+  files @0 :List(OperationFile);
+  description @1 :Text;
+}
+
 struct OperationSummary {
   id @0 :Int64;
   operationHash @1 :List(UInt8);
@@ -206,13 +217,18 @@ struct DatabaseChangeset {
 
 struct ManifestOperation {
   operation @0 :Operation;
-  fileAdditions @1 :List(FileAddition);
+  fileAdditions @1 :List(ManifestOperationFileAddition);
   annotationFileAdditions @4 :List(FileAddition);
   annotationFileDetails @5 :List(ManifestAnnotationFileAddition);
   operationSummary :union {
     none @2 :Void;
     some @3 :OperationSummary;
   }
+}
+
+struct ManifestOperationFileAddition {
+  fileAddition @0 :FileAddition;
+  filename @1 :Text;
 }
 
 struct ManifestAnnotationFileAddition {

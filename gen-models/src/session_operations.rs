@@ -76,7 +76,7 @@ pub fn end_operation(
                     Ok(fa) => fa,
                     Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
                 };
-                Operation::add_file(operation_conn, &operation.hash, &fa.id)
+                Operation::add_file(operation_conn, &operation.hash, &fa.id, &op_file.filename)
                     .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
                     match fa.store_file(context.workspace()) {

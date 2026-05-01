@@ -53,10 +53,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.sample,
         cmd.create_missing,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: cmd.path.clone(),
-                file_type: FileTypes::GenBank,
-            }],
+            files: vec![OperationFile::new(cmd.path.clone(), FileTypes::GenBank)],
             description: "Update from GenBank".to_string(),
         },
     ) {

@@ -6,10 +6,35 @@ use crate::{
     db::OperationsConnection,
     gen_models_capnp::{
         manifest, manifest_annotation_file_addition, manifest_diff, manifest_operation,
+        manifest_operation_file_addition,
     },
     operations::{FileAddition, Operation, OperationSummary},
     traits::Query,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ManifestOperationFileAddition {
+    pub file_addition: FileAddition,
+    pub filename: String,
+}
+
+impl<'a> Capnp<'a> for ManifestOperationFileAddition {
+    type Builder = manifest_operation_file_addition::Builder<'a>;
+    type Reader = manifest_operation_file_addition::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        let mut file_addition_builder = builder.reborrow().init_file_addition();
+        self.file_addition.write_capnp(&mut file_addition_builder);
+        builder.set_filename(&self.filename);
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        Self {
+            file_addition: FileAddition::read_capnp(reader.get_file_addition().unwrap()),
+            filename: reader.get_filename().unwrap().to_string().unwrap(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestAnnotationFileAddition {
@@ -64,7 +89,7 @@ impl<'a> Capnp<'a> for ManifestAnnotationFileAddition {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestOperation {
     pub operation: Operation,
-    pub file_additions: Vec<FileAddition>,
+    pub file_additions: Vec<ManifestOperationFileAddition>,
     pub annotation_file_additions: Vec<ManifestAnnotationFileAddition>,
     pub operation_summary: Option<OperationSummary>,
 }
@@ -120,7 +145,9 @@ impl<'a> Capnp<'a> for ManifestOperation {
         let file_additions_reader = reader.get_file_additions().unwrap();
         let mut file_additions = Vec::new();
         for file_addition_reader in file_additions_reader.iter() {
-            file_additions.push(FileAddition::read_capnp(file_addition_reader));
+            file_additions.push(ManifestOperationFileAddition::read_capnp(
+                file_addition_reader,
+            ));
         }
 
         let annotation_file_additions = if reader.has_annotation_file_details() {
@@ -288,7 +315,18 @@ impl<'a> ManifestGenerator<'a> {
 
             for hash in hashes.iter() {
                 if let Some(op) = operations_map.get(hash) {
-                    let file_additions = FileAddition::get_files_for_operation(self.conn, &op.hash);
+                    let query = "select fa.*, of.filename from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
+                    let mut stmt = self.conn.prepare(query).unwrap();
+                    let file_additions = stmt
+                        .query_map(rusqlite::params![op.hash], |row| {
+                            Ok(ManifestOperationFileAddition {
+                                file_addition: FileAddition::process_row(row),
+                                filename: row.get(4)?,
+                            })
+                        })
+                        .unwrap()
+                        .map(|row| row.unwrap())
+                        .collect::<Vec<_>>();
                     let annotation_file_additions =
                         AnnotationFile::get_files_for_operation(self.conn, &op.hash)
                             .into_iter()
@@ -424,11 +462,14 @@ mod tests {
 
         let manifest_operation = ManifestOperation {
             operation: operation.clone(),
-            file_additions: vec![FileAddition {
-                id: HashId([1u8; 32]),
-                file_path: "/path/to/file.fa".to_string(),
-                file_type: FileTypes::Fasta,
-                checksum: HashId([2u8; 32]),
+            file_additions: vec![ManifestOperationFileAddition {
+                file_addition: FileAddition {
+                    id: HashId([1u8; 32]),
+                    file_path: "/path/to/file.fa".to_string(),
+                    file_type: FileTypes::Fasta,
+                    checksum: HashId([2u8; 32]),
+                },
+                filename: "file.fa".to_string(),
             }],
             annotation_file_additions: vec![ManifestAnnotationFileAddition {
                 file_addition: FileAddition {
