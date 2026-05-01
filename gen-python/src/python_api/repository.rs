@@ -353,7 +353,9 @@ impl PyRepository {
                     node_key.node_id
                 ))
             })?;
-            Ok(sequence.get_sequence(node_key.sequence_start, node_key.sequence_end))
+            Ok(sequence
+                .get_sequence(node_key.sequence_start, node_key.sequence_end)
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?)
         })
     }
 }

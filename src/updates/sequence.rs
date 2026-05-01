@@ -54,7 +54,7 @@ pub fn update_with_sequence(
 
     for target_block_group in &target_block_groups {
         let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-        let interval_tree = path.intervaltree(conn);
+        let interval_tree = path.intervaltree(conn)?;
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
@@ -280,11 +280,11 @@ mod tests {
         let child_path = BlockGroup::get_current_path(conn, &child_blockgroup);
         let other_path = BlockGroup::get_current_path(conn, &other_blockgroup);
         assert_eq!(
-            child_path.sequence(conn),
+            child_path.sequence(conn).unwrap(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
         );
         assert_eq!(
-            other_path.sequence(conn),
+            other_path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
@@ -667,7 +667,7 @@ mod tests {
 
         let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
         assert_eq!(
-            latest_path.sequence(conn),
+            latest_path.sequence(conn).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
     }

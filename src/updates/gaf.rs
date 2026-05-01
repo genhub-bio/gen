@@ -116,15 +116,20 @@ where
 
     let mut node_lengths: HashMap<String, (HashId, i64)> = HashMap::new();
 
-    let mut get_node_info = |node_id: &str| -> (HashId, i64) {
-        *node_lengths.entry(node_id.to_string()).or_insert_with(|| {
-            let node_info : Vec<&str> = node_id.rsplitn(2, '.').collect();
-            let node_id = *node_info.last().unwrap();
-            let id = HashId::try_from(node_id).unwrap();
-            let mut stmt = conn.prepare_cached("select s.length from nodes n left join sequences s on (s.hash = n.sequence_hash) where n.id = ?1;").unwrap();
-            let res = stmt.query_row([id], |row| row.get(0)).unwrap();
-            (id, res)
-        })
+    let mut get_node_info = |node_id: &str| -> Option<(HashId, i64)> {
+        if let Some(node_info) = node_lengths.get(node_id) {
+            return Some(*node_info);
+        }
+
+        let node_info: Vec<&str> = node_id.rsplitn(2, '.').collect();
+        let node_id = *node_info.last().unwrap();
+        let id = HashId::try_from(node_id).ok()?;
+        let length = Node::query_nodes_length(conn, &[id])
+            .ok()?
+            .get(&id)
+            .copied()?;
+        node_lengths.insert(node_id.to_string(), (id, length));
+        Some((id, length))
     };
 
     // our GFA export encodes segments like node_id.sequence_start
@@ -234,7 +239,9 @@ where
                         .parse::<i64>()
                         .map_err(GafUpdateError::ParseInt)?;
                     for (segment_strand, segment_id) in segments.iter() {
-                        let (segment_node_id, node_length) = get_node_info(segment_id);
+                        let Some((segment_node_id, node_length)) = get_node_info(segment_id) else {
+                            continue;
+                        };
                         if node_length >= matches {
                             strand = Some(*segment_strand);
                             node_id = Some(segment_node_id);
@@ -246,7 +253,9 @@ where
                 } else if query.ends_with("right") {
                     query_key = "right";
                     let (segment_strand, segment_id) = segments.first().unwrap();
-                    let (segment_node_id, _node_length) = get_node_info(segment_id);
+                    let Some((segment_node_id, _node_length)) = get_node_info(segment_id) else {
+                        continue;
+                    };
                     strand = Some(*segment_strand);
                     node_id = Some(segment_node_id);
                 } else {

@@ -117,6 +117,7 @@ pub struct GenBankAnnotation {
 pub struct GenBankLocus {
     pub name: String,
     pub molecule_type: Option<String>,
+    pub circular: bool,
     pub sequence: String,
     pub changes: Vec<GenBankEdit>,
     pub annotations: Vec<GenBankAnnotation>,
@@ -277,6 +278,7 @@ fn annotation_for_feature(feature: &Feature) -> Option<GenBankAnnotation> {
 }
 
 pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
+    let circular = seq.is_circular();
     let final_sequence = if let Ok(sequence) = str::from_utf8(&seq.seq) {
         sequence.to_string()
     } else {
@@ -286,6 +288,7 @@ pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
     let geneious_edit = Regex::new(r"Geneious type: Editing History (?P<edit_type>\w+)")?;
     let mut locus = GenBankLocus {
         name: seq.name.unwrap_or_default(),
+        circular,
         sequence: final_sequence.clone(),
         molecule_type: seq.molecule_type,
         changes: vec![],

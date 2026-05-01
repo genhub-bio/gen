@@ -527,7 +527,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let patch_path = Path::new(&patch);
             let mut f = File::open(patch_path)?;
             let patches = patch::load_patches(&mut f);
-            let diagrams = view_patches(&workspace, &patches);
+            let diagrams = view_patches(&workspace, &patches)?;
             for (patch_hash, patch_diagrams) in diagrams.iter() {
                 for (bg_id, dot) in patch_diagrams.iter() {
                     let path = if let Some(ref p) = prefix {
@@ -679,7 +679,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     format!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
                 })?;
             let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
-            let sequence = path.sequence(graph_conn);
+            let sequence = path.sequence(graph_conn)?;
             if end_coordinate == -1 {
                 end_coordinate = sequence.len() as i64;
             }

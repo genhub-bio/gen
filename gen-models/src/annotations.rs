@@ -541,7 +541,7 @@ pub fn add_annotation(
         .find(|bg| bg.name == parsed_region.name)
         .ok_or_else(|| anyhow!("Graph {} not found for sample {sample}", parsed_region.name))?;
     let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
-    let path_length = path.length(graph_conn);
+    let path_length = path.length(graph_conn)?;
     if start < 0 || end < 0 || start > end || end > path_length {
         return Err(anyhow!("Region {region} is outside the path bounds (0-{path_length})").into());
     }
@@ -551,7 +551,7 @@ pub fn add_annotation(
     operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let mut cache = PathCache::new(graph_conn);
-    let _ = PathCache::lookup(&mut cache, &block_group.id, path.name.clone());
+    let _ = PathCache::lookup(&mut cache, &block_group.id, path.name.clone())?;
     let accession = BlockGroup::add_accession(graph_conn, &path, name, start, end, &mut cache)?;
 
     let annotation_group = group.unwrap_or("default");
@@ -901,7 +901,7 @@ mod tests {
         let _ = Sample::create(&conn, "sample-2").unwrap();
 
         let mut cache = PathCache::new(&conn);
-        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone());
+        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
         let accession =
             BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
 

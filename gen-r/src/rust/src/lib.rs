@@ -1236,7 +1236,8 @@ fn repo_query(db_path: String, query: String) -> std::result::Result<List, Error
 fn repo_get_block_group_by_id(db_path: String, id: String) -> std::result::Result<List, Error> {
     let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
     let block_group =
-        BlockGroup::get_by_id(&conn, &hash_id_from_string(&id).map_err(Error::Other)?);
+        BlockGroup::get_by_id(&conn, &hash_id_from_string(&id).map_err(Error::Other)?)
+            .map_err(|err| Error::Other(err.to_string()))?;
     Ok(block_group_record(block_group, Some(&db_path)))
 }
 
@@ -1283,7 +1284,8 @@ fn repo_create_block_group(
             name: &name,
             ..Default::default()
         },
-    );
+    )
+    .map_err(|err| Error::Other(err.to_string()))?;
     Ok(block_group_record(block_group, Some(&db_path)))
 }
 
@@ -1350,7 +1352,9 @@ fn repo_get_block_sequence(
     let sequence = sequences
         .get(&node_id)
         .ok_or_else(|| Error::Other(format!("Node with id {node_id} not found")))?;
-    Ok(sequence.get_sequence(sequence_start, sequence_end))
+    Ok(sequence
+        .get_sequence(sequence_start, sequence_end)
+        .map_err(|err| Error::Other(err.to_string()))?)
 }
 
 #[extendr]

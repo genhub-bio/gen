@@ -1122,7 +1122,7 @@ mod tests {
         assert!(state.has_focus); // Focus is enabled by default for keyboard input
 
         state.focus();
-        state.camera_anim.is_some();
+        let _ = state.camera_anim.is_some();
 
         state.blur();
         assert!(!state.has_focus);

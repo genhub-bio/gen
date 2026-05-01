@@ -8,8 +8,13 @@ use std::{
 use gen_core::{HashId, is_terminal, strand::Strand};
 use gen_graph::{GenGraph, project_path};
 use gen_models::{
-    block_group::BlockGroup, block_group_edge::BlockGroupEdge, db::GraphConnection, edge::Edge,
-    path::Path, sample::Sample,
+    block_group::BlockGroup,
+    block_group_edge::BlockGroupEdge,
+    db::GraphConnection,
+    edge::Edge,
+    errors::{PathError, SequenceError},
+    path::Path,
+    sample::Sample,
 };
 use itertools::Itertools;
 use thiserror::Error;
@@ -20,6 +25,16 @@ use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_s
 pub enum GfaExportError {
     #[error("I/O error while exporting GFA: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Sequence error while exporting GFA: {0}")]
+    Sequence(#[from] SequenceError),
+    #[error("Path error while exporting GFA: {0}")]
+    Path(#[from] PathError),
+    #[error("Path error while exporting GFA for path '{path_name}': {source}")]
+    PathForName {
+        path_name: String,
+        #[source]
+        source: PathError,
+    },
     #[error("No block groups found for collection {collection_name} and sample {sample_name}")]
     MissingBlockGroups {
         collection_name: String,
@@ -216,7 +231,12 @@ fn get_paths(
         };
         let sample_name = block_group.sample_name;
 
-        let path_blocks = path.blocks(conn);
+        let path_blocks = path
+            .blocks(conn)
+            .map_err(|source| GfaExportError::PathForName {
+                path_name: path.name.clone(),
+                source,
+            })?;
         let projected_path = project_path(graph, &path_blocks);
 
         if !projected_path.is_empty() {
@@ -478,7 +498,7 @@ mod tests {
 
         let paths = Path::query_for_collection(conn, "test collection 2");
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].sequence(conn), "AAAATTTTGGGGCCCC");
+        assert_eq!(paths[0].sequence(conn).unwrap(), "AAAATTTTGGGGCCCC");
     }
 
     #[test]
@@ -705,7 +725,7 @@ mod tests {
             Node::create(conn, &insert_sequence.hash, &HashId::convert_str("1")).unwrap();
         let insert = PathBlock {
             node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).to_string(),
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
             sequence_start: 0,
             sequence_end: 4,
             path_start: 7,
@@ -723,7 +743,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(conn);
+        let tree = path.intervaltree(conn).unwrap();
         BlockGroup::insert_change(conn, &change, &tree).unwrap();
 
         let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);

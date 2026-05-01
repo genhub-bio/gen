@@ -72,7 +72,9 @@ fn get_block_group_path_nodes(
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
     // Get the path blocks from the database
-    let path_blocks = path.blocks(conn);
+    let path_blocks = path
+        .blocks(conn)
+        .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
     // Project the path blocks onto the current graph state
     let projected_path = project_path(graph, &path_blocks);

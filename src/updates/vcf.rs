@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt::Debug,
     io, str,
 };
@@ -8,7 +8,7 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
     db::{DbContext, GraphConnection},
-    errors::{BlockGroupError, NodeError, OperationError, SampleError, SequenceError},
+    errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
@@ -200,6 +200,8 @@ pub enum VcfError {
     BlockGroupError(#[from] BlockGroupError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
+    #[error("Path error: {0}")]
+    PathError(#[from] PathError),
 }
 
 fn resolve_parent_samples(
@@ -368,12 +370,13 @@ pub fn update_with_vcf(
                         };
                         for sample_bg_id in &sample_bg_ids {
                             let sample_path =
-                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone());
-                            let path_length = path_lengths
-                                .entry(sample_path.id)
-                                .or_insert_with(|| sample_path.length(conn));
+                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone())?;
+                            let path_length = match path_lengths.entry(sample_path.id) {
+                                Entry::Occupied(entry) => *entry.get(),
+                                Entry::Vacant(entry) => *entry.insert(sample_path.length(conn)?),
+                            };
 
-                            if ref_start > *path_length {
+                            if ref_start > path_length {
                                 return Err(VcfError::InvalidRecord(format!(
                                     "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
                                     sample_path.name
@@ -394,7 +397,7 @@ pub fn update_with_vcf(
                     } else if let Some(ref_accession) = allele_accession {
                         for sample_bg_id in &sample_bg_ids {
                             let sample_path =
-                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone());
+                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone())?;
 
                             let key = (sample_path, ref_accession.clone());
 
@@ -483,17 +486,15 @@ pub fn update_with_vcf(
                                             &mut path_cache,
                                             sample_bg_id,
                                             seq_name.clone(),
-                                        );
-                                        let path_length =
-                                            if let Some(l) = path_lengths.get(&sample_path.id) {
-                                                l
-                                            } else {
-                                                let l = sample_path.sequence(conn).len();
-                                                path_lengths.insert(sample_path.id, l as i64);
-                                                &path_lengths[&sample_path.id]
-                                            };
+                                        )?;
+                                        let path_length = match path_lengths.entry(sample_path.id) {
+                                            Entry::Occupied(entry) => *entry.get(),
+                                            Entry::Vacant(entry) => {
+                                                *entry.insert(sample_path.length(conn)?)
+                                            }
+                                        };
 
-                                        if ref_start > *path_length {
+                                        if ref_start > path_length {
                                             return Err(VcfError::InvalidRecord(format!(
                                                 "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
                                                 sample_path.name
@@ -518,7 +519,7 @@ pub fn update_with_vcf(
                                             &mut path_cache,
                                             sample_bg_id,
                                             seq_name.clone(),
-                                        );
+                                        )?;
 
                                         let key = (sample_path, ref_accession.clone());
 
@@ -545,7 +546,7 @@ pub fn update_with_vcf(
             let ref_start = vcf_entry.ref_start;
             let sequence =
                 SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string())?;
-            let sequence_string = sequence.get_sequence(None, None);
+            let sequence_string = sequence.get_sequence(None, None)?;
 
             let source_path_id =
                 if let Some(source_path_id) = node_source_paths.get(&vcf_entry.path.id) {
@@ -557,7 +558,7 @@ pub fn update_with_vcf(
                             &mut path_cache,
                             &parent_block_group_id,
                             vcf_entry.path.name.clone(),
-                        );
+                        )?;
                         node_source_paths.insert(vcf_entry.path.id, parent_path.id);
                         parent_path.id
                     } else {

@@ -6,7 +6,9 @@ use std::{
 };
 
 use gen_core::{NodeIntervalBlock, range::Range};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path, sample::Sample};
+use gen_models::{
+    block_group::BlockGroup, db::GraphConnection, errors::PathError, path::Path, sample::Sample,
+};
 use itertools::Itertools;
 use thiserror::Error;
 
@@ -16,6 +18,8 @@ use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_s
 pub enum GfaDiffError {
     #[error("I/O error while writing GFA diff: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Path error while generating GFA diff: {0}")]
+    Path(#[from] PathError),
 }
 
 pub fn gfa_sample_diff(
@@ -80,15 +84,11 @@ pub fn gfa_sample_diff(
         let source_path_result = source_paths_by_name.get(path_name);
         let target_path_result = target_paths_by_name.get(path_name);
 
-        let has_source_path = source_path_result.is_some();
-        let has_target_path = target_path_result.is_some();
-
-        let mappings = if has_source_path && has_target_path {
-            source_path_result
-                .unwrap()
-                .find_block_mappings(conn, target_path_result.unwrap())
-        } else {
-            vec![]
+        let mappings = match (source_path_result, target_path_result) {
+            (Some(source_path), Some(target_path)) => {
+                source_path.find_block_mappings(conn, target_path)?
+            }
+            _ => vec![],
         };
 
         let mut source_ranges = vec![];
@@ -118,9 +118,8 @@ pub fn gfa_sample_diff(
             last_target_position = mapping.target_range.end;
         }
 
-        if has_source_path {
-            let source_path = source_path_result.unwrap();
-            let source_sequence = source_path.sequence(conn);
+        if let Some(source_path) = source_path_result {
+            let source_sequence = source_path.sequence(conn)?;
 
             let source_len = source_sequence.len() as i64;
             if last_source_position < source_len {
@@ -130,7 +129,7 @@ pub fn gfa_sample_diff(
                 });
             }
 
-            let source_node_blocks = source_path.node_block_partition(conn, source_ranges);
+            let source_node_blocks = source_path.node_block_partition(conn, source_ranges)?;
             let source_segments = segments_from_blocks(&source_node_blocks, &source_sequence);
             segments.extend(source_segments.iter().cloned());
 
@@ -142,9 +141,8 @@ pub fn gfa_sample_diff(
             paths.push(source_gfa_path);
         }
 
-        if has_target_path {
-            let target_path = target_path_result.unwrap();
-            let target_sequence = target_path.sequence(conn);
+        if let Some(target_path) = target_path_result {
+            let target_sequence = target_path.sequence(conn)?;
 
             let target_len = target_sequence.len() as i64;
             if last_target_position < target_len {
@@ -154,7 +152,7 @@ pub fn gfa_sample_diff(
                 });
             }
 
-            let target_node_blocks = target_path.node_block_partition(conn, target_ranges);
+            let target_node_blocks = target_path.node_block_partition(conn, target_ranges)?;
             let target_segments = segments_from_blocks(&target_node_blocks, &target_sequence);
             segments.extend(target_segments.iter().cloned());
 

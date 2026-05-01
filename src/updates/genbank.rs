@@ -49,9 +49,19 @@ where
                 if !locus.name.is_empty() {
                     seq_model = seq_model.name(&locus.name);
                 }
-                if let Some(ref mol_type) = locus.molecule_type {
-                    seq_model = seq_model.sequence_type(mol_type);
-                }
+                let sequence_type = if locus.circular {
+                    locus
+                        .molecule_type
+                        .as_ref()
+                        .map(|mol_type| format!("circular {mol_type}"))
+                        .unwrap_or_else(|| "circular".to_string())
+                } else {
+                    locus
+                        .molecule_type
+                        .clone()
+                        .unwrap_or_else(|| "DNA".to_string())
+                };
+                seq_model = seq_model.sequence_type(&sequence_type);
                 let sequence = seq_model.save(conn)?;
                 let wt_node_id = Node::create(
                     conn,
@@ -209,7 +219,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    let tree = path.intervaltree(conn);
+                    let tree = path.intervaltree(conn)?;
                     BlockGroup::insert_change(conn, &change, &tree).unwrap();
                 }
             }
