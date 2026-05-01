@@ -36,6 +36,25 @@ impl<'a> Capnp<'a> for ManifestOperationFileAddition {
     }
 }
 
+impl ManifestOperationFileAddition {
+    pub fn get_files_for_operation(
+        conn: &OperationsConnection,
+        operation_hash: &HashId,
+    ) -> Vec<Self> {
+        let query = "select fa.*, of.filename from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
+        let mut stmt = conn.prepare(query).unwrap();
+        stmt.query_map(rusqlite::params![operation_hash], |row| {
+            Ok(Self {
+                file_addition: FileAddition::process_row(row),
+                filename: row.get(4)?,
+            })
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestAnnotationFileAddition {
     pub file_addition: FileAddition,
@@ -315,18 +334,8 @@ impl<'a> ManifestGenerator<'a> {
 
             for hash in hashes.iter() {
                 if let Some(op) = operations_map.get(hash) {
-                    let query = "select fa.*, of.filename from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
-                    let mut stmt = self.conn.prepare(query).unwrap();
-                    let file_additions = stmt
-                        .query_map(rusqlite::params![op.hash], |row| {
-                            Ok(ManifestOperationFileAddition {
-                                file_addition: FileAddition::process_row(row),
-                                filename: row.get(4)?,
-                            })
-                        })
-                        .unwrap()
-                        .map(|row| row.unwrap())
-                        .collect::<Vec<_>>();
+                    let file_additions =
+                        ManifestOperationFileAddition::get_files_for_operation(self.conn, &op.hash);
                     let annotation_file_additions =
                         AnnotationFile::get_files_for_operation(self.conn, &op.hash)
                             .into_iter()
