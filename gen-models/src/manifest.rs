@@ -18,6 +18,12 @@ pub struct ManifestOperationFileAddition {
     pub filename: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestOperationFileAdditionError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+}
+
 impl<'a> Capnp<'a> for ManifestOperationFileAddition {
     type Builder = manifest_operation_file_addition::Builder<'a>;
     type Reader = manifest_operation_file_addition::Reader<'a>;
@@ -40,18 +46,17 @@ impl ManifestOperationFileAddition {
     pub fn get_files_for_operation(
         conn: &OperationsConnection,
         operation_hash: &HashId,
-    ) -> Vec<Self> {
+    ) -> Result<Vec<Self>, ManifestOperationFileAdditionError> {
         let query = "select fa.*, of.filename from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = conn.prepare(query)?;
         stmt.query_map(rusqlite::params![operation_hash], |row| {
             Ok(Self {
                 file_addition: FileAddition::process_row(row),
                 filename: row.get(4)?,
             })
-        })
-        .unwrap()
-        .map(|row| row.unwrap())
-        .collect()
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ManifestOperationFileAdditionError::from)
     }
 }
 
@@ -334,8 +339,9 @@ impl<'a> ManifestGenerator<'a> {
 
             for hash in hashes.iter() {
                 if let Some(op) = operations_map.get(hash) {
-                    let file_additions =
-                        ManifestOperationFileAddition::get_files_for_operation(self.conn, &op.hash);
+                    let file_additions = ManifestOperationFileAddition::get_files_for_operation(
+                        self.conn, &op.hash,
+                    )?;
                     let annotation_file_additions =
                         AnnotationFile::get_files_for_operation(self.conn, &op.hash)
                             .into_iter()
@@ -382,6 +388,8 @@ pub enum ManifestError {
     OperationNotFound(String),
     #[error("Branch not found")]
     BranchNotFound,
+    #[error("Manifest operation file addition error: {0}")]
+    ManifestOperationFileAdditionError(#[from] ManifestOperationFileAdditionError),
 }
 
 pub struct ManifestComparer;
@@ -400,6 +408,7 @@ impl ManifestComparer {
             .iter()
             .map(|op| &op.operation.hash)
             .collect();
+
         let ops2_hashes: std::collections::HashSet<_> = manifest2
             .operations
             .iter()
