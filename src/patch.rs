@@ -237,7 +237,12 @@ pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<
                 files: patch
                     .files
                     .iter()
-                    .map(|fa| OperationFile::new(fa.file_path.clone(), fa.file_type))
+                    .map(|fa| OperationFile {
+                        filename: OperationFile::new(fa.file_path.clone(), fa.file_type).filename,
+                        file_path: fa.file_path.clone(),
+                        file_type: fa.file_type,
+                        checksum_override: Some(fa.checksum),
+                    })
                     .collect::<Vec<_>>(),
                 description: "unknown".to_string(),
             },

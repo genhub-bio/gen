@@ -368,6 +368,7 @@ pub struct OperationFile {
     pub filename: String,
     pub file_path: String,
     pub file_type: FileTypes,
+    pub checksum_override: Option<HashId>,
 }
 
 impl OperationFile {
@@ -382,6 +383,7 @@ impl OperationFile {
             filename,
             file_path,
             file_type,
+            checksum_override: None,
         }
     }
 }
@@ -730,6 +732,9 @@ impl FileAddition {
         } else {
             workspace.repo_root()?.join(&self.file_path)
         };
+        if source_path == asset_path {
+            return Ok(());
+        }
         fs::copy(source_path, asset_path)?;
         Ok(())
     }

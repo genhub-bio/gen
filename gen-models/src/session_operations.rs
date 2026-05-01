@@ -71,7 +71,7 @@ pub fn end_operation(
                     operation_conn,
                     &op_file.file_path,
                     op_file.file_type,
-                    None,
+                    op_file.checksum_override,
                 ) {
                     Ok(fa) => fa,
                     Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
