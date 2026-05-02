@@ -52,14 +52,24 @@ impl RawPalette {
     }
 }
 
-/// Initialize the global theme from bundled JSON palettes.
-///
-/// Reads `GEN_THEME` env var: `"light"` → Catppuccin Latte, anything else → Catppuccin Mocha.
 pub fn init_theme() {
     let json = match std::env::var("GEN_THEME").ok().as_deref() {
-        Some("light") => include_str!("../themes/latte.json"),
-        _ => include_str!("../themes/mocha.json"),
+        Some("light") => include_str!("../../theme/latte.json"),
+        _ => include_str!("../../theme/mocha.json"),
     };
     let raw: RawPalette = serde_json::from_str(json).expect("bundled palette JSON is valid");
     set_theme(raw.to_theme());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RawPalette;
+
+    #[test]
+    fn bundled_palettes_parse() {
+        let latte = include_str!("../../theme/latte.json");
+        let mocha = include_str!("../../theme/mocha.json");
+        serde_json::from_str::<RawPalette>(latte).expect("latte.json is valid");
+        serde_json::from_str::<RawPalette>(mocha).expect("mocha.json is valid");
+    }
 }

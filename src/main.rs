@@ -13,7 +13,6 @@ use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use r#gen::{
     annotations::gff::propagate_gff,
-    base16::init_theme,
     commands::{
         Cli, Commands,
         cli_context::CliContext,
@@ -28,7 +27,9 @@ use r#gen::{
     graphs::graph_search::{GenGraphMatcher, GraphLocus, SeedIndex},
     operation_management,
     operation_management::{parse_patch_operations, pull, push},
-    patch, track_database,
+    patch,
+    theme::init_theme,
+    track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
