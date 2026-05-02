@@ -9,11 +9,9 @@ use gen_tui::{
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::VisualDetail,
     plotter::{NodeRenderer, NodeSizer},
-    theme::Theme,
+    theme::current_theme,
 };
-use ratatui::style::{Color, Style};
-
-use crate::theme::get_theme_color;
+use ratatui::style::Style;
 
 /// Labels for special start/end nodes
 pub mod label {
@@ -103,26 +101,21 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
         node_id: &GraphNode,
         detail_level: VisualDetail,
     ) {
-        let background_style = Style::default().bg(get_theme_color("node").unwrap_or_default());
-        let text_style = Style::default()
-            .bg(get_theme_color("node").unwrap_or(ratatui::style::Color::Blue))
-            .fg(get_theme_color("text").unwrap_or(ratatui::style::Color::White));
+        let theme = current_theme();
+        let background_style = Style::default().bg(theme[0x05]);
+        let text_style = Style::default().bg(theme[0x05]).fg(theme[0x00]);
 
         buffer.fill_rect(area, ' ');
         buffer.set_char_styled(area.left_center(), ' ', background_style);
 
         // Handle special start/end nodes (always show full label)
         if is_start_node(node_id.node_id) {
-            let edge_style = Style::default()
-                .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
-                .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
+            let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
             buffer.set_string_styled(area.left_center(), label::START, edge_style);
             return;
         }
         if is_end_node(node_id.node_id) {
-            let edge_style = Style::default()
-                .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue))
-                .fg(get_theme_color("edge").unwrap_or(ratatui::style::Color::White));
+            let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
             buffer.set_string_styled(area.left_center(), label::END, edge_style);
             return;
         }
@@ -130,9 +123,7 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
         match detail_level {
             VisualDetail::Minimal => {
                 // Base scale: Just show a simple glyph
-                let text_style = Style::default()
-                    .fg(get_theme_color("text").unwrap_or(ratatui::style::Color::White))
-                    .bg(get_theme_color("canvas").unwrap_or(ratatui::style::Color::Blue));
+                let text_style = Style::default().fg(theme[0x00]).bg(theme[0x05]);
                 buffer.set_string_styled(area.left_center(), &NODE_GLYPH.to_string(), text_style);
             }
             VisualDetail::Truncated => {
@@ -209,16 +200,7 @@ pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
     let node_sizer = GenGraphNodeSizer;
-    let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme {
-        canvas: get_theme_color("canvas").unwrap(),
-        node_fg: get_theme_color("text").unwrap(),
-        node_bg: get_theme_color("node").unwrap(),
-        edge_fg: get_theme_color("edge").unwrap(),
-        edge_bg: get_theme_color("canvas").unwrap(),
-        cursor_fg: get_theme_color("cursor_fg").unwrap(),
-        cursor_bg: get_theme_color("cursor_bg").unwrap(),
-        highlight: Color::Cyan,
-    });
+    let mut controller = GraphController::new(graph, node_sizer);
     controller.set_detail_level(VisualDetail::Truncated);
     controller.hide_cursor();
     controller

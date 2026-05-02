@@ -11,19 +11,15 @@ use gen_tui::{
     graph_controller::GraphController,
     layout::VisualDetail,
     plotter::{LineStyle, PathStyle},
-    theme::Theme,
+    theme::current_theme,
 };
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
-    style::Color,
     widgets::{Block, Borders},
 };
 
-use crate::{
-    theme::get_theme_color,
-    views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget},
-};
+use crate::views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget};
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
 fn get_path_nodes(
@@ -128,17 +124,7 @@ pub struct InlineGenGraphState<'a> {
 impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
-        let mut graph_controller =
-            GraphController::new(graph.clone(), node_sizer).with_theme(Theme {
-                canvas: Color::Reset,
-                node_fg: get_theme_color("text").unwrap(),
-                node_bg: get_theme_color("node").unwrap(),
-                edge_fg: get_theme_color("edge").unwrap(),
-                edge_bg: Color::Reset,
-                cursor_fg: get_theme_color("cursor_fg").unwrap(),
-                cursor_bg: get_theme_color("cursor_bg").unwrap(),
-                highlight: get_theme_color("cursor_highlight").unwrap(),
-            });
+        let mut graph_controller = GraphController::new(graph.clone(), node_sizer);
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
         let paths = Vec::new();
@@ -244,12 +230,9 @@ pub fn show_inline_gen_graph_widget(
                                 }
                                 KeyCode::Char('p') => {
                                     // Toggle path highlighting
-                                    let path_style = PathStyle::new(
-                                        get_theme_color("base09")
-                                            .expect("Theme should use base16 system"),
-                                    )
-                                    .with_line_style(LineStyle::Bold)
-                                    .with_merge_glyphs(true);
+                                    let path_style = PathStyle::new(current_theme()[0x09])
+                                        .with_line_style(LineStyle::Bold)
+                                        .with_merge_glyphs(true);
 
                                     if state.controller.has_highlight(&path_style) {
                                         state.controller.clear_highlight(&path_style);

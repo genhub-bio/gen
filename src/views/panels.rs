@@ -1,3 +1,4 @@
+use gen_tui::theme::current_theme;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -5,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
-use crate::{theme::get_theme_color, views::helpers::style_text};
+use crate::views::helpers::style_text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusMode {
@@ -174,14 +175,14 @@ where
 }
 
 pub fn render_status_bar(frame: &mut Frame, area: Rect, message: &str) {
+    let theme = current_theme();
     let status_bar_contents = format!("{message:^width$}", width = area.width as usize);
     let status_line = style_text(
         &status_bar_contents,
-        Style::default().fg(get_theme_color("text_muted").unwrap()),
-        Style::default().fg(get_theme_color("highlight").unwrap()),
+        Style::default().fg(theme[0x04]),
+        Style::default().fg(theme[0x07]),
     );
-    let status_bar = Paragraph::new(status_line)
-        .style(Style::default().bg(get_theme_color("statusbar").unwrap()));
+    let status_bar = Paragraph::new(status_line).style(Style::default().bg(theme[0x00]));
     frame.render_widget(status_bar, area);
 }
 

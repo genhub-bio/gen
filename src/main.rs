@@ -27,7 +27,9 @@ use r#gen::{
     graphs::graph_search::{GenGraphMatcher, GraphLocus, SeedIndex},
     operation_management,
     operation_management::{parse_patch_operations, pull, push},
-    patch, track_database,
+    patch,
+    theme::init_theme,
+    track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
@@ -905,6 +907,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_global_panic_hook();
+    init_theme();
 
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();

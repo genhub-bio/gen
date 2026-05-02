@@ -21,10 +21,7 @@ use gen_models::{
     operations::{Defaults, OperationFile, OperationInfo},
     traits::Query,
 };
-use gen_tui::{
-    graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    theme::Theme,
-};
+use gen_tui::{graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail};
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use rusqlite::{Connection, types::ValueRef};
 use serde::Serialize;
@@ -1368,7 +1365,7 @@ fn graph_render_frame(
 ) -> std::result::Result<String, Error> {
     let (conn, graph) = block_group_graph(&db_path, &block_group_id).map_err(Error::Other)?;
     let node_sizer = GenGraphNodeSizer;
-    let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme::default());
+    let mut controller = GraphController::new(graph, node_sizer);
     controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
     controller.hide_cursor();
     apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
@@ -1393,7 +1390,7 @@ fn graph_handle_click(
 ) -> std::result::Result<bool, Error> {
     let (_conn, graph) = block_group_graph(&db_path, &block_group_id).map_err(Error::Other)?;
     let node_sizer = GenGraphNodeSizer;
-    let mut controller = GraphController::new(graph, node_sizer).with_theme(Theme::default());
+    let mut controller = GraphController::new(graph, node_sizer);
     controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
     controller.hide_cursor();
     apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
