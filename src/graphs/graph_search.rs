@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 /// position 105 in the underlying stored sequence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GraphPos {
-    pub node: GraphNode,
-    /// Local offset within contained sequence slice: `0..=node.length()`.
+    pub block: GraphNode,
+    /// Local offset within `block`'s sequence slice: `0..=block.length()`.
     pub offset: usize,
 }
 
@@ -37,7 +37,7 @@ pub struct GraphLocus {
 }
 
 /// Biological interpretation of the sequences being searched.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum SequenceKind {
     /// Case-sensitive exact byte match.
     ///
@@ -45,27 +45,19 @@ pub enum SequenceKind {
     Exact,
     /// Double-stranded DNA search.
     ///
-    /// Case-insensitive (both sides uppercased). Searches the query as provided
-    /// and as its reverse complement. Uses IUPAC degenerate matching if the
-    /// query contains non-ACGT bases; otherwise uses normalized exact matching.
+    /// Case-insensitive. Searches the query as provided and as its reverse
+    /// complement. Uses IUPAC degenerate matching if the query contains
+    /// non-ACGT characters; otherwise uses case-insensitive exact matching.
+    #[default]
     Dna,
     /// Single-stranded DNA search.
     ///
-    /// Case-insensitive (both sides uppercased). Searches only the query as
-    /// provided. Uses IUPAC degenerate matching if the query contains non-ACGT
-    /// bases; otherwise uses normalized exact matching.
+    /// Case-insensitive. Searches only the query as provided. Uses IUPAC
+    /// degenerate matching if the query contains non-ACGT characters; otherwise uses
+    /// case-insensitive exact matching.
     SsDna,
-    /// Protein or other non-nucleotide sequence search.
-    ///
-    /// Case-insensitive (both sides uppercased). No IUPAC expansion or reverse
-    /// complement.
+    /// Protein search, case-insensitive.
     Protein,
-}
-
-impl Default for SequenceKind {
-    fn default() -> Self {
-        Self::Dna
-    }
 }
 
 impl SequenceKind {
@@ -82,21 +74,16 @@ impl SequenceKind {
     fn matcher_for_query(self, query: &[u8]) -> fn(u8, u8) -> bool {
         match self {
             Self::Exact => |q: u8, g: u8| q == g,
-            Self::Protein => normalized_matches,
+            Self::Protein => |q, g| q.eq_ignore_ascii_case(&g),
             Self::Dna | Self::SsDna => {
                 if query_contains_degenerate_iupac(query) {
                     degenerate_matches
                 } else {
-                    normalized_matches
+                    |q, g| q.eq_ignore_ascii_case(&g)
                 }
             }
         }
     }
-}
-
-#[inline]
-fn normalized_matches(query_byte: u8, graph_byte: u8) -> bool {
-    query_byte.eq_ignore_ascii_case(&graph_byte)
 }
 
 /// Complete search state: which query byte to match next, and where we are in
@@ -120,14 +107,9 @@ enum StepResult {
 }
 
 #[inline]
-fn normalize_nucleotide_byte(byte: u8) -> u8 {
-    byte.to_ascii_uppercase()
-}
-
-#[inline]
 fn is_degenerate_iupac(byte: u8) -> bool {
     matches!(
-        normalize_nucleotide_byte(byte),
+        byte.to_ascii_uppercase(),
         b'R' | b'Y' | b'S' | b'W' | b'K' | b'M' | b'B' | b'D' | b'H' | b'V' | b'N'
     )
 }
@@ -143,8 +125,8 @@ fn query_contains_degenerate_iupac(query: &[u8]) -> bool {
 /// interpreted in the query only; unknown query codes fall back to exact match.
 #[inline]
 fn degenerate_matches(query_byte: u8, graph_byte: u8) -> bool {
-    let query_byte = normalize_nucleotide_byte(query_byte);
-    let graph_byte = normalize_nucleotide_byte(graph_byte);
+    let query_byte = query_byte.to_ascii_uppercase();
+    let graph_byte = graph_byte.to_ascii_uppercase();
 
     match query_byte {
         b'A' => graph_byte == b'A',
@@ -171,23 +153,23 @@ fn degenerate_matches(query_byte: u8, graph_byte: u8) -> bool {
 fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
-        .map(|&base| match base {
-            b'A' | b'a' => b'T',
-            b'T' | b't' => b'A',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            b'U' | b'u' => b'A',
-            b'N' | b'n' => b'N',
-            b'R' | b'r' => b'Y',
-            b'Y' | b'y' => b'R',
-            b'S' | b's' => b'S',
-            b'W' | b'w' => b'W',
-            b'K' | b'k' => b'M',
-            b'M' | b'm' => b'K',
-            b'B' | b'b' => b'V',
-            b'V' | b'v' => b'B',
-            b'D' | b'd' => b'H',
-            b'H' | b'h' => b'D',
+        .map(|&base| match base.to_ascii_uppercase() {
+            b'A' => b'T',
+            b'T' => b'A',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'U' => b'A',
+            b'N' => b'N',
+            b'R' => b'Y',
+            b'Y' => b'R',
+            b'S' => b'S',
+            b'W' => b'W',
+            b'K' => b'M',
+            b'M' => b'K',
+            b'B' => b'V',
+            b'V' => b'B',
+            b'D' => b'H',
+            b'H' => b'D',
             _ => base,
         })
         .collect()
@@ -318,7 +300,6 @@ impl GenGraphMatcher {
     /// bases. Returns an error if the query contains degenerate bases, because an
     /// exact seed lookup would silently miss valid matches.
     ///
-    /// Normalization of the seed lookup and full match follows `seed_index.normalized`.
     pub fn find_all_with_seed_index(
         &self,
         seed_index: &SeedIndex,
@@ -333,7 +314,7 @@ impl GenGraphMatcher {
         }
 
         let matcher: fn(u8, u8) -> bool = if seed_index.normalized {
-            normalized_matches
+            |q, g| q.eq_ignore_ascii_case(&g)
         } else {
             |q: u8, g: u8| q == g
         };
@@ -394,7 +375,7 @@ impl GenGraphMatcher {
     fn contains_from(&self, start: GraphPos, query: &[u8], matcher: fn(u8, u8) -> bool) -> bool {
         let initial = State {
             q_idx: 0,
-            block: start.node,
+            block: start.block,
             offset: start.offset,
         };
 
@@ -440,11 +421,11 @@ impl GenGraphMatcher {
         let initial = TraceState {
             state: State {
                 q_idx: 0,
-                block: start.node,
+                block: start.block,
                 offset: start.offset,
             },
             start_offset: start.offset,
-            path: vec![start.node],
+            path: vec![start.block],
         };
 
         let mut stack = vec![initial];
@@ -529,7 +510,10 @@ impl GenGraphMatcher {
         for node in self.graph.nodes() {
             let len = self.graph_node_text(node).len();
             for offset in 0..len {
-                starts.push(GraphPos { node, offset });
+                starts.push(GraphPos {
+                    block: node,
+                    offset,
+                });
             }
         }
 
@@ -576,68 +560,31 @@ struct SeedIndexHeader {
 }
 
 /// Errors from indexed search.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SeedIndexSearchError {
     /// The seed index does not support degenerate (IUPAC) query bases.
+    #[error("seed index search does not support degenerate (IUPAC) query bases")]
     UnsupportedQuery,
 }
 
-impl std::fmt::Display for SeedIndexSearchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnsupportedQuery => write!(
-                f,
-                "seed index search does not support degenerate (IUPAC) query bases"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SeedIndexSearchError {}
-
 /// Errors from `SeedIndex` serialization/deserialization.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SeedIndexIoError {
-    Io(std::io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("encode error: {0}")]
     Encode(postcard::Error),
+    #[error("decode error: {0}")]
     Decode(postcard::Error),
     /// File is shorter than expected.
+    #[error("file truncated or malformed")]
     Truncated,
     /// Header `version` does not match `SEED_INDEX_VERSION`.
-    VersionMismatch {
-        got: u32,
-        expected: u32,
-    },
+    #[error("version mismatch: got {got}, expected {expected}")]
+    VersionMismatch { got: u32, expected: u32 },
     /// Header `k` does not match the requested k-mer length.
-    KMismatch {
-        got: usize,
-        expected: usize,
-    },
-}
-
-impl std::fmt::Display for SeedIndexIoError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "I/O error: {e}"),
-            Self::Encode(e) => write!(f, "encode error: {e}"),
-            Self::Decode(e) => write!(f, "decode error: {e}"),
-            Self::Truncated => write!(f, "file truncated or malformed"),
-            Self::VersionMismatch { got, expected } => {
-                write!(f, "version mismatch: got {got}, expected {expected}")
-            }
-            Self::KMismatch { got, expected } => {
-                write!(f, "k mismatch: got {got}, expected {expected}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SeedIndexIoError {}
-
-impl From<std::io::Error> for SeedIndexIoError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
+    #[error("k mismatch: got {got}, expected {expected}")]
+    KMismatch { got: usize, expected: usize },
 }
 
 impl SeedIndex {
@@ -731,14 +678,14 @@ impl SeedIndex {
     ) -> Vec<Vec<u8>> {
         #[derive(Clone)]
         struct Frame {
-            node: GraphNode,
+            block: GraphNode,
             offset: usize,
             buf: Vec<u8>,
         }
 
         let mut out = Vec::new();
         let mut stack = vec![Frame {
-            node: start.node,
+            block: start.block,
             offset: start.offset,
             buf: Vec::with_capacity(k),
         }];
@@ -749,7 +696,7 @@ impl SeedIndex {
                 continue;
             }
 
-            let text = matcher.graph_node_text(frame.node);
+            let text = matcher.graph_node_text(frame.block);
 
             if frame.offset < text.len() {
                 let mut next = frame.clone();
@@ -766,10 +713,10 @@ impl SeedIndex {
 
             for next_node in matcher
                 .graph
-                .neighbors_directed(frame.node, Direction::Outgoing)
+                .neighbors_directed(frame.block, Direction::Outgoing)
             {
                 let mut next = frame.clone();
-                next.node = next_node;
+                next.block = next_node;
                 next.offset = 0;
                 stack.push(next);
             }
@@ -811,5 +758,394 @@ fn validate_seed_index_header_version(header: &SeedIndexHeader) -> Result<(), Se
 }
 
 #[cfg(test)]
-#[path = "graph_search_tests.rs"]
-mod tests;
+mod tests {
+    use gen_models::{block_group::BlockGroup, collection::Collection};
+
+    use super::*;
+    use crate::test_helpers::{setup_block_group, setup_gen};
+
+    fn test_matcher() -> GenGraphMatcher {
+        let ctx = setup_gen();
+        let conn = ctx.graph().conn();
+        Collection::create(conn, "test");
+        let (block_group_id, _path) = setup_block_group(conn);
+        let graph = BlockGroup::get_graph(conn, &block_group_id);
+        GenGraphMatcher::new(conn, graph)
+    }
+
+    fn test_protein_matcher() -> GenGraphMatcher {
+        let ctx = setup_gen();
+        let conn = ctx.graph().conn();
+        Collection::create(conn, "test");
+        let (block_group_id, _path) = setup_block_group(conn);
+        let graph = BlockGroup::get_graph(conn, &block_group_id);
+        GenGraphMatcher::new_protein(conn, graph)
+    }
+
+    fn test_exact_matcher() -> GenGraphMatcher {
+        let ctx = setup_gen();
+        let conn = ctx.graph().conn();
+        Collection::create(conn, "test");
+        let (block_group_id, _path) = setup_block_group(conn);
+        let graph = BlockGroup::get_graph(conn, &block_group_id);
+        GenGraphMatcher::new_with_sequence_kind(conn, graph, SequenceKind::Exact)
+    }
+
+    #[test]
+    fn reverse_complement_basic() {
+        assert_eq!(reverse_complement(b"ACGT"), b"ACGT");
+        assert_eq!(reverse_complement(b"AAAA"), b"TTTT");
+        assert_eq!(reverse_complement(b"TTTT"), b"AAAA");
+        assert_eq!(reverse_complement(b"AACGT"), b"ACGTT");
+        assert_eq!(reverse_complement(b""), b"");
+    }
+
+    #[test]
+    fn reverse_complement_lowercase() {
+        assert_eq!(reverse_complement(b"acgt"), b"ACGT");
+        assert_eq!(reverse_complement(b"aatt"), b"AATT");
+    }
+
+    #[test]
+    fn reverse_complement_degenerate_codes() {
+        assert_eq!(reverse_complement(b"RYSWKMBVDH"), b"DHBVKMWSRY");
+        assert_eq!(reverse_complement(b"ry"), b"RY");
+        assert_eq!(reverse_complement(b"ACGR"), b"YCGT");
+    }
+
+    #[test]
+    fn reverse_complement_uracil() {
+        assert_eq!(reverse_complement(b"U"), b"A");
+        assert_eq!(reverse_complement(b"AU"), b"AT");
+    }
+
+    #[test]
+    fn degenerate_matches_standard_bases() {
+        assert!(degenerate_matches(b'A', b'A'));
+        assert!(degenerate_matches(b'C', b'C'));
+        assert!(degenerate_matches(b'G', b'G'));
+        assert!(degenerate_matches(b'T', b'T'));
+
+        assert!(!degenerate_matches(b'A', b'C'));
+        assert!(!degenerate_matches(b'C', b'G'));
+        assert!(!degenerate_matches(b'G', b'T'));
+        assert!(!degenerate_matches(b'T', b'A'));
+    }
+
+    #[test]
+    fn degenerate_matches_degenerate_codes() {
+        assert!(degenerate_matches(b'N', b'A'));
+        assert!(degenerate_matches(b'N', b'C'));
+        assert!(degenerate_matches(b'N', b'G'));
+        assert!(degenerate_matches(b'N', b'T'));
+
+        assert!(degenerate_matches(b'R', b'A'));
+        assert!(degenerate_matches(b'R', b'G'));
+        assert!(!degenerate_matches(b'R', b'C'));
+        assert!(!degenerate_matches(b'R', b'T'));
+
+        assert!(degenerate_matches(b'Y', b'C'));
+        assert!(degenerate_matches(b'Y', b'T'));
+        assert!(!degenerate_matches(b'Y', b'A'));
+        assert!(!degenerate_matches(b'Y', b'G'));
+
+        assert!(degenerate_matches(b'B', b'C'));
+        assert!(degenerate_matches(b'B', b'G'));
+        assert!(degenerate_matches(b'B', b'T'));
+        assert!(!degenerate_matches(b'B', b'A'));
+    }
+
+    #[test]
+    fn degenerate_matches_unknown_falls_back_to_exact() {
+        assert!(degenerate_matches(b'X', b'X'));
+        assert!(degenerate_matches(b'!', b'!'));
+        assert!(!degenerate_matches(b'X', b'A'));
+        assert!(!degenerate_matches(b'!', b'A'));
+    }
+
+    #[test]
+    fn query_contains_degenerate_iupac_detects_only_degenerate_codes() {
+        assert!(!query_contains_degenerate_iupac(b"ACGT"));
+        assert!(!query_contains_degenerate_iupac(b"acgt"));
+        assert!(query_contains_degenerate_iupac(b"ACGN"));
+        assert!(query_contains_degenerate_iupac(b"ry"));
+    }
+
+    #[test]
+    fn contains_exact_within_single_node() {
+        let matcher = test_matcher();
+
+        assert!(matcher.contains(b"AAAA"));
+        assert!(matcher.contains(b"TTTT"));
+        assert!(matcher.contains(b"CCCC"));
+        assert!(matcher.contains(b"GGGG"));
+    }
+
+    #[test]
+    fn contains_spanning_node_boundary() {
+        let matcher = test_matcher();
+
+        assert!(matcher.contains(b"AAAATTTT"));
+        assert!(matcher.contains(b"TTTTCCCC"));
+    }
+
+    #[test]
+    fn contains_absent_exact_sequence() {
+        let matcher = test_matcher();
+
+        assert!(!matcher.contains(b"ACGT"));
+    }
+
+    #[test]
+    fn contains_empty_query_always_true() {
+        let matcher = test_matcher();
+
+        assert!(matcher.contains(b""));
+    }
+
+    #[test]
+    fn protein_matcher_does_not_search_reverse_complement() {
+        let matcher = test_protein_matcher();
+
+        // AAAAACCCCC is absent. Its reverse complement, GGGGGTTTTT, is present
+        // across the G-node and T-node, but protein mode does not search reverse
+        // complements.
+        assert!(!matcher.contains(b"AAAAACCCCC"));
+    }
+
+    #[test]
+    fn contains_iupac_n_matches_any_base() {
+        let matcher = test_matcher();
+
+        assert!(matcher.contains(b"NNNN"));
+    }
+
+    #[test]
+    fn protein_matcher_does_not_use_iupac_matching() {
+        let matcher = test_protein_matcher();
+
+        assert!(!matcher.contains(b"NNNN"));
+        assert!(!matcher.contains(b"RRRR"));
+        assert!(!matcher.contains(b"YYYY"));
+    }
+
+    #[test]
+    fn find_all_single_node_match() {
+        let matcher = test_matcher();
+
+        let hits = matcher.find_all(b"AAAAAAAAAA");
+        assert_eq!(hits.len(), 2);
+
+        assert!(
+            hits.iter().any(|hit| {
+                hit.start_offset == 0 && hit.end_offset == 10 && hit.blocks.len() == 1
+            })
+        );
+    }
+
+    #[test]
+    fn find_all_spanning_match() {
+        let matcher = test_matcher();
+
+        let hits = matcher.find_all(b"AAAAATTTTT");
+        assert_eq!(hits.len(), 2);
+
+        assert!(
+            hits.iter().any(|hit| {
+                hit.blocks.len() == 2 && hit.start_offset == 5 && hit.end_offset == 5
+            })
+        );
+    }
+
+    #[test]
+    fn find_all_no_match_returns_empty() {
+        let matcher = test_matcher();
+
+        assert!(matcher.find_all(b"ACGT").is_empty());
+    }
+
+    #[test]
+    fn find_all_empty_query_returns_empty() {
+        let matcher = test_matcher();
+
+        assert!(matcher.find_all(b"").is_empty());
+    }
+
+    #[test]
+    fn find_all_iupac_n_matches_each_node() {
+        let matcher = test_matcher();
+
+        let hits = matcher.find_all(b"NNNNNNNNNN");
+        assert_eq!(hits.len(), 62);
+    }
+
+    #[test]
+    fn seed_index_build_and_find() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        assert_eq!(index.k, 4);
+        assert!(index.table.contains_key(b"AAAA".as_ref()));
+        assert!(index.table.contains_key(b"TTTT".as_ref()));
+        assert!(index.table.contains_key(b"CCCC".as_ref()));
+        assert!(index.table.contains_key(b"GGGG".as_ref()));
+        assert!(index.table.contains_key(b"ATTT".as_ref()));
+    }
+
+    #[test]
+    fn seed_index_find_all_with_index_matches_forward_search() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        let query = b"AAAAATTTTT";
+        let via_index = matcher.find_all_with_seed_index(&index, query).unwrap();
+        assert_eq!(via_index.len(), 1);
+    }
+
+    #[test]
+    fn seed_index_find_all_absent_query_empty() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        let hits = matcher.find_all_with_seed_index(&index, b"ACGT").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn seed_index_short_query_falls_back_to_forward_find_all() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        let via_index = matcher.find_all_with_seed_index(&index, b"AA").unwrap();
+        assert_eq!(via_index.len(), 9);
+    }
+
+    #[test]
+    fn seed_index_rejects_degenerate_query() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        let err = matcher
+            .find_all_with_seed_index(&index, b"ATGN")
+            .unwrap_err();
+        assert_eq!(err, SeedIndexSearchError::UnsupportedQuery);
+    }
+
+    #[test]
+    fn seed_index_roundtrip_bytes() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        let bytes = index.to_bytes_with_header().unwrap();
+        let loaded = SeedIndex::from_bytes_with_header(&bytes, 4).unwrap();
+        assert_eq!(loaded.k, index.k);
+        assert_eq!(loaded.normalized, index.normalized);
+        assert_eq!(loaded.table.len(), index.table.len());
+    }
+
+    #[test]
+    fn seed_index_error_cases() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        let bytes = index.to_bytes_with_header().unwrap();
+
+        assert!(matches!(
+            SeedIndex::from_bytes_with_header(&bytes[..2], 4),
+            Err(SeedIndexIoError::Truncated)
+        ));
+        assert!(matches!(
+            SeedIndex::from_bytes_with_header(&bytes, 8),
+            Err(SeedIndexIoError::KMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn seed_index_save_and_load_path() {
+        let matcher = test_matcher();
+
+        let index = SeedIndex::build(&matcher, 4, true);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        index.save_to_path(tmp.path()).unwrap();
+        let loaded = SeedIndex::load_from_path(tmp.path()).unwrap();
+        assert_eq!(loaded.k, index.k);
+        assert_eq!(loaded.normalized, index.normalized);
+        assert_eq!(loaded.table.len(), index.table.len());
+    }
+
+    // --- Case sensitivity tests ---
+    // The test graph contains uppercase-only sequences: AAAAAAAAAA, TTTTTTTTTT,
+    // CCCCCCCCCC, GGGGGGGGGG.
+
+    #[test]
+    fn exact_matcher_matches_uppercase_query() {
+        let matcher = test_exact_matcher();
+        assert!(matcher.contains(b"AAAA"));
+        assert!(matcher.contains(b"TTTT"));
+    }
+
+    #[test]
+    fn exact_matcher_rejects_lowercase_query() {
+        let matcher = test_exact_matcher();
+        assert!(!matcher.contains(b"aaaa"));
+        assert!(!matcher.contains(b"tttt"));
+        assert!(!matcher.contains(b"cccc"));
+        assert!(!matcher.contains(b"gggg"));
+    }
+
+    #[test]
+    fn exact_matcher_does_not_reverse_complement() {
+        let matcher = test_exact_matcher();
+        // The graph goes A→T→C→G. GGGGGAAAAA is absent in the forward direction;
+        // its RC (TTTTTCCCCC) spans the T→C boundary and IS present. The DNA
+        // matcher finds it via RC; Exact must not.
+        assert!(test_matcher().contains(b"GGGGGAAAAA")); // DNA finds via RC
+        assert!(!matcher.contains(b"GGGGGAAAAA")); // Exact does not
+    }
+
+    #[test]
+    fn dna_matcher_is_case_insensitive() {
+        let matcher = test_matcher();
+        assert!(matcher.contains(b"aaaa"));
+        assert!(matcher.contains(b"tttt"));
+        assert!(matcher.contains(b"cccc"));
+        assert!(matcher.contains(b"gggg"));
+        assert!(matcher.contains(b"AaAa"));
+    }
+
+    #[test]
+    fn protein_matcher_is_case_insensitive() {
+        let matcher = test_protein_matcher();
+        assert!(matcher.contains(b"aaaa"));
+        assert!(matcher.contains(b"AAAA"));
+        assert!(matcher.contains(b"cccc"));
+        assert!(matcher.contains(b"CCCC"));
+    }
+
+    #[test]
+    fn seed_index_normalized_matches_lowercase_query() {
+        let matcher = test_matcher();
+        let index = SeedIndex::build(&matcher, 4, true);
+        // lowercase query should be normalized and hit the uppercase index keys
+        let hits = matcher
+            .find_all_with_seed_index(&index, b"aaaaaaaaaa")
+            .unwrap();
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn seed_index_not_normalized_misses_lowercase_query() {
+        let matcher = test_exact_matcher();
+        let index = SeedIndex::build(&matcher, 4, false);
+        // index keys are raw uppercase; lowercase seed won't match
+        let hits = matcher
+            .find_all_with_seed_index(&index, b"aaaaaaaaaa")
+            .unwrap();
+        assert!(hits.is_empty());
+        // uppercase query does match
+        let hits = matcher
+            .find_all_with_seed_index(&index, b"AAAAAAAAAA")
+            .unwrap();
+        assert!(!hits.is_empty());
+    }
+}

@@ -70,6 +70,19 @@ impl Workspace {
         ensure_dir(&path);
         path
     }
+
+    pub fn find_search_index(&self) -> Option<PathBuf> {
+        self.find_gen_dir().map(|d| d.join("search_index"))
+    }
+
+    pub fn ensure_search_index(&self) -> Result<PathBuf, ConfigError> {
+        let dir = self
+            .find_gen_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?
+            .join("search_index");
+        ensure_dir(&dir);
+        Ok(dir)
+    }
 }
 
 fn ensure_dir(path: &Path) {

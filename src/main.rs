@@ -57,25 +57,6 @@ use itertools::Itertools;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
-// Format a match's path as "[hash:start-end, ...]" with 12-char node hash prefixes.
-// start/end are the node's own coordinates in the reference sequence.
-fn fmt_match_path(m: &GraphLocus) -> String {
-    let parts: Vec<String> = m
-        .blocks
-        .iter()
-        .map(|node| {
-            let hash = format!("{}", node.node_id);
-            format!(
-                "{}:{}-{}",
-                &hash[..12],
-                node.sequence_start,
-                node.sequence_end
-            )
-        })
-        .collect();
-    format!("[{}]", parts.join(", "))
-}
-
 fn get_default_collection(conn: &OperationsConnection) -> Result<String, rusqlite::Error> {
     let mut stmt = conn.prepare("select collection_name from defaults where id = 1")?;
     Ok(stmt
@@ -654,10 +635,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 None => Collection::get_block_groups(graph_conn, &collection_name),
             };
             let index_dir = workspace
-                .find_gen_dir()
-                .ok_or("No .gen directory found. Run 'gen init' first.")?
-                .join("search_index");
-            std::fs::create_dir_all(&index_dir)?;
+                .ensure_search_index()
+                .map_err(|_| "No .gen directory found. Run 'gen init' first.")?;
             for bg in block_groups {
                 let graph = BlockGroup::get_graph(graph_conn, &bg.id);
                 let matcher = GenGraphMatcher::new(graph_conn, graph);
@@ -678,9 +657,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 None => Collection::get_block_groups(graph_conn, &collection_name),
             };
             let index_dir = workspace
-                .find_gen_dir()
-                .ok_or("No .gen directory found. Run 'gen init' first.")?
-                .join("search_index");
+                .find_search_index()
+                .ok_or("No .gen directory found. Run 'gen init' first.")?;
             if !index_dir.exists() {
                 println!("No search index cache found.");
                 return Ok(());
@@ -708,7 +686,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .collect(),
                 (None, None) => BlockGroup::all(graph_conn),
             };
-            let index_dir = workspace.find_gen_dir().map(|d| d.join("search_index"));
+            let index_dir = workspace.find_search_index();
             let query_bytes = query.as_bytes();
             println!("sample\tgraph\tblocks\toffset");
             for bg in block_groups {
@@ -723,11 +701,24 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|idx| matcher.find_all_with_seed_index(&idx, query_bytes))
                     .unwrap_or_else(|| Ok(matcher.find_all(query_bytes)))?;
                 for m in matches {
+                    let block_strings: Vec<String> = m
+                        .blocks
+                        .iter()
+                        .map(|node| {
+                            let hash = format!("{}", node.node_id);
+                            format!(
+                                "{}:{}-{}",
+                                &hash[..12],
+                                node.sequence_start,
+                                node.sequence_end
+                            )
+                        })
+                        .collect();
                     println!(
-                        "{}\t{}\t{}\t{}",
+                        "{}\t{}\t[{}]\t{}",
                         bg.sample_name,
                         bg.name,
-                        fmt_match_path(&m),
+                        block_strings.join(", "),
                         m.start_offset
                     );
                 }

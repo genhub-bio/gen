@@ -58,12 +58,6 @@ impl<C> DbHandle<C> {
 pub type GraphHandle = DbHandle<GraphConnection>;
 pub type OperationsHandle = DbHandle<OperationsConnection>;
 
-impl DbHandle<GraphConnection> {
-    pub fn path(&self) -> Option<&std::path::Path> {
-        self.conn.as_ref().0.path().map(std::path::Path::new)
-    }
-}
-
 #[derive(Clone)]
 pub struct DbContext {
     workspace: Arc<Workspace>,
