@@ -65,19 +65,20 @@ pub fn update_with_fasta(
 
     let mut target_states = target_block_groups
         .iter()
-        .map(|target_block_group| {
+        .map(|target_block_group| -> Result<_, FastaError> {
             let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-            let interval_tree = path.intervaltree(conn);
-            TargetBlockGroupState {
+            let interval_tree = path.intervaltree(conn)?;
+            Ok(TargetBlockGroupState {
                 block_group_id: target_block_group.id,
                 path,
                 interval_tree,
                 first_node: None,
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut change_count = 0;
+
     for (index, result) in fasta_reader.records().enumerate() {
         let record = result?;
         let sequence = str::from_utf8(record.sequence().as_ref()).unwrap();
@@ -117,7 +118,7 @@ pub fn update_with_fasta(
                 let seq = Sequence::new()
                     .sequence_type("DNA")
                     .sequence(sequence)
-                    .save(conn);
+                    .save(conn)?;
                 let node_id = Node::create(
                     conn,
                     &seq.hash,
@@ -128,7 +129,7 @@ pub fn update_with_fasta(
                         ref_end = seq.length,
                         sequence_hash = seq.hash
                     )),
-                );
+                )?;
 
                 let path_block = PathBlock {
                     node_id,
@@ -159,7 +160,6 @@ pub fn update_with_fasta(
                     state.first_node = None;
                 }
             }
-
             change_count += 1;
         }
     }
@@ -189,7 +189,7 @@ pub fn update_with_fasta(
                     end_coordinate,
                     &edge_to_new_node,
                     &edge_from_new_node,
-                );
+                )?;
             }
         }
     }
@@ -336,11 +336,11 @@ mod tests {
         let child_path = BlockGroup::get_current_path(conn, &child_blockgroup);
         let other_path = BlockGroup::get_current_path(conn, &other_blockgroup);
         assert_eq!(
-            child_path.sequence(conn),
+            child_path.sequence(conn).unwrap(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
         );
         assert_eq!(
-            other_path.sequence(conn),
+            other_path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
@@ -829,7 +829,7 @@ mod tests {
 
         let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
         assert_eq!(
-            latest_path.sequence(conn),
+            latest_path.sequence(conn).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
     }

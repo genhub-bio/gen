@@ -11,6 +11,8 @@ use crate::{db::OperationsConnection, gen_models_capnp::gen_database, traits::*}
 pub enum GenDatabaseError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Duplicate entry with uuid: {0}")]
+    Duplicate(String),
 }
 
 #[derive(Clone, Debug, Eq, Hash, Serialize, Deserialize, PartialEq)]
@@ -64,15 +66,25 @@ impl GenDatabase {
         db_uuid: &str,
         name: &str,
         path: &str,
-    ) -> SQLResult<GenDatabase> {
+    ) -> Result<GenDatabase, GenDatabaseError> {
         let query = "INSERT INTO gen_databases (db_uuid, name, path) VALUES (?1, ?2, ?3);";
-        let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![db_uuid, name, path])?;
-        Ok(GenDatabase {
-            db_uuid: db_uuid.to_string(),
-            name: name.to_string(),
-            path: path.to_string(),
-        })
+        let mut stmt = match conn.prepare(query) {
+            Ok(s) => s,
+            Err(e) => return Err(GenDatabaseError::DatabaseError(e)),
+        };
+        match stmt.execute(params![db_uuid, name, path]) {
+            Ok(_) => Ok(GenDatabase {
+                db_uuid: db_uuid.to_string(),
+                name: name.to_string(),
+                path: path.to_string(),
+            }),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(GenDatabaseError::Duplicate(db_uuid.to_string()))
+            }
+            Err(e) => Err(GenDatabaseError::DatabaseError(e)),
+        }
     }
 
     pub fn delete_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
@@ -104,26 +116,20 @@ impl GenDatabase {
         db_uuid: &str,
         name: &str,
         path: &str,
-    ) -> SQLResult<GenDatabase> {
+    ) -> Result<GenDatabase, GenDatabaseError> {
         match GenDatabase::create(conn, db_uuid, name, path) {
             Ok(new) => Ok(new),
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    match GenDatabase::get(
-                        conn,
-                        "select * from gen_databases where db_uuid = ?1 AND name = ?2 AND path = ?3",
-                        params![db_uuid, name, path],
-                    ) {
-                        Ok(result) => Ok(result),
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    panic!("something bad happened querying the database")
+            Err(GenDatabaseError::Duplicate(_)) => {
+                match GenDatabase::get(
+                    conn,
+                    "select * from gen_databases where db_uuid = ?1 AND name = ?2 AND path = ?3",
+                    params![db_uuid, name, path],
+                ) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Err(GenDatabaseError::DatabaseError(e)),
                 }
             }
-            Err(_) => {
-                panic!("something bad happened.")
-            }
+            Err(e) => Err(e),
         }
     }
 

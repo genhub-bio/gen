@@ -44,16 +44,15 @@ use gen_models::{
     collection::Collection,
     db::{DbContext, OperationsConnection},
     errors::RemoteError,
-    file_types::FileTypes,
     metadata,
     operations::{
-        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
+        add_files_operation, parse_hash,
     },
     reference_alias::ReferenceAlias,
     sample::Sample,
     traits::Query,
 };
-use itertools::Itertools;
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
@@ -530,7 +529,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let patch_path = Path::new(&patch);
             let mut f = File::open(patch_path)?;
             let patches = patch::load_patches(&mut f);
-            let diagrams = view_patches(&workspace, &patches);
+            let diagrams = view_patches(&workspace, &patches)?;
             for (patch_hash, patch_diagrams) in diagrams.iter() {
                 for (bg_id, dot) in patch_diagrams.iter() {
                     let path = if let Some(ref p) = prefix {
@@ -619,6 +618,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 message.as_deref(),
             )?;
             println!("Annotation file added in operation {}", operation.hash);
+            Ok(())
+        }
+        Some(Commands::AddFile { files, message }) => {
+            let operation = add_files_operation(&db_context, &files, message.as_deref())?;
+            println!("Files added in operation {}", operation.hash);
             Ok(())
         }
         Some(Commands::BuildIndex {
@@ -786,7 +790,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     format!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
                 })?;
             let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
-            let sequence = path.sequence(graph_conn);
+            let sequence = path.sequence(graph_conn)?;
             if end_coordinate == -1 {
                 end_coordinate = sequence.len() as i64;
             }

@@ -226,7 +226,14 @@ impl GenGraphMatcher {
         let mut node_sequences: HashMap<HashId, Vec<u8>> =
             Node::get_sequences_by_node_ids(conn, &node_ids)
                 .into_iter()
-                .map(|(node_id, seq)| (node_id, seq.get_sequence(None, None).into_bytes()))
+                .map(|(node_id, seq)| {
+                    (
+                        node_id,
+                        seq.get_sequence(None, None)
+                            .expect("failed to get sequence")
+                            .into_bytes(),
+                    )
+                })
                 .collect();
 
         // PATH_START and PATH_END have empty sequences.

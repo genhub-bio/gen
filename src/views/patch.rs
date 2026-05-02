@@ -8,9 +8,16 @@ use gen_core::{
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{
-    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, db::DbContext, edge::Edge,
-    errors::OperationError, node::Node, operations::Operation, sequence::Sequence,
-    session_operations::DependencyModels, traits::Query,
+    block_group_edge::BlockGroupEdge,
+    changesets::ChangesetModels,
+    db::DbContext,
+    edge::Edge,
+    errors::OperationError,
+    node::Node,
+    operations::Operation,
+    sequence::{Sequence, SequenceError},
+    session_operations::DependencyModels,
+    traits::Query,
 };
 use html_escape;
 use itertools::Itertools;
@@ -198,7 +205,7 @@ pub fn get_change_graph(
 pub fn view_patches(
     workspace: &Workspace,
     patches: &[OperationPatch],
-) -> HashMap<HashId, HashMap<HashId, String>> {
+) -> Result<HashMap<HashId, HashMap<HashId, String>>, SequenceError> {
     // For each blockgroup in a patch, a .dot file is generated showing how the base sequence
     // has been updated.
     let mut diagrams: HashMap<HashId, HashMap<HashId, String>> = HashMap::new();
@@ -259,11 +266,11 @@ pub fn view_patches(
                 let formatted_seq = if len > 7 {
                     format!(
                         "{s}...{e}",
-                        s = seq.get_sequence(start, start + 3),
-                        e = seq.get_sequence(end - 3, end)
+                        s = seq.get_sequence(start, start + 3)?,
+                        e = seq.get_sequence(end - 3, end)?
                     )
                 } else {
-                    seq.get_sequence(start, end)
+                    seq.get_sequence(start, end)?
                 };
 
                 let coordinates = format!("{node_id}:{start}-{end}");
@@ -321,5 +328,5 @@ pub fn view_patches(
         }
         diagrams.insert(patch.operation.hash, bg_dots);
     }
-    diagrams
+    Ok(diagrams)
 }

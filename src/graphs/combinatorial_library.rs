@@ -7,7 +7,13 @@ use std::{
 
 use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_models::{db::GraphConnection, node::Node, path::Path, sequence::Sequence};
+use gen_models::{
+    db::GraphConnection,
+    errors::{NodeError, PathError, SequenceError},
+    node::Node,
+    path::Path,
+    sequence::Sequence,
+};
 use noodles::fasta;
 use thiserror::Error;
 
@@ -36,6 +42,12 @@ pub enum CombinatorialLibraryCreationError {
     NoParts(String),
     #[error("Graph error: {0}")]
     GraphError(#[from] GraphError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
 }
 
 pub fn parse_library(
@@ -139,7 +151,7 @@ pub fn create_library(
         let seq = Sequence::new()
             .sequence_type("DNA")
             .sequence(&part.sequence)
-            .save(conn);
+            .save(conn)?;
 
         sequence_hashes_by_name.insert(part.name.clone(), seq.hash);
     }
@@ -170,7 +182,7 @@ pub fn create_library(
                     ref_end = part.sequence_length,
                     sequence_hash = part_hash
                 )),
-            );
+            )?;
             part_nodes.push(part_node_id);
             sequence_lengths_by_node_id.insert(part_node_id, part.sequence_length);
         }
@@ -278,7 +290,7 @@ pub fn create_library(
             format!("{library_name} default path").as_str(),
             &block_group_id,
             &path_edge_ids,
-        );
+        )?;
     }
 
     Ok(result_block_group_chunk)
@@ -312,7 +324,8 @@ mod tests {
                 name: "test-block-group",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         match create_library(conn, block_group.id, "library", vec![], false) {
             Ok(_) => {

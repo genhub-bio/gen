@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gen_core::{is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{db::GraphConnection, node::Node};
+use gen_models::{db::GraphConnection, node::Node, sequence::SequenceError};
 use gen_tui::{
     geometry::WorldRect,
     graph_controller::{GraphController, WorldBuffer},
@@ -67,10 +67,10 @@ impl<'a> GenGraphNodeRenderer<'a> {
     }
 
     /// Fetch sequence for a GenGraph node with caching
-    pub fn get_sequence(&mut self, node_key: &GraphNode) -> String {
+    pub fn get_sequence(&mut self, node_key: &GraphNode) -> Result<String, SequenceError> {
         // Check cache first
         if let Some(cached) = self.cache.get(node_key) {
-            return cached.clone();
+            return Ok(cached.clone());
         }
 
         // Cache miss - query database
@@ -81,12 +81,12 @@ impl<'a> GenGraphNodeRenderer<'a> {
         );
         let sequences = Node::get_sequences_by_node_ids(self.conn, &[db_node_id]);
         let sequence = match sequences.get(&db_node_id) {
-            Some(seq) => seq.get_sequence(start, end),
+            Some(seq) => seq.get_sequence(start, end)?,
             None => "?".repeat((end - start).max(0) as usize),
         };
 
         self.cache.insert(*node_key, sequence.clone());
-        sequence
+        Ok(sequence)
     }
 }
 
@@ -137,14 +137,18 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
             }
             VisualDetail::Truncated => {
                 // Truncated scale: Show sequence with truncation to max 12 chars
-                let sequence = self.get_sequence(node_id);
+                let sequence = self
+                    .get_sequence(node_id)
+                    .unwrap_or_else(|_| "Unknown Sequence".to_string());
                 let max_width = 12u32;
                 let truncated = inner_truncation(&sequence, max_width);
                 buffer.set_string_styled(area.left_center(), &truncated, text_style);
             }
             VisualDetail::Full => {
                 // Full scale: Show complete sequence (truncated only by area width)
-                let sequence = self.get_sequence(node_id);
+                let sequence = self
+                    .get_sequence(node_id)
+                    .unwrap_or_else(|_| "Unknown Sequence".to_string());
                 buffer.set_string_styled(area.left_center(), &sequence, text_style);
             }
         }

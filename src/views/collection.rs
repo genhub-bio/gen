@@ -961,16 +961,16 @@ mod tests {
         let conn = context.graph().conn();
 
         // Create collections with hierarchical paths
-        Collection::create(conn, "/foo/bar");
-        Collection::create(conn, "/foo/bar/a");
-        Collection::create(conn, "/foo/bar/a/b");
-        Collection::create(conn, "/foo/bar2");
-        Collection::create(conn, "/foo/baz");
+        Collection::create(conn, "/foo/bar").unwrap();
+        Collection::create(conn, "/foo/bar/a").unwrap();
+        Collection::create(conn, "/foo/bar/a/b").unwrap();
+        Collection::create(conn, "/foo/bar2").unwrap();
+        Collection::create(conn, "/foo/baz").unwrap();
 
         // Create samples
-        let sample_reference = Sample::get_or_create(conn, Sample::DEFAULT_NAME);
-        let sample_alpha = Sample::get_or_create(conn, "SampleAlpha");
-        let sample_beta = Sample::get_or_create(conn, "SampleBeta");
+        let sample_reference = Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
+        let sample_alpha = Sample::get_or_create(conn, "SampleAlpha").unwrap();
+        let sample_beta = Sample::get_or_create(conn, "SampleBeta").unwrap();
 
         // Create block groups for three explicit samples
         BlockGroup::create(
@@ -981,7 +981,8 @@ mod tests {
                 name: "BG_ReferenceA",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -990,7 +991,8 @@ mod tests {
                 name: "BG_ReferenceB",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -999,7 +1001,8 @@ mod tests {
                 name: "BG_Alpha1",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -1008,7 +1011,8 @@ mod tests {
                 name: "BG_Beta1",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         // Call the function under test—notice we pass the full path
         let op_conn = context.operations().conn();

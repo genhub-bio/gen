@@ -1,0 +1,10 @@
+S	3.2	CGA	*
+S	4.0	AAAAAAAA	*
+S	3.0	AT	*
+S	3.5	TCGATCGATCGATCGGGAACACACAGAGA	*
+L	3.2	+	3.5	+	0M
+L	3.0	+	4.0	+	0M
+L	4.0	+	3.5	+	0M
+L	3.0	+	3.2	+	0M
+P	M-123	3.0+,3.2+,3.5+	*
+P	Child.m-123-Start-2-End-5-Node-4	3.0+,4.0+,3.5+	*

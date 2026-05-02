@@ -253,6 +253,7 @@ struct Annotation {
   name @1 :Text;
   annotationGroup @2 :Text;
   accessionId @3 :List(UInt8);
+  extra @4 :Text;
 }
 
 struct AnnotationGroupSample {

@@ -1,6 +1,8 @@
 use std::io::Error as IOError;
 
-use gen_models::errors::{OperationError, QueryError};
+use gen_models::errors::{
+    BlockGroupError, NodeError, OperationError, PathError, QueryError, SequenceError,
+};
 use thiserror::Error;
 
 pub use crate::{
@@ -18,4 +20,20 @@ pub enum SequenceUpdateError {
     IOError(#[from] IOError),
     #[error("SQL query Error: {0}")]
     SQLQueryError(#[from] QueryError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
+    #[error("Missing segment '{0}' in GFA input")]
+    MissingSegment(String),
+    #[error("Missing strand for path '{path_name}' at segment index {index}")]
+    MissingPathStrand { path_name: String, index: usize },
+    #[error("Path '{0}' has no segments")]
+    EmptyPath(String),
+    #[error("No path block found for path id {path_id} at coordinate {coordinate}")]
+    MissingPathBlock { path_id: String, coordinate: i64 },
 }

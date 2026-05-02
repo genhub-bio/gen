@@ -1,24 +1,24 @@
 use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
+pub use crate::{
+    accession::{AccessionError, AccessionPathError},
+    annotations::{AnnotationError, AnnotationGroupError},
+    block_group::BlockGroupError,
+    collection::CollectionError,
+    edge::EdgeError,
+    node::NodeError,
+    operations::BranchError,
+    path::PathError,
+    path_edge::PathEdgeError,
+    sample::SampleError,
+    sequence::SequenceError,
+};
+
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
 pub enum QueryError {
     #[error("Results not found: {0}")]
     ResultsNotFound(String),
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum SampleError {
-    #[error("Query Error: {0}")]
-    QueryError(#[from] QueryError),
-    #[error("SQLite Error: {0}")]
-    SqliteError(#[from] rusqlite::Error),
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum ChangeError {
-    #[error("Operation Error: {0}")]
-    OutOfBounds(String),
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -27,8 +27,26 @@ pub enum ChangesetError {
     StrandError(#[from] StrandError),
     #[error("Missing Model: {0}")]
     MissingModel(String),
+    #[error("Serialization Error: {0}")]
+    SerializationError(String),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Collection creation error: {0}")]
+    CollectionError(#[from] CollectionError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
+    #[error("Node creation error: {0}")]
+    NodeError(#[from] NodeError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Accession creation error: {0}")]
+    AccessionError(#[from] AccessionError),
+    #[error("Accession path creation error: {0}")]
+    AccessionPathError(#[from] AccessionPathError),
+    #[error("Sequence save error: {0}")]
+    SequenceError(#[from] SequenceError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 #[derive(Debug, PartialEq, Error)]
@@ -53,14 +71,20 @@ pub enum OperationError {
     IOError,
 }
 
-#[derive(Debug, PartialEq, Error)]
-pub enum BranchError {
-    #[error("Cannot delete branch: {0}")]
-    CannotDelete(String),
-    #[error("SQL Error: {0}")]
-    SQLError(String),
+#[derive(Debug, Error)]
+pub enum AddFilesOperationError {
+    #[error("Operation Error: {0}")]
+    OperationError(#[from] OperationError),
+    #[error("File Addition Error: {0}")]
+    FileAdditionError(#[from] FileAdditionError),
+    #[error("File Store Error: {0}")]
+    FileStoreError(#[from] FileStoreError),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Config Error: {0}")]
+    ConfigError(#[from] ConfigError),
+    #[error("I/O Error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -118,6 +142,14 @@ pub enum FileAdditionError {
 
     #[error("HashId generation failed: {0}")]
     HashIdError(String),
+}
+
+#[derive(Debug, Error)]
+pub enum FileStoreError {
+    #[error("Config Error: {0}")]
+    ConfigError(#[from] ConfigError),
+    #[error("I/O Error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 #[cfg(test)]

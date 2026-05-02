@@ -1,9 +1,9 @@
 use std::{
     cmp::{max, min},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
 };
 
-use gen_core::{HashId, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_graph::GenGraph;
 use gen_tui::{CroppedGraph, GraphController, ViewportState, VisualDetail, WorldPos, WorldRect};
 use petgraph::visit::NodeIndexable;
@@ -19,6 +19,7 @@ pub struct AnnotationSegment {
     pub node_id: HashId,
     pub start: i64,
     pub end: i64,
+    pub strand: Strand,
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +57,8 @@ impl AnnotationTrack {
 }
 
 type AnnotationSegmentsByIndex = HashMap<usize, Vec<(i64, i64)>>;
-type AnnotationSegmentsResult = (Vec<usize>, AnnotationSegmentsByIndex);
+type AnnotationVisibleRanges = HashMap<usize, (i64, i64)>;
+type AnnotationSegmentsResult = (AnnotationVisibleRanges, AnnotationSegmentsByIndex);
 
 /// Collect visible annotation segments by mapping sequence coordinates to world X coordinates.
 ///
@@ -70,12 +72,11 @@ fn collect_annotation_segments(
     graph: &GenGraph,
 ) -> AnnotationSegmentsResult {
     if track.annotations.is_empty() {
-        return (Vec::new(), HashMap::new());
+        return (HashMap::new(), HashMap::new());
     }
 
     const HORIZONTAL_LOOKAHEAD: i64 = 8;
-    let mut visible_indices = Vec::new();
-    let mut visible_index_set = HashSet::new();
+    let mut visible_ranges: AnnotationVisibleRanges = HashMap::new();
     let mut segments_by_annotation: AnnotationSegmentsByIndex = HashMap::new();
 
     let camera_rect = viewport_state.camera_rect();
@@ -135,8 +136,14 @@ fn collect_annotation_segments(
             };
 
             let is_on_screen = seg_x2 >= window_start && seg_x1 <= window_end;
-            if is_on_screen && visible_index_set.insert(*idx) {
-                visible_indices.push(*idx);
+            if is_on_screen {
+                visible_ranges
+                    .entry(*idx)
+                    .and_modify(|range| {
+                        range.0 = range.0.min(seg_x1);
+                        range.1 = range.1.max(seg_x2);
+                    })
+                    .or_insert((seg_x1, seg_x2));
             }
 
             segments_by_annotation
@@ -146,8 +153,54 @@ fn collect_annotation_segments(
         }
     }
 
-    visible_indices.sort_unstable();
-    (visible_indices, segments_by_annotation)
+    (visible_ranges, segments_by_annotation)
+}
+
+fn pack_visible_annotation_rows(
+    visible_ranges: &AnnotationVisibleRanges,
+    track: &AnnotationTrack,
+    max_rows: usize,
+) -> Vec<Vec<usize>> {
+    if visible_ranges.is_empty() || max_rows == 0 {
+        return Vec::new();
+    }
+
+    let mut annotations: Vec<_> = visible_ranges.iter().collect();
+    annotations.sort_by(|a, b| {
+        a.1.0
+            .cmp(&b.1.0)
+            .then_with(|| a.1.1.cmp(&b.1.1))
+            .then_with(|| a.0.cmp(b.0))
+    });
+
+    let mut rows: Vec<Vec<usize>> = Vec::with_capacity(max_rows);
+    let mut row_ends: Vec<i64> = Vec::with_capacity(max_rows);
+
+    for (idx, (start, end)) in annotations {
+        let label_len = track.annotations[*idx].name.chars().count() as i64;
+        let occupied_start = *start - label_len - 1;
+        let occupied_end = *end;
+
+        let best_row = row_ends
+            .iter()
+            .enumerate()
+            .filter(|(_, row_end)| occupied_start > **row_end)
+            .min_by_key(|(_, row_end)| **row_end)
+            .map(|(row_idx, _)| row_idx);
+
+        if let Some(row_idx) = best_row {
+            rows[row_idx].push(*idx);
+            row_ends[row_idx] = occupied_end;
+            continue;
+        }
+
+        if rows.len() < max_rows {
+            rows.push(vec![*idx]);
+            row_ends.push(occupied_end);
+        }
+    }
+
+    rows
 }
 
 /// Calculate the desired height for an annotation track panel.
@@ -225,95 +278,99 @@ pub fn draw_annotations_panel(
     let annotation_bar_style = Style::default().bg(annotation_color);
     let annotation_dot_style = Style::default().fg(annotation_color).bg(bg_color);
 
-    let (visible_indices, segments_by_annotation) = collect_annotation_segments(
+    let (visible_ranges, segments_by_annotation) = collect_annotation_segments(
         track,
         controller.get_viewport_graph(),
         &controller.viewport_state,
         controller.graph(),
     );
-    if visible_indices.is_empty() {
+    let packed_rows = pack_visible_annotation_rows(&visible_ranges, track, inner.height as usize);
+    if packed_rows.is_empty() {
         return;
     }
 
-    let max_rows = inner.height as usize;
-    let row_count = visible_indices.len().min(max_rows);
     let viewport_state = &controller.viewport_state;
 
-    for (row, idx) in visible_indices.iter().take(row_count).enumerate() {
-        let Some(mut segments) = segments_by_annotation.get(idx).cloned() else {
-            continue;
-        };
-        segments.sort_by(|a, b| a.0.cmp(&b.0));
-
+    for (row, row_annotations) in packed_rows.iter().enumerate() {
         // Each annotation row is drawn at a fixed terminal Y within the inner rect
         let terminal_y = inner.y + row as u16;
 
-        let annotation_name = &track.annotations[*idx].name;
+        for idx in row_annotations {
+            let Some(mut segments) = segments_by_annotation.get(idx).cloned() else {
+                continue;
+            };
+            segments.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Draw the label to the left of the first segment
-        if let Some((first_x1, _)) = segments.first() {
-            let label_len = annotation_name.chars().count() as i64;
-            let label_world_x = first_x1 - label_len - 1;
-            if let Some((term_x, _)) =
-                viewport_state.world_to_terminal(WorldPos::new(label_world_x, 0))
-            {
-                // Clamp label to the panel area
-                let label_start = term_x.max(inner.x);
-                if label_start < inner.x + inner.width {
-                    frame.buffer_mut().set_string(
-                        label_start,
+            let annotation_name = &track.annotations[*idx].name;
+
+            // Draw the label to the left of the first segment
+            if let Some((first_x1, _)) = segments.first() {
+                let label_len = annotation_name.chars().count() as i64;
+                let label_world_x = first_x1 - label_len - 1;
+                if let Some((term_x, _)) =
+                    viewport_state.world_to_terminal(WorldPos::new(label_world_x, 0))
+                {
+                    // Clamp label to the panel area
+                    let label_start = term_x.max(inner.x);
+                    if label_start < inner.x + inner.width {
+                        frame.buffer_mut().set_string(
+                            label_start,
+                            terminal_y,
+                            annotation_name,
+                            annotation_label_style,
+                        );
+                    }
+                }
+            }
+
+            let mut prev_end: Option<i64> = None;
+            for (x1, x2) in &segments {
+                if zoomed_out {
+                    // Draw a single dot at the center
+                    let center = (x1 + x2) / 2;
+                    if let Some((term_x, _)) =
+                        viewport_state.world_to_terminal(WorldPos::new(center, 0))
+                        && term_x >= inner.x
+                        && term_x < inner.x + inner.width
+                    {
+                        frame.buffer_mut().set_string(
+                            term_x,
+                            terminal_y,
+                            "●",
+                            annotation_dot_style,
+                        );
+                    }
+                } else {
+                    // Draw a solid bar for the segment
+                    place_bar(
+                        frame,
+                        inner,
+                        viewport_state,
+                        *x1,
+                        *x2,
                         terminal_y,
-                        annotation_name,
+                        annotation_bar_style,
+                    );
+                }
+
+                // Draw dashed connectors between disconnected segments of the same annotation
+                if !zoomed_out
+                    && let Some(prev) = prev_end
+                    && x1 - prev > 1
+                {
+                    draw_dashed_connector(
+                        frame,
+                        inner,
+                        viewport_state,
+                        prev + 1,
+                        x1 - 1,
+                        terminal_y,
                         annotation_label_style,
                     );
                 }
-            }
-        }
 
-        let mut prev_end: Option<i64> = None;
-        for (x1, x2) in &segments {
-            if zoomed_out {
-                // Draw a single dot at the center
-                let center = (x1 + x2) / 2;
-                if let Some((term_x, _)) =
-                    viewport_state.world_to_terminal(WorldPos::new(center, 0))
-                    && term_x >= inner.x
-                    && term_x < inner.x + inner.width
-                {
-                    frame
-                        .buffer_mut()
-                        .set_string(term_x, terminal_y, "●", annotation_dot_style);
-                }
-            } else {
-                // Draw a solid bar for the segment
-                place_bar(
-                    frame,
-                    inner,
-                    viewport_state,
-                    *x1,
-                    *x2,
-                    terminal_y,
-                    annotation_bar_style,
-                );
+                prev_end = Some(*x2);
             }
-
-            // Draw dashed connectors between disconnected segments of the same annotation
-            if !zoomed_out
-                && let Some(prev) = prev_end
-                && x1 - prev > 1
-            {
-                draw_dashed_connector(
-                    frame,
-                    inner,
-                    viewport_state,
-                    prev + 1,
-                    x1 - 1,
-                    terminal_y,
-                    annotation_label_style,
-                );
-            }
-
-            prev_end = Some(*x2);
         }
     }
 }
@@ -400,4 +457,68 @@ fn draw_dashed_connector(
     frame
         .buffer_mut()
         .set_string(start_x, terminal_y, label, style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track_with_names(names: &[&str]) -> AnnotationTrack {
+        AnnotationTrack::new(
+            "test",
+            names
+                .iter()
+                .map(|name| AnnotationSpan {
+                    id: HashId::convert_str(name),
+                    name: (*name).to_string(),
+                    segments: Vec::new(),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn pack_visible_annotation_rows_packs_disjoint_annotations_on_same_row() {
+        let track = track_with_names(&["abc1", "abc2", "abc3"]);
+        let mut visible_ranges = AnnotationVisibleRanges::new();
+        visible_ranges.insert(0, (10, 20));
+        visible_ranges.insert(1, (31, 41));
+        visible_ranges.insert(2, (52, 62));
+
+        let rows = pack_visible_annotation_rows(&visible_ranges, &track, 2);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn pack_visible_annotation_rows_uses_multiple_rows_for_overlaps() {
+        let track = track_with_names(&["abc1", "abc2", "abc3"]);
+        let mut visible_ranges = AnnotationVisibleRanges::new();
+        visible_ranges.insert(0, (10, 20));
+        visible_ranges.insert(1, (18, 28));
+        visible_ranges.insert(2, (50, 60));
+
+        let rows = pack_visible_annotation_rows(&visible_ranges, &track, 2);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![0, 2]);
+        assert_eq!(rows[1], vec![1]);
+    }
+
+    #[test]
+    fn pack_visible_annotation_rows_drops_annotations_when_rows_are_full() {
+        let track = track_with_names(&["abc1", "abc2", "abc3"]);
+        let mut visible_ranges = AnnotationVisibleRanges::new();
+        visible_ranges.insert(0, (10, 20));
+        visible_ranges.insert(1, (11, 21));
+        visible_ranges.insert(2, (12, 22));
+
+        let rows = pack_visible_annotation_rows(&visible_ranges, &track, 2);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![0]);
+        assert_eq!(rows[1], vec![1]);
+        assert!(!rows.iter().flatten().any(|idx| *idx == 2));
+    }
 }

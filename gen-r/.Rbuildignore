@@ -1,0 +1,4 @@
+^src/\.cargo$
+^src/rust/target$
+^src/rust/vendor$
+^Dockerfile$

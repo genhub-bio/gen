@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use gen_core::{HashId, Strand, calculate_hash, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{Result as SQLResult, Row, params};
+use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     block_group_edge::AugmentedEdgeData,
@@ -18,6 +19,14 @@ pub struct Accession {
     pub name: String,
     pub path_id: HashId,
     pub parent_accession_id: Option<HashId>,
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum AccessionError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+    #[error("Duplicate entry with uuid: {0}")]
+    Duplicate(String),
 }
 
 impl<'a> Capnp<'a> for Accession {
@@ -87,6 +96,12 @@ pub struct AccessionEdge {
     pub chromosome_index: i64,
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum AccessionEdgeError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+}
+
 impl<'a> Capnp<'a> for AccessionEdge {
     type Builder = accession_edge::Builder<'a>;
     type Reader = accession_edge::Reader<'a>;
@@ -149,6 +164,12 @@ pub struct AccessionPath {
     pub accession_id: HashId,
     pub index_in_path: i64,
     pub edge_id: HashId,
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum AccessionPathError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
 }
 
 impl<'a> Capnp<'a> for AccessionPath {
@@ -250,25 +271,41 @@ impl From<&AugmentedEdgeData> for AccessionEdgeData {
 }
 
 impl Accession {
+    fn id_hash(path_id: &HashId, parent_accession_id: Option<&HashId>, name: &str) -> HashId {
+        HashId(calculate_hash(&format!(
+            "{path_id}:{parent_accession_id:?}:{name}"
+        )))
+    }
+
     pub fn create(
         conn: &GraphConnection,
         name: &str,
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
-    ) -> SQLResult<Accession> {
-        let hash = HashId(calculate_hash(&format!(
-            "{path_id}:{parent_accession_id:?}:{name}"
-        )));
+    ) -> Result<Accession, AccessionError> {
         let query = "INSERT INTO accessions (id, name, path_id, parent_accession_id) VALUES (?1, ?2, ?3, ?4);";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = match conn.prepare(query) {
+            Ok(s) => s,
+            Err(e) => return Err(AccessionError::DatabaseError(e)),
+        };
 
-        stmt.execute((hash, name, path_id, parent_accession_id))?;
-        Ok(Accession {
-            id: hash,
-            name: name.to_string(),
-            path_id: *path_id,
-            parent_accession_id: parent_accession_id.copied(),
-        })
+        let hash = Accession::id_hash(path_id, parent_accession_id, name);
+        match stmt.execute((hash, name, path_id, parent_accession_id)) {
+            Ok(_) => Ok(Accession {
+                id: hash,
+                name: name.to_string(),
+                path_id: *path_id,
+                parent_accession_id: parent_accession_id.copied(),
+            }),
+            Err(rusqlite::Error::SqliteFailure(err, _details))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(AccessionError::Duplicate(format!(
+                    "An accession with the same name, path_id, and parent_accession_id already exists. name: {name}, path_id: {path_id}, parent_accession_id: {parent_accession_id:?}"
+                )))
+            }
+            Err(e) => Err(AccessionError::DatabaseError(e)),
+        }
     }
 
     pub fn get_or_create(
@@ -276,30 +313,19 @@ impl Accession {
         name: &str,
         path_id: &HashId,
         parent_accession_id: Option<&HashId>,
-    ) -> Accession {
+    ) -> Result<Accession, AccessionError> {
         match Accession::create(conn, name, path_id, parent_accession_id) {
-            Ok(accession) => accession,
-            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    let existing_id: HashId;
-                    if let Some(id) = parent_accession_id {
-                        existing_id = conn.query_row("select id from accessions where name = ?1 and path_id = ?2 and parent_accession_id = ?3;", params![name.to_string(), path_id, id], |row| row.get(0)).unwrap();
-                    } else {
-                        existing_id = conn.query_row("select id from accessions where name = ?1 and path_id = ?2 and parent_accession_id is null;", params![name.to_string(), path_id], |row| row.get(0)).unwrap();
-                    }
-                    Accession {
-                        id: existing_id,
-                        name: name.to_string(),
-                        path_id: *path_id,
-                        parent_accession_id: parent_accession_id.copied(),
-                    }
-                } else {
-                    panic!("something bad happened querying the database")
-                }
+            Ok(accession) => Ok(accession),
+            Err(AccessionError::Duplicate(_)) => {
+                let hash = Accession::id_hash(path_id, parent_accession_id, name);
+                Ok(Accession {
+                    id: hash,
+                    name: name.to_string(),
+                    path_id: *path_id,
+                    parent_accession_id: parent_accession_id.copied(),
+                })
             }
-            Err(_) => {
-                panic!("something bad happened.")
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -330,7 +356,10 @@ impl Query for Accession {
 }
 
 impl AccessionEdge {
-    pub fn create(conn: &GraphConnection, edge: AccessionEdgeData) -> AccessionEdge {
+    pub fn create(
+        conn: &GraphConnection,
+        edge: AccessionEdgeData,
+    ) -> Result<AccessionEdge, AccessionEdgeError> {
         let hash = HashId(calculate_hash(&format!(
             "{}:{}:{}:{}:{}:{}:{}",
             edge.source_node_id,
@@ -355,12 +384,12 @@ impl AccessionEdge {
             edge.chromosome_index
         ]) {
             Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(_err, _details)) => {}
-            Err(_) => {
-                panic!("something bad happened querying the database")
+            Err(rusqlite::Error::SqliteFailure(err, _details)) => {
+                if err.code == rusqlite::ErrorCode::ConstraintViolation {}
             }
+            Err(err) => return Err(AccessionEdgeError::DatabaseError(err)),
         };
-        AccessionEdge {
+        Ok(AccessionEdge {
             id: hash,
             source_node_id: edge.source_node_id,
             source_coordinate: edge.source_coordinate,
@@ -369,7 +398,7 @@ impl AccessionEdge {
             target_coordinate: edge.target_coordinate,
             target_strand: edge.target_strand,
             chromosome_index: edge.chromosome_index,
-        }
+        })
     }
 
     pub fn bulk_create(conn: &GraphConnection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
@@ -448,7 +477,11 @@ impl Query for AccessionEdge {
 }
 
 impl AccessionPath {
-    pub fn create(conn: &GraphConnection, accession_id: &HashId, edge_ids: &[HashId]) {
+    pub fn create(
+        conn: &GraphConnection,
+        accession_id: &HashId,
+        edge_ids: &[HashId],
+    ) -> Result<(), AccessionPathError> {
         let batch_size = max_rows_per_batch(conn, 4);
 
         for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
@@ -471,9 +504,17 @@ impl AccessionPath {
                 rows_to_insert.join(", ")
             );
 
-            let mut stmt = conn.prepare(&sql).unwrap();
-            stmt.execute(rusqlite::params_from_iter(params)).unwrap();
+            let mut stmt = match conn.prepare(&sql) {
+                Ok(s) => s,
+                Err(e) => return Err(AccessionPathError::DatabaseError(e)),
+            };
+            match stmt.execute(rusqlite::params_from_iter(params)) {
+                Ok(_) => {}
+                Err(e) => return Err(AccessionPathError::DatabaseError(e)),
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -586,6 +627,6 @@ mod tests {
                 path_id: path.id,
                 parent_accession_id: None,
             }]
-        )
+        );
     }
 }

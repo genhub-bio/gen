@@ -1,6 +1,6 @@
 use std::{
     cmp::{max, min},
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     io::{Read, Write},
 };
 
@@ -9,6 +9,7 @@ use gen_graph::{GraphNode, project_path};
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::PathError,
     reference_alias::{ReferenceAlias, ReferenceAliasError},
     sample::Sample,
 };
@@ -26,6 +27,8 @@ pub enum BedError {
     Io(#[from] std::io::Error),
     #[error("Error loading reference aliases: {0}")]
     ReferenceAliasError(#[from] ReferenceAliasError),
+    #[error("Error loading path blocks: {0}")]
+    PathError(#[from] PathError),
 }
 
 pub fn translate_bed<R, W>(
@@ -39,9 +42,9 @@ where
     R: Read,
     W: Write,
 {
-    let mut record = bed::Record::default();
-    let mut bed_reader = bed::io::reader::Builder::<3>.build_from_reader(reader);
-    let mut bed_writer = bed::io::Writer::<3, _>::new(writer);
+    let mut record = bed::Record::<6>::default();
+    let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
+    let mut bed_writer = bed::io::Writer::<6, _>::new(writer);
 
     let bgs = Sample::get_block_groups(conn, collection, sample);
     let sample_bgs: HashMap<String, &BlockGroup> = HashMap::from_iter(
@@ -66,32 +69,49 @@ where
         let start = record.feature_start().unwrap().get() as i64 - 1;
         let end = record.feature_end().unwrap().unwrap().get() as i64;
         if let Some(bg) = sample_bgs.get(&ref_name) {
-            let projection = paths.entry(bg.id).or_insert_with(|| {
-                let path = BlockGroup::get_current_path(conn, &bg.id);
-                let graph = BlockGroup::get_graph(conn, &bg.id);
-                let mut tree = IntervalTree::default();
-                let mut position: i64 = 0;
-                for (node, strand) in project_path(&graph, &path.blocks(conn)) {
-                    if !is_terminal(node.node_id) {
-                        let end_position = position + node.length();
-                        tree.insert(position..end_position, (node, strand));
-                        position = end_position;
+            let projection = match paths.entry(bg.id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let path = BlockGroup::get_current_path(conn, &bg.id);
+                    let graph = BlockGroup::get_graph(conn, &bg.id);
+                    let mut tree = IntervalTree::default();
+                    let mut position: i64 = 0;
+                    for (node, strand) in project_path(&graph, &path.blocks(conn)?) {
+                        if !is_terminal(node.node_id) {
+                            let end_position = position + node.length();
+                            tree.insert(position..end_position, (node, strand));
+                            position = end_position;
+                        }
                     }
+                    entry.insert(tree)
                 }
-                tree
-            });
+            };
             let range = start..end;
             let values: Vec<_> = record.other_fields().iter().map(Value::from).collect();
             let other_fields = OtherFields::from(values);
+            let name = record
+                .name()
+                .map(|name| String::from_utf8_lossy(name.as_ref()).to_string());
+            let score = record.score().ok();
+            let strand = record.strand().ok().flatten();
             for (overlap, (node, _strand)) in projection.iter_overlaps(&range) {
                 let overlap_start = max(start, overlap.start) as usize;
                 let overlap_end = min(end, overlap.end) as usize;
-                let out_record = bed::feature::RecordBuf::<3>::builder()
+                let mut out_record = bed::feature::RecordBuf::<6>::builder()
                     .set_reference_sequence_name(format!("{nid}", nid = node.node_id))
                     .set_feature_start(Position::try_from(overlap_start + 1).unwrap())
                     .set_feature_end(Position::try_from(overlap_end).unwrap())
-                    .set_other_fields(other_fields.clone())
-                    .build();
+                    .set_other_fields(other_fields.clone());
+                if let Some(name) = &name {
+                    out_record = out_record.set_name(name.clone());
+                }
+                if let Some(score) = score {
+                    out_record = out_record.set_score(score);
+                }
+                if let Some(strand) = strand {
+                    out_record = out_record.set_strand(strand);
+                }
+                let out_record = out_record.build();
                 bed_writer.write_feature_record(&out_record)?;
             }
         }

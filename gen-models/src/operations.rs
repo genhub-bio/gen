@@ -1,14 +1,16 @@
 use std::{
     collections::HashMap,
     convert::TryInto,
+    fs,
     io::{self, BufReader},
     path::{Path, PathBuf},
     rc::Rc,
     string::ToString,
 };
 
-use gen_core::{HashId, Workspace, calculate_hash, traits::Capnp};
+use gen_core::{HashId, Workspace, calculate_hash, errors::ConfigError, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
+use itertools::Itertools;
 use petgraph::{Direction, graphmap::UnGraphMap};
 use rusqlite::{Result as SQLResult, Row, params, types::Value};
 use serde::{Deserialize, Serialize};
@@ -17,12 +19,17 @@ use thiserror::Error;
 
 use crate::{
     changesets::{
-        DatabaseChangeset, get_changeset_dependencies_from_path, get_changeset_from_path,
+        ChangesetModels, DatabaseChangeset, get_changeset_dependencies_from_path,
+        get_changeset_from_path, write_changeset,
     },
-    db::OperationsConnection,
-    errors::{BranchError, FileAdditionError, RemoteError},
+    db::{DbContext, OperationsConnection},
+    errors::{
+        AddFilesOperationError, FileAdditionError, FileStoreError, OperationError, RemoteError,
+    },
     file_types::FileTypes,
+    files::GenDatabase,
     gen_models_capnp::operation,
+    metadata,
     session_operations::DependencyModels,
     traits::*,
 };
@@ -367,6 +374,87 @@ pub struct OperationInfo {
     pub description: String,
 }
 
+pub fn add_files_operation(
+    context: &DbContext,
+    files: &[String],
+    message: Option<&str>,
+) -> Result<Operation, AddFilesOperationError> {
+    let workspace = context.workspace();
+    let operation_conn = context.operations().conn();
+    let graph_conn = context.graph().conn();
+    let db_uuid = metadata::get_db_uuid(graph_conn);
+
+    let file_additions = files
+        .iter()
+        .map(|path| {
+            FileAddition::get_or_create(
+                workspace,
+                operation_conn,
+                path,
+                FileTypes::infer_from_path(path),
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let unique_file_additions = file_additions
+        .into_iter()
+        .unique_by(|file_addition| file_addition.id)
+        .collect::<Vec<_>>();
+
+    let operation_hash = HashId(calculate_hash(
+        &unique_file_additions
+            .iter()
+            .map(|file_addition| file_addition.id.to_string())
+            .sorted()
+            .join(":"),
+    ));
+
+    let operation = match Operation::create(operation_conn, "add-file", &operation_hash) {
+        Ok(operation) => operation,
+        Err(rusqlite::Error::SqliteFailure(err, _details))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Err(AddFilesOperationError::OperationError(
+                OperationError::NoChanges,
+            ));
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    for file_addition in &unique_file_additions {
+        Operation::add_file(operation_conn, &operation.hash, &file_addition.id)?;
+    }
+
+    Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
+
+    let summary = message.map(str::to_string).unwrap_or_else(|| {
+        if files.len() == 1 {
+            format!("Add file {}", files[0])
+        } else {
+            format!("Add {} files", files.len())
+        }
+    });
+    OperationSummary::create(operation_conn, &operation.hash, &summary);
+
+    let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid)?;
+    write_changeset(
+        workspace,
+        &operation,
+        DatabaseChangeset {
+            db_path: gen_db.path,
+            changes: ChangesetModels::default(),
+        },
+        &DependencyModels::default(),
+    );
+
+    for file_addition in unique_file_additions {
+        file_addition.store_file(workspace)?;
+    }
+
+    Ok(operation)
+}
+
 pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<HashId, std::io::Error> {
     let file = std::fs::File::open(file_path)?;
     let reader = BufReader::new(file);
@@ -546,6 +634,27 @@ impl FileAddition {
                 acc.entry(hash).or_default().push(item);
                 Ok(acc)
             })
+    }
+
+    pub fn store_file(&self, workspace: &Workspace) -> Result<(), FileStoreError> {
+        let gen_dir = workspace
+            .find_gen_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?;
+        let assets_dir = gen_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        let asset_path = assets_dir.join(self.clone().hashed_filename());
+        if asset_path.exists() {
+            return Ok(());
+        }
+
+        let source_path = if Path::new(&self.file_path).is_absolute() {
+            PathBuf::from(&self.file_path)
+        } else {
+            workspace.repo_root()?.join(&self.file_path)
+        };
+        fs::copy(source_path, asset_path)?;
+        Ok(())
     }
 
     pub fn hashed_filename(self) -> String {
@@ -836,6 +945,20 @@ pub struct Branch {
     pub remote_name: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Error)]
+pub enum BranchError {
+    #[error("Cannot delete branch: {0}")]
+    CannotDelete(String),
+    #[error("SQL Error: {0}")]
+    SQLError(String),
+    #[error("SQLite Error: {0}")]
+    SqliteError(#[from] rusqlite::Error),
+    #[error("Duplicate entry: {0}")]
+    Duplicate(String),
+    #[error("Couldn't create branch: {0}")]
+    CannotCreate(String),
+}
+
 impl Query for Branch {
     type Model = Branch;
 
@@ -852,20 +975,19 @@ impl Query for Branch {
 }
 
 impl Branch {
-    pub fn get_or_create(conn: &OperationsConnection, branch_name: &str) -> Branch {
+    pub fn get_or_create(
+        conn: &OperationsConnection,
+        branch_name: &str,
+    ) -> Result<Branch, BranchError> {
         match Branch::create_with_remote(conn, branch_name, None) {
-            Ok(res) => res,
-            Err(rusqlite::Error::SqliteFailure(err, details)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    Branch::get_by_name(conn, branch_name)
-                        .unwrap_or_else(|| panic!("No branch named {branch_name}."))
-                } else {
-                    panic!("something bad happened querying the database {err:?} {details:?}");
-                }
-            }
-            Err(_) => {
-                panic!("something bad happened querying the database");
-            }
+            Ok(res) => Ok(res),
+            Err(BranchError::Duplicate(_)) => match Branch::get_by_name(conn, branch_name) {
+                Some(branch) => Ok(branch),
+                None => Err(BranchError::CannotCreate(
+                    "Failed to create branch".to_string(),
+                )),
+            },
+            Err(e) => Err(e),
         }
     }
 
@@ -873,21 +995,37 @@ impl Branch {
         conn: &OperationsConnection,
         branch_name: &str,
         remote_name: Option<&str>,
-    ) -> SQLResult<Branch> {
+    ) -> Result<Branch, BranchError> {
         let current_operation_hash = OperationState::get_operation(conn);
-        let mut stmt = conn.prepare_cached("insert into branch (name, current_operation_hash, remote_name) values (?1, ?2, ?3) returning (id);").unwrap();
+        let mut stmt = match conn.prepare_cached("insert into branch (name, current_operation_hash, remote_name) values (?1, ?2, ?3) returning (id);") {
+	    Ok(stmt) => stmt,
+	    Err(e) => return Err(BranchError::SqliteError(e)),
+	};
 
-        let mut rows = stmt
-            .query_map((branch_name, current_operation_hash, remote_name), |row| {
+        let results: Result<_, _> =
+            stmt.query_map((branch_name, current_operation_hash, remote_name), |row| {
                 Ok(Branch {
                     id: row.get(0)?,
                     name: branch_name.to_string(),
                     current_operation_hash,
                     remote_name: remote_name.map(|s| s.to_string()),
                 })
-            })
-            .unwrap();
-        rows.next().unwrap()
+            });
+        match results {
+            Ok(mut results) => match results.next() {
+                Some(Ok(branch)) => Ok(branch),
+                Some(Err(rusqlite::Error::SqliteFailure(err, _)))
+                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Err(BranchError::Duplicate(branch_name.to_string()))
+                }
+                Some(Err(e)) => Err(BranchError::SqliteError(e)),
+                None => Err(BranchError::CannotCreate(
+                    "Failed to create branch".to_string(),
+                )),
+            },
+            Err(e) => Err(BranchError::SqliteError(e)),
+        }
     }
 
     pub fn delete(conn: &OperationsConnection, branch_id: i64) -> Result<(), BranchError> {
@@ -1321,7 +1459,7 @@ mod tests {
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
 
             // Create test branch
-            let branch = Branch::get_or_create(op_conn, "test_branch");
+            let branch = Branch::get_or_create(op_conn, "test_branch").unwrap();
 
             // Initially, branch should have no remote
             assert_eq!(Branch::get_remote(op_conn, branch.id), None);
@@ -1345,7 +1483,7 @@ mod tests {
             // Get database UUID and setup database
 
             // Create test branch
-            let branch = Branch::get_or_create(op_conn, "test_branch");
+            let branch = Branch::get_or_create(op_conn, "test_branch").unwrap();
 
             // Try to set a remote that doesn't exist - should fail due to foreign key constraint
             let result = Branch::set_remote(op_conn, branch.id, Some("nonexistent"));
@@ -1366,7 +1504,7 @@ mod tests {
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
 
             // Create test branch
-            let branch = Branch::get_or_create(op_conn, "test_branch");
+            let branch = Branch::get_or_create(op_conn, "test_branch").unwrap();
 
             // Set a remote first
             Branch::set_remote(op_conn, branch.id, Some("origin")).unwrap();
@@ -1391,7 +1529,7 @@ mod tests {
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
 
             // Create a branch and associate it with a remote
-            let branch = Branch::get_or_create(op_conn, "test_branch_cascade");
+            let branch = Branch::get_or_create(op_conn, "test_branch_cascade").unwrap();
             Branch::set_remote(op_conn, branch.id, Some("origin")).unwrap();
 
             // Verify the association
@@ -1421,7 +1559,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let op_1 =
@@ -1453,7 +1591,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let op_1 =
@@ -1487,7 +1625,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let _op = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
@@ -1507,7 +1645,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let _op_1 = Operation::create(
@@ -1544,7 +1682,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let op_unique = Operation::create(
@@ -1591,7 +1729,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let op_unique = Operation::create(
@@ -1615,7 +1753,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let _op_1 = Operation::create(
@@ -1648,7 +1786,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let op_1 = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
@@ -1666,7 +1804,7 @@ mod tests {
             let context = setup_gen();
             let op_conn = context.operations().conn();
 
-            let branch = Branch::get_or_create(op_conn, "main");
+            let branch = Branch::get_or_create(op_conn, "main").unwrap();
             OperationState::set_branch(op_conn, &branch.name);
 
             let _op = Operation::create(op_conn, "add", &HashId::convert_str("op-1")).unwrap();
@@ -1822,15 +1960,15 @@ mod tests {
         );
 
         OperationState::set_operation(op_conn, &HashId::convert_str("op-3"));
-        let branch_1 = Branch::get_or_create(op_conn, "branch-1");
+        let branch_1 = Branch::get_or_create(op_conn, "branch-1").unwrap();
         OperationState::set_operation(op_conn, &HashId::convert_str("op-8"));
-        let branch_2 = Branch::get_or_create(op_conn, "branch-2");
+        let branch_2 = Branch::get_or_create(op_conn, "branch-2").unwrap();
         OperationState::set_operation(op_conn, &HashId::convert_str("op-5"));
-        let branch_1_sub_1 = Branch::get_or_create(op_conn, "branch-1-sub-1");
+        let branch_1_sub_1 = Branch::get_or_create(op_conn, "branch-1-sub-1").unwrap();
         OperationState::set_operation(op_conn, &HashId::convert_str("op-11"));
-        let branch_2_sub_1 = Branch::get_or_create(op_conn, "branch-2-sub-1");
+        let branch_2_sub_1 = Branch::get_or_create(op_conn, "branch-2-sub-1").unwrap();
         OperationState::set_operation(op_conn, &HashId::convert_str("op-13"));
-        let branch_2_midpoint_1 = Branch::get_or_create(op_conn, "branch-2-midpoint-1");
+        let branch_2_midpoint_1 = Branch::get_or_create(op_conn, "branch-2-midpoint-1").unwrap();
 
         let ops = Branch::get_operations(op_conn, branch_2_midpoint_1.id)
             .iter()
@@ -1933,16 +2071,16 @@ mod tests {
         let _ = Operation::create(op_conn, "vcf_addition", &HashId::convert_str("op-1")).unwrap();
         let _ = Operation::create(op_conn, "vcf_addition", &HashId::convert_str("op-2")).unwrap();
         let _ = Operation::create(op_conn, "vcf_addition", &HashId::convert_str("op-3")).unwrap();
-        Branch::get_or_create(op_conn, "branch-1");
+        Branch::get_or_create(op_conn, "branch-1").unwrap();
         OperationState::set_branch(op_conn, "branch-1");
         let _ = Operation::create(op_conn, "vcf_addition", &HashId::convert_str("op-4")).unwrap();
         let _ = Operation::create(op_conn, "vcf_addition", &HashId::convert_str("op-5")).unwrap();
         OperationState::set_operation(op_conn, &HashId::convert_str("op-4"));
-        Branch::get_or_create(op_conn, "branch-2");
+        Branch::get_or_create(op_conn, "branch-2").unwrap();
         OperationState::set_branch(op_conn, "branch-2");
         let _ = Operation::create(op_conn, "vcf_addition", &HashId::convert_str("op-6")).unwrap();
         OperationState::set_operation(op_conn, &HashId::convert_str("op-1"));
-        Branch::get_or_create(op_conn, "branch-3");
+        Branch::get_or_create(op_conn, "branch-3").unwrap();
         OperationState::set_branch(op_conn, "branch-3");
         let _ = Operation::create(op_conn, "vcf_addition", &HashId::convert_str("op-7")).unwrap();
         let graph = Operation::get_operation_graph(op_conn);
@@ -1997,7 +2135,7 @@ mod tests {
             "foo",
             HashId::convert_str("op-3"),
         );
-        Branch::get_or_create(op_conn, "branch-1");
+        Branch::get_or_create(op_conn, "branch-1").unwrap();
         OperationState::set_branch(op_conn, "branch-1");
         create_operation(
             &context,
@@ -2014,7 +2152,7 @@ mod tests {
             HashId::convert_str("op-5"),
         );
         OperationState::set_operation(op_conn, &HashId::convert_str("op-4"));
-        Branch::get_or_create(op_conn, "branch-2");
+        Branch::get_or_create(op_conn, "branch-2").unwrap();
         OperationState::set_branch(op_conn, "branch-2");
         create_operation(
             &context,
@@ -2024,7 +2162,7 @@ mod tests {
             HashId::convert_str("op-6"),
         );
         OperationState::set_operation(op_conn, &HashId::convert_str("op-1"));
-        Branch::get_or_create(op_conn, "branch-3");
+        Branch::get_or_create(op_conn, "branch-3").unwrap();
         OperationState::set_branch(op_conn, "branch-3");
         create_operation(
             &context,
@@ -2191,7 +2329,7 @@ mod tests {
         Remote::create(op_conn, "test_remote", "https://test.com/repo.gen").unwrap();
 
         // Create a branch and associate it with the remote
-        let branch = Branch::get_or_create(op_conn, "test_branch");
+        let branch = Branch::get_or_create(op_conn, "test_branch").unwrap();
 
         // Set the remote association (this would be done by the Branch::set_remote method when implemented)
         op_conn
@@ -2239,7 +2377,7 @@ mod tests {
         Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
 
         // Create a branch
-        let branch = Branch::get_or_create(op_conn, "test_branch");
+        let branch = Branch::get_or_create(op_conn, "test_branch").unwrap();
 
         // Initially, branch should have no remote
         let remote = Branch::get_remote(op_conn, branch.id);
@@ -2270,8 +2408,8 @@ mod tests {
         Remote::create(op_conn, "upstream", "https://upstream.com/repo.gen").unwrap();
 
         // Create branches
-        let branch1 = Branch::get_or_create(op_conn, "branch1");
-        let branch2 = Branch::get_or_create(op_conn, "branch2");
+        let branch1 = Branch::get_or_create(op_conn, "branch1").unwrap();
+        let branch2 = Branch::get_or_create(op_conn, "branch2").unwrap();
 
         // Set different remotes for each branch
         Branch::set_remote(op_conn, branch1.id, Some("origin")).unwrap();
@@ -2346,7 +2484,7 @@ mod tests {
         let op_conn = context.operations().conn();
 
         // Create a branch
-        let branch = Branch::get_or_create(op_conn, "test_branch");
+        let branch = Branch::get_or_create(op_conn, "test_branch").unwrap();
 
         // Try to set a remote that doesn't exist - this should fail due to foreign key constraint
         let result = Branch::set_remote(op_conn, branch.id, Some("nonexistent_remote"));
@@ -2667,5 +2805,66 @@ mod tests {
         .expect("Failed to create FileAddition");
 
         assert_ne!(fa1.id, fa1_new.id);
+    }
+
+    #[test]
+    fn test_add_files_operation_stores_shared_unmodified_asset_once_across_operations() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
+        let workspace = context.workspace();
+
+        let db_uuid = metadata::get_db_uuid(graph_conn);
+        GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
+        Branch::get_or_create(operation_conn, "main").unwrap();
+        OperationState::set_branch(operation_conn, "main");
+
+        let repo_root = workspace.repo_root().unwrap();
+        fs::write(repo_root.join("shared.txt"), "shared contents").unwrap();
+        fs::write(repo_root.join("unique.txt"), "unique contents").unwrap();
+
+        let operation_1 =
+            add_files_operation(&context, &["shared.txt".to_string()], Some("first")).unwrap();
+        let operation_2 = add_files_operation(
+            &context,
+            &["shared.txt".to_string(), "unique.txt".to_string()],
+            Some("second"),
+        )
+        .unwrap();
+
+        let operation_1_files =
+            FileAddition::get_files_for_operation(operation_conn, &operation_1.hash);
+        let operation_2_files =
+            FileAddition::get_files_for_operation(operation_conn, &operation_2.hash);
+
+        let shared_file_1 = operation_1_files
+            .iter()
+            .find(|file| file.file_path == "shared.txt")
+            .unwrap();
+        let shared_file_2 = operation_2_files
+            .iter()
+            .find(|file| file.file_path == "shared.txt")
+            .unwrap();
+
+        assert_eq!(shared_file_1.id, shared_file_2.id);
+
+        let assets_dir = workspace.find_gen_dir().unwrap().join("assets");
+        let asset_names = fs::read_dir(&assets_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(asset_names.len(), 2);
+        assert!(asset_names.contains(&shared_file_1.clone().hashed_filename()));
+        assert!(
+            asset_names.contains(
+                &operation_2_files
+                    .iter()
+                    .find(|file| file.file_path == "unique.txt")
+                    .unwrap()
+                    .clone()
+                    .hashed_filename()
+            )
+        );
     }
 }

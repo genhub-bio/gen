@@ -1,5 +1,9 @@
 python: venv
 	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module --extras jupyter
+r:
+	# Makes the build quiet for CI/agents
+	docker build -t gen-r -f ./gen-r/Dockerfile . 2>&1 | tail -n 25
+	docker run --rm gen-r
 clean:
 	cargo clean
 build:

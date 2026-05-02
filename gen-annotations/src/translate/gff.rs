@@ -1,6 +1,6 @@
 use std::{
     cmp::{max, min},
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     io::{BufRead, Read, Write},
 };
 
@@ -9,6 +9,7 @@ use gen_graph::{GraphNode, project_path};
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::PathError,
     reference_alias::{ReferenceAlias, ReferenceAliasError},
     sample::Sample,
 };
@@ -22,6 +23,8 @@ pub enum GffError {
     Io(#[from] std::io::Error),
     #[error("Error loading reference aliases: {0}")]
     ReferenceAliasError(#[from] ReferenceAliasError),
+    #[error("Error loading path blocks: {0}")]
+    PathError(#[from] PathError),
 }
 
 pub fn translate_gff<R, W>(
@@ -61,26 +64,29 @@ where
         let start = record.start().get() as i64;
         let end = record.end().get() as i64;
         if let Some(bg) = sample_bgs.get(&ref_name) {
-            let projection = paths.entry(bg.id).or_insert_with(|| {
-                let path = BlockGroup::get_current_path(conn, &bg.id);
-                let graph = BlockGroup::get_graph(conn, &bg.id);
-                let mut tree = IntervalTree::default();
-                let mut position: i64 = 0;
-                for (node, strand) in project_path(&graph, &path.blocks(conn)) {
-                    if !is_terminal(node.node_id) {
-                        // GFF indexing is one based, inclusive, so we add 1 to the start.
-                        // Take a sequence that is 1-4 in our coordinates, this converts to:
-                        // 0123456
-                        // ATCGATC
-                        // 1234567
-                        // 1-4 in our zero-based half open interval would be 2-4 in GFF coordinates
-                        let end_position = position + node.length();
-                        tree.insert(position + 1..end_position, (node, strand));
-                        position = end_position;
+            let projection = match paths.entry(bg.id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let path = BlockGroup::get_current_path(conn, &bg.id);
+                    let graph = BlockGroup::get_graph(conn, &bg.id);
+                    let mut tree = IntervalTree::default();
+                    let mut position: i64 = 0;
+                    for (node, strand) in project_path(&graph, &path.blocks(conn)?) {
+                        if !is_terminal(node.node_id) {
+                            // GFF indexing is one based, inclusive, so we add 1 to the start.
+                            // Take a sequence that is 1-4 in our coordinates, this converts to:
+                            // 0123456
+                            // ATCGATC
+                            // 1234567
+                            // 1-4 in our zero-based half open interval would be 2-4 in GFF coordinates
+                            let end_position = position + node.length();
+                            tree.insert(position + 1..end_position, (node, strand));
+                            position = end_position;
+                        }
                     }
+                    entry.insert(tree)
                 }
-                tree
-            });
+            };
             let range = start..end;
             for (overlap, (node, _overlap_strand)) in projection.iter_overlaps(&range) {
                 let overlap_start = max(start, overlap.start) as usize;

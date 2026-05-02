@@ -19,8 +19,8 @@ mod remote_workflow_integration_tests {
 
         // Create branches and associate with remotes
         let main_branch = Branch::get_by_name(op_conn, "main").unwrap();
-        let feature_branch = Branch::get_or_create(op_conn, "feature");
-        let develop_branch = Branch::get_or_create(op_conn, "develop");
+        let feature_branch = Branch::get_or_create(op_conn, "feature").unwrap();
+        let develop_branch = Branch::get_or_create(op_conn, "develop").unwrap();
 
         Branch::set_remote(op_conn, main_branch.id, Some("origin")).unwrap();
         Branch::set_remote(op_conn, feature_branch.id, Some("origin")).unwrap();

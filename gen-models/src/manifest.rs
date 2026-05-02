@@ -414,7 +414,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("ACGT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "test op".to_string(),
@@ -467,7 +468,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("ACGT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "test op".to_string(),
@@ -507,7 +509,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("ACGT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "test op".to_string(),
@@ -547,7 +550,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("ACGT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "first op".to_string(),
@@ -558,7 +562,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("TGCA")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "second op".to_string(),
@@ -595,7 +600,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("ACGT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "annotation op".to_string(),
@@ -650,7 +656,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("ACGT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "first op".to_string(),
@@ -661,7 +668,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("TTTT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "second op".to_string(),
@@ -672,7 +680,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("AAAA")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "third op".to_string(),
@@ -741,7 +750,8 @@ mod tests {
         crate::sequence::Sequence::new()
             .sequence("ACGT")
             .sequence_type("DNA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let op_info = OperationInfo {
             files: vec![],
             description: "first op".to_string(),

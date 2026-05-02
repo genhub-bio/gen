@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs::File, path::PathBuf};
 
 use anyhow::Result;
 use clap::Args;
@@ -37,7 +37,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
-    export_genbank(conn, name, cmd.sample.as_str(), &PathBuf::from(cmd.path))?;
+    let file = File::create(PathBuf::from(cmd.path))?;
+    export_genbank(conn, name, cmd.sample.as_str(), file)?;
 
     conn.execute("END TRANSACTION", [])?;
     operation_conn.execute("END TRANSACTION", [])?;

@@ -155,7 +155,7 @@ mod tests {
             "test_collection_3",
         ];
         for name in &collection_names {
-            Collection::create(&conn, name);
+            Collection::create(&conn, name).unwrap();
         }
 
         let all_results = Collection::all(&conn);
@@ -172,7 +172,7 @@ mod tests {
         let conn = get_connection(None).expect("Failed to get connection");
 
         for i in 0..10 {
-            Collection::create(&conn, &format!("test_collection_{}", i));
+            Collection::create(&conn, &format!("test_collection_{}", i)).unwrap();
         }
 
         let limited_results = Collection::all_with_limit(&conn, 5);

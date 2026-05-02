@@ -7,7 +7,7 @@ use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::Edge,
-    errors::OperationError,
+    errors::{BlockGroupError, OperationError, PathError},
     path::Path,
     path_edge::PathEdge,
     sample::Sample,
@@ -29,6 +29,10 @@ pub enum GraphOperationError {
     PathNotFound(String),
     #[error("Graph error: {0}")]
     GraphError(#[from] GraphError),
+    #[error("Path creation error: {0}")]
+    PathError(#[from] PathError),
+    #[error("Block group creation error: {0}")]
+    BlockGroupError(#[from] BlockGroupError),
 }
 
 pub fn get_path(
@@ -86,9 +90,9 @@ pub fn derive_chunks(
         backbone,
     )?;
 
-    let current_path_length = current_path.length(conn);
+    let current_path_length = current_path.length(conn)?;
 
-    let current_intervaltree = current_path.intervaltree(conn);
+    let current_intervaltree = current_path.intervaltree(conn)?;
     let current_path_edges = PathEdge::edges_for_path(conn, &current_path.id);
 
     let chunk_ranges_length = chunk_ranges.len();
@@ -114,7 +118,7 @@ pub fn derive_chunks(
                     parent_block_group_id: Some(&parent_block_group_id),
                     ..Default::default()
                 },
-            );
+            )?;
             child_block_group.id
         };
 
@@ -153,7 +157,7 @@ pub fn derive_chunks(
             end_node_coordinate,
             &child_block_group_id,
             create_block_group,
-        );
+        )?;
 
         let child_block_group_edges =
             BlockGroupEdge::edges_for_block_group(conn, &child_block_group_id);
@@ -205,6 +209,7 @@ pub fn derive_chunks(
         for edge in &current_path_edges {
             let new_source_node_id = new_node_ids_by_old.get(&edge.source_node_id);
             let new_target_node_id = new_node_ids_by_old.get(&edge.target_node_id);
+
             if let Some(new_source_node_id) = new_source_node_id
                 && let Some(new_target_node_id) = new_target_node_id
             {
@@ -246,7 +251,7 @@ pub fn derive_chunks(
                 &current_path.name,
                 &child_block_group_id,
                 &new_path_edge_ids,
-            );
+            )?;
         }
 
         let path_edges = Edge::query_by_ids(conn, &new_path_edge_ids);
@@ -315,7 +320,7 @@ pub fn make_stitch(
             name: new_region_name,
             ..Default::default()
         },
-    );
+    )?;
 
     let mut block_group_chunks = vec![];
 
@@ -413,7 +418,7 @@ pub fn make_stitch_from_block_groups(
             new_region_name,
             &child_block_group_id,
             &new_path_edge_ids,
-        );
+        )?;
     }
 
     Ok(())
@@ -451,22 +456,24 @@ mod tests {
 
         track_database(conn, op_conn).unwrap();
 
-        Collection::create(conn, "test");
+        Collection::create(conn, "test").unwrap();
         let (block_group1_id, original_path) = setup_block_group(conn);
 
-        let intervaltree = original_path.intervaltree(conn);
+        let intervaltree = original_path.intervaltree(conn).unwrap();
         let insert_start_node_id = intervaltree.query_point(16).next().unwrap().value.node_id;
         let insert_end_node_id = intervaltree.query_point(24).next().unwrap().value.node_id;
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AAAAAAAA")
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let insert_node_id = Node::create(
             conn,
             &insert_sequence.hash,
             &HashId::convert_str(&format!("test-insert-a.{}", insert_sequence.hash)),
-        );
+        )
+        .unwrap();
         let edge_into_insert = Edge::create(
             conn,
             insert_start_node_id,
@@ -475,7 +482,8 @@ mod tests {
             insert_node_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge_out_of_insert = Edge::create(
             conn,
             insert_node_id,
@@ -484,7 +492,8 @@ mod tests {
             insert_end_node_id,
             4,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let ref_heal_1 = Edge::create(
             conn,
             insert_start_node_id,
@@ -493,7 +502,8 @@ mod tests {
             insert_start_node_id,
             6,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let ref_heal_2 = Edge::create(
             conn,
             insert_end_node_id,
@@ -502,7 +512,8 @@ mod tests {
             insert_end_node_id,
             4,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let edge_ids = [
             edge_into_insert.id,
@@ -522,10 +533,11 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let insert_path =
-            original_path.new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert);
+        let insert_path = original_path
+            .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
+            .unwrap();
         assert_eq!(
-            insert_path.sequence(conn),
+            insert_path.sequence(conn).unwrap(),
             "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
         );
 
@@ -561,7 +573,7 @@ mod tests {
         );
 
         let new_path = BlockGroup::get_current_path(conn, &block_group2.id);
-        assert_eq!(new_path.sequence(conn), "TAAAAAAAAC");
+        assert_eq!(new_path.sequence(conn).unwrap(), "TAAAAAAAAC");
     }
 
     #[test]
@@ -598,7 +610,8 @@ mod tests {
             5,
             fasta_update_path.to_str().unwrap(),
             false,
-        );
+        )
+        .unwrap();
 
         let _ = update_with_fasta(
             &context,
@@ -610,7 +623,8 @@ mod tests {
             20,
             fasta_update_path.to_str().unwrap(),
             false,
-        );
+        )
+        .unwrap();
 
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
@@ -664,7 +678,7 @@ mod tests {
         );
 
         let path2 = BlockGroup::get_current_path(conn, &block_group2.id);
-        assert_eq!(path2.sequence(conn), "TCAATCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false);
@@ -677,7 +691,7 @@ mod tests {
         );
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
-        assert_eq!(path3.sequence(conn), "ATCGATCAAGGAACACA");
+        assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
     }
 
     #[test]
@@ -714,7 +728,8 @@ mod tests {
             5,
             fasta_update_path.to_str().unwrap(),
             false,
-        );
+        )
+        .unwrap();
 
         let _ = update_with_fasta(
             &context,
@@ -726,7 +741,8 @@ mod tests {
             20,
             fasta_update_path.to_str().unwrap(),
             false,
-        );
+        )
+        .unwrap();
 
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
@@ -780,7 +796,7 @@ mod tests {
         );
 
         let path2 = BlockGroup::get_current_path(conn, &block_group2.id);
-        assert_eq!(path2.sequence(conn), "TCAATCG");
+        assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false);
@@ -793,7 +809,7 @@ mod tests {
         );
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
-        assert_eq!(path3.sequence(conn), "ATCGATCAAGGAACACA");
+        assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
 
         // Stitch the two main chunks back together in same order
         make_stitch(
@@ -825,7 +841,7 @@ mod tests {
 
         let path4 = BlockGroup::get_current_path(conn, &block_group4.id);
         // path2 + path3 concatenated
-        assert_eq!(path4.sequence(conn), "TCAATCGATCGATCAAGGAACACA");
+        assert_eq!(path4.sequence(conn).unwrap(), "TCAATCGATCGATCAAGGAACACA");
 
         // Stitch the two main chunks together but in reverse order
         make_stitch(
@@ -857,6 +873,6 @@ mod tests {
 
         let path5 = BlockGroup::get_current_path(conn, &block_group5.id);
         // path3 + path2 concatenated
-        assert_eq!(path5.sequence(conn), "ATCGATCAAGGAACACATCAATCG");
+        assert_eq!(path5.sequence(conn).unwrap(), "ATCGATCAAGGAACACATCAATCG");
     }
 }

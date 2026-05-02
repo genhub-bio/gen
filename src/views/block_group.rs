@@ -72,7 +72,9 @@ fn get_block_group_path_nodes(
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
     // Get the path blocks from the database
-    let path_blocks = path.blocks(conn);
+    let path_blocks = path
+        .blocks(conn)
+        .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
     // Project the path blocks onto the current graph state
     let projected_path = project_path(graph, &path_blocks);
@@ -245,7 +247,14 @@ pub fn view_block_group(
         std::collections::HashMap::new();
     let mut annotation_group_tracks: std::collections::HashMap<String, AnnotationTrack> =
         std::collections::HashMap::new();
-    let mut current_block_group = block_group_id.map(|bg_id| BlockGroup::get_by_id(conn, &bg_id));
+    let mut current_block_group =
+        block_group_id.map(|bg_id| match BlockGroup::get_by_id(conn, &bg_id) {
+            Ok(bg) => bg,
+            Err(err) => {
+                // TODO: Handle these with messages instead of panic'ing
+                panic!("Failed to load block group {bg_id}: {err}");
+            }
+        });
 
     // Create the graph controller and initial graph
     let bar = progress_bar.add(get_time_elapsed_bar());
@@ -1033,7 +1042,15 @@ pub fn view_block_group(
             block_graph = BlockGroup::get_graph(conn, new_block_group_id);
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
-            current_block_group = Some(BlockGroup::get_by_id(conn, new_block_group_id));
+            let block_group = match BlockGroup::get_by_id(conn, new_block_group_id) {
+                Ok(bg) => bg,
+                Err(err) => {
+                    // TODO: Handle these with messages instead of panic'ing
+                    panic!("Failed to load block group {}: {err}", new_block_group_id);
+                }
+            };
+
+            current_block_group = Some(block_group);
             let selected_sample = current_block_group
                 .as_ref()
                 .map(|bg| bg.sample_name.as_str());

@@ -1,0 +1,31 @@
+[package]
+name = "gen-r"
+description = "R bindings for the gen sequence graph and version control system."
+version = "0.1.31"
+edition = "2024"
+repository = "https://github.com/genhub-bio/gen"
+homepage = "https://genhub.bio"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "genr"
+crate-type = ["staticlib"]
+
+[dependencies]
+extendr-api = "0.9.0"
+flate2 = "1.1.5"
+gen = { path = "../../..", version = "0.1.31" }
+gen-core = { path = "../../../gen-core", version = "0.1.31" }
+gen-diff = { path = "../../../gen-diff", version = "0.1.31" }
+gen-graph = { path = "../../../gen-graph", version = "0.1.31" }
+gen-models = { path = "../../../gen-models", version = "0.1.31" }
+gen-tui = { path = "../../../gen-tui", version = "0.1.31", default-features = false }
+log = "0.4.26"
+ratatui = { version = "0.30.0", default-features = false }
+rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+
+[workspace]
+members = ["."]

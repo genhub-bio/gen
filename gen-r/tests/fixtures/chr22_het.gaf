@@ -1,0 +1,7 @@
+test_left	50	0	50	+	>138.0	50	0	50	50	50	31	tp:A:P	NM:i:0	cm:i:30	s1:i:50	s2:i:0	dv:f:0	cg:Z:50=	ds:Z::50
+test_right	50	0	50	+	>140.0	50	0	50	50	50	31	tp:A:P	NM:i:0	cm:i:30	s1:i:50	s2:i:0	dv:f:0	cg:Z:50=	ds:Z::50
+2node_span_left	85	0	85	+	>454.0>455.0	100	0	79	79	85	60	tp:A:P	NM:i:6	cm:i:20	s1:i:79	s2:i:0	dv:f:0.0561	cg:Z:22=6I57=	ds:Z::22+aaaaa[a]:57
+2node_span_right	89	0	89	+	>530.0>531.0	100	11	100	89	89	60	tp:A:P	NM:i:0	cm:i:49	s1:i:90	s2:i:0	dv:f:0.0163	cg:Z:89=	ds:Z::89
+left_extreme_right	50	0	50	+	>3.0	50	0	50	50	50	31	tp:A:P	NM:i:0	cm:i:30	s1:i:50	s2:i:0	dv:f:0	cg:Z:50=	ds:Z::50
+right_extreme_left	50	0	50	+	>1001.0	50	0	50	50	50	31	tp:A:P	NM:i:0	cm:i:30	s1:i:50	s2:i:0	dv:f:0	cg:Z:50=	ds:Z::50
+nonsense_entry	50	1	50	+	>140.0	50	1	50	49	49	28	tp:A:P	NM:i:0	cm:i:14	s1:i:49	s2:i:0	dv:f:0	cg:Z:49=	ds:Z::49

@@ -3,10 +3,19 @@ use std::{collections::HashMap, fs::File, io, io::BufReader};
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
+    errors::PathError,
     path::{Annotation, Path},
     sample::Sample,
 };
 use noodles::{core::Position, gff};
+
+#[derive(Debug, thiserror::Error)]
+pub enum PropagateGffError {
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Path error: {0}")]
+    Path(#[from] PathError),
+}
 
 pub fn gff_attribute_value_to_string(
     attrs: &gff::feature::record_buf::Attributes,
@@ -36,7 +45,7 @@ pub fn propagate_gff(
     to_sample_name: &str,
     gff_input_filename: &str,
     gff_output_filename: &str,
-) -> io::Result<()> {
+) -> Result<(), PropagateGffError> {
     let mut reader = File::open(gff_input_filename)
         .map(BufReader::new)
         .map(gff::io::Reader::new)?;
@@ -58,14 +67,14 @@ pub fn propagate_gff(
     let mut path_mappings_by_bg_name = HashMap::new();
     for (name, target_path) in &target_paths_by_bg_name {
         let source_path = source_paths_by_bg_name.get(name).unwrap();
-        let mapping = source_path.get_mapping_tree(conn, target_path);
+        let mapping = source_path.get_mapping_tree(conn, target_path)?;
         path_mappings_by_bg_name.insert(name, mapping);
     }
 
     let sequence_lengths_by_path_name = target_paths_by_bg_name
         .iter()
-        .map(|(name, path)| (name.clone(), path.sequence(conn).len() as i64))
-        .collect::<HashMap<String, i64>>();
+        .map(|(name, path)| Ok((name.clone(), path.sequence(conn)?.len() as i64)))
+        .collect::<Result<HashMap<String, i64>, PathError>>()?;
 
     for result in reader.record_bufs() {
         let record = result?;
@@ -136,13 +145,14 @@ mod tests {
     use crate::test_helpers::get_connection;
 
     fn create_block_group(conn: &GraphConnection) {
-        let collection = Collection::create(conn, "test");
-        Sample::get_or_create(conn, Sample::DEFAULT_NAME);
+        let collection = Collection::create(conn, "test").unwrap();
+        Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence(sequence)
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node_id = Node::create(
             conn,
             &reference_sequence.hash,
@@ -151,7 +161,8 @@ mod tests {
                 collection = collection.name,
                 hash = reference_sequence.hash
             )),
-        );
+        )
+        .unwrap();
         let block_group = BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -161,7 +172,8 @@ mod tests {
                 parent_block_group_id: None,
                 is_default: false,
             },
-        );
+        )
+        .unwrap();
 
         let edge_into = Edge::create(
             conn,
@@ -171,7 +183,8 @@ mod tests {
             node_id,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
         let edge_out_of = Edge::create(
             conn,
             node_id,
@@ -180,7 +193,8 @@ mod tests {
             PATH_END_NODE_ID,
             0,
             Strand::Forward,
-        );
+        )
+        .unwrap();
 
         let new_block_group_edges = vec![
             BlockGroupEdgeData {
@@ -203,11 +217,12 @@ mod tests {
             "m123",
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
-        );
+        )
+        .unwrap();
     }
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
-        Sample::get_or_create(conn, "child sample");
+        Sample::get_or_create(conn, "child sample").unwrap();
         let _ = Sample::get_or_create_child(
             conn,
             "test",
@@ -225,13 +240,14 @@ mod tests {
         .expect("should create child block group")[0]
             .id;
         let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
-        let tree = sample_path.intervaltree(conn);
+        let tree = sample_path.intervaltree(conn).unwrap();
         let replacement_sequence = "AA";
 
         let replacement = Sequence::new()
             .sequence_type("DNA")
             .sequence(replacement_sequence)
-            .save(conn);
+            .save(conn)
+            .unwrap();
         let node_id = Node::create(
             conn,
             &replacement.hash,
@@ -240,7 +256,8 @@ mod tests {
                 path_id = sample_path.id,
                 sequence_hash = replacement.hash,
             )),
-        );
+        )
+        .unwrap();
         let change = PathChange {
             block_group_id: sample_bg_id,
             path: sample_path.clone(),
@@ -276,7 +293,9 @@ mod tests {
             rusqlite::params![node_id],
         )[0]
         .clone();
-        sample_path.new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert);
+        sample_path
+            .new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert)
+            .unwrap();
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs::File, path::PathBuf};
 
 use gen_models::operations::Defaults;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
@@ -92,7 +92,9 @@ pub fn export_genbank(
         conn,
         &collection_name,
         &sample,
-        &PathBuf::from(filename),
+        File::create(PathBuf::from(filename)).map_err(|io_err| {
+            PyRuntimeError::new_err(format!("GenBank export failed: {io_err}"))
+        })?,
     ) {
         return Err(PyRuntimeError::new_err(format!(
             "GenBank export failed: {err}"

@@ -27,6 +27,7 @@ pub fn create_bg(
     sample_name: &str,
     name: &str,
 ) -> BlockGroup {
+    Sample::get_or_create(conn, sample_name).unwrap();
     BlockGroup::create(
         conn,
         NewBlockGroup {
@@ -36,6 +37,7 @@ pub fn create_bg(
             ..Default::default()
         },
     )
+    .unwrap()
 }
 use intervaltree::IntervalTree;
 use rusqlite::Connection;
@@ -109,41 +111,49 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     let a_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("AAAAAAAAAA")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let a_node_id = Node::create(
         conn,
         &a_seq.hash,
         &HashId::convert_str(&format!("test-a-node.{}", a_seq.hash)),
-    );
+    )
+    .unwrap();
     let t_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("TTTTTTTTTT")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let t_node_id = Node::create(
         conn,
         &t_seq.hash,
         &HashId::convert_str(&format!("test-t-node.{}", a_seq.hash)),
-    );
+    )
+    .unwrap();
     let c_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("CCCCCCCCCC")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let c_node_id = Node::create(
         conn,
         &c_seq.hash,
         &HashId::convert_str(&format!("test-c-node.{}", a_seq.hash)),
-    );
+    )
+    .unwrap();
     let g_seq = Sequence::new()
         .sequence_type("DNA")
         .sequence("GGGGGGGGGG")
-        .save(conn);
+        .save(conn)
+        .unwrap();
     let g_node_id = Node::create(
         conn,
         &g_seq.hash,
         &HashId::convert_str(&format!("test-g-node.{}", a_seq.hash)),
-    );
+    )
+    .unwrap();
     let _collection = Collection::create(conn, "test");
-    Sample::get_or_create(conn, "test");
+    Sample::get_or_create(conn, "test").unwrap();
     let block_group = create_bg(conn, "test", "test", "chr1");
     let edge0 = Edge::create(
         conn,
@@ -153,7 +163,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         a_node_id,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
     let edge1 = Edge::create(
         conn,
         a_node_id,
@@ -162,7 +173,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         t_node_id,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
     let edge2 = Edge::create(
         conn,
         t_node_id,
@@ -171,7 +183,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         c_node_id,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
     let edge3 = Edge::create(
         conn,
         c_node_id,
@@ -180,7 +193,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         g_node_id,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
     let edge4 = Edge::create(
         conn,
         g_node_id,
@@ -189,7 +203,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         PATH_END_NODE_ID,
         0,
         Strand::Forward,
-    );
+    )
+    .unwrap();
 
     let block_group_edges = vec![
         BlockGroupEdgeData {
@@ -230,7 +245,8 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
         "chr1",
         &block_group.id,
         &[edge0.id, edge1.id, edge2.id, edge3.id, edge4.id],
-    );
+    )
+    .unwrap();
     (block_group.id, path)
 }
 
