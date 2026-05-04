@@ -1,18 +1,21 @@
 use std::{
     cmp::{max, min},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
 };
 
 use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_graph::GenGraph;
 use gen_tui::{
-    CroppedGraph, GraphController, ViewportState, VisualDetail, WorldPos, WorldRect,
-    theme::current_theme,
+    GraphController, ViewportState, WorldRect, plotter::NodeSizer, theme::current_theme,
 };
 use petgraph::visit::NodeIndexable;
-use ratatui::{layout::Rect, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
 
-use crate::views::gen_graph_widget::GenGraphNodeSizer;
+use crate::graphs::graph_search::GraphLocus;
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSegment {
@@ -34,6 +37,40 @@ pub struct AnnotationTrack {
     pub name: String,
     pub annotations: Vec<AnnotationSpan>,
     pub annotation_segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>>,
+    pub min_rows: usize,
+    pub max_rows: usize,
+}
+
+pub fn graphlocus_to_annotation_span(locus: &GraphLocus, name: &str) -> AnnotationSpan {
+    let n = locus.blocks.len();
+    let segments = locus
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let start = if i == 0 {
+                node.sequence_start + locus.start_offset as i64
+            } else {
+                node.sequence_start
+            };
+            let end = if i == n - 1 {
+                node.sequence_start + locus.end_offset as i64
+            } else {
+                node.sequence_end
+            };
+            AnnotationSegment {
+                node_id: node.node_id,
+                start,
+                end,
+                strand: locus.strand,
+            }
+        })
+        .collect();
+    AnnotationSpan {
+        id: HashId::convert_str(name),
+        name: name.to_string(),
+        segments,
+    }
 }
 
 impl AnnotationTrack {
@@ -52,54 +89,329 @@ impl AnnotationTrack {
             name,
             annotations,
             annotation_segments_by_node: segments_by_node,
+            min_rows: 0,
+            max_rows: 9,
         }
+    }
+
+    /// Draw annotation track at the bottom of `area`. Returns height used, or 0 if nothing visible.
+    pub fn draw<S: NodeSizer<GenGraph>>(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        controller: &GraphController<GenGraph, S>,
+    ) -> u16 {
+        let (_, segments_by_annotation, truncated_count) =
+            collect_visual_segments(self, controller);
+        let visible_ranges: AnnotationVisibleRanges = segments_by_annotation
+            .iter()
+            .map(|(idx, segs)| {
+                let x1 = segs.iter().map(VisualSegment::start_x).min().unwrap_or(0);
+                let x2 = segs.iter().map(VisualSegment::end_x).max().unwrap_or(0);
+                (*idx, (x1, x2))
+            })
+            .collect();
+        let packed_rows = pack_visible_annotation_rows(&visible_ranges, self, self.max_rows);
+
+        let n = packed_rows.len().max(self.min_rows);
+        let height = (n as u16 + 1).max(1);
+        if area.height < height {
+            return 0;
+        }
+
+        let area = Rect {
+            x: area.x,
+            y: area.y + area.height - height,
+            width: area.width,
+            height,
+        };
+
+        let viewport_state = &controller.viewport_state;
+
+        let theme = current_theme();
+
+        let divider_style = Style::default().fg(theme[0x02]);
+        buf.set_string(
+            area.x,
+            area.y,
+            "─".repeat(area.width as usize),
+            divider_style,
+        );
+
+        if !self.name.is_empty() {
+            let header = if truncated_count > 0 {
+                format!("{} (+{truncated_count} in truncated regions)", self.name)
+            } else {
+                self.name.clone()
+            };
+            buf.set_string(area.x + 1, area.y, header, Style::default().fg(theme[0x04]));
+        }
+
+        let inner = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height - 1,
+        };
+
+        if inner.width == 0 {
+            return height;
+        }
+
+        let bg_color = theme[0x00];
+        for row in inner.y..inner.y + inner.height {
+            buf.set_string(
+                inner.x,
+                row,
+                " ".repeat(inner.width as usize),
+                Style::default().bg(bg_color),
+            );
+        }
+
+        let label_fg_over_bar = bg_color;
+
+        for (row_idx, row_annotations) in packed_rows.iter().take(inner.height as usize).enumerate()
+        {
+            let annotation_color = if row_idx % 2 == 0 {
+                theme[0x0B]
+            } else {
+                theme[0x0C]
+            };
+            let annotation_style = Style::default().fg(annotation_color).bg(bg_color);
+            let terminal_y = inner.y + row_idx as u16;
+
+            for idx in row_annotations {
+                let Some(mut segments) = segments_by_annotation.get(idx).cloned() else {
+                    continue;
+                };
+                segments.sort_by_key(|s| s.start_x());
+                let mut prev_end: Option<i64> = None;
+                for seg in &segments {
+                    let x1 = seg.start_x();
+                    let x2 = seg.end_x();
+                    place_bar(
+                        buf,
+                        inner,
+                        viewport_state,
+                        x1,
+                        x2,
+                        terminal_y,
+                        annotation_style,
+                    );
+                    if seg.start.1.is_none() {
+                        draw_truncation_marker(
+                            buf,
+                            inner,
+                            viewport_state,
+                            seg.start.0,
+                            terminal_y,
+                            annotation_style,
+                        );
+                    }
+                    if seg.end.1.is_none() {
+                        draw_truncation_marker(
+                            buf,
+                            inner,
+                            viewport_state,
+                            seg.end.0,
+                            terminal_y,
+                            annotation_style,
+                        );
+                    }
+                    if let Some(prev) = prev_end
+                        && x1 - prev > 1
+                    {
+                        draw_dashed_connector(
+                            buf,
+                            inner,
+                            viewport_state,
+                            prev + 1,
+                            x1 - 1,
+                            terminal_y,
+                            annotation_style,
+                        );
+                    }
+                    prev_end = Some(x2);
+                }
+            }
+
+            for idx in row_annotations {
+                let annotation_name = &self.annotations[*idx].name;
+                if annotation_name.is_empty() {
+                    continue;
+                }
+                let Some(visual_segs) = segments_by_annotation.get(idx) else {
+                    continue;
+                };
+                let x1 = visual_segs
+                    .iter()
+                    .map(VisualSegment::start_x)
+                    .min()
+                    .unwrap_or_default();
+                let x2 = visual_segs
+                    .iter()
+                    .map(VisualSegment::end_x)
+                    .max()
+                    .unwrap_or_default();
+
+                let span_strand = span_strand(&self.annotations[*idx]);
+                place_sticky_label(
+                    buf,
+                    inner,
+                    viewport_state,
+                    x1,
+                    x2,
+                    terminal_y,
+                    annotation_name,
+                    span_strand,
+                    annotation_style,
+                    label_fg_over_bar,
+                );
+            }
+        }
+
+        height
     }
 }
 
-type AnnotationSegmentsByIndex = HashMap<usize, Vec<(i64, i64)>>;
 type AnnotationVisibleRanges = HashMap<usize, (i64, i64)>;
-type AnnotationSegmentsResult = (AnnotationVisibleRanges, AnnotationSegmentsByIndex);
 
-/// Collect visible annotation segments by mapping sequence coordinates to world X coordinates.
+/// Bases from either node boundary that map to precise cells (0-indexed, inclusive).
+/// For example, if we truncate 123456789 to 12...89  this number would be 2
+const BORDER_BP: i64 = 5;
+
+/// Extra collection margin for labels that can remain visible outside the bar.
+const MIN_LABEL_LOOKAHEAD: i64 = 8;
+
+/// Fixed gap between annotation bar and label when label is external.
+const LABEL_SIDE_GUTTER: i64 = 1;
+
+/// Fixed gap reserved to the right of each annotation bar when packing rows
+const RIGHT_BAR_MARGIN: i64 = 4;
+
+/// How an annotation endpoint maps to the current visual representation.
 ///
-/// This is the gen-tui equivalent of the old `Viewer::collect_annotation_segments`. Instead of
-/// reading from `scaled_layout.labels`, it iterates over visible Data nodes in the CroppedGraph
-/// and uses `WorldPos` + `LayoutNode.size` to determine each node's X span in world coordinates.
-fn collect_annotation_segments(
-    track: &AnnotationTrack,
-    viewport_graph: &CroppedGraph,
-    viewport_state: &ViewportState,
-    graph: &GenGraph,
-) -> AnnotationSegmentsResult {
-    if track.annotations.is_empty() {
-        return (HashMap::new(), HashMap::new());
+/// `(base_x, Some(offset))` — exact cell at world position `base_x + offset`.
+/// `(node_mid_x, None)`     — falls in the truncated interior; draw `░` at `node_mid_x`.
+pub type EndpointX = (i64, Option<i64>);
+
+/// One resolved segment of an annotation, covering part of a single graph node.
+#[derive(Clone, Debug)]
+pub struct VisualSegment {
+    /// World X of node left edge.
+    pub node_x1: i64,
+    /// World X of node right edge.
+    pub node_x2: i64,
+    /// Resolved start endpoint.
+    pub start: EndpointX,
+    /// Resolved end endpoint.
+    pub end: EndpointX,
+}
+
+impl VisualSegment {
+    pub fn start_x(&self) -> i64 {
+        self.start.0 + self.start.1.unwrap_or(0)
     }
 
-    const HORIZONTAL_LOOKAHEAD: i64 = 8;
-    let mut visible_ranges: AnnotationVisibleRanges = HashMap::new();
-    let mut segments_by_annotation: AnnotationSegmentsByIndex = HashMap::new();
+    pub fn end_x(&self) -> i64 {
+        self.end.0 + self.end.1.unwrap_or(0)
+    }
+}
+
+/// Resolve one annotation sequence position to a visual endpoint.
+///
+/// * `dist_from_start` – bases from the node's first base (≥ 0).
+/// * `dist_from_end`   – bases from the node's last base, inclusive (≥ 0; 0 = last base).
+///
+/// For truncated nodes (`node_len > node_width`, `node_width ≥ 3`):
+/// - Positions within `BORDER_BP` bases of either boundary map to a precise border cell.
+/// - All other positions map to the node's middle cell with `offset = None`.
+///
+/// The middle cell (`node_width / 2`) is kept free of border mappings, ensuring
+/// `░` indicators only appear for genuinely ambiguous interior positions.
+fn resolve_endpoint(
+    dist_from_start: i64,
+    dist_from_end: i64,
+    node_x1: i64,
+    node_width: i64,
+    node_len: i64,
+) -> EndpointX {
+    if node_len <= node_width || node_width < 3 {
+        let offset = if node_len <= 0 {
+            0
+        } else {
+            (dist_from_start * node_width / node_len).clamp(0, node_width - 1)
+        };
+        return (node_x1, Some(offset));
+    }
+
+    // Truncated node. `half` is the mid-cell index (= 6 for width 13).
+    // Left border uses cells 0 .. half-1; right border uses cells half+1 .. end.
+    let half = node_width / 2;
+
+    if dist_from_start <= BORDER_BP {
+        return (node_x1, Some(dist_from_start.min(half - 1)));
+    }
+
+    if dist_from_end <= BORDER_BP {
+        return (node_x1, Some(node_width - 1 - dist_from_end.min(half - 1)));
+    }
+
+    (node_x1 + half, None)
+}
+
+/// Collect visible annotation segments, resolving endpoint positions against
+/// the current layout and detail level.
+///
+/// Returns `(visible_indices_sorted, segments_by_annotation, entirely_truncated_count)`.
+/// `entirely_truncated_count` is the number of visible annotations whose every segment
+/// falls entirely within a truncated node interior and is therefore visually omitted.
+pub fn collect_visual_segments<S: NodeSizer<GenGraph>>(
+    track: &AnnotationTrack,
+    controller: &GraphController<GenGraph, S>,
+) -> (Vec<usize>, HashMap<usize, Vec<VisualSegment>>, usize) {
+    if track.annotations.is_empty() {
+        return (Vec::new(), HashMap::new(), 0);
+    }
+
+    let viewport_state = &controller.viewport_state;
+    let viewport_graph = controller.get_viewport_graph();
+    let graph = controller.graph();
 
     let camera_rect = viewport_state.camera_rect();
-    let window_start = camera_rect.min.x;
-    let window_end = camera_rect.max.x;
-    let left_bound = window_start - HORIZONTAL_LOOKAHEAD;
-    let right_bound = window_end + HORIZONTAL_LOOKAHEAD;
+    let win_start = camera_rect.min.x;
+    let win_end = camera_rect.max.x;
+
+    let max_label_len = track
+        .annotations
+        .iter()
+        .map(|annotation| annotation.name.chars().count() as i64)
+        .max()
+        .unwrap_or(0);
+
+    // Labels can remain visible outside the bar by roughly their own width plus
+    // gutter. If collection only looks at the bar, a label can vanish before it
+    // has finished sliding out of the viewport.
+    let lookahead = MIN_LABEL_LOOKAHEAD.max(max_label_len + LABEL_SIDE_GUTTER * 2 + 1);
+    let left_bound = win_start - lookahead;
+    let right_bound = win_end + lookahead;
+
+    let mut segments_by_annotation: HashMap<usize, Vec<VisualSegment>> = HashMap::new();
+    let mut visible_indices: Vec<usize> = Vec::new();
+    let mut visible_set: HashSet<usize> = HashSet::new();
 
     for (world_pos, domain_idx, layout_node) in viewport_graph.data_nodes() {
-        // Resolve the domain GraphNode from the index
         let block = <&GenGraph as NodeIndexable>::from_index(&graph, domain_idx.index());
 
         if is_start_node(block.node_id) || is_end_node(block.node_id) {
             continue;
         }
 
-        // Compute the node's world-space X range from its center position and size
         let node_rect = WorldRect::from_center_and_size(world_pos, layout_node.size);
         let x1 = node_rect.min.x;
         let x2 = node_rect.max.x;
 
-        let near_horizontally = x2 >= left_bound && x1 <= right_bound;
-        if !near_horizontally {
+        if x2 < left_bound || x1 > right_bound {
             continue;
         }
 
@@ -112,48 +424,77 @@ fn collect_annotation_segments(
             continue;
         }
 
-        // label_len is the inclusive width of the node in world cells
-        let label_len = x2 - x1;
-        if label_len <= 0 {
-            continue;
-        }
+        let node_width = layout_node.size.0 as i64;
 
         for (idx, segment) in segments {
             let overlap_start = max(segment.start, block.sequence_start);
             let overlap_end = min(segment.end, block.sequence_end);
+
             if overlap_end <= overlap_start {
                 continue;
             }
 
-            // Map sequence coordinates to world X coordinates using relative positioning
-            // (same algorithm as the annotations branch, but with integer world coordinates)
-            let seg_x1 = x1 + (overlap_start - block.sequence_start) * label_len / node_len;
-            let seg_x2 = x1 + (overlap_end - block.sequence_start) * label_len / node_len;
-            let (seg_x1, seg_x2) = if seg_x2 < seg_x1 {
-                (seg_x2, seg_x1)
-            } else {
-                (seg_x1, seg_x2)
-            };
+            let seg_start = resolve_endpoint(
+                overlap_start - block.sequence_start,
+                block.sequence_end - 1 - overlap_start,
+                x1,
+                node_width,
+                node_len,
+            );
 
-            let is_on_screen = seg_x2 >= window_start && seg_x1 <= window_end;
-            if is_on_screen {
-                visible_ranges
-                    .entry(*idx)
-                    .and_modify(|range| {
-                        range.0 = range.0.min(seg_x1);
-                        range.1 = range.1.max(seg_x2);
-                    })
-                    .or_insert((seg_x1, seg_x2));
+            let seg_end = resolve_endpoint(
+                overlap_end - 1 - block.sequence_start,
+                block.sequence_end - overlap_end,
+                x1,
+                node_width,
+                node_len,
+            );
+
+            if visible_set.insert(*idx) {
+                visible_indices.push(*idx);
             }
 
             segments_by_annotation
                 .entry(*idx)
                 .or_default()
-                .push((seg_x1, seg_x2));
+                .push(VisualSegment {
+                    node_x1: x1,
+                    node_x2: x2,
+                    start: seg_start,
+                    end: seg_end,
+                });
         }
     }
 
-    (visible_ranges, segments_by_annotation)
+    // Filter out entirely truncated annotations (start and end on same node, both in truncated interior).
+    let mut entirely_truncated_count = 0;
+
+    visible_indices.retain(|idx| {
+        let Some(segs) = segments_by_annotation.get(idx) else {
+            return false;
+        };
+
+        let (Some(first), Some(last)) = (segs.first(), segs.last()) else {
+            return true;
+        };
+
+        let is_truncated =
+            first.node_x1 == last.node_x1 && first.start.1.is_none() && last.end.1.is_none();
+
+        if is_truncated {
+            entirely_truncated_count += 1;
+            segments_by_annotation.remove(idx);
+            false
+        } else {
+            true
+        }
+    });
+
+    (
+        visible_indices,
+        segments_by_annotation,
+        entirely_truncated_count,
+    )
 }
 
 fn pack_visible_annotation_rows(
@@ -179,7 +520,7 @@ fn pack_visible_annotation_rows(
     for (idx, (start, end)) in annotations {
         let label_len = track.annotations[*idx].name.chars().count() as i64;
         let occupied_start = *start - label_len - 1;
-        let occupied_end = *end;
+        let occupied_end = *end + RIGHT_BAR_MARGIN;
 
         let best_row = row_ends
             .iter()
@@ -203,183 +544,44 @@ fn pack_visible_annotation_rows(
     rows
 }
 
-/// Calculate the desired height for an annotation track panel.
-pub fn annotation_panel_height(track: &AnnotationTrack, max_height: u16) -> u16 {
-    if max_height < 2 {
-        return 0;
+fn span_strand(span: &AnnotationSpan) -> Option<Strand> {
+    let first = span.segments.first()?.strand;
+    if Strand::is_ambiguous(first) {
+        return None;
     }
-    if track.annotations.is_empty() {
-        return if track.name.is_empty() {
-            0
-        } else {
-            2.min(max_height)
-        };
+    if span.segments.iter().all(|s| s.strand == first) {
+        Some(first)
+    } else {
+        None
     }
-    let desired = track.annotations.len().saturating_add(1) as u16;
-    let cap = max_height.saturating_div(3).max(3);
-    desired.min(cap).min(max_height)
 }
 
-/// Draw the annotation track panel below the graph canvas.
-///
-/// This is the gen-tui equivalent of the old `Viewer::draw_annotations_panel`. Instead of
-/// rendering through ratatui's `Canvas` widget with braille coordinates, it writes directly
-/// to the terminal buffer. The X axis is synchronized with the graph's viewport by converting
-/// world X coordinates to terminal X via `ViewportState::world_to_terminal`.
-pub fn draw_annotations_panel(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    track: &AnnotationTrack,
-    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+/// Convert a world X coordinate to a terminal X coordinate.
+#[inline]
+pub(crate) fn world_x_to_term_x(viewport_state: &ViewportState, world_x: i64) -> i64 {
+    let cam_min_x = viewport_state.camera_rect().min.x;
+    viewport_state.viewport_bounds.x as i64 + (world_x - cam_min_x)
+}
+
+fn draw_truncation_marker(
+    buf: &mut Buffer,
+    inner: Rect,
+    viewport_state: &ViewportState,
+    world_x: i64,
+    terminal_y: u16,
+    style: Style,
 ) {
-    if area.height < 2 {
-        return;
-    }
+    let raw_x = world_x_to_term_x(viewport_state, world_x);
+    let area_left = inner.x as i64;
+    let area_right = (inner.x + inner.width - 1) as i64;
 
-    let theme = current_theme();
-
-    // Draw the divider line with track name
-    let divider_style = Style::default().fg(theme[0x02]);
-    let divider_y = area.y;
-    let divider = "─".repeat(area.width as usize);
-    frame
-        .buffer_mut()
-        .set_string(area.x, divider_y, divider, divider_style);
-
-    if !track.name.is_empty() {
-        frame.buffer_mut().set_string(
-            area.x + 1,
-            divider_y,
-            &track.name,
-            Style::default().fg(theme[0x04]),
-        );
-    }
-
-    let inner = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height - 1,
-    };
-
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    // Fill background
-    let bg_color = theme[0x00];
-    let bg_style = Style::default().bg(bg_color);
-    for row in inner.y..inner.y + inner.height {
-        let blank = " ".repeat(inner.width as usize);
-        frame.buffer_mut().set_string(inner.x, row, blank, bg_style);
-    }
-
-    let zoomed_out = controller.get_detail_level() == VisualDetail::Minimal;
-    let annotation_color = theme[0x0B];
-    let annotation_label_style = Style::default().fg(annotation_color).bg(bg_color);
-    let annotation_bar_style = Style::default().bg(annotation_color);
-    let annotation_dot_style = Style::default().fg(annotation_color).bg(bg_color);
-
-    let (visible_ranges, segments_by_annotation) = collect_annotation_segments(
-        track,
-        controller.get_viewport_graph(),
-        &controller.viewport_state,
-        controller.graph(),
-    );
-    let packed_rows = pack_visible_annotation_rows(&visible_ranges, track, inner.height as usize);
-    if packed_rows.is_empty() {
-        return;
-    }
-
-    let viewport_state = &controller.viewport_state;
-
-    for (row, row_annotations) in packed_rows.iter().enumerate() {
-        // Each annotation row is drawn at a fixed terminal Y within the inner rect
-        let terminal_y = inner.y + row as u16;
-
-        for idx in row_annotations {
-            let Some(mut segments) = segments_by_annotation.get(idx).cloned() else {
-                continue;
-            };
-            segments.sort_by(|a, b| a.0.cmp(&b.0));
-
-            let annotation_name = &track.annotations[*idx].name;
-
-            // Draw the label to the left of the first segment
-            if let Some((first_x1, _)) = segments.first() {
-                let label_len = annotation_name.chars().count() as i64;
-                let label_world_x = first_x1 - label_len - 1;
-                if let Some((term_x, _)) =
-                    viewport_state.world_to_terminal(WorldPos::new(label_world_x, 0))
-                {
-                    // Clamp label to the panel area
-                    let label_start = term_x.max(inner.x);
-                    if label_start < inner.x + inner.width {
-                        frame.buffer_mut().set_string(
-                            label_start,
-                            terminal_y,
-                            annotation_name,
-                            annotation_label_style,
-                        );
-                    }
-                }
-            }
-
-            let mut prev_end: Option<i64> = None;
-            for (x1, x2) in &segments {
-                if zoomed_out {
-                    // Draw a single dot at the center
-                    let center = (x1 + x2) / 2;
-                    if let Some((term_x, _)) =
-                        viewport_state.world_to_terminal(WorldPos::new(center, 0))
-                        && term_x >= inner.x
-                        && term_x < inner.x + inner.width
-                    {
-                        frame.buffer_mut().set_string(
-                            term_x,
-                            terminal_y,
-                            "●",
-                            annotation_dot_style,
-                        );
-                    }
-                } else {
-                    // Draw a solid bar for the segment
-                    place_bar(
-                        frame,
-                        inner,
-                        viewport_state,
-                        *x1,
-                        *x2,
-                        terminal_y,
-                        annotation_bar_style,
-                    );
-                }
-
-                // Draw dashed connectors between disconnected segments of the same annotation
-                if !zoomed_out
-                    && let Some(prev) = prev_end
-                    && x1 - prev > 1
-                {
-                    draw_dashed_connector(
-                        frame,
-                        inner,
-                        viewport_state,
-                        prev + 1,
-                        x1 - 1,
-                        terminal_y,
-                        annotation_label_style,
-                    );
-                }
-
-                prev_end = Some(*x2);
-            }
-        }
+    if raw_x >= area_left && raw_x <= area_right {
+        buf.set_string(raw_x as u16, terminal_y, "░", style);
     }
 }
 
-/// Draw a solid bar from world x1 to world x2 at the given terminal y, clipped to the inner rect.
 fn place_bar(
-    frame: &mut ratatui::Frame,
+    buf: &mut Buffer,
     inner: Rect,
     viewport_state: &ViewportState,
     world_x1: i64,
@@ -387,34 +589,24 @@ fn place_bar(
     terminal_y: u16,
     style: Style,
 ) {
-    // Convert world X endpoints to terminal X
-    let term_x1 = viewport_state
-        .world_to_terminal(WorldPos::new(world_x1, 0))
-        .map(|(x, _)| x);
-    let term_x2 = viewport_state
-        .world_to_terminal(WorldPos::new(world_x2, 0))
-        .map(|(x, _)| x);
+    let area_left = inner.x as i64;
+    let area_right = (inner.x + inner.width - 1) as i64;
+    let raw_x1 = world_x_to_term_x(viewport_state, world_x1);
+    let raw_x2 = world_x_to_term_x(viewport_state, world_x2);
 
-    // Fall back to inner rect edges if off-screen
-    let start_x = term_x1.unwrap_or(inner.x).max(inner.x);
-    let end_x = term_x2
-        .unwrap_or(inner.x + inner.width - 1)
-        .min(inner.x + inner.width - 1);
-
-    if start_x > end_x {
+    if raw_x2 < area_left || raw_x1 > area_right {
         return;
     }
 
+    let start_x = raw_x1.max(area_left) as u16;
+    let end_x = raw_x2.min(area_right) as u16;
     let width = (end_x - start_x + 1) as usize;
-    let bar = " ".repeat(width);
-    frame
-        .buffer_mut()
-        .set_string(start_x, terminal_y, bar, style);
+
+    buf.set_string(start_x, terminal_y, "█".repeat(width), style);
 }
 
-/// Draw a dashed connector from world x_start to world x_end at the given terminal y.
 fn draw_dashed_connector(
-    frame: &mut ratatui::Frame,
+    buf: &mut Buffer,
     inner: Rect,
     viewport_state: &ViewportState,
     world_x_start: i64,
@@ -426,39 +618,137 @@ fn draw_dashed_connector(
         return;
     }
 
-    let term_x1 = viewport_state
-        .world_to_terminal(WorldPos::new(world_x_start, 0))
-        .map(|(x, _)| x);
-    let term_x2 = viewport_state
-        .world_to_terminal(WorldPos::new(world_x_end, 0))
-        .map(|(x, _)| x);
+    let area_left = inner.x as i64;
+    let area_right = (inner.x + inner.width - 1) as i64;
+    let raw_x1 = world_x_to_term_x(viewport_state, world_x_start);
+    let raw_x2 = world_x_to_term_x(viewport_state, world_x_end);
 
-    let start_x = term_x1.unwrap_or(inner.x).max(inner.x);
-    let end_x = term_x2
-        .unwrap_or(inner.x + inner.width - 1)
-        .min(inner.x + inner.width - 1);
-
-    if start_x > end_x {
+    if raw_x2 < area_left || raw_x1 > area_right {
         return;
     }
 
+    let start_x = raw_x1.max(area_left) as u16;
+    let end_x = raw_x2.min(area_right) as u16;
     let visible_width = (end_x - start_x + 1) as usize;
-    // Compute the offset into the dash pattern based on how far we are from the start
-    let pattern_offset =
-        (start_x as i64 - term_x1.unwrap_or(start_x) as i64).unsigned_abs() as usize;
 
-    let mut label = String::with_capacity(visible_width);
-    for i in 0..visible_width {
-        if (pattern_offset + i).is_multiple_of(2) {
-            label.push('-');
-        } else {
-            label.push(' ');
-        }
+    buf.set_string(start_x, terminal_y, "-".repeat(visible_width), style);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_sticky_label(
+    buf: &mut Buffer,
+    inner: Rect,
+    viewport_state: &ViewportState,
+    annotation_world_x1: i64,
+    annotation_world_x2: i64,
+    terminal_y: u16,
+    label: &str,
+    strand: Option<Strand>,
+    normal_style: Style,
+    label_fg_over_bar: Color,
+) {
+    // TODO: this assumes one terminal cell per char. If annotation names can
+    // contain wide Unicode or combining marks, switch to unicode-width and
+    // grapheme-aware clipping/writing.
+    let label_len = label.chars().count() as i64;
+
+    if label_len == 0 || inner.width == 0 {
+        return;
     }
 
-    frame
-        .buffer_mut()
-        .set_string(start_x, terminal_y, label, style);
+    let area_left = inner.x as i64;
+    let area_right = (inner.x + inner.width - 1) as i64;
+
+    if area_right < area_left {
+        return;
+    }
+
+    let annotation_start = annotation_world_x1.min(annotation_world_x2);
+    let annotation_end = annotation_world_x1.max(annotation_world_x2);
+
+    let annotation_start_term = world_x_to_term_x(viewport_state, annotation_start);
+    let annotation_end_term = world_x_to_term_x(viewport_state, annotation_end);
+
+    let final_start = match strand {
+        Some(Strand::Forward) => (annotation_start_term - LABEL_SIDE_GUTTER - label_len)
+            .max(area_left + LABEL_SIDE_GUTTER)
+            .min(annotation_end_term - label_len),
+        Some(Strand::Reverse) => (annotation_end_term + LABEL_SIDE_GUTTER)
+            .min(area_right - label_len - LABEL_SIDE_GUTTER)
+            .max(annotation_start_term + LABEL_SIDE_GUTTER),
+        _ => (annotation_start_term - LABEL_SIDE_GUTTER - label_len)
+            .max(area_left + LABEL_SIDE_GUTTER)
+            .min(annotation_end_term - label_len),
+    };
+
+    let label_with_marker = match strand {
+        Some(Strand::Forward) => format!("{label}›"),
+        Some(Strand::Reverse) => format!("‹{label}"),
+        _ => label.to_string(),
+    };
+
+    draw_label_clipped_over_existing(
+        buf,
+        inner,
+        final_start,
+        terminal_y,
+        &label_with_marker,
+        normal_style,
+        label_fg_over_bar,
+    );
+}
+
+fn draw_label_clipped_over_existing(
+    buf: &mut Buffer,
+    inner: Rect,
+    start_x: i64,
+    terminal_y: u16,
+    label: &str,
+    normal_style: Style,
+    label_fg_over_bar: Color,
+) {
+    let area_left = inner.x as i64;
+    let area_right = (inner.x + inner.width - 1) as i64;
+
+    if area_right < area_left {
+        return;
+    }
+
+    let normal_fg = normal_style.fg.unwrap_or(Color::Reset);
+
+    for (i, ch) in label.chars().enumerate() {
+        let x = start_x + i as i64;
+
+        if x < area_left || x > area_right {
+            continue;
+        }
+
+        if ch == ' ' {
+            // Preserve the existing cell entirely for spaces in the label, so
+            // bars/connectors/backgrounds shine through instead of getting a
+            // visible label-colored gap.
+            continue;
+        }
+
+        let x = x as u16;
+
+        let Some(old_cell) = buf.cell((x, terminal_y)) else {
+            continue;
+        };
+
+        let old_symbol = old_cell.symbol();
+
+        let style = if old_symbol == "█" || old_symbol == "░" {
+            // The annotation bar is drawn as a full block glyph. Its visible
+            // color is the cell foreground, so reuse that fg as the label bg.
+            Style::default().fg(label_fg_over_bar).bg(old_cell.fg)
+        } else {
+            // Not over a bar: preserve whatever background is already there.
+            Style::default().fg(normal_fg).bg(old_cell.bg)
+        };
+
+        buf.set_string(x, terminal_y, ch.to_string(), style);
+    }
 }
 
 #[cfg(test)]

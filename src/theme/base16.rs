@@ -5,6 +5,7 @@ use ratatui::style::Color;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
 struct RawPalette {
     base00: String,
     base01: String,
@@ -16,11 +17,17 @@ struct RawPalette {
     base07: String,
     base08: String,
     base09: String,
+    #[serde(alias = "base0A")]
     base0a: String,
+    #[serde(alias = "base0B")]
     base0b: String,
+    #[serde(alias = "base0C")]
     base0c: String,
+    #[serde(alias = "base0D")]
     base0d: String,
+    #[serde(alias = "base0E")]
     base0e: String,
+    #[serde(alias = "base0F")]
     base0f: String,
 }
 

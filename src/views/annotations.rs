@@ -151,7 +151,37 @@ fn build_annotation_spans(
         .collect()
 }
 
-fn parse_translated_gff<R: BufRead>(
+/// Parse a translated GFF3 file from a filesystem path.
+pub fn parse_translated_gff_file(
+    path: &std::path::Path,
+    node_filter: &HashSet<HashId>,
+    track_label: &str,
+) -> Result<Vec<AnnotationSpan>, Box<dyn std::error::Error>> {
+    let reader = BufReader::new(File::open(path)?);
+    Ok(parse_translated_gff(
+        reader,
+        node_filter,
+        track_label,
+        HashMap::new(),
+    ))
+}
+
+/// Parse a translated BED file from a filesystem path.
+pub fn parse_translated_bed_file(
+    path: &std::path::Path,
+    node_filter: &HashSet<HashId>,
+    track_label: &str,
+) -> Result<Vec<AnnotationSpan>, Box<dyn std::error::Error>> {
+    let reader = BufReader::new(File::open(path)?);
+    Ok(parse_translated_bed(
+        reader,
+        node_filter,
+        track_label,
+        HashMap::new(),
+    ))
+}
+
+pub fn parse_translated_gff<R: BufRead>(
     reader: R,
     node_filter: &HashSet<HashId>,
     track_label: &str,
@@ -206,7 +236,7 @@ fn parse_translated_gff<R: BufRead>(
     build_annotation_spans(track_label, segments_by_name)
 }
 
-fn parse_translated_bed<R: BufRead>(
+pub fn parse_translated_bed<R: BufRead>(
     reader: R,
     node_filter: &HashSet<HashId>,
     track_label: &str,
