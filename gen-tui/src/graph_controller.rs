@@ -337,8 +337,9 @@ where
         color
     }
 
-    /// Internal helper to apply a node rect highlight to the viewport graph.
-    /// Stores the domain NodeIndex directly — no world-coordinate conversion needed.
+    /// Render-only primitive shared by `set_cell_highlight` (initial paint) and the
+    /// highlight replay loop (re-paint after viewport rebuild). Kept separate so replay
+    /// can call it without pushing duplicate entries into `self.highlights`.
     fn apply_cell_highlight(
         viewport_graph: &mut CroppedGraph,
         graph: &G,
@@ -392,9 +393,12 @@ where
         self.set_path_highlight(PathStyle::new(color), path_nodes);
     }
 
-    /// Highlight the rectangle from `tl` to `br` (node-local col/row offsets,
-    /// exclusive end) for a single node.
+    /// Record and paint a cell-rect highlight with an explicit style. Persists the
+    /// highlight into `self.highlights` so it survives viewport rebuilds; delegates
+    /// the actual paint to `apply_cell_highlight`. Prefer `add_cell_highlight` when
+    /// you don't need to choose the color.
     ///
+    /// `tl`/`br` are node-local (col, row) offsets, exclusive end.
     /// Example — columns 5..12 on the top row:
     ///   set_cell_highlight(node_id, (5, 0), (12, 0), style)
     pub fn set_cell_highlight(
@@ -414,8 +418,9 @@ where
         self.highlights.push((kind, style));
     }
 
-    /// Highlight a cell rect using the next available theme accent color.
-    /// Returns the color that was chosen.
+    /// Convenience wrapper around `set_cell_highlight` that picks the next theme
+    /// accent color automatically. Returns the chosen color. Use this when you
+    /// don't need to control the style; use `set_cell_highlight` when you do.
     pub fn add_cell_highlight(
         &mut self,
         node_id: G::NodeId,
@@ -1231,6 +1236,9 @@ mod tests {
         assert!(state.has_focus); // Focus is enabled by default for keyboard input
 
         state.focus();
+        assert!(state.has_focus);
+
+        state.handle_mouse_scroll(5, 5, Duration::from_millis(100));
         assert!(state.camera_anim.is_some());
 
         state.blur();
