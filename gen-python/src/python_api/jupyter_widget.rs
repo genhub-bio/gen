@@ -150,8 +150,9 @@ impl PyGraphController {
         block_group: &PyBlockGroup,
     ) -> PyResult<Self> {
         let bg_id = block_group.id;
-        let graph = repo.with_connection(|conn| BlockGroup::get_graph(conn, &bg_id));
-        Ok(Self::new(repo.db_path.clone(), graph))
+        let graph = BlockGroup::get_graph(repo.context.graph().conn(), &bg_id);
+        let db_path = repo.context.workspace().ensure_gen_dir().join("default.db");
+        Ok(Self::new(db_path, graph))
     }
 
     /// Set the level of node detail.

@@ -1,10 +1,8 @@
-use std::{path::PathBuf, sync::Mutex};
-
-use r#gen::{core::HashId, get_connection};
+use r#gen::{get_connection, get_operation_connection};
 use gen_core::config::Workspace;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
-    db::GraphConnection,
+    db::DbContext,
     node::Node,
     traits::Query,
 };
@@ -13,6 +11,7 @@ use pyo3::{prelude::*, types::PyModule};
 use super::{
     block_group::PyBlockGroup,
     factory::Factory,
+    hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_and_display_widget},
     node_key::PyNodeKey,
     utils::{block_group_err_to_pyerr, path_to_py_path, py_query, sqlite_err_to_pyerr},
@@ -22,30 +21,25 @@ use super::{
 ///
 /// This class manages the database connection and provides methods for
 /// querying and manipulating the database.
-#[pyclass(name = "Repository")]
+// unsendable because DbContext contains Rc (rusqlite::Connection is !Sync)
+#[pyclass(name = "Repository", unsendable)]
 pub struct PyRepository {
-    // We use custom getters, hence no #[pyo3(get)]
-    pub gen_dir: PathBuf,
-    pub db_path: PathBuf,
-    pub conn: Mutex<Option<GraphConnection>>, // Private to Rust, not exposed to Python
-    pub factory: Factory,                     // Embedded factory for BlockGroup transformations
+    pub context: DbContext,
+    pub factory: Factory,
 }
 
-// Regular Rust implementation outside of PyO3 exposure
 impl PyRepository {
-    // Private helper method that provides a connection to a closure
-    // This pattern avoids exposing Rust-specific types like MutexGuard to Python
-    // while still ensuring proper connection management
-    pub fn with_connection<F, T>(&self, op: F) -> T
-    where
-        F: FnOnce(&GraphConnection) -> T,
-    {
-        let mut conn_guard = self.conn.lock().unwrap();
-        if conn_guard.is_none() {
-            *conn_guard = Some(get_connection(self.db_path.to_str().unwrap()).unwrap());
+    /// Converts a model [`BlockGroup`] into a [`PyBlockGroup`], cloning the
+    /// repository's [`DbContext`] into it so the block group can issue its own
+    /// queries without holding a reference back to the repository.
+    fn into_py_block_group(&self, bg: BlockGroup) -> PyBlockGroup {
+        PyBlockGroup {
+            id: bg.id,
+            collection_name: bg.collection_name,
+            sample_name: bg.sample_name,
+            name: bg.name,
+            context: Some(self.context.clone()),
         }
-
-        op(conn_guard.as_ref().unwrap())
     }
 }
 
@@ -54,44 +48,49 @@ impl PyRepository {
     #[new]
     #[pyo3(signature = (path = Option::<String>::None))]
     fn new(path: Option<String>) -> PyResult<Self> {
-        // PathBuf instead of Path to avoid borrowing issues
-        let gen_dir: PathBuf = match path {
-            Some(path_str) => PathBuf::from(path_str),
-            None => Workspace::from_current_dir().ensure_gen_dir(),
+        let workspace = match path {
+            Some(p) => Workspace::new(p),
+            None => Workspace::from_current_dir(),
         };
-
+        let gen_dir = workspace.ensure_gen_dir();
         let db_path = gen_dir.join("default.db");
+        let ops_path = gen_dir.join("gen.db");
 
-        // Initialize with no connection - it will be created lazily
-        // We do need to use a Mutex for memory safety
+        let graph_conn = get_connection(db_path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let ops_conn = get_operation_connection(Some(ops_path))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
         Ok(PyRepository {
-            gen_dir,
-            db_path,
-            conn: Mutex::new(None),
-            factory: Factory::new(), // Initialize the factory
+            context: DbContext::new(workspace, graph_conn, ops_conn),
+            factory: Factory::new(),
         })
     }
 
     #[getter]
     fn get_gen_dir(&self, py: Python) -> PyResult<PyObject> {
-        path_to_py_path(py, &self.gen_dir)
+        path_to_py_path(py, &self.context.workspace().ensure_gen_dir())
     }
 
     #[getter]
     fn get_db_path(&self, py: Python) -> PyResult<PyObject> {
-        path_to_py_path(py, &self.db_path)
+        path_to_py_path(
+            py,
+            &self.context.workspace().ensure_gen_dir().join("default.db"),
+        )
     }
 
-    // Database operations directly on PyRepository
     fn execute(&self, query: &str) -> PyResult<()> {
-        self.with_connection(|conn| {
-            conn.execute(query, []).map_err(sqlite_err_to_pyerr)?;
-            Ok(())
-        })
+        self.context
+            .graph()
+            .conn()
+            .execute(query, [])
+            .map_err(sqlite_err_to_pyerr)?;
+        Ok(())
     }
 
     fn query(&self, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
-        self.with_connection(|conn| py_query(conn, query))
+        py_query(self.context.graph().conn(), query)
     }
 
     /// Retrieves a BlockGroup by its ID.
@@ -101,27 +100,31 @@ impl PyRepository {
     ///
     /// Returns:
     ///     A PyBlockGroup instance representing the requested BlockGroup
-    fn get_block_group_by_id(&self, id: &HashId) -> PyResult<PyBlockGroup> {
-        self.with_connection(|conn| {
-            let block_group = match BlockGroup::get_by_id(conn, id) {
-                Ok(bg) => bg,
-                Err(r#gen::models::block_group::BlockGroupError::QueryError(_)) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "BlockGroup with id {:?} not found",
-                        id
-                    )));
-                }
-                Err(e) => return Err(block_group_err_to_pyerr(e)),
-            };
+    fn get_block_group(
+        &self,
+        name: &str,
+        sample_name: &str,
+        collection_name: &str,
+    ) -> PyResult<PyBlockGroup> {
+        let id = BlockGroup::get_id(collection_name, sample_name, name, None);
+        let conn = self.context.graph().conn();
+        let block_group = BlockGroup::get_by_id(conn, &id).map_err(block_group_err_to_pyerr)?;
+        Ok(self.into_py_block_group(block_group))
+    }
 
-            Ok(PyBlockGroup {
-                id: block_group.id,
-                collection_name: block_group.collection_name,
-                sample_name: block_group.sample_name,
-                name: block_group.name,
-                db_path: Some(self.db_path.clone()),
-            })
-        })
+    fn get_block_group_by_id(&self, id: &PyHashId) -> PyResult<PyBlockGroup> {
+        let conn = self.context.graph().conn();
+        let block_group = match BlockGroup::get_by_id(conn, &id.hash_id) {
+            Ok(bg) => bg,
+            Err(r#gen::models::block_group::BlockGroupError::QueryError(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "BlockGroup with id {} not found",
+                    id.hash_id
+                )));
+            }
+            Err(e) => return Err(block_group_err_to_pyerr(e)),
+        };
+        Ok(self.into_py_block_group(block_group))
     }
 
     /// Retrieves all BlockGroups.
@@ -129,23 +132,11 @@ impl PyRepository {
     /// Returns:
     ///     A vector of PyBlockGroup instances
     fn get_block_groups(&self) -> PyResult<Vec<PyBlockGroup>> {
-        self.with_connection(|conn| {
-            let block_groups = BlockGroup::all(conn);
-
-            let db_path = self.db_path.clone();
-            let result = block_groups
-                .into_iter()
-                .map(|bg| PyBlockGroup {
-                    id: bg.id,
-                    collection_name: bg.collection_name,
-                    sample_name: bg.sample_name,
-                    name: bg.name,
-                    db_path: Some(db_path.clone()),
-                })
-                .collect();
-
-            Ok(result)
-        })
+        let conn = self.context.graph().conn();
+        Ok(BlockGroup::all(conn)
+            .into_iter()
+            .map(|bg| self.into_py_block_group(bg))
+            .collect())
     }
 
     /// Retrieves all BlockGroups belonging to a specific collection.
@@ -156,27 +147,15 @@ impl PyRepository {
     /// Returns:
     ///     A vector of PyBlockGroup instances
     fn get_block_groups_by_collection(&self, collection_name: &str) -> PyResult<Vec<PyBlockGroup>> {
-        self.with_connection(|conn| {
-            let block_groups = BlockGroup::query(
-                conn,
-                "SELECT * FROM block_groups WHERE collection_name = ?1",
-                rusqlite::params![collection_name],
-            );
-
-            let db_path = self.db_path.clone();
-            let result = block_groups
-                .into_iter()
-                .map(|bg| PyBlockGroup {
-                    id: bg.id,
-                    collection_name: bg.collection_name,
-                    sample_name: bg.sample_name,
-                    name: bg.name,
-                    db_path: Some(db_path.clone()),
-                })
-                .collect();
-
-            Ok(result)
-        })
+        let conn = self.context.graph().conn();
+        Ok(BlockGroup::query(
+            conn,
+            "SELECT * FROM block_groups WHERE collection_name = ?1",
+            rusqlite::params![collection_name],
+        )
+        .into_iter()
+        .map(|bg| self.into_py_block_group(bg))
+        .collect())
     }
 
     // Factory methods:
@@ -196,20 +175,13 @@ impl PyRepository {
     /// Raises:
     ///     PyModuleNotFoundError: If rustworkx is not installed
     fn block_group_to_rustworkx(&self, block_group: &PyBlockGroup) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
-            // Check if rustworkx is installed
-            match PyModule::import(py, "rustworkx") {
-                Ok(_) => {
-                    // rustworkx is available, proceed with the conversion
-                    self.with_connection(|conn| self.factory.to_rustworkx(conn, &block_group.id))
-                }
-                Err(_) => {
-                    // rustworkx is not available, return a helpful error message
-                    Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
-                        "The 'rustworkx' module is not installed. Please install it using 'pip install rustworkx' to use this functionality.",
-                    ))
-                }
-            }
+        Python::with_gil(|py| match PyModule::import(py, "rustworkx") {
+            Ok(_) => self
+                .factory
+                .to_rustworkx(self.context.graph().conn(), &block_group.id),
+            Err(_) => Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
+                "The 'rustworkx' module is not installed. Please install it using 'pip install rustworkx' to use this functionality.",
+            )),
         })
     }
 
@@ -221,7 +193,8 @@ impl PyRepository {
     /// Returns:
     ///     A Python dictionary containing the graph representation
     fn block_group_to_dict(&self, block_group: &PyBlockGroup) -> PyResult<PyObject> {
-        self.with_connection(|conn| self.factory.to_dict(conn, &block_group.id))
+        self.factory
+            .to_dict(self.context.graph().conn(), &block_group.id)
     }
 
     /// Converts a BlockGroup to a NetworkX graph representation
@@ -235,20 +208,13 @@ impl PyRepository {
     /// Raises:
     ///     PyModuleNotFoundError: If networkx is not installed
     fn block_group_to_networkx(&self, block_group: &PyBlockGroup) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
-            // Check if networkx is installed
-            match PyModule::import(py, "networkx") {
-                Ok(_) => {
-                    // networkx is available, proceed with the conversion
-                    self.with_connection(|conn| self.factory.to_networkx(conn, &block_group.id))
-                }
-                Err(_) => {
-                    // networkx is not available, return a helpful error message
-                    Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
-                        "The 'networkx' module is not installed. Please install it using 'pip install networkx' to use this functionality.",
-                    ))
-                }
-            }
+        Python::with_gil(|py| match PyModule::import(py, "networkx") {
+            Ok(_) => self
+                .factory
+                .to_networkx(self.context.graph().conn(), &block_group.id),
+            Err(_) => Err(pyo3::exceptions::PyModuleNotFoundError::new_err(
+                "The 'networkx' module is not installed. Please install it using 'pip install networkx' to use this functionality.",
+            )),
         })
     }
 
@@ -268,28 +234,18 @@ impl PyRepository {
         collection_name: String,
         sample_name: String,
     ) -> PyResult<PyBlockGroup> {
-        self.with_connection(|conn| {
-            let block_group = match BlockGroup::create(
-                conn,
-                NewBlockGroup {
-                    collection_name: &collection_name,
-                    sample_name: &sample_name,
-                    name: &name,
-                    ..Default::default()
-                },
-            ) {
-                Ok(bg) => bg,
-                Err(e) => return Err(block_group_err_to_pyerr(e)),
-            };
-
-            Ok(PyBlockGroup {
-                id: block_group.id,
-                collection_name: block_group.collection_name,
-                sample_name: block_group.sample_name,
-                name: block_group.name,
-                db_path: Some(self.db_path.clone()),
-            })
-        })
+        let conn = self.context.graph().conn();
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &collection_name,
+                sample_name: &sample_name,
+                name: &name,
+                ..Default::default()
+            },
+        )
+        .map_err(block_group_err_to_pyerr)?;
+        Ok(self.into_py_block_group(block_group))
     }
 
     /// Plot a BlockGroup's graph as an interactive Jupyter widget.
@@ -327,9 +283,10 @@ impl PyRepository {
         cols: Option<u32>,
         detail: Option<&str>,
     ) -> PyResult<PyObject> {
-        let bg_id = block_group.id;
-        let graph = self.with_connection(|conn| BlockGroup::get_graph(conn, &bg_id));
-        let mut ctrl = PyGraphController::new(self.db_path.clone(), graph);
+        let conn = self.context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, &block_group.id);
+        let db_path = self.context.workspace().ensure_gen_dir().join("default.db");
+        let mut ctrl = PyGraphController::new(db_path, graph);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
@@ -345,32 +302,51 @@ impl PyRepository {
     /// Returns:
     ///     A string containing the sequence for the specified block
     fn get_block_sequence(&self, node_key: &PyNodeKey) -> PyResult<String> {
-        self.with_connection(|conn| {
-            let sequences_by_node_id = Node::get_sequences_by_node_ids(conn, &[node_key.node_id]);
-            let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Node with id {:?} not found",
-                    node_key.node_id
-                ))
-            })?;
-            Ok(sequence
-                .get_sequence(node_key.sequence_start, node_key.sequence_end)
-                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?)
-        })
+        let conn = self.context.graph().conn();
+        let sequences_by_node_id = Node::get_sequences_by_node_ids(conn, &[node_key.node_id]);
+        let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Node with id {:?} not found",
+                node_key.node_id
+            ))
+        })?;
+        Ok(sequence
+            .get_sequence(node_key.sequence_start, node_key.sequence_end)
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?)
     }
 }
 
 #[cfg(test)]
 mod python_tests {
-    use r#gen::test_helpers::setup_gen;
+    use r#gen::{
+        core::HashId,
+        test_helpers::{create_bg, setup_gen, setup_gen_on_disk},
+    };
     use pyo3::{prelude::*, py_run};
 
-    use crate::python_api::repository::PyRepository;
+    use crate::python_api::{factory::Factory, hash_id::PyHashId, repository::PyRepository};
+
+    fn make_repo_with_data(py: Python) -> Py<PyRepository> {
+        use gen_models::collection::Collection;
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        Collection::create(conn, "col-a").unwrap();
+        Collection::create(conn, "col-b").unwrap();
+        create_bg(conn, "col-a", "s1", "bg1");
+        create_bg(conn, "col-b", "s1", "bg2");
+        Py::new(
+            py,
+            PyRepository {
+                context,
+                factory: Factory::new(),
+            },
+        )
+        .unwrap()
+    }
 
     #[test]
     fn test_repository_creation() {
         setup_gen();
-        // Run python code to confirm that the repository class is available, with the repository class passed in from Rust
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let repository = py.get_type::<PyRepository>();
@@ -378,12 +354,47 @@ mod python_tests {
                 py,
                 repository,
                 r#"
-                # Create a repository in the present working directory
                 repo = repository()
-
-                # Test that the repository was created successfully
                 assert hasattr(repo, "gen_dir")
                 assert hasattr(repo, "db_path")
+            "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_get_block_groups() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let repo = make_repo_with_data(py);
+            py_run!(
+                py,
+                repo,
+                r#"
+                bgs = repo.get_block_groups()
+                assert len(bgs) == 2
+                names = {bg.name for bg in bgs}
+                assert names == {"bg1", "bg2"}
+            "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_get_block_group_by_id_not_found() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let repo = make_repo_with_data(py);
+            let bad_id = Py::new(py, PyHashId::new(HashId([0u8; 32]))).unwrap();
+            py_run!(
+                py,
+                repo bad_id,
+                r#"
+                try:
+                    repo.get_block_group_by_id(bad_id)
+                    assert False, "expected ValueError"
+                except ValueError:
+                    pass
             "#
             );
         });
