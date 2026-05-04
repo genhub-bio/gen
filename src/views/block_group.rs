@@ -681,23 +681,6 @@ pub fn view_block_group(
         terminal.draw(|frame| {
             let status_bar_height: u16 = 1;
 
-            // Collect annotation tracks to display
-            let mut track_panels: Vec<(&AnnotationTrack, u16)> = Vec::new();
-            for track in annotation_file_tracks.values() {
-                let height = crate::views::annotation_track::annotation_panel_height(track, 10);
-                if height > 0 {
-                    track_panels.push((track, height));
-                }
-            }
-            for track in annotation_group_tracks.values() {
-                let height = crate::views::annotation_track::annotation_panel_height(track, 10);
-                if height > 0 {
-                    track_panels.push((track, height));
-                }
-            }
-
-            let total_annotation_height: u16 = track_panels.iter().map(|(_, h)| *h).sum();
-
             // The outer layout is a vertical split between the main area, optional message bar, and status bar
             let show_message_bar = !messages.is_empty();
 
@@ -728,39 +711,17 @@ pub fn view_block_group(
             last_sidebar_area = sidebar_area;
             let viewer_root_area = sidebar_layout[1];
 
-            // Split viewer area between graph and annotation panels
-            let viewer_constraints = if total_annotation_height > 0 {
-                vec![
-                    Constraint::Min(10),                         // Graph area (minimum 10 lines)
-                    Constraint::Length(total_annotation_height), // Annotation panels
-                ]
-            } else {
-                vec![Constraint::Percentage(100)] // Just the graph
-            };
-
-            let viewer_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(viewer_constraints)
-                .split(viewer_root_area);
-
-            let graph_root_area = viewer_layout[0];
-            let annotation_area = if viewer_layout.len() > 1 {
-                Some(viewer_layout[1])
-            } else {
-                None
-            };
-
-            // The panel pops up in the graph area, it does not overlap with the sidebar or annotations
+            // The panel pops up in the graph area, it does not overlap with the sidebar
             let panel_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(vec![Constraint::Percentage(80), Constraint::Percentage(20)])
-                .split(graph_root_area);
+                .split(viewer_root_area);
             let panel_area = panel_layout[1];
 
             let canvas_area = if show_panel {
                 panel_layout[0]
             } else {
-                graph_root_area
+                viewer_root_area
             };
 
             // Set viewport bounds to the actual canvas area before updating animations
@@ -891,27 +852,17 @@ pub fn view_block_group(
                     .cursor();
                 frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
 
-                // Render annotation track panels below the graph
-                if let Some(annotation_area) = annotation_area {
-                    let mut current_y = annotation_area.y;
-                    for (track, height) in track_panels.iter() {
-                        if current_y + height > annotation_area.y + annotation_area.height {
-                            break; // No more room
-                        }
-                        let track_area = Rect {
-                            x: annotation_area.x,
-                            y: current_y,
-                            width: annotation_area.width,
-                            height: *height,
-                        };
-                        crate::views::annotation_track::draw_annotations_panel(
-                            frame,
-                            track_area,
-                            track,
-                            &graph_controller,
-                        );
-                        current_y = current_y.saturating_add(*height);
-                    }
+                // Overlay annotation tracks at the bottom of the canvas.
+                // Prepare after graph render so viewport state is accurate.
+                let mut remaining = canvas_area;
+                let tracks: Vec<&mut AnnotationTrack> = annotation_file_tracks
+                    .values_mut()
+                    .chain(annotation_group_tracks.values_mut())
+                    .collect();
+                for track in tracks.into_iter().rev() {
+                    let height = track.draw(frame.buffer_mut(), remaining, &graph_controller);
+                    if height == 0 { break; }
+                    remaining.height = remaining.height.saturating_sub(height);
                 }
             }
 
