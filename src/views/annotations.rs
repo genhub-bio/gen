@@ -282,9 +282,9 @@ fn resolve_annotation_file_path(
             return Some(repo_path);
         }
     }
-    let gen_dir = workspace.find_gen_dir()?;
-    let asset_path = gen_dir
-        .join("assets")
+    let asset_path = workspace
+        .asset_dir()
+        .ok()?
         .join(file_addition.clone().hashed_filename());
     if asset_path.exists() {
         return Some(asset_path);

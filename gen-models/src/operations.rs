@@ -8,7 +8,7 @@ use std::{
     string::ToString,
 };
 
-use gen_core::{HashId, Workspace, calculate_hash, errors::ConfigError, traits::Capnp};
+use gen_core::{HashId, Workspace, calculate_hash, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
 use itertools::Itertools;
 use petgraph::{Direction, graphmap::UnGraphMap};
@@ -523,22 +523,27 @@ impl FileAddition {
         HashId(calculate_hash(&combined))
     }
 
-    fn asset_relative_path(checksum: &HashId, file_type: FileTypes) -> String {
-        Path::new(".gen")
-            .join("assets")
+    fn asset_relative_path(
+        workspace: &Workspace,
+        checksum: &HashId,
+        file_type: FileTypes,
+    ) -> String {
+        let repo_root = workspace.repo_root().unwrap();
+        workspace
+            .asset_dir()
+            .unwrap()
+            .strip_prefix(&repo_root)
+            .unwrap()
             .join(format!("{checksum}.{}", FileTypes::suffix(file_type)))
             .to_string_lossy()
             .to_string()
     }
 
-    fn normalize_file_paths(
-        workspace: &Workspace,
-        file_path: &str,
-        checksum: Option<&HashId>,
-        file_type: FileTypes,
-    ) -> (String, String) {
+    /// Returns a usable path for system file access. It prefers an absolute path
+    /// when one can be resolved, and otherwise falls back to the original input.
+    fn source_file_path(workspace: &Workspace, file_path: &str) -> String {
         if file_path.is_empty() {
-            return (String::new(), String::new());
+            return String::new();
         }
         let repo_root = workspace.repo_root().unwrap();
 
@@ -546,37 +551,60 @@ impl FileAddition {
 
         if provided_path.is_absolute() {
             if provided_path.starts_with(&repo_root) {
-                let absolute = provided_path.to_string_lossy().to_string();
-                let relative = provided_path
-                    .strip_prefix(&repo_root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-                return (absolute, relative);
+                return provided_path.to_string_lossy().to_string();
             }
         } else {
             let absolute = repo_root.join(provided_path);
             if absolute.exists() {
-                let relative = absolute
+                return absolute.to_string_lossy().to_string();
+            }
+        }
+
+        file_path.to_string()
+    }
+
+    /// Returns the file path as it should be stored relative to the gen
+    /// directory. If a file is within the gen directory, it returns a path
+    /// relative to the `.gen` folder. Otherwise, if the path is absolute, it
+    /// returns a path relative to the `.gen/assets` directory. If it is not
+    /// absolute and not within the gen directory, it is returned as-is.
+    fn stored_file_path(
+        workspace: &Workspace,
+        file_path: &str,
+        checksum: &HashId,
+        file_type: FileTypes,
+    ) -> String {
+        if file_path.is_empty() {
+            return String::new();
+        }
+        let repo_root = workspace.repo_root().unwrap();
+
+        let provided_path = Path::new(file_path);
+
+        if provided_path.is_absolute() {
+            if provided_path.starts_with(&repo_root) {
+                return provided_path
                     .strip_prefix(&repo_root)
                     .unwrap()
                     .to_string_lossy()
                     .to_string();
-                return (absolute.to_string_lossy().to_string(), relative);
             }
-        };
-
-        if provided_path.is_absolute()
-            && let Some(checksum) = checksum
-        {
-            return (
-                file_path.to_string(),
-                Self::asset_relative_path(checksum, file_type),
-            );
+        } else {
+            let absolute = repo_root.join(provided_path);
+            if absolute.exists() {
+                return absolute
+                    .strip_prefix(&repo_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+            }
         }
 
-        let fallback = file_path.to_string();
-        (fallback.clone(), fallback)
+        if provided_path.is_absolute() {
+            return Self::asset_relative_path(workspace, checksum, file_type);
+        }
+
+        file_path.to_string()
     }
 
     fn ensure_asset_copy(
@@ -585,12 +613,9 @@ impl FileAddition {
         checksum: &HashId,
         file_type: FileTypes,
     ) -> Result<(), FileAdditionError> {
-        let gen_dir = workspace
-            .find_gen_dir()
-            .ok_or(ConfigError::GenDirectoryNotFound)
+        let assets_dir = workspace
+            .asset_dir()
             .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err.to_string())))?;
-        let assets_dir = gen_dir.join("assets");
-        fs::create_dir_all(&assets_dir)?;
 
         let asset_path = assets_dir.join(format!("{checksum}.{}", FileTypes::suffix(file_type)));
         if asset_path.exists() {
@@ -608,18 +633,14 @@ impl FileAddition {
         file_type: FileTypes,
         checksum_override: Option<HashId>,
     ) -> Result<FileAddition, FileAdditionError> {
-        let (source_file_path, preliminary_relative_path) =
-            FileAddition::normalize_file_paths(workspace, file_path, None, file_type);
-
-        // TODO: Verify checksum_override actually matches the file's checksum?
+        let source_file_path = FileAddition::source_file_path(workspace, file_path);
         let checksum = if let Some(checksum_override) = checksum_override {
             checksum_override
         } else {
-            let absolute_path = Path::new(&source_file_path);
-            let checksum_path = if absolute_path.is_file() {
+            let checksum_path = if Path::new(&source_file_path).is_file() {
                 source_file_path.as_str()
             } else {
-                preliminary_relative_path.as_str()
+                file_path
             };
             match calculate_file_checksum(checksum_path) {
                 Ok(checksum) => checksum,
@@ -636,14 +657,13 @@ impl FileAddition {
                 },
             }
         };
+        let relative_file_path =
+            FileAddition::stored_file_path(workspace, file_path, &checksum, file_type);
 
-        let (absolute_file_path, relative_file_path) =
-            FileAddition::normalize_file_paths(workspace, file_path, Some(&checksum), file_type);
-
-        if Path::new(file_path).is_absolute() && relative_file_path != absolute_file_path {
+        if Path::new(&source_file_path).is_file() {
             FileAddition::ensure_asset_copy(
                 workspace,
-                Path::new(&absolute_file_path),
+                Path::new(&source_file_path),
                 &checksum,
                 file_type,
             )?;
@@ -716,11 +736,7 @@ impl FileAddition {
     }
 
     pub fn store_file(&self, workspace: &Workspace) -> Result<(), FileStoreError> {
-        let gen_dir = workspace
-            .find_gen_dir()
-            .ok_or(ConfigError::GenDirectoryNotFound)?;
-        let assets_dir = gen_dir.join("assets");
-        fs::create_dir_all(&assets_dir)?;
+        let assets_dir = workspace.asset_dir()?;
 
         let asset_path = assets_dir.join(self.clone().hashed_filename());
         if asset_path.exists() {
@@ -2745,7 +2761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_file_paths_absolute_path_in_repo() {
+    fn test_source_and_stored_file_paths_absolute_path_in_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
         let repo_root = workspace.base_dir();
@@ -2760,10 +2776,11 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        let (absolute, relative) = FileAddition::normalize_file_paths(
+        let absolute = FileAddition::source_file_path(workspace, absolute_string.as_str());
+        let relative = FileAddition::stored_file_path(
             workspace,
             absolute_string.as_str(),
-            None,
+            &calculate_file_checksum(&absolute_path).unwrap(),
             FileTypes::Fasta,
         );
 
@@ -2772,7 +2789,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_file_paths_relative_path_in_repo() {
+    fn test_source_and_stored_file_paths_relative_path_in_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
         let repo_root = workspace.repo_root().unwrap();
@@ -2784,10 +2801,11 @@ mod tests {
         let relative_string = relative_path.to_string_lossy().to_string();
         let absolute_string = absolute_path.to_string_lossy().to_string();
 
-        let (absolute, relative) = FileAddition::normalize_file_paths(
+        let absolute = FileAddition::source_file_path(workspace, relative_string.as_str());
+        let relative = FileAddition::stored_file_path(
             workspace,
             relative_string.as_str(),
-            None,
+            &calculate_file_checksum(&absolute_path).unwrap(),
             FileTypes::Fasta,
         );
 
@@ -2796,7 +2814,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_file_paths_outside_repo_fallbacks() {
+    fn test_source_and_stored_file_paths_outside_repo_fallbacks() {
         let context = setup_gen();
         let workspace = context.workspace();
 
@@ -2806,10 +2824,11 @@ mod tests {
         let outside_string = outside_file.path().to_string_lossy().to_string();
         let checksum = calculate_file_checksum(outside_file.path()).unwrap();
 
-        let (absolute, relative) = FileAddition::normalize_file_paths(
+        let absolute = FileAddition::source_file_path(workspace, outside_string.as_str());
+        let relative = FileAddition::stored_file_path(
             workspace,
             outside_string.as_str(),
-            Some(&checksum),
+            &checksum,
             FileTypes::Fasta,
         );
 
@@ -2824,21 +2843,27 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_file_paths_without_connection_path() {
+    fn test_source_and_stored_file_paths_without_connection_path() {
         let context = setup_gen();
         let workspace = context.workspace();
 
-        let (absolute, relative) = FileAddition::normalize_file_paths(
+        let absolute = FileAddition::source_file_path(workspace, "detached/file.txt");
+        let relative = FileAddition::stored_file_path(
             workspace,
             "detached/file.txt",
-            None,
+            &HashId::convert_str("detached"),
             FileTypes::Fasta,
         );
         assert_eq!(absolute, "detached/file.txt");
         assert_eq!(relative, "detached/file.txt");
 
-        let (absolute_empty, relative_empty) =
-            FileAddition::normalize_file_paths(workspace, "", None, FileTypes::Fasta);
+        let absolute_empty = FileAddition::source_file_path(workspace, "");
+        let relative_empty = FileAddition::stored_file_path(
+            workspace,
+            "",
+            &HashId::convert_str("empty"),
+            FileTypes::Fasta,
+        );
         assert_eq!(absolute_empty, "");
         assert_eq!(relative_empty, "");
     }
@@ -2873,6 +2898,14 @@ mod tests {
         let relative1_id = FileAddition::generate_file_addition_id(&checksum, &relative1);
 
         assert_eq!(fa1.id, relative1_id);
+        assert!(
+            context
+                .workspace()
+                .asset_dir()
+                .unwrap()
+                .join(fa1.clone().hashed_filename())
+                .exists()
+        );
 
         // Second call with same file should return the same FileAddition
         let fa2 = FileAddition::get_or_create(
@@ -2937,9 +2970,8 @@ mod tests {
         assert!(
             context
                 .workspace()
-                .find_gen_dir()
+                .asset_dir()
                 .unwrap()
-                .join("assets")
                 .join(outside.clone().hashed_filename())
                 .exists()
         );
@@ -2986,7 +3018,7 @@ mod tests {
 
         assert_eq!(shared_file_1.id, shared_file_2.id);
 
-        let assets_dir = workspace.find_gen_dir().unwrap().join("assets");
+        let assets_dir = workspace.asset_dir().unwrap();
         let asset_names = fs::read_dir(&assets_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())

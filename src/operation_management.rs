@@ -853,8 +853,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                             form = form
                                 .file(
                                     "assets",
-                                    FilePath::new(".gen")
-                                        .join("assets")
+                                    FilePath::new(&workspace.asset_dir()?)
                                         .join(op_file.hashed_filename()),
                                 )
                                 .unwrap();
@@ -865,8 +864,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                             form = form
                                 .file(
                                     "assets",
-                                    FilePath::new(".gen")
-                                        .join("assets")
+                                    FilePath::new(&workspace.asset_dir()?)
                                         .join(annotation_file.file_addition.hashed_filename()),
                                 )
                                 .unwrap();
@@ -876,8 +874,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                                 form = form
                                     .file(
                                         "assets",
-                                        FilePath::new(".gen")
-                                            .join("assets")
+                                        FilePath::new(&workspace.asset_dir()?)
                                             .join(index_file_addition.clone().hashed_filename()),
                                     )
                                     .unwrap();
@@ -1312,12 +1309,10 @@ fn download_remote_operation_assets(
         "dependencies",
     )?;
 
-    let gen_dir = workspace
-        .find_gen_dir()
-        .ok_or(ConfigError::GenDirectoryNotFound)?;
-    let gen_path = FilePath::new(&gen_dir);
+    let asset_dir = workspace.asset_dir()?;
+    let gen_path = FilePath::new(&asset_dir);
     for file in asset_response.files {
-        let destination = gen_path.join("assets").join(&file.asset_path);
+        let destination = gen_path.join(&file.asset_path);
         let user_destination = repo_root.join(&file.file_path);
         if !destination.exists() {
             download_binary(
