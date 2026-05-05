@@ -527,40 +527,46 @@ impl FileAddition {
         workspace: &Workspace,
         checksum: &HashId,
         file_type: FileTypes,
-    ) -> String {
-        let repo_root = workspace.repo_root().unwrap();
-        workspace
-            .asset_dir()
-            .unwrap()
+    ) -> Result<String, FileAdditionError> {
+        let repo_root = workspace.repo_root()?;
+        let asset_dir = workspace.asset_dir()?;
+
+        Ok(asset_dir
             .strip_prefix(&repo_root)
-            .unwrap()
+            .map_err(|_| FileAdditionError::PathOutsideRepo {
+                path: asset_dir.clone(),
+                repo_root: repo_root.clone(),
+            })?
             .join(format!("{checksum}.{}", FileTypes::suffix(file_type)))
             .to_string_lossy()
-            .to_string()
+            .to_string())
     }
 
     /// Returns a usable path for system file access. It prefers an absolute path
     /// when one can be resolved, and otherwise falls back to the original input.
-    fn source_file_path(workspace: &Workspace, file_path: &str) -> String {
+    fn source_file_path(
+        workspace: &Workspace,
+        file_path: &str,
+    ) -> Result<String, FileAdditionError> {
         if file_path.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
-        let repo_root = workspace.repo_root().unwrap();
+        let repo_root = workspace.repo_root()?;
 
         let provided_path = Path::new(file_path);
 
         if provided_path.is_absolute() {
             if provided_path.starts_with(&repo_root) {
-                return provided_path.to_string_lossy().to_string();
+                return Ok(provided_path.to_string_lossy().to_string());
             }
         } else {
             let absolute = repo_root.join(provided_path);
             if absolute.exists() {
-                return absolute.to_string_lossy().to_string();
+                return Ok(absolute.to_string_lossy().to_string());
             }
         }
 
-        file_path.to_string()
+        Ok(file_path.to_string())
     }
 
     /// Returns the file path as it should be stored relative to the gen
@@ -573,30 +579,36 @@ impl FileAddition {
         file_path: &str,
         checksum: &HashId,
         file_type: FileTypes,
-    ) -> String {
+    ) -> Result<String, FileAdditionError> {
         if file_path.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
-        let repo_root = workspace.repo_root().unwrap();
+        let repo_root = workspace.repo_root()?;
 
         let provided_path = Path::new(file_path);
 
         if provided_path.is_absolute() {
             if provided_path.starts_with(&repo_root) {
-                return provided_path
+                return Ok(provided_path
                     .strip_prefix(&repo_root)
-                    .unwrap()
+                    .map_err(|_| FileAdditionError::PathOutsideRepo {
+                        path: provided_path.to_path_buf(),
+                        repo_root: repo_root.clone(),
+                    })?
                     .to_string_lossy()
-                    .to_string();
+                    .to_string());
             }
         } else {
             let absolute = repo_root.join(provided_path);
             if absolute.exists() {
-                return absolute
+                return Ok(absolute
                     .strip_prefix(&repo_root)
-                    .unwrap()
+                    .map_err(|_| FileAdditionError::PathOutsideRepo {
+                        path: absolute.clone(),
+                        repo_root: repo_root.clone(),
+                    })?
                     .to_string_lossy()
-                    .to_string();
+                    .to_string());
             }
         }
 
@@ -604,7 +616,7 @@ impl FileAddition {
             return Self::asset_relative_path(workspace, checksum, file_type);
         }
 
-        file_path.to_string()
+        Ok(file_path.to_string())
     }
 
     fn ensure_asset_copy(
@@ -613,9 +625,7 @@ impl FileAddition {
         checksum: &HashId,
         file_type: FileTypes,
     ) -> Result<(), FileAdditionError> {
-        let assets_dir = workspace
-            .asset_dir()
-            .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err.to_string())))?;
+        let assets_dir = workspace.asset_dir()?;
 
         let asset_path = assets_dir.join(format!("{checksum}.{}", FileTypes::suffix(file_type)));
         if asset_path.exists() {
@@ -633,7 +643,7 @@ impl FileAddition {
         file_type: FileTypes,
         checksum_override: Option<HashId>,
     ) -> Result<FileAddition, FileAdditionError> {
-        let source_file_path = FileAddition::source_file_path(workspace, file_path);
+        let source_file_path = FileAddition::source_file_path(workspace, file_path)?;
         let checksum = if let Some(checksum_override) = checksum_override {
             checksum_override
         } else {
@@ -658,7 +668,7 @@ impl FileAddition {
             }
         };
         let relative_file_path =
-            FileAddition::stored_file_path(workspace, file_path, &checksum, file_type);
+            FileAddition::stored_file_path(workspace, file_path, &checksum, file_type)?;
 
         if Path::new(&source_file_path).is_file() {
             FileAddition::ensure_asset_copy(
@@ -2776,13 +2786,14 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        let absolute = FileAddition::source_file_path(workspace, absolute_string.as_str());
+        let absolute = FileAddition::source_file_path(workspace, absolute_string.as_str()).unwrap();
         let relative = FileAddition::stored_file_path(
             workspace,
             absolute_string.as_str(),
             &calculate_file_checksum(&absolute_path).unwrap(),
             FileTypes::Fasta,
-        );
+        )
+        .unwrap();
 
         assert_eq!(absolute, absolute_string);
         assert_eq!(relative, relative_string);
@@ -2801,13 +2812,14 @@ mod tests {
         let relative_string = relative_path.to_string_lossy().to_string();
         let absolute_string = absolute_path.to_string_lossy().to_string();
 
-        let absolute = FileAddition::source_file_path(workspace, relative_string.as_str());
+        let absolute = FileAddition::source_file_path(workspace, relative_string.as_str()).unwrap();
         let relative = FileAddition::stored_file_path(
             workspace,
             relative_string.as_str(),
             &calculate_file_checksum(&absolute_path).unwrap(),
             FileTypes::Fasta,
-        );
+        )
+        .unwrap();
 
         assert_eq!(absolute, absolute_string);
         assert_eq!(relative, relative_string);
@@ -2824,13 +2836,14 @@ mod tests {
         let outside_string = outside_file.path().to_string_lossy().to_string();
         let checksum = calculate_file_checksum(outside_file.path()).unwrap();
 
-        let absolute = FileAddition::source_file_path(workspace, outside_string.as_str());
+        let absolute = FileAddition::source_file_path(workspace, outside_string.as_str()).unwrap();
         let relative = FileAddition::stored_file_path(
             workspace,
             outside_string.as_str(),
             &checksum,
             FileTypes::Fasta,
-        );
+        )
+        .unwrap();
 
         assert_eq!(absolute, outside_string);
         assert_eq!(
@@ -2847,23 +2860,25 @@ mod tests {
         let context = setup_gen();
         let workspace = context.workspace();
 
-        let absolute = FileAddition::source_file_path(workspace, "detached/file.txt");
+        let absolute = FileAddition::source_file_path(workspace, "detached/file.txt").unwrap();
         let relative = FileAddition::stored_file_path(
             workspace,
             "detached/file.txt",
             &HashId::convert_str("detached"),
             FileTypes::Fasta,
-        );
+        )
+        .unwrap();
         assert_eq!(absolute, "detached/file.txt");
         assert_eq!(relative, "detached/file.txt");
 
-        let absolute_empty = FileAddition::source_file_path(workspace, "");
+        let absolute_empty = FileAddition::source_file_path(workspace, "").unwrap();
         let relative_empty = FileAddition::stored_file_path(
             workspace,
             "",
             &HashId::convert_str("empty"),
             FileTypes::Fasta,
-        );
+        )
+        .unwrap();
         assert_eq!(absolute_empty, "");
         assert_eq!(relative_empty, "");
     }

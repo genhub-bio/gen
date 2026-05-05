@@ -142,6 +142,15 @@ pub enum FileAdditionError {
 
     #[error("HashId generation failed: {0}")]
     HashIdError(String),
+
+    #[error("Config Error: {0}")]
+    ConfigError(#[from] ConfigError),
+
+    #[error("Path '{path}' is not within repo root '{repo_root}'")]
+    PathOutsideRepo {
+        path: std::path::PathBuf,
+        repo_root: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Error)]
