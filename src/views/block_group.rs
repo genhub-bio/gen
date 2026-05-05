@@ -24,7 +24,8 @@ use crate::{
     views::{
         annotation_track::AnnotationTrack,
         annotations::{
-            AnnotationFileTrackRequest, load_annotation_file_track, load_annotations_for_group,
+            AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
+            load_annotations_for_group,
         },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
@@ -200,17 +201,13 @@ pub fn view_block_group(
         None
     };
 
-    // Create explorer and its state that persists across frames
-    let mut explorer =
-        CollectionExplorer::new(conn, op_conn, sample_name.as_deref(), collection_name);
+    let mut block_graph;
+    let mut block_group_id: Option<gen_core::HashId> = None;
+    let mut focus_zone = FocusZone::Sidebar;
     let mut explorer_state = CollectionExplorerState::new();
     if let Some(ref s) = sample_name {
         explorer_state.set_sample_expanded(s, true);
     }
-
-    let mut block_graph;
-    let mut block_group_id: Option<gen_core::HashId> = None;
-    let mut focus_zone = FocusZone::Sidebar;
 
     if let (Some(name), Some(sample_name)) = (name, sample_name.as_ref()) {
         let block_group = BlockGroup::get(
@@ -256,6 +253,15 @@ pub fn view_block_group(
                 panic!("Failed to load block group {bg_id}: {err}");
             }
         });
+
+    // Create explorer and its state that persists across frames
+    let mut explorer = CollectionExplorer::new(
+        conn,
+        op_conn,
+        sample_name.as_deref(),
+        current_block_group.as_ref(),
+        collection_name,
+    );
 
     // Create the graph controller and initial graph
     let bar = progress_bar.add(get_time_elapsed_bar());
@@ -498,27 +504,52 @@ pub fn view_block_group(
                                     if current_block_group.is_some() {
                                         let visible_node_ranges =
                                             visible_ranges_by_node(&block_graph);
-                                        let spans = match load_annotations_for_group(
-                                            conn,
-                                            &toggled_group,
-                                            &visible_node_ranges,
-                                        ) {
-                                            Ok(spans) => spans,
-                                            Err(err) => {
+                                        let entry = explorer.annotation_group_entry(&toggled_group);
+                                        let spans = match entry.map(|entry| {
+                                            load_annotations_for_group(
+                                                &AnnotationGroupTrackRequest {
+                                                    conn,
+                                                    current_block_group: current_block_group
+                                                        .as_ref()
+                                                        .expect("current block group should exist"),
+                                                    entry,
+                                                    visible_ranges_by_node: &visible_node_ranges,
+                                                },
+                                            )
+                                        }) {
+                                            Some(Ok(spans)) => spans,
+                                            Some(Err(err)) => {
                                                 messages.push_warn(format!(
                                                     "Failed to load annotations for group {}: {err}",
                                                     toggled_group
                                                 ));
                                                 Vec::new()
                                             }
+                                            None => Vec::new(),
                                         };
                                         if spans.is_empty() {
                                             explorer_state
                                                 .deactivate_annotation_group(&toggled_group);
                                         } else {
+                                            let title = if let Some(entry) =
+                                                explorer.annotation_group_entry(&toggled_group)
+                                            {
+                                                if current_block_group.as_ref().is_some_and(|bg| {
+                                                    bg.sample_name == entry.sample_name
+                                                }) {
+                                                    entry.name.clone()
+                                                } else {
+                                                    format!(
+                                                        "{} ({})",
+                                                        entry.name, entry.sample_name
+                                                    )
+                                                }
+                                            } else {
+                                                toggled_group.clone()
+                                            };
                                             annotation_group_tracks.insert(
                                                 toggled_group.clone(),
-                                                AnnotationTrack::new(toggled_group, spans),
+                                                AnnotationTrack::new(title, spans),
                                             );
                                         }
                                     }
@@ -594,7 +625,13 @@ pub fn view_block_group(
             let selected_sample = current_block_group
                 .as_ref()
                 .map(|bg| bg.sample_name.as_str());
-            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
+            if explorer.refresh(
+                conn,
+                op_conn,
+                selected_sample,
+                current_block_group.as_ref(),
+                collection_name,
+            ) {
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
@@ -1047,7 +1084,13 @@ pub fn view_block_group(
             let selected_sample = current_block_group
                 .as_ref()
                 .map(|bg| bg.sample_name.as_str());
-            if explorer.refresh(conn, op_conn, selected_sample, collection_name) {
+            if explorer.refresh(
+                conn,
+                op_conn,
+                selected_sample,
+                current_block_group.as_ref(),
+                collection_name,
+            ) {
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
@@ -1063,17 +1106,18 @@ pub fn view_block_group(
                 let query_window =
                     current_view_coordinate_window(&graph_controller).map(expand_query_window);
                 for entry in explorer.data.annotation_groups.iter() {
-                    if explorer_state.is_annotation_group_active(&entry.name) {
-                        let spans = match load_annotations_for_group(
+                    if explorer_state.is_annotation_group_active(&entry.id) {
+                        let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
                             conn,
-                            &entry.name,
-                            &visible_node_ranges,
-                        ) {
+                            current_block_group: bg,
+                            entry,
+                            visible_ranges_by_node: &visible_node_ranges,
+                        }) {
                             Ok(spans) => spans,
                             Err(err) => {
                                 messages.push_warn(format!(
                                     "Failed to load annotations for group {}: {err}",
-                                    entry.name
+                                    entry.id
                                 ));
                                 Vec::new()
                             }
@@ -1082,8 +1126,15 @@ pub fn view_block_group(
                             continue;
                         }
                         annotation_group_tracks.insert(
-                            entry.name.clone(),
-                            AnnotationTrack::new(entry.name.clone(), spans),
+                            entry.id.clone(),
+                            AnnotationTrack::new(
+                                if entry.sample_name == bg.sample_name {
+                                    entry.name.clone()
+                                } else {
+                                    format!("{} ({})", entry.name, entry.sample_name)
+                                },
+                                spans,
+                            ),
                         );
                     }
                 }

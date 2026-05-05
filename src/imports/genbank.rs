@@ -738,7 +738,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        test_helpers::setup_gen, track_database, views::annotations::load_annotations_for_group,
+        test_helpers::setup_gen,
+        track_database,
+        views::{
+            annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+            annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
+        },
     };
 
     fn get_unmodified_sequence() -> String {
@@ -1190,8 +1195,20 @@ mod tests {
                 .push((block.sequence_start, block.sequence_end));
         }
 
-        let spans =
-            load_annotations_for_group(conn, &groups[0].name, &visible_ranges_by_node).unwrap();
+        let entry = AnnotationGroupEntry {
+            id: format!("{}::{}", block_group.sample_name, groups[0].name),
+            name: groups[0].name.clone(),
+            sample_name: block_group.sample_name.clone(),
+            source_block_group_id: block_group.id,
+            origin: AnnotationGroupOrigin::CurrentSample,
+        };
+        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            current_block_group: &block_group,
+            entry: &entry,
+            visible_ranges_by_node: &visible_ranges_by_node,
+        })
+        .unwrap();
         let m13_forward = spans
             .iter()
             .find(|annotation| annotation.name == "M13 Forward")
