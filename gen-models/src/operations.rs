@@ -523,21 +523,34 @@ impl FileAddition {
         HashId(calculate_hash(&combined))
     }
 
+    fn asset_filename(checksum: &HashId, file_type: FileTypes) -> String {
+        format!("{checksum}.{}", FileTypes::suffix(file_type))
+    }
+
+    fn asset_path(
+        workspace: &Workspace,
+        checksum: &HashId,
+        file_type: FileTypes,
+    ) -> Result<PathBuf, FileAdditionError> {
+        Ok(workspace
+            .asset_dir()?
+            .join(Self::asset_filename(checksum, file_type)))
+    }
+
     fn asset_relative_path(
         workspace: &Workspace,
         checksum: &HashId,
         file_type: FileTypes,
     ) -> Result<String, FileAdditionError> {
         let repo_root = workspace.repo_root()?;
-        let asset_dir = workspace.asset_dir()?;
+        let asset_path = Self::asset_path(workspace, checksum, file_type)?;
 
-        Ok(asset_dir
+        Ok(asset_path
             .strip_prefix(&repo_root)
             .map_err(|_| FileAdditionError::PathOutsideRepo {
-                path: asset_dir.clone(),
+                path: asset_path.clone(),
                 repo_root: repo_root.clone(),
             })?
-            .join(format!("{checksum}.{}", FileTypes::suffix(file_type)))
             .to_string_lossy()
             .to_string())
     }
@@ -625,9 +638,7 @@ impl FileAddition {
         checksum: &HashId,
         file_type: FileTypes,
     ) -> Result<(), FileAdditionError> {
-        let assets_dir = workspace.asset_dir()?;
-
-        let asset_path = assets_dir.join(format!("{checksum}.{}", FileTypes::suffix(file_type)));
+        let asset_path = Self::asset_path(workspace, checksum, file_type)?;
         if asset_path.exists() {
             return Ok(());
         }
@@ -746,9 +757,7 @@ impl FileAddition {
     }
 
     pub fn store_file(&self, workspace: &Workspace) -> Result<(), FileStoreError> {
-        let assets_dir = workspace.asset_dir()?;
-
-        let asset_path = assets_dir.join(self.clone().hashed_filename());
+        let asset_path = workspace.asset_dir()?.join(self.clone().hashed_filename());
         if asset_path.exists() {
             return Ok(());
         }
@@ -766,11 +775,7 @@ impl FileAddition {
     }
 
     pub fn hashed_filename(self) -> String {
-        format!(
-            "{}.{}",
-            self.checksum.clone(),
-            &FileTypes::suffix(self.file_type)
-        )
+        Self::asset_filename(&self.checksum, self.file_type)
     }
 }
 
