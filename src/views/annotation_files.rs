@@ -14,10 +14,10 @@ pub fn load_annotation_file_entries(conn: &OperationsConnection) -> Vec<Annotati
     let mut entries = Vec::new();
     for info in AnnotationFile::get_all_files(conn) {
         let display_name = info.name.clone().unwrap_or_else(|| {
-            FsPath::new(&info.file_addition.file_path)
+            FsPath::new(&info.file_addition.file_path())
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| info.file_addition.file_path.clone())
+                .unwrap_or_else(|| info.file_addition.file_path().to_string())
         });
         entries.push(AnnotationFileEntry {
             file_addition: info.file_addition,

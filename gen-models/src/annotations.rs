@@ -814,17 +814,17 @@ impl AnnotationFile {
             })
             .collect();
         entries.sort_by(|a, b| {
-            let a_name = std::path::Path::new(&a.file_addition.file_path)
+            let a_path = a.file_addition.file_path();
+            let b_path = b.file_addition.file_path();
+            let a_name = std::path::Path::new(a_path)
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| a.file_addition.file_path.clone());
-            let b_name = std::path::Path::new(&b.file_addition.file_path)
+                .unwrap_or_else(|| a_path.to_string());
+            let b_name = std::path::Path::new(b_path)
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| b.file_addition.file_path.clone());
-            a_name
-                .cmp(&b_name)
-                .then_with(|| a.file_addition.file_path.cmp(&b.file_addition.file_path))
+                .unwrap_or_else(|| b_path.to_string());
+            a_name.cmp(&b_name).then_with(|| a_path.cmp(b_path))
         });
         entries
     }

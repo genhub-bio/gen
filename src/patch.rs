@@ -40,15 +40,26 @@ impl PatchFile {
         format!("assets/{checksum}.{}", FileTypes::suffix(file_type))
     }
 
-    fn from_file_addition(file: FileAddition) -> Result<Self, CreatePatchError> {
-        if file.file_path.is_empty() {
+    fn from_file_addition(
+        context: &DbContext,
+        file: FileAddition,
+    ) -> Result<Self, CreatePatchError> {
+        if file.asset_uri.is_empty() {
             return Ok(Self {
                 archive_path: String::new(),
                 file,
             });
         }
 
-        let archive_path = Self::asset_entry_name(file.checksum, file.file_type);
+        let source_asset_path = context
+            .workspace()
+            .asset_dir()?
+            .join(file.clone().hashed_filename());
+        let archive_path = if source_asset_path.exists() {
+            Self::asset_entry_name(file.checksum, file.file_type)
+        } else {
+            String::new()
+        };
 
         Ok(Self { file, archive_path })
     }
@@ -71,7 +82,7 @@ impl PatchFile {
     where
         R: Read + Seek,
     {
-        if self.file.file_path.is_empty() || self.archive_path.is_empty() {
+        if self.file.asset_uri.is_empty() || self.archive_path.is_empty() {
             return Ok(());
         }
 
@@ -317,8 +328,8 @@ fn apply_patch(context: &DbContext, patch: &OperationPatch) -> Result<(), PatchE
                 .files
                 .iter()
                 .map(|patch_file| OperationFile {
-                    filename: OperationFile::new(patch_file.file.file_path.clone()).filename,
-                    file_path: patch_file.file.file_path.clone(),
+                    filename: OperationFile::new(patch_file.file.asset_uri.clone()).filename,
+                    file_path: patch_file.file.asset_uri.clone(),
                     file_type: patch_file.file.file_type,
                     checksum_override: Some(patch_file.file.checksum),
                 })
@@ -350,7 +361,7 @@ where
 
         let files = FileAddition::get_files_for_operation(op_conn, &operation.hash)
             .into_iter()
-            .map(PatchFile::from_file_addition)
+            .map(|file| PatchFile::from_file_addition(context, file))
             .collect::<Result<Vec<_>, _>>()?;
 
         patches.push(OperationPatch {
@@ -432,6 +443,7 @@ mod tests {
 
     use gen_models::{
         block_group::BlockGroup,
+        file_types::FileTypes,
         operations::{Branch, FileAddition, OperationState},
         sample::Sample,
     };
@@ -739,5 +751,21 @@ mod tests {
             fs::read(restored_asset_path).unwrap(),
             fs::read(external_file.path()).unwrap()
         );
+    }
+
+    #[test]
+    fn test_patch_file_skips_archive_for_uri_only_asset() {
+        let context = setup_gen_on_disk();
+        let file = FileAddition {
+            id: HashId::convert_str("patch-uri"),
+            asset_uri: "https://example.com/assets/reference.fa.gz".to_string(),
+            file_type: FileTypes::Fasta,
+            checksum: HashId::convert_str("checksum"),
+        };
+
+        let patch_file = PatchFile::from_file_addition(&context, file.clone()).unwrap();
+
+        assert_eq!(patch_file.file, file);
+        assert_eq!(patch_file.archive_path, "");
     }
 }

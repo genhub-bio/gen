@@ -1,5 +1,6 @@
 pub mod accession;
 pub mod annotations;
+pub mod assets;
 pub mod block_group;
 pub mod block_group_edge;
 pub mod block_group_lineage;
