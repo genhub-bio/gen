@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use gen_models::db::OperationsConnection;
 
 pub mod cli_context;
+pub mod clone;
 pub mod export;
 pub mod graph_operations;
 pub mod import;
@@ -12,6 +13,13 @@ pub mod update;
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
     Init {},
+    /// Clone a GenHub repository
+    #[command(arg_required_else_help(true))]
+    Clone {
+        /// The GenHub repository URL to clone
+        #[clap(index = 1)]
+        url: String,
+    },
     /// Commands for importing
     Import(import::Command),
     /// Commands for updating

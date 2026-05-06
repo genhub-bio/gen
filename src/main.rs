@@ -77,6 +77,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(Commands::Clone { url }) = &cli.command {
+        return r#gen::commands::clone::execute(url);
+    }
+
     let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
     if let Some(Commands::Defaults {
         database,
@@ -156,6 +160,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             println!("Gen repository initialized.");
             Ok(())
         }
+        Some(Commands::Clone { .. }) => Ok(()),
         Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
         Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
         Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),

@@ -782,7 +782,7 @@ mod tests {
     fn test_matcher() -> GenGraphMatcher {
         let ctx = setup_gen();
         let conn = ctx.graph().conn();
-        let _ = Collection::create(conn, "test");
+        Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
         GenGraphMatcher::new(conn, graph)
@@ -800,7 +800,7 @@ mod tests {
     fn test_protein_matcher() -> GenGraphMatcher {
         let ctx = setup_gen();
         let conn = ctx.graph().conn();
-        let _ = Collection::create(conn, "test");
+        Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
         GenGraphMatcher::new_protein(conn, graph)
@@ -809,7 +809,7 @@ mod tests {
     fn test_exact_matcher() -> GenGraphMatcher {
         let ctx = setup_gen();
         let conn = ctx.graph().conn();
-        let _ = Collection::create(conn, "test");
+        Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
         GenGraphMatcher::new_with_sequence_kind(conn, graph, SequenceKind::Exact)
