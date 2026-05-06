@@ -851,6 +851,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                     let manifest =
                         generator.generate_manifest(&current_branch.name, Some(&current_hash))?;
                     let diff = send_manifest_to_remote(remote_name, &remote_url, &manifest)?;
+                    println!("Manifest sent successfully to {remote_url}");
 
                     let auth_tokens = load_tokens(remote_name).map_err(|e| {
                         RemoteOperationError::AuthError(format!(
@@ -1083,6 +1084,8 @@ fn pull_from_remote_server(
             &manifest_operation.operation.hash,
         );
     }
+
+    println!("Pull succeeded from {remote_url}");
 
     Ok(())
 }
@@ -1474,7 +1477,6 @@ fn send_manifest_to_remote(
         ));
     }
 
-    println!("Manifest sent successfully to {remote_url}");
     Ok(response.json()?)
 }
 
