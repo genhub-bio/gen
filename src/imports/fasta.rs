@@ -8,6 +8,7 @@ use std::{
 use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
+    assets::AssetUri,
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -41,7 +42,8 @@ pub fn import_fasta(
     let mut session = start_operation(conn);
     let path = PathBuf::from(fasta);
 
-    let file = std::fs::File::open(fasta)?;
+    let asset_uri = <dyn AssetUri>::new(fasta);
+    let file = asset_uri.reader(context.workspace())?;
 
     let reader_stream: Box<dyn BufRead> = match path.extension().and_then(|ext| ext.to_str()) {
         Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(file))),

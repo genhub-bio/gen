@@ -487,6 +487,10 @@ pub fn add_files_operation(
 pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<HashId, std::io::Error> {
     let file = std::fs::File::open(file_path)?;
     let reader = BufReader::new(file);
+    calculate_reader_checksum(reader)
+}
+
+pub fn calculate_reader_checksum<R: std::io::Read>(reader: R) -> Result<HashId, std::io::Error> {
     let hash_bytes = calculate_stream_hash(reader)?;
     Ok(HashId(hash_bytes))
 }

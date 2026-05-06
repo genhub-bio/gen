@@ -1,20 +1,88 @@
 use std::{
-    fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     string::ToString,
+    sync::LazyLock,
 };
 
 use gen_core::{HashId, Workspace, calculate_hash};
+use opendal::{blocking, services};
+use url::{Position, Url};
 
 use crate::{
     errors::{FileAdditionError, FileStoreError},
     file_types::FileTypes,
-    operations::{FileAddition, calculate_file_checksum},
+    operations::{FileAddition, calculate_reader_checksum},
 };
+
+static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build OpenDAL runtime")
+});
+
+fn with_opendal_runtime<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = OPENDAL_RUNTIME.enter();
+    f()
+}
+
+fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
+    FileAdditionError::FileReadError(io::Error::other(err))
+}
+
+fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
+    FileStoreError::IoError(io::Error::other(err))
+}
+
+fn local_operator(path: &Path) -> Result<(blocking::Operator, String), opendal::Error> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                opendal::Error::new(opendal::ErrorKind::Unexpected, "current_dir failed")
+                    .set_source(err)
+            })?
+            .join(path)
+    };
+    let op_path = absolute_path
+        .strip_prefix(Path::new("/"))
+        .unwrap_or(&absolute_path)
+        .to_string_lossy()
+        .to_string();
+    let op = with_opendal_runtime(|| {
+        let builder = services::Fs::default().root("/");
+        let op = opendal::Operator::new(builder)?.finish();
+        blocking::Operator::new(op)
+    })?;
+    Ok((op, op_path))
+}
+
+fn stream_copy(
+    source_op: &blocking::Operator,
+    source_op_path: &str,
+    asset_op: &blocking::Operator,
+    asset_op_path: &str,
+) -> io::Result<u64> {
+    let mut reader = source_op
+        .reader(source_op_path)
+        .map_err(io::Error::other)?
+        .into_std_read(..)
+        .map_err(io::Error::other)?;
+    let mut writer = asset_op
+        .writer(asset_op_path)
+        .map_err(io::Error::other)?
+        .into_std_write();
+    let bytes_copied = io::copy(&mut reader, &mut writer)?;
+    writer.close()?;
+    Ok(bytes_copied)
+}
 
 pub trait AssetUri {
     fn uri(&self) -> &str;
+
+    fn reader(&self, workspace: &Workspace) -> Result<Box<dyn Read>, FileAdditionError>;
 
     fn checksum(
         &self,
@@ -97,8 +165,7 @@ impl dyn AssetUri {
         let (scheme, _) = uri.split_once("://").unwrap_or(("file", uri));
         match scheme.to_ascii_lowercase().as_str() {
             "file" => Box::new(FileAssetUri::new(uri)),
-            "http" | "https" => Box::new(HttpAssetUri::new(uri)),
-            _ => Box::new(RemoteAssetUri::new(uri)),
+            _ => Box::new(OpenDalAssetUri::new(uri)),
         }
     }
 }
@@ -106,13 +173,25 @@ impl dyn AssetUri {
 pub struct FileAssetUri {
     asset_uri: String,
     source_path: Option<PathBuf>,
-    read_file: Option<fs::File>,
-    write_file: Option<fs::File>,
+    read_file: Option<opendal::blocking::StdReader>,
+    write_file: Option<opendal::blocking::StdWriter>,
 }
 
 impl AssetUri for FileAssetUri {
     fn uri(&self) -> &str {
         &self.asset_uri
+    }
+
+    fn reader(&self, workspace: &Workspace) -> Result<Box<dyn Read>, FileAdditionError> {
+        let source_file_path = self.resolved_source_file_path(workspace)?;
+        let (op, op_path) =
+            local_operator(Path::new(&source_file_path)).map_err(opendal_file_addition_error)?;
+        Ok(Box::new(
+            op.reader(&op_path)
+                .map_err(opendal_file_addition_error)?
+                .into_std_read(..)
+                .map_err(opendal_file_addition_error)?,
+        ))
     }
 
     fn checksum(
@@ -130,16 +209,7 @@ impl AssetUri for FileAssetUri {
         } else {
             self.file_path()
         };
-        match calculate_file_checksum(checksum_path) {
-            Ok(checksum) => Ok(checksum),
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
-                std::io::ErrorKind::PermissionDenied => Err(
-                    FileAdditionError::FilePermissionDenied(self.file_path().to_string()),
-                ),
-                _ => Err(FileAdditionError::FileReadError(e)),
-            },
-        }
+        self.calculate_checksum(checksum_path)
     }
 
     fn stored_asset_uri(
@@ -229,6 +299,50 @@ impl FileAssetUri {
         self.source_path
             .clone()
             .unwrap_or_else(|| PathBuf::from(self.file_path()))
+    }
+
+    fn calculate_checksum(&self, path: &str) -> Result<HashId, FileAdditionError> {
+        let (op, op_path) = local_operator(Path::new(path)).map_err(opendal_file_addition_error)?;
+        if let Err(err) = op.stat(&op_path) {
+            return match err.kind() {
+                opendal::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                opendal::ErrorKind::PermissionDenied => {
+                    Err(FileAdditionError::FilePermissionDenied(path.to_string()))
+                }
+                _ => Err(opendal_file_addition_error(err)),
+            };
+        }
+        let reader = match op.reader(&op_path) {
+            Ok(reader) => reader,
+            Err(err) => {
+                return match err.kind() {
+                    opendal::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                    opendal::ErrorKind::PermissionDenied => {
+                        Err(FileAdditionError::FilePermissionDenied(path.to_string()))
+                    }
+                    _ => Err(opendal_file_addition_error(err)),
+                };
+            }
+        }
+        .into_std_read(..)
+        .map_err(opendal_file_addition_error)?;
+        match calculate_reader_checksum(reader) {
+            Ok(checksum) => Ok(checksum),
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                std::io::ErrorKind::PermissionDenied => {
+                    Err(FileAdditionError::FilePermissionDenied(path.to_string()))
+                }
+                _ => Err(FileAdditionError::FileReadError(e)),
+            },
+        }
+    }
+
+    pub fn close_write(&mut self) -> io::Result<()> {
+        if let Some(mut file) = self.write_file.take() {
+            file.close()?;
+        }
+        Ok(())
     }
 
     fn resolved_source_file_path(
@@ -330,7 +444,12 @@ impl FileAssetUri {
             return Ok(());
         }
 
-        fs::copy(source_path, asset_path)?;
+        let (source_op, source_op_path) =
+            local_operator(source_path).map_err(opendal_file_addition_error)?;
+        let (asset_op, asset_op_path) =
+            local_operator(&asset_path).map_err(opendal_file_addition_error)?;
+        stream_copy(&source_op, &source_op_path, &asset_op, &asset_op_path)
+            .map_err(FileAdditionError::FileReadError)?;
         Ok(())
     }
 
@@ -355,7 +474,12 @@ impl FileAssetUri {
         if source_path == asset_path {
             return Ok(());
         }
-        fs::copy(source_path, asset_path)?;
+        let (source_op, source_op_path) =
+            local_operator(&source_path).map_err(opendal_file_store_error)?;
+        let (asset_op, asset_op_path) =
+            local_operator(&asset_path).map_err(opendal_file_store_error)?;
+        stream_copy(&source_op, &source_op_path, &asset_op, &asset_op_path)
+            .map_err(FileStoreError::IoError)?;
         Ok(())
     }
 }
@@ -363,7 +487,13 @@ impl FileAssetUri {
 impl Read for FileAssetUri {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.read_file.is_none() {
-            self.read_file = Some(fs::File::open(self.io_path())?);
+            let (op, op_path) = local_operator(&self.io_path()).map_err(io::Error::other)?;
+            self.read_file = Some(
+                op.reader(&op_path)
+                    .map_err(io::Error::other)?
+                    .into_std_read(..)
+                    .map_err(io::Error::other)?,
+            );
         }
         self.read_file.as_mut().unwrap().read(buf)
     }
@@ -372,12 +502,11 @@ impl Read for FileAssetUri {
 impl Write for FileAssetUri {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.write_file.is_none() {
+            let (op, op_path) = local_operator(&self.io_path()).map_err(io::Error::other)?;
             self.write_file = Some(
-                fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(self.io_path())?,
+                op.writer(&op_path)
+                    .map_err(io::Error::other)?
+                    .into_std_write(),
             );
         }
         self.write_file.as_mut().unwrap().write(buf)
@@ -392,68 +521,30 @@ impl Write for FileAssetUri {
     }
 }
 
-pub struct HttpAssetUri {
+impl Drop for FileAssetUri {
+    fn drop(&mut self) {
+        let _ = self.close_write();
+    }
+}
+
+pub struct OpenDalAssetUri {
     asset_uri: String,
 }
 
-impl AssetUri for HttpAssetUri {
+impl AssetUri for OpenDalAssetUri {
     fn uri(&self) -> &str {
         &self.asset_uri
     }
 
-    fn checksum(
-        &self,
-        _workspace: &Workspace,
-        checksum_override: Option<HashId>,
-    ) -> Result<HashId, FileAdditionError> {
-        Ok(RemoteAssetUri::checksum_for_uri(
-            &self.asset_uri,
-            checksum_override,
+    fn reader(&self, _workspace: &Workspace) -> Result<Box<dyn Read>, FileAdditionError> {
+        let op_path = self.operator_path()?;
+        Ok(Box::new(
+            self.operator()?
+                .reader(&op_path)
+                .map_err(opendal_file_addition_error)?
+                .into_std_read(..)
+                .map_err(opendal_file_addition_error)?,
         ))
-    }
-
-    fn stored_asset_uri(
-        &self,
-        _workspace: &Workspace,
-        _checksum: &HashId,
-        _file_type: FileTypes,
-    ) -> Result<String, FileAdditionError> {
-        Ok(self.asset_uri.clone())
-    }
-
-    fn ensure_asset(
-        &self,
-        _workspace: &Workspace,
-        _checksum: &HashId,
-        _file_type: FileTypes,
-    ) -> Result<(), FileAdditionError> {
-        Ok(())
-    }
-
-    fn store_file(
-        &self,
-        _file_addition: &FileAddition,
-        _workspace: &Workspace,
-    ) -> Result<(), FileStoreError> {
-        Ok(())
-    }
-}
-
-impl HttpAssetUri {
-    pub fn new(asset_uri: &str) -> Self {
-        Self {
-            asset_uri: asset_uri.to_string(),
-        }
-    }
-}
-
-pub struct RemoteAssetUri {
-    asset_uri: String,
-}
-
-impl AssetUri for RemoteAssetUri {
-    fn uri(&self) -> &str {
-        &self.asset_uri
     }
 
     fn checksum(
@@ -491,11 +582,50 @@ impl AssetUri for RemoteAssetUri {
     }
 }
 
-impl RemoteAssetUri {
+impl OpenDalAssetUri {
     pub fn new(asset_uri: &str) -> Self {
         Self {
             asset_uri: asset_uri.to_string(),
         }
+    }
+
+    pub fn operator(&self) -> Result<blocking::Operator, FileAdditionError> {
+        let url = Url::parse(&self.asset_uri)
+            .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
+
+        if url.scheme().eq_ignore_ascii_case("s3") {
+            let bucket = url.host_str().ok_or_else(|| {
+                FileAdditionError::FileReadError(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("s3 uri is missing bucket: {}", self.asset_uri),
+                ))
+            })?;
+
+            return with_opendal_runtime(|| {
+                let builder = services::S3::default().bucket(bucket).allow_anonymous();
+
+                let op = opendal::Operator::new(builder)?.finish();
+                blocking::Operator::new(op)
+            })
+            .map_err(opendal_file_addition_error);
+        }
+
+        let operator_uri = self.operator_uri()?;
+        opendal::init_default_registry();
+        with_opendal_runtime(|| blocking::Operator::from_uri(operator_uri.as_str()))
+            .map_err(opendal_file_addition_error)
+    }
+
+    fn operator_uri(&self) -> Result<String, FileAdditionError> {
+        let url = Url::parse(&self.asset_uri)
+            .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
+        Ok(url[..Position::BeforePath].to_string())
+    }
+
+    fn operator_path(&self) -> Result<String, FileAdditionError> {
+        let url = Url::parse(&self.asset_uri)
+            .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
+        Ok(url.path().trim_start_matches('/').to_string())
     }
 
     fn checksum_for_uri(asset_uri: &str, checksum_override: Option<HashId>) -> HashId {
@@ -508,11 +638,14 @@ mod tests {
     use std::{
         fs,
         io::{Read, Write},
+        net::TcpListener,
         path::PathBuf,
+        thread,
+        time::{Duration, Instant},
     };
 
     use super::*;
-    use crate::test_helpers::setup_gen;
+    use crate::{operations::calculate_file_checksum, test_helpers::setup_gen};
 
     #[test]
     fn test_generate_file_addition_id_consistency() {
@@ -740,8 +873,54 @@ mod tests {
         let mut writer =
             FileAssetUri::new_for_workspace(context.workspace(), "asset-uri-io.txt").unwrap();
         writer.write_all(b"updated").unwrap();
-        writer.flush().unwrap();
+        writer.close_write().unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "updated");
+    }
+
+    #[test]
+    fn test_opendal_asset_uri_reads_http_uri() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut served_get = false;
+            while !served_get && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 1024];
+                let len = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..len]);
+                served_get = request.starts_with("GET ");
+                if served_get {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ninitial",
+                        )
+                        .unwrap();
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n",
+                        )
+                        .unwrap();
+                }
+            }
+            assert!(served_get);
+        });
+
+        let context = setup_gen();
+        let uri = format!("http://{addr}/asset.fa");
+        let mut reader = OpenDalAssetUri::new(&uri)
+            .reader(context.workspace())
+            .unwrap();
+        let mut contents = String::new();
+        reader.read_to_string(&mut contents).unwrap();
+
+        handle.join().unwrap();
+        assert_eq!(contents, "initial");
     }
 }
