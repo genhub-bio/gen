@@ -1,13 +1,14 @@
 use std::{fs, path::PathBuf};
 
 use gen_core::config::Workspace;
-use gen_models::db::DbContext;
+use gen_models::{
+    db::DbContext,
+    operations::{Defaults, Remote},
+};
 
 use crate::{
-    commands::remote::{add_remote, login_remote, set_default_remote},
-    get_connection, get_operation_connection,
-    operation_management::pull,
-    track_database,
+    commands::remote::login_remote, get_connection, get_operation_connection,
+    operation_management::pull, track_database,
 };
 
 const ORIGIN: &str = "origin";
@@ -23,10 +24,10 @@ pub fn execute(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Gen repository initialized.");
 
     let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
-    add_remote(&operation_conn, ORIGIN, url)?;
+    Remote::create(&operation_conn, ORIGIN, url)?;
     println!("Remote '{ORIGIN}' added successfully");
 
-    set_default_remote(&operation_conn, ORIGIN)?;
+    Defaults::set_default_remote(&operation_conn, Some(ORIGIN))?;
     println!("Default remote set to '{ORIGIN}'");
 
     login_remote(&operation_conn, Some(ORIGIN))?;

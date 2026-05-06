@@ -38,19 +38,6 @@ pub enum RemoteCommand {
     },
 }
 
-pub fn add_remote(
-    conn: &OperationsConnection,
-    name: &str,
-    url: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Remote::create(conn, name, url)?;
-    Ok(())
-}
-
-pub fn list_remotes(conn: &OperationsConnection) -> Vec<Remote> {
-    Remote::list_all(conn)
-}
-
 pub fn remove_remote(
     conn: &OperationsConnection,
     name: &str,
@@ -64,18 +51,6 @@ pub fn remove_remote(
 
     Remote::delete(conn, name)?;
     Ok(())
-}
-
-pub fn set_default_remote(
-    conn: &OperationsConnection,
-    name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Defaults::set_default_remote(conn, Some(name))?;
-    Ok(())
-}
-
-pub fn get_default_remote(conn: &OperationsConnection) -> Option<String> {
-    Defaults::get_default_remote(conn)
 }
 
 pub fn login_remote(
@@ -142,19 +117,19 @@ pub fn handle_remote_command(
     command: &RemoteCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        RemoteCommand::Add { name, url } => match add_remote(conn, name, url) {
+        RemoteCommand::Add { name, url } => match Remote::create(conn, name, url) {
             Ok(_) => {
                 println!("Remote '{name}' added successfully");
                 Ok(())
             }
             Err(remote_err) => {
                 eprintln!("Error: {remote_err}");
-                Err(remote_err)
+                Err(Box::new(remote_err))
             }
         },
 
         RemoteCommand::List => {
-            let remotes = list_remotes(conn);
+            let remotes = Remote::list_all(conn);
             if remotes.is_empty() {
                 println!("No remotes configured");
             } else {
@@ -177,18 +152,20 @@ pub fn handle_remote_command(
             }
         },
 
-        RemoteCommand::SetDefault { name } => match set_default_remote(conn, name) {
-            Ok(_) => {
-                println!("Default remote set to '{name}'");
-                Ok(())
+        RemoteCommand::SetDefault { name } => {
+            match Defaults::set_default_remote(conn, Some(name)) {
+                Ok(_) => {
+                    println!("Default remote set to '{name}'");
+                    Ok(())
+                }
+                Err(remote_err) => {
+                    eprintln!("Error: {remote_err}");
+                    Err(Box::new(remote_err))
+                }
             }
-            Err(remote_err) => {
-                eprintln!("Error: {remote_err}");
-                Err(remote_err)
-            }
-        },
+        }
 
-        RemoteCommand::GetDefault => match get_default_remote(conn) {
+        RemoteCommand::GetDefault => match Defaults::get_default_remote(conn) {
             Some(remote_name) => {
                 println!("Default remote: {remote_name}");
                 Ok(())
