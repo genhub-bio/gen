@@ -405,10 +405,10 @@ where
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile::new(
-                gaf_path.as_ref().to_str().unwrap().to_string(),
-                FileTypes::GAF,
-            )],
+            files: vec![
+                OperationFile::new(gaf_path.as_ref().to_str().unwrap().to_string())
+                    .set_file_type(FileTypes::GAF),
+            ],
             description: "insert_via_gaf".to_string(),
         },
         &format!("{change_count} updates."),

@@ -1859,7 +1859,9 @@ mod tests {
                 &context,
                 &mut session,
                 &OperationInfo {
-                    files: vec![OperationFile::new("test".to_string(), FileTypes::None)],
+                    files: vec![
+                        OperationFile::new("test".to_string()).set_file_type(FileTypes::None),
+                    ],
                     description: "test".to_string(),
                 },
                 "test",

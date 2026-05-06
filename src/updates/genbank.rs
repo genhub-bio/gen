@@ -278,7 +278,9 @@ mod tests {
                 Sample::DEFAULT_NAME,
                 false,
                 &OperationInfo {
-                    files: vec![OperationFile::new("".to_string(), FileTypes::GenBank)],
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
                     description: "test".to_string(),
                 }
             ),
@@ -307,10 +309,10 @@ mod tests {
             Sample::DEFAULT_NAME,
             true,
             &OperationInfo {
-                files: vec![OperationFile::new(
-                    path.to_str().unwrap().to_string(),
-                    FileTypes::GenBank,
-                )],
+                files: vec![
+                    OperationFile::new(path.to_str().unwrap().to_string())
+                        .set_file_type(FileTypes::GenBank),
+                ],
                 description: "test".to_string(),
             },
         )
@@ -350,7 +352,9 @@ mod tests {
                 None,
                 Sample::DEFAULT_NAME,
                 OperationInfo {
-                    files: vec![OperationFile::new("".to_string(), FileTypes::GenBank)],
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
                     description: "test".to_string(),
                 },
                 GenBankImportOptions::default().annotation_name_from_path(&path),
@@ -366,7 +370,9 @@ mod tests {
                 Sample::DEFAULT_NAME,
                 true,
                 &OperationInfo {
-                    files: vec![OperationFile::new("".to_string(), FileTypes::GenBank)],
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
                     description: "test".to_string(),
                 },
             );
@@ -402,7 +408,9 @@ mod tests {
                 None,
                 Sample::DEFAULT_NAME,
                 OperationInfo {
-                    files: vec![OperationFile::new("".to_string(), FileTypes::GenBank)],
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
                     description: "test".to_string(),
                 },
                 GenBankImportOptions::default().annotation_name_from_path(&path),
@@ -418,7 +426,9 @@ mod tests {
                 Sample::DEFAULT_NAME,
                 true,
                 &OperationInfo {
-                    files: vec![OperationFile::new("".to_string(), FileTypes::GenBank)],
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
                     description: "test".to_string(),
                 },
             );
@@ -466,7 +476,9 @@ mod tests {
                 None,
                 Sample::DEFAULT_NAME,
                 OperationInfo {
-                    files: vec![OperationFile::new("".to_string(), FileTypes::GenBank)],
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
                     description: "test".to_string(),
                 },
                 GenBankImportOptions::default().annotation_name_from_path(&path),
@@ -482,7 +494,9 @@ mod tests {
                 Sample::DEFAULT_NAME,
                 false,
                 &OperationInfo {
-                    files: vec![OperationFile::new("".to_string(), FileTypes::GenBank)],
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
                     description: "test".to_string(),
                 },
             );

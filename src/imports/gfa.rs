@@ -451,10 +451,10 @@ pub fn import_gfa(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile::new(
-                gfa_path.to_str().unwrap().to_string(),
-                FileTypes::GFA,
-            )],
+            files: vec![
+                OperationFile::new(gfa_path.to_str().unwrap().to_string())
+                    .set_file_type(FileTypes::GFA),
+            ],
             description: "gfa_import".to_string(),
         },
         &format!("Imported GFA {path}", path = gfa_path.to_str().unwrap()),

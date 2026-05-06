@@ -238,10 +238,10 @@ pub fn apply(
         &change_context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile::new(
-                format!("{full_op_hash}/changeset"),
-                FileTypes::Changeset,
-            )],
+            files: vec![
+                OperationFile::new(format!("{full_op_hash}/changeset"))
+                    .set_file_type(FileTypes::Changeset),
+            ],
             description: "changeset_application".to_string(),
         },
         &format!("Applied changeset {full_op_hash}."),
@@ -2354,7 +2354,9 @@ mod tests {
 
                 let file_path = format!("test_file_{i}.fa");
                 let op_info = OperationInfo {
-                    files: vec![OperationFile::new(file_path.clone(), FileTypes::Fasta)],
+                    files: vec![
+                        OperationFile::new(file_path.clone()).set_file_type(FileTypes::Fasta),
+                    ],
                     description: format!("Test operation {i}"),
                 };
 

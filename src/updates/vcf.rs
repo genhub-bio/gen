@@ -639,7 +639,7 @@ pub fn update_with_vcf(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile::new(vcf_path.to_string(), FileTypes::VCF)],
+            files: vec![OperationFile::new(vcf_path.to_string()).set_file_type(FileTypes::VCF)],
             description: "vcf_addition".to_string(),
         },
         &summary_str,

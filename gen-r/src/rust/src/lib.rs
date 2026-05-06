@@ -531,10 +531,10 @@ fn import_genbank(
         collection_name_opt.as_deref(),
         &sample,
         OperationInfo {
-            files: vec![OperationFile::new(
-                filename.clone(),
-                gen_models::file_types::FileTypes::GenBank,
-            )],
+            files: vec![
+                OperationFile::new(filename.clone())
+                    .set_file_type(gen_models::file_types::FileTypes::GenBank),
+            ],
             description: "GenBank Import".to_string(),
         },
         r#gen::imports::genbank::GenBankImportOptions::default()
@@ -845,10 +845,10 @@ fn update_with_genbank(
         &sample,
         create_missing,
         &OperationInfo {
-            files: vec![OperationFile::new(
-                filename.clone(),
-                gen_models::file_types::FileTypes::GenBank,
-            )],
+            files: vec![
+                OperationFile::new(filename.clone())
+                    .set_file_type(gen_models::file_types::FileTypes::GenBank),
+            ],
             description: "Update from GenBank".to_string(),
         },
     ) {

@@ -238,7 +238,7 @@ pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<
                     .files
                     .iter()
                     .map(|fa| OperationFile {
-                        filename: OperationFile::new(fa.file_path.clone(), fa.file_type).filename,
+                        filename: OperationFile::new(fa.file_path.clone()).filename,
                         file_path: fa.file_path.clone(),
                         file_type: fa.file_type,
                         checksum_override: Some(fa.checksum),
