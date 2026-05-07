@@ -1,7 +1,5 @@
-use std::path::PathBuf;
-
-use r#gen::{core::HashId, get_connection};
-use gen_models::block_group::BlockGroup;
+use r#gen::core::HashId;
+use gen_models::{block_group::BlockGroup, db::DbContext};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{
@@ -9,8 +7,23 @@ use super::{
     jupyter_widget::{PyGraphController, build_and_display_widget},
 };
 
-/// Exposes a BlockGroup to Python.
-#[pyclass]
+/// A block group returned by a ``Repository``.
+///
+/// ``BlockGroup`` objects cannot be shared across threads because they hold a
+/// reference to the database connection of the ``Repository`` that created them.
+///
+/// To use a block group's identity in another thread, capture its ``id``,
+/// open a fresh ``Repository`` in that thread, and look it up by id::
+///
+///     bg_id = bg.id
+///     path  = str(repo.db_path)
+///
+///     def worker():
+///         r = gen.Repository(path)
+///         bg = r.get_block_group_by_id(bg_id)
+///         ...
+// unsendable because DbContext contains Rc (rusqlite::Connection is !Sync)
+#[pyclass(unsendable)]
 #[derive(Clone)]
 pub struct PyBlockGroup {
     pub id: HashId,
@@ -20,8 +33,7 @@ pub struct PyBlockGroup {
     pub sample_name: String,
     #[pyo3(get)]
     pub name: String,
-    /// Path to the SQLite database for the Repository that created this block group.
-    pub db_path: Option<PathBuf>,
+    pub context: Option<DbContext>,
 }
 
 #[pymethods]
@@ -33,7 +45,7 @@ impl PyBlockGroup {
             collection_name,
             sample_name,
             name,
-            db_path: None,
+            context: None,
         }
     }
 
@@ -79,7 +91,7 @@ impl PyBlockGroup {
     /// skipped and only the widget is returned.
     ///
     /// Raises ``RuntimeError`` if this block group was not created via a
-    /// ``Repository`` (i.e. ``db_path`` is unset).
+    /// ``Repository``.
     ///
     /// Parameters
     /// ----------
@@ -100,20 +112,24 @@ impl PyBlockGroup {
     ) -> PyResult<PyObject> {
         let py = slf.py();
 
-        let (db_path, bg_id) = {
+        let (context, bg_id) = {
             let bg = slf.borrow();
-            match bg.db_path.clone() {
-                Some(p) => (p, bg.id),
+            match bg.context.clone() {
+                Some(ctx) => (ctx, bg.id),
                 None => {
                     return Err(PyRuntimeError::new_err(
-                        "plot() requires a db_path; obtain BlockGroup via Repository",
+                        "plot() requires a Repository context; obtain BlockGroups via Repository by query or id.",
                     ));
                 }
             }
         };
 
-        let conn = get_connection(&db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let graph = BlockGroup::get_graph(&conn, &bg_id);
+        let conn = context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let db_path = context
+            .gen_db_path()
+            .map(|p| p.with_file_name("default.db"))
+            .unwrap_or_default();
         let mut ctrl = PyGraphController::new(db_path, graph);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
