@@ -136,10 +136,7 @@ pub fn import_genbank(
         name.as_ref(),
         &sample,
         OperationInfo {
-            files: vec![OperationFile {
-                file_path: filename.clone(),
-                file_type: FileTypes::GenBank,
-            }],
+            files: vec![OperationFile::new(filename.clone()).set_file_type(FileTypes::GenBank)],
             description: "GenBank Import".to_string(),
         },
         r#gen::imports::genbank::GenBankImportOptions::default()
