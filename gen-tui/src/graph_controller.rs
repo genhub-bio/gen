@@ -79,8 +79,9 @@ pub enum HighlightKind<N> {
     Edge(N, N),
     /// A path consisting of a sequence of nodes
     Path(Vec<N>),
-    /// Tint a sub-rectangle of a single node.
-    /// tl/br are (col, row) offsets from the node's top-left corner; br is exclusive.
+    /// Tint a rectangular region of a single node. The rectangle is defined by the
+    /// (col, row) position of its top-left corner (`tl`) and bottom-right corner (`br`).
+    /// The top-left of the node area is (0, 0). Both corners are inclusive.
     Cells {
         node: N,
         tl: (i64, i64),
@@ -398,8 +399,10 @@ where
     /// the actual paint to `apply_cell_highlight`. Prefer `add_cell_highlight` when
     /// you don't need to choose the color.
     ///
-    /// `tl`/`br` are node-local (col, row) offsets, exclusive end.
-    /// Example — columns 5..12 on the top row:
+    /// `tl`/`br` are the (col, row) positions of the top-left and bottom-right corners
+    /// of the rectangle to highlight. Both corners are inclusive. The top-left of the
+    /// node area is (0, 0).
+    /// Example — columns 5..=12 on the top row:
     ///   set_cell_highlight(node_id, (5, 0), (12, 0), style)
     pub fn set_cell_highlight(
         &mut self,

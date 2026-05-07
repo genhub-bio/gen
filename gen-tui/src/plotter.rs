@@ -359,7 +359,9 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 }
 
                 // Sub-rect highlight pass: tint only the matched column/row range.
-                // tl/br are node-local (col, row) offsets from world_rect.min, both inclusive.
+                // tl/br define the top-left and bottom-right corners of the rectangle to
+                // highlight; both are node-local (col, row) positions where (0,0) is the
+                // node's top-left. Both corners are inclusive.
                 if let Some((_, tl, br, path_style)) = cell_highlights
                     .iter()
                     .filter(|(idx, ..)| idx == domain_idx)
