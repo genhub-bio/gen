@@ -8,7 +8,7 @@ using GenModels = import "gen-models.capnp";
 # Operation patch structure for serializing and deserializing patches
 struct PatchFile {
   file @0 :GenModels.FileAddition;
-  contents @1 :Data;
+  archivePath @1 :Text;
 }
 
 struct OperationPatch {

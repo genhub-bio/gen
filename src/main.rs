@@ -518,8 +518,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::PatchApply { patch }) => {
             let mut f = File::open(patch)?;
-            let patches = patch::load_patches(&mut f);
-            match patch::apply_patches(&db_context, &patches) {
+            match patch::apply_patch_archive(&db_context, &mut f) {
                 Ok(_) => {
                     println!("Patch applied");
                     Ok(())
