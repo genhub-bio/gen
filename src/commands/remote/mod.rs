@@ -4,6 +4,7 @@ use gen_models::{
     operations::{Defaults, Remote},
 };
 use reqwest::{blocking::Client, redirect::Policy};
+use thiserror::Error;
 
 pub mod server;
 pub mod utils;
@@ -38,6 +39,12 @@ pub enum RemoteCommand {
     },
 }
 
+#[derive(Debug, Error, PartialEq)]
+pub enum RemoteError {
+    #[error("No redirect url returned for url {0}")]
+    NoRedirectUrl(String),
+}
+
 pub fn remove_remote(
     conn: &OperationsConnection,
     name: &str,
@@ -46,11 +53,12 @@ pub fn remove_remote(
         && default_remote == name
         && let Err(err) = Defaults::set_default_remote_compat(conn, None)
     {
-        eprintln!("Warning: Failed to clear default remote: {err}");
+        eprintln!("Failed to clear default remote: {err}");
+        Err(Box::new(err))
+    } else {
+        Remote::delete(conn, name)?;
+        Ok(())
     }
-
-    Remote::delete(conn, name)?;
-    Ok(())
 }
 
 pub fn login_remote(
@@ -100,6 +108,7 @@ pub fn login_remote(
         webbrowser::open(redirect_url)?;
     } else {
         println!("No redirect URL found. Response: {res:?}");
+        return Err(Box::new(RemoteError::NoRedirectUrl(remote_url)));
     }
 
     handle.join().unwrap();
