@@ -11,7 +11,6 @@ use gen_models::{
     file_types::FileTypes,
     sample::Sample,
     sample_lineage::SampleLineage,
-    traits::Query,
 };
 use gen_tui::theme::current_theme;
 use ratatui::{
@@ -21,7 +20,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, StatefulWidget, Wrap},
 };
-use rusqlite::params;
 use tui_widget_list::{ListBuilder, ListState, ListView, hit_test::Hit};
 
 use crate::views::{
@@ -124,8 +122,6 @@ pub struct CollectionExplorerData {
     pub sample_parents: HashMap<String, Vec<String>>,
     /// The block groups for each sample
     pub sample_block_groups: HashMap<String, Vec<(gen_core::HashId, String)>>,
-    /// Immediate sub-collections ("direct children") one level deeper
-    pub nested_collections: Vec<String>,
     /// Annotation files available in the operations database
     pub annotation_files: Vec<AnnotationFileEntry>,
     /// Annotation groups associated with the selected sample (if any)
@@ -191,26 +187,6 @@ pub fn gather_collection_explorer_data(
         sample_block_groups.insert(sample.clone(), pairs);
     }
 
-    // 5) Direct "nested" collections: must start with "full_collection_name + /" but no further delimiter
-    let direct_prefix = format!("{}{}", full_collection_name, "/");
-
-    let sibling_candidates = Collection::query(
-        conn,
-        "SELECT * FROM collections
-         WHERE name GLOB ?1",
-        params![format!("{}*", direct_prefix)],
-    );
-
-    let mut nested_collections = Vec::new();
-    for child in sibling_candidates {
-        // The portion *after* "/foo/bar/"
-        let remainder = &child.name[direct_prefix.len()..];
-        // If there's no further slash, it's a direct child
-        if !remainder.is_empty() && !remainder.contains('/') {
-            nested_collections.push(remainder.to_string());
-        }
-    }
-
     let annotation_files = load_annotation_file_entries(op_conn);
     let annotation_groups = sample_name
         .map(|sample_name| load_annotation_group_entries(conn, sample_name))
@@ -224,7 +200,6 @@ pub fn gather_collection_explorer_data(
         sample_children,
         sample_parents,
         sample_block_groups,
-        nested_collections,
         annotation_files,
         annotation_groups,
     }
@@ -531,9 +506,9 @@ impl CollectionExplorer {
 
     pub fn handle_input(&self, state: &mut CollectionExplorerState, key: KeyEvent) {
         match key.code {
-            KeyCode::Up => self.previous(state),
-            KeyCode::Down => self.next(state),
-            KeyCode::Left => {
+            KeyCode::Up | KeyCode::Char('k') => self.previous(state),
+            KeyCode::Down | KeyCode::Char('j') => self.next(state),
+            KeyCode::Left | KeyCode::Char('h') => {
                 if let Some(selected_idx) = state.list_state.selected {
                     let items = self.get_display_items(state);
                     if let Some(ExplorerItem::Sample { name, expanded, .. }) =
@@ -558,7 +533,7 @@ impl CollectionExplorer {
                     }
                 }
             }
-            KeyCode::Right => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 if let Some(selected_idx) = state.list_state.selected {
                     let items = self.get_display_items(state);
                     if let Some(ExplorerItem::Sample {
@@ -627,7 +602,7 @@ impl CollectionExplorer {
     }
 
     pub fn get_status_line() -> String {
-        "*▼ ▲* navigate | *return/space* toggle | *←/→* tree".to_string()
+        "*↑↓* navigate | *←/→* expand/collapse | *return/space* open | *tab* to graph".to_string()
     }
 
     /// Get all items to display, taking into account the current state
@@ -694,19 +669,6 @@ impl CollectionExplorer {
         items.push(ExplorerItem::Header {
             text: String::new(),
         });
-
-        // Nested collections section
-        items.push(ExplorerItem::Header {
-            text: "Nested Collections:".to_string(),
-        });
-
-        // Nested collections
-        for collection in &self.data.nested_collections {
-            items.push(ExplorerItem::Collection {
-                name: collection.clone(),
-                is_current: false,
-            });
-        }
 
         // Blank line
         items.push(ExplorerItem::Header {
@@ -1061,13 +1023,6 @@ mod tests {
         let beta_bg = explorer_data.sample_block_groups.get("SampleBeta").unwrap();
         let beta_bg_names: Vec<_> = beta_bg.iter().map(|(_, n)| n.clone()).collect();
         assert_eq!(beta_bg_names, vec!["BG_Beta1".to_string()]);
-
-        // (E) Nested collections: we only want the direct child after "/foo/bar/"
-        // e.g. "/foo/bar/a" => child is "a"
-        // "/foo/bar/a/b" is not a direct child, it's an extra level
-        // "/foo/bar2" doesn't match the prefix "/foo/bar/"
-        // ... So only "a" is a direct nested collection
-        assert_eq!(explorer_data.nested_collections, vec!["a".to_string()]);
     }
 
     #[test]

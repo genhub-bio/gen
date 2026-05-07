@@ -182,7 +182,7 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, message: &str) {
         Style::default().fg(theme[0x04]),
         Style::default().fg(theme[0x07]),
     );
-    let status_bar = Paragraph::new(status_line).style(Style::default().bg(theme[0x00]));
+    let status_bar = Paragraph::new(status_line).style(Style::default().bg(theme[0x01]));
     frame.render_widget(status_bar, area);
 }
 
