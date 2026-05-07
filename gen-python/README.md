@@ -16,7 +16,7 @@ compile the Gen engine into a native extension module (`gen.so`). This layer own
 
 - **`Repository`** — opens a Gen workspace, exposes block-group and node queries,
   and drives all import/export operations (FASTA, GenBank, GFA, VCF, GAF, …).
-- **`PyBlockGroup`, `PyNodeKey`, `PyHashId`** — typed wrappers around internal
+- **`PyBlockGroup`, `PyBlock`, `PyHashId`** — typed wrappers around internal
   objects so Python code can work with them safely.
 - **`PyGraphController`** — wraps the GraphController and owns the ratatui render loop for the Jupyter widget. On each
   frame request it renders the graph into a ratatui `Buffer` and serialises the

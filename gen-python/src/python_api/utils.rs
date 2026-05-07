@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::{path::Path, str};
 
-use gen_core::config::Workspace;
 use gen_models::block_group::BlockGroupError;
 use pyo3::{
+    exceptions::PyValueError,
     prelude::*,
     types::{PyBytes, PyModule},
 };
@@ -19,7 +19,7 @@ pub fn block_group_err_to_pyerr(err: BlockGroupError) -> PyErr {
 }
 
 /// Helper function to convert a Rust path to a Python pathlib.Path object
-pub fn path_to_py_path(py: Python, path: &Path) -> PyResult<PyObject> {
+pub fn path_to_py_path(py: Python<'_>, path: &Path) -> PyResult<PyObject> {
     let pathlib = PyModule::import(py, "pathlib")?;
     let path_class = pathlib.getattr("Path")?;
     let py_path = path_class.call1((path.to_str().unwrap(),))?;
@@ -27,41 +27,29 @@ pub fn path_to_py_path(py: Python, path: &Path) -> PyResult<PyObject> {
 }
 
 /// Helper function return sqlite query results as a list of lists of Python objects
-pub fn py_query(conn: &Connection, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
+pub fn py_query(py: Python<'_>, conn: &Connection, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
     let mut stmt = conn.prepare(query).map_err(sqlite_err_to_pyerr)?;
     let column_count = stmt.column_count();
     let mut rows = Vec::new();
     let mut row_iter = stmt.query([]).map_err(sqlite_err_to_pyerr)?;
 
-    Python::with_gil(|py| -> PyResult<_> {
-        while let Some(row) = row_iter.next().map_err(sqlite_err_to_pyerr)? {
-            let mut row_data = Vec::with_capacity(column_count);
-            for i in 0..column_count {
-                let value: PyObject = match row.get_ref(i).map_err(sqlite_err_to_pyerr)? {
-                    ValueRef::Null => py.None(),
-                    ValueRef::Integer(i) => i.into_pyobject(py)?.into(),
-                    ValueRef::Real(f) => f.into_pyobject(py)?.into(),
-                    ValueRef::Text(s) => std::str::from_utf8(s)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyUnicodeDecodeError, _>(e.to_string())
-                        })?
-                        .into_pyobject(py)?
-                        .into(),
-                    ValueRef::Blob(b) => PyBytes::new(py, b).into_pyobject(py)?.into(),
-                };
-                row_data.push(value);
-            }
-            rows.push(row_data);
+    while let Some(row) = row_iter.next().map_err(sqlite_err_to_pyerr)? {
+        let mut row_data = Vec::with_capacity(column_count);
+        for i in 0..column_count {
+            let value: PyObject = match row.get_ref(i).map_err(sqlite_err_to_pyerr)? {
+                ValueRef::Null => py.None(),
+                ValueRef::Integer(i) => i.into_pyobject(py)?.into(),
+                ValueRef::Real(f) => f.into_pyobject(py)?.into(),
+                ValueRef::Text(s) => str::from_utf8(s)
+                    .map_err(|e| PyValueError::new_err(format!("UTF-8 decode error: {e}")))?
+                    .into_pyobject(py)?
+                    .into(),
+                ValueRef::Blob(b) => PyBytes::new(py, b).into_pyobject(py)?.into(),
+            };
+            row_data.push(value);
         }
-        Ok(())
-    })?;
+        rows.push(row_data);
+    }
 
     Ok(rows)
-}
-
-/// Returns the path to the .gen directory as a Python pathlib.Path object.
-#[pyfunction(name = "get_gen_dir")]
-pub fn get_gen_dir_py(py: Python) -> PyResult<PyObject> {
-    let gen_dir = Workspace::from_current_dir().ensure_gen_dir();
-    path_to_py_path(py, &gen_dir)
 }
