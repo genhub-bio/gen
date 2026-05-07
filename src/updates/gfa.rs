@@ -218,10 +218,7 @@ pub fn update_with_gfa(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: gfa_path.to_string(),
-                file_type: FileTypes::GFA,
-            }],
+            files: vec![OperationFile::new(gfa_path.to_string()).set_file_type(FileTypes::GFA)],
             description: "gfa_update".to_string(),
         },
         &summary_str,

@@ -199,10 +199,9 @@ pub fn update_with_fasta(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: fasta_file_path.to_string(),
-                file_type: FileTypes::Fasta,
-            }],
+            files: vec![
+                OperationFile::new(fasta_file_path.to_string()).set_file_type(FileTypes::Fasta),
+            ],
             description: "fasta_update".to_string(),
         },
         &summary_str,

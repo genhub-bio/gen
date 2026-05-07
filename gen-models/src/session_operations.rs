@@ -71,12 +71,12 @@ pub fn end_operation(
                     operation_conn,
                     &op_file.file_path,
                     op_file.file_type,
-                    None,
+                    op_file.checksum_override,
                 ) {
                     Ok(fa) => fa,
                     Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
                 };
-                Operation::add_file(operation_conn, &operation.hash, &fa.id)
+                Operation::add_file(operation_conn, &operation.hash, &fa.id, &op_file.filename)
                     .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
                     match fa.store_file(context.workspace()) {

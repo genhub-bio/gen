@@ -161,10 +161,7 @@ pub fn import_fasta(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: fasta.to_string(),
-                file_type: FileTypes::Fasta,
-            }],
+            files: vec![OperationFile::new(fasta.to_string()).set_file_type(FileTypes::Fasta)],
             description: "fasta_addition".to_string(),
         },
         &summary_str,

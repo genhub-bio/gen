@@ -182,16 +182,10 @@ pub fn update_with_library(
 
     let mut files = vec![];
     if let Some(library_file_path) = library_file_path {
-        files.push(OperationFile {
-            file_path: library_file_path.to_string(),
-            file_type: FileTypes::CSV,
-        });
+        files.push(OperationFile::new(library_file_path.to_string()).set_file_type(FileTypes::CSV));
     }
     if let Some(parts_file_path) = parts_file_path {
-        files.push(OperationFile {
-            file_path: parts_file_path.to_string(),
-            file_type: FileTypes::Fasta,
-        });
+        files.push(OperationFile::new(parts_file_path.to_string()).set_file_type(FileTypes::Fasta));
     }
 
     let summary_str = format!("{region_name} created.\n");

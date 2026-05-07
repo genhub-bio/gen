@@ -238,10 +238,10 @@ pub fn apply(
         &change_context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: format!("{full_op_hash}/changeset"),
-                file_type: FileTypes::Changeset,
-            }],
+            files: vec![
+                OperationFile::new(format!("{full_op_hash}/changeset"))
+                    .set_file_type(FileTypes::Changeset),
+            ],
             description: "changeset_application".to_string(),
         },
         &format!("Applied changeset {full_op_hash}."),
@@ -545,8 +545,8 @@ fn apply_operations_to_remote(
         })?;
 
         for file_addition in &manifest_op.file_additions {
-            let src_path = local_base.join(&file_addition.file_path);
-            let dst_path = remote_base.join(&file_addition.file_path);
+            let src_path = local_base.join(&file_addition.file_addition.file_path);
+            let dst_path = remote_base.join(&file_addition.file_addition.file_path);
             // we do a conditional transfer because users may be making tmp files to just add nodes/etc. and don't actually
             // care about keeping those files around
             if src_path.exists() {
@@ -557,7 +557,7 @@ fn apply_operations_to_remote(
 
                 fs::copy(&src_path, &dst_path).map_err(|_| {
                     RemoteOperationError::FileTransferError(
-                        file_addition.file_path.clone(),
+                        file_addition.file_addition.file_path.clone(),
                         src_path.to_string_lossy().to_string(),
                         dst_path.to_string_lossy().to_string(),
                     )
@@ -636,11 +636,16 @@ fn apply_operations_to_remote(
                     let remote_file_addition = FileAddition::get_or_create(
                         remote_workspace,
                         remote_op_conn,
-                        &file_addition.file_path,
-                        file_addition.file_type,
+                        &file_addition.file_addition.file_path,
+                        file_addition.file_addition.file_type,
                         None,
                     )?;
-                    Operation::add_file(remote_op_conn, &operation.hash, &remote_file_addition.id)?;
+                    Operation::add_file(
+                        remote_op_conn,
+                        &operation.hash,
+                        &remote_file_addition.id,
+                        &file_addition.filename,
+                    )?;
                 }
                 for annotation_file in &manifest_op.annotation_file_additions {
                     let remote_file_addition = FileAddition::get_or_create(
@@ -848,8 +853,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                             form = form
                                 .file(
                                     "assets",
-                                    FilePath::new(".gen")
-                                        .join("assets")
+                                    FilePath::new(&workspace.asset_dir()?)
                                         .join(op_file.hashed_filename()),
                                 )
                                 .unwrap();
@@ -860,8 +864,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                             form = form
                                 .file(
                                     "assets",
-                                    FilePath::new(".gen")
-                                        .join("assets")
+                                    FilePath::new(&workspace.asset_dir()?)
                                         .join(annotation_file.file_addition.hashed_filename()),
                                 )
                                 .unwrap();
@@ -871,8 +874,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                                 form = form
                                     .file(
                                         "assets",
-                                        FilePath::new(".gen")
-                                            .join("assets")
+                                        FilePath::new(&workspace.asset_dir()?)
                                             .join(index_file_addition.clone().hashed_filename()),
                                     )
                                     .unwrap();
@@ -1091,11 +1093,16 @@ fn ingest_manifest_operation(
                 let local_file_addition = FileAddition::get_or_create(
                     workspace,
                     operation_conn,
-                    &file_addition.file_path,
-                    file_addition.file_type,
+                    &file_addition.file_addition.file_path,
+                    file_addition.file_addition.file_type,
                     None,
                 )?;
-                Operation::add_file(operation_conn, &operation.hash, &local_file_addition.id)?;
+                Operation::add_file(
+                    operation_conn,
+                    &operation.hash,
+                    &local_file_addition.id,
+                    &file_addition.filename,
+                )?;
             }
             for annotation_file in &manifest_operation.annotation_file_additions {
                 let local_file_addition = FileAddition::get_or_create(
@@ -1196,15 +1203,15 @@ fn copy_operation_from_remote_fs(
     let remote_path = remote_workspace.repo_root()?;
     let repo_root = local_workspace.repo_root()?;
     for file_addition in &manifest_operation.file_additions {
-        let src_path = remote_path.join(&file_addition.file_path);
-        let dst_path = repo_root.join(&file_addition.file_path);
+        let src_path = remote_path.join(&file_addition.file_addition.file_path);
+        let dst_path = repo_root.join(&file_addition.file_addition.file_path);
         if src_path.exists() {
             if let Some(parent) = dst_path.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::copy(&src_path, &dst_path).map_err(|_| {
                 RemoteOperationError::FileTransferError(
-                    file_addition.file_path.clone(),
+                    file_addition.file_addition.file_path.clone(),
                     src_path.to_string_lossy().to_string(),
                     dst_path.to_string_lossy().to_string(),
                 )
@@ -1302,12 +1309,10 @@ fn download_remote_operation_assets(
         "dependencies",
     )?;
 
-    let gen_dir = workspace
-        .find_gen_dir()
-        .ok_or(ConfigError::GenDirectoryNotFound)?;
-    let gen_path = FilePath::new(&gen_dir);
+    let asset_dir = workspace.asset_dir()?;
+    let gen_path = FilePath::new(&asset_dir);
     for file in asset_response.files {
-        let destination = gen_path.join("assets").join(&file.asset_path);
+        let destination = gen_path.join(&file.asset_path);
         let user_destination = repo_root.join(&file.file_path);
         if !destination.exists() {
             download_binary(
@@ -2349,10 +2354,9 @@ mod tests {
 
                 let file_path = format!("test_file_{i}.fa");
                 let op_info = OperationInfo {
-                    files: vec![OperationFile {
-                        file_path: file_path.clone(),
-                        file_type: FileTypes::Fasta,
-                    }],
+                    files: vec![
+                        OperationFile::new(file_path.clone()).set_file_type(FileTypes::Fasta),
+                    ],
                     description: format!("Test operation {i}"),
                 };
 

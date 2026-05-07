@@ -252,10 +252,7 @@ pub fn create_operation(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile {
-                file_path: file_path.to_string(),
-                file_type,
-            }],
+            files: vec![OperationFile::new(file_path.to_string()).set_file_type(file_type)],
             description: description.to_string(),
         },
         "test operation",

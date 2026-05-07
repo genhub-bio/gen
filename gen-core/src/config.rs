@@ -6,6 +6,7 @@ use std::{
 use crate::{HashId, errors::ConfigError};
 
 pub const CHANGESET_DIR_NAME: &str = "changesets";
+pub const ASSETS_DIR_NAME: &str = "assets";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workspace {
@@ -32,6 +33,8 @@ impl Workspace {
         ensure_dir(&gen_path);
         let changesets = gen_path.join(CHANGESET_DIR_NAME);
         ensure_dir(&changesets);
+        let assets = gen_path.join(ASSETS_DIR_NAME);
+        ensure_dir(&assets);
         gen_path
     }
 
@@ -60,6 +63,13 @@ impl Workspace {
         self.find_gen_dir()
             .map(|dir| dir.join("gen.db"))
             .ok_or(ConfigError::GenDirectoryNotFound)
+    }
+
+    pub fn asset_dir(&self) -> Result<PathBuf, ConfigError> {
+        Ok(self
+            .find_gen_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?
+            .join(ASSETS_DIR_NAME))
     }
 
     pub fn changeset_path(&self, hash: &HashId) -> PathBuf {
@@ -174,5 +184,18 @@ mod tests {
                 .join(format!("{hash}"))
         );
         assert!(path.is_dir());
+    }
+
+    #[test]
+    fn asset_dir_creates_assets_directory() {
+        let tmp_dir = tempdir().unwrap();
+        let tmp_dir_path = tmp_dir.path().to_path_buf();
+        let workspace = Workspace::new(&tmp_dir_path);
+        workspace.ensure_gen_dir();
+
+        let asset_dir = workspace.asset_dir().unwrap();
+
+        assert_eq!(asset_dir, tmp_dir_path.join(".gen").join(ASSETS_DIR_NAME));
+        assert!(asset_dir.is_dir());
     }
 }

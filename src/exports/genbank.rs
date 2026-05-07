@@ -619,10 +619,10 @@ mod tests {
             None,
             Sample::DEFAULT_NAME,
             OperationInfo {
-                files: vec![OperationFile {
-                    file_path: path.to_str().unwrap().to_string(),
-                    file_type: FileTypes::GenBank,
-                }],
+                files: vec![
+                    OperationFile::new(path.to_str().unwrap().to_string())
+                        .set_file_type(FileTypes::GenBank),
+                ],
                 description: "test".to_string(),
             },
             GenBankImportOptions::default().annotation_name_from_path(&path),
@@ -650,10 +650,10 @@ mod tests {
             None,
             Sample::DEFAULT_NAME,
             OperationInfo {
-                files: vec![OperationFile {
-                    file_path: path.to_str().unwrap().to_string(),
-                    file_type: FileTypes::GenBank,
-                }],
+                files: vec![
+                    OperationFile::new(path.to_str().unwrap().to_string())
+                        .set_file_type(FileTypes::GenBank),
+                ],
                 description: "test".to_string(),
             },
             GenBankImportOptions::default().annotation_name_from_path(&path),
@@ -681,10 +681,10 @@ mod tests {
             None,
             Sample::DEFAULT_NAME,
             OperationInfo {
-                files: vec![OperationFile {
-                    file_path: path.to_str().unwrap().to_string(),
-                    file_type: FileTypes::GenBank,
-                }],
+                files: vec![
+                    OperationFile::new(path.to_str().unwrap().to_string())
+                        .set_file_type(FileTypes::GenBank),
+                ],
                 description: "test".to_string(),
             },
             GenBankImportOptions::default().annotation_name_from_path(&path),
@@ -711,10 +711,10 @@ mod tests {
             Some("fixtures"),
             "puc19-export",
             OperationInfo {
-                files: vec![OperationFile {
-                    file_path: path.to_str().unwrap().to_string(),
-                    file_type: FileTypes::GenBank,
-                }],
+                files: vec![
+                    OperationFile::new(path.to_str().unwrap().to_string())
+                        .set_file_type(FileTypes::GenBank),
+                ],
                 description: "test".to_string(),
             },
             GenBankImportOptions::default().annotation_name_from_path(&path),

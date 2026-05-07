@@ -237,10 +237,10 @@ pub fn update_with_genbank(
         &sample,
         create_missing,
         &gen_models::operations::OperationInfo {
-            files: vec![gen_models::operations::OperationFile {
-                file_path: filename.clone(),
-                file_type: gen_models::file_types::FileTypes::GenBank,
-            }],
+            files: vec![
+                gen_models::operations::OperationFile::new(filename.clone())
+                    .set_file_type(gen_models::file_types::FileTypes::GenBank),
+            ],
             description: "Update from GenBank".to_string(),
         },
     ) {
