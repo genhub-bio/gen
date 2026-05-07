@@ -79,6 +79,14 @@ pub enum HighlightKind<N> {
     Edge(N, N),
     /// A path consisting of a sequence of nodes
     Path(Vec<N>),
+    /// Tint a rectangular region of a single node. The rectangle is defined by the
+    /// (col, row) position of its top-left corner (`tl`) and bottom-right corner (`br`).
+    /// The top-left of the node area is (0, 0). Both corners are inclusive.
+    Cells {
+        node: N,
+        tl: (i64, i64),
+        br: (i64, i64),
+    },
 }
 
 impl<G, S> GraphController<G, S>
@@ -330,6 +338,25 @@ where
         color
     }
 
+    /// Render-only primitive shared by `set_cell_highlight` (initial paint) and the
+    /// highlight replay loop (re-paint after viewport rebuild). Kept separate so replay
+    /// can call it without pushing duplicate entries into `self.highlights`.
+    fn apply_cell_highlight(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+        style: PathStyle,
+    ) {
+        let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
+        if viewport_graph.node_positions.contains_key(&node_idx) {
+            viewport_graph
+                .cell_highlights
+                .push((node_idx, tl, br, style));
+        }
+    }
+
     /// Set a node highlight
     pub fn set_node_highlight(&mut self, node_id: G::NodeId, style: PathStyle) {
         let graph = &self.partition_controller.graph;
@@ -367,6 +394,53 @@ where
         self.set_path_highlight(PathStyle::new(color), path_nodes);
     }
 
+    /// Record and paint a cell-rect highlight with an explicit style. Persists the
+    /// highlight into `self.highlights` so it survives viewport rebuilds; delegates
+    /// the actual paint to `apply_cell_highlight`. Prefer `add_cell_highlight` when
+    /// you don't need to choose the color.
+    ///
+    /// `tl`/`br` are the (col, row) positions of the top-left and bottom-right corners
+    /// of the rectangle to highlight. Both corners are inclusive. The top-left of the
+    /// node area is (0, 0).
+    /// Example — columns 5..=12 on the top row:
+    ///   set_cell_highlight(node_id, (5, 0), (12, 0), style)
+    pub fn set_cell_highlight(
+        &mut self,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+        style: PathStyle,
+    ) {
+        let graph = &self.partition_controller.graph;
+        Self::apply_cell_highlight(&mut self.viewport_graph, graph, node_id, tl, br, style);
+        let kind = HighlightKind::Cells {
+            node: node_id,
+            tl,
+            br,
+        };
+        self.highlights.push((kind, style));
+    }
+
+    /// Convenience wrapper around `set_cell_highlight` that picks the next theme
+    /// accent color automatically. Returns the chosen color. Use this when you
+    /// don't need to control the style; use `set_cell_highlight` when you do.
+    pub fn add_cell_highlight(
+        &mut self,
+        node_id: G::NodeId,
+        tl: (i64, i64),
+        br: (i64, i64),
+    ) -> Color {
+        let color = self.next_accent_color();
+        self.set_cell_highlight(node_id, tl, br, PathStyle::new(color));
+        color
+    }
+
+    /// Get a reference to the node rect highlights in the current viewport
+    #[allow(clippy::type_complexity)]
+    pub fn get_cell_highlights(&self) -> &[(NodeIndex, (i64, i64), (i64, i64), PathStyle)] {
+        &self.viewport_graph.cell_highlights
+    }
+
     /// Check if a specific style has any highlighting
     pub fn has_highlight(&self, style: &PathStyle) -> bool {
         self.highlights.iter().any(|(_, s)| s == style)
@@ -382,6 +456,9 @@ where
         self.viewport_graph
             .edge_highlights
             .retain(|(_, s)| s != style);
+        self.viewport_graph
+            .cell_highlights
+            .retain(|(_, _, _, s)| s != style);
         self.trigger_rebuild();
     }
 
@@ -390,6 +467,7 @@ where
         self.highlights.clear();
         self.viewport_graph.node_highlights.clear();
         self.viewport_graph.edge_highlights.clear();
+        self.viewport_graph.cell_highlights.clear();
         self.trigger_rebuild();
     }
 
@@ -906,6 +984,16 @@ where
                         *style,
                     );
                 }
+                HighlightKind::Cells { node, tl, br } => {
+                    Self::apply_cell_highlight(
+                        &mut self.viewport_graph,
+                        &self.partition_controller.graph,
+                        *node,
+                        *tl,
+                        *br,
+                        *style,
+                    );
+                }
             }
         }
 
@@ -1151,7 +1239,10 @@ mod tests {
         assert!(state.has_focus); // Focus is enabled by default for keyboard input
 
         state.focus();
-        let _ = state.camera_anim.is_some();
+        assert!(state.has_focus);
+
+        state.handle_mouse_scroll(5, 5, Duration::from_millis(100));
+        assert!(state.camera_anim.is_some());
 
         state.blur();
         assert!(!state.has_focus);
