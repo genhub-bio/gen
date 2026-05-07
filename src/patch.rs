@@ -1,7 +1,14 @@
-use std::io::{Read, Write};
+use std::{
+    fs,
+    io::{Read, Write},
+};
 
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use gen_core::{HashId, errors::ConnectionError, traits::Capnp};
+use gen_core::{
+    HashId,
+    errors::{ConfigError, ConnectionError},
+    traits::Capnp,
+};
 use gen_models::{
     changesets::{DatabaseChangeset, apply_changeset},
     db::DbContext,
@@ -15,14 +22,81 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    gen_schema_capnp::{operation_patch, operation_patches},
+    gen_schema_capnp::{operation_patch, operation_patches, patch_file},
     get_connection,
 };
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct PatchFile {
+    file: FileAddition,
+    contents: Vec<u8>,
+}
+
+impl PatchFile {
+    fn from_file_addition(
+        context: &DbContext,
+        file: FileAddition,
+    ) -> Result<Self, CreatePatchError> {
+        if file.file_path.is_empty() {
+            return Ok(Self {
+                file,
+                contents: Vec::new(),
+            });
+        }
+
+        let asset_path = context
+            .workspace()
+            .asset_dir()?
+            .join(file.clone().hashed_filename());
+        let contents = fs::read(asset_path)?;
+
+        Ok(Self { file, contents })
+    }
+
+    fn restore_into_asset_dir(&self, context: &DbContext) -> Result<(), PatchError> {
+        if self.file.file_path.is_empty() || self.contents.is_empty() {
+            return Ok(());
+        }
+
+        let asset_dir = context
+            .workspace()
+            .asset_dir()
+            .map_err(ConnectionError::from)?;
+        fs::create_dir_all(&asset_dir).map_err(|err| PatchError::Io(err.to_string()))?;
+
+        let asset_path = asset_dir.join(self.file.clone().hashed_filename());
+        if !asset_path.exists() {
+            fs::write(asset_path, &self.contents).map_err(|err| PatchError::Io(err.to_string()))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a> Capnp<'a> for PatchFile {
+    type Builder = patch_file::Builder<'a>;
+    type Reader = patch_file::Reader<'a>;
+
+    fn write_capnp(&self, builder: &mut Self::Builder) {
+        self.file.write_capnp(&mut builder.reborrow().init_file());
+        builder.set_contents(&self.contents);
+    }
+
+    fn read_capnp(reader: Self::Reader) -> Self {
+        Self {
+            file: FileAddition::read_capnp(reader.get_file().expect("should have file")),
+            contents: reader
+                .get_contents()
+                .expect("should have contents")
+                .to_vec(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct OperationPatch {
     pub operation: Operation,
-    files: Vec<FileAddition>,
+    files: Vec<PatchFile>,
     summary: OperationSummary,
     dependencies: DependencyModels,
     changeset: DatabaseChangeset,
@@ -58,7 +132,7 @@ impl<'a> Capnp<'a> for OperationPatch {
         let files_reader = reader.get_files().expect("should have files");
         let mut files = Vec::with_capacity(files_reader.len() as usize);
         for file_reader in files_reader.iter() {
-            files.push(FileAddition::read_capnp(file_reader));
+            files.push(PatchFile::read_capnp(file_reader));
         }
 
         let summary =
@@ -114,6 +188,8 @@ pub enum PatchError {
     ChangesetError(#[from] ChangesetError),
     #[error("Connection Error: {0}")]
     ConnectionError(#[from] ConnectionError),
+    #[error("I/O error: {0}")]
+    Io(String),
     #[error("SQL Error: {0}")]
     SQLError(String),
     #[error("SQLite Error: {0}")]
@@ -132,6 +208,8 @@ pub enum CreatePatchError {
     SqliteError(#[from] SQLError),
     #[error("I/O Error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Config error: {0}")]
+    Config(#[from] ConfigError),
     #[error("Cap'n Proto error: {0}")]
     Capnp(#[from] capnp::Error),
 }
@@ -151,9 +229,13 @@ where
         let operation = Operation::get_by_id(op_conn, hash)
             .ok_or_else(|| CreatePatchError::OperationNotFound(*hash))?;
         println!("Creating patch for Operation {id}", id = operation.hash);
+        let files = FileAddition::get_files_for_operation(op_conn, &operation.hash)
+            .into_iter()
+            .map(|file| PatchFile::from_file_addition(context, file))
+            .collect::<Result<Vec<_>, _>>()?;
         patches.push(OperationPatch {
             operation: operation.clone(),
-            files: FileAddition::get_files_for_operation(op_conn, &operation.hash),
+            files,
             summary: OperationSummary::get(
                 op_conn,
                 "select * from operation_summaries where operation_hash = ?1",
@@ -208,6 +290,10 @@ where
 pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<(), PatchError> {
     let workspace = context.workspace();
     for patch in patches.iter() {
+        for file in &patch.files {
+            file.restore_into_asset_dir(context)?;
+        }
+
         let changeset = &patch.changeset;
         let dependencies = &patch.dependencies;
         let mut change_context = context.clone();
@@ -237,11 +323,11 @@ pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<
                 files: patch
                     .files
                     .iter()
-                    .map(|fa| OperationFile {
-                        filename: OperationFile::new(fa.file_path.clone()).filename,
-                        file_path: fa.file_path.clone(),
-                        file_type: fa.file_type,
-                        checksum_override: Some(fa.checksum),
+                    .map(|patch_file| OperationFile {
+                        filename: OperationFile::new(patch_file.file.file_path.clone()).filename,
+                        file_path: patch_file.file.file_path.clone(),
+                        file_type: patch_file.file.file_type,
+                        checksum_override: Some(patch_file.file.checksum),
                     })
                     .collect::<Vec<_>>(),
                 description: "unknown".to_string(),
@@ -255,13 +341,14 @@ pub fn apply_patches(context: &DbContext, patches: &[OperationPatch]) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use gen_models::{
         block_group::BlockGroup,
         operations::{Branch, OperationState},
         sample::Sample,
     };
+    use tempfile::Builder;
 
     use super::*;
     use crate::{
@@ -442,6 +529,8 @@ mod tests {
         // Verify we got the same patches back
         assert_eq!(loaded_patches[0].operation, op_1);
         assert_eq!(loaded_patches[1].operation, op_2);
+        assert!(!loaded_patches[0].files.is_empty());
+        assert!(!loaded_patches[1].files.is_empty());
     }
 
     #[test]
@@ -484,5 +573,67 @@ mod tests {
         )
         .unwrap();
         apply_patches(&fresh_context, &patches).unwrap();
+    }
+
+    #[test]
+    fn test_patch_restores_external_assets_into_target_workspace() {
+        let source_context = setup_gen_on_disk();
+        track_database(
+            source_context.graph().conn(),
+            source_context.operations().conn(),
+        )
+        .unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let fixture_vcf_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.vcf");
+        let collection = "test".to_string();
+        import_fasta(
+            &source_context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let external_file = Builder::new().suffix(".vcf").tempfile().unwrap();
+        fs::copy(&fixture_vcf_path, external_file.path()).unwrap();
+
+        let operation = update_with_vcf(
+            &source_context,
+            &external_file.path().to_string_lossy().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let mut write_stream: Vec<u8> = Vec::new();
+        create_patch(&source_context, &[operation.hash], &mut write_stream).unwrap();
+        let patches = load_patches(&write_stream[..]);
+
+        let target_context = setup_gen_on_disk();
+        track_database(
+            target_context.graph().conn(),
+            target_context.operations().conn(),
+        )
+        .unwrap();
+
+        apply_patches(&target_context, &patches).unwrap();
+
+        let restored_file = &patches[0].files[0].file;
+        let restored_asset_path = target_context
+            .workspace()
+            .asset_dir()
+            .unwrap()
+            .join(restored_file.clone().hashed_filename());
+        assert!(restored_asset_path.exists());
+        assert_eq!(
+            fs::read(restored_asset_path).unwrap(),
+            fs::read(external_file.path()).unwrap()
+        );
     }
 }

@@ -6,9 +6,14 @@
 using GenModels = import "gen-models.capnp";
 
 # Operation patch structure for serializing and deserializing patches
+struct PatchFile {
+  file @0 :GenModels.FileAddition;
+  contents @1 :Data;
+}
+
 struct OperationPatch {
   operation @0 :GenModels.Operation;
-  files @1 :List(GenModels.FileAddition);
+  files @1 :List(PatchFile);
   summary @2 :GenModels.OperationSummary;
   dependencies @3 :GenModels.DependencyModels;  # Serialized DependencyModels as bytes
   changeset @4 :GenModels.DatabaseChangeset;
