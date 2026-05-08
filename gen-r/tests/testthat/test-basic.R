@@ -379,9 +379,6 @@ test_that("repository and graph controller helpers work", {
     smoke_rows <- repo$query("SELECT id FROM r_binding_smoke")
     expect_equal(smoke_rows[[1]][[1]], 1)
 
-    created <- repo$create_block_group("manual", "repo-collection", "sample-a")
-    expect_equal(created$name, "manual")
-
     graph_dict <- repo$block_group_to_dict(groups[[1]])
     expect_true(length(graph_dict$nodes) >= 1)
     expect_true(length(graph_dict$edges) >= 1)
@@ -442,9 +439,6 @@ test_that("low-level helper bindings are directly callable", {
 
     fetched <- genr:::repo_get_block_group_by_id(db_path, groups[[1]]$id)
     expect_equal(fetched$name, "m123")
-
-    created <- genr:::repo_create_block_group(db_path, "manual-low", "low-level-collection", "sample-a")
-    expect_equal(created$name, "manual-low")
 
     graph_dict <- genr:::repo_block_group_to_dict(db_path, groups[[1]]$id)
     expect_true(length(graph_dict$nodes) >= 1)

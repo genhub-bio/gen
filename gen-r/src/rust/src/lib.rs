@@ -1,5 +1,5 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{BufWriter, Read},
     path::{Path, PathBuf},
 };
@@ -7,14 +7,25 @@ use std::{
 use extendr_api::prelude::*;
 use flate2::read::GzDecoder;
 use r#gen::{
+    commands::graph_operations::{
+        derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
+        make_stitch::make_stitch_operation,
+    },
+    exports::{
+        fasta::export_fasta as fasta_export, genbank::export_genbank as genbank_export,
+        gfa::export_gfa as gfa_export,
+    },
     get_connection,
-    graphs::combinatorial_library::{SequencePart, parse_library},
+    graphs::{
+        combinatorial_library::{SequencePart, parse_library},
+        graph_search::{GenGraphMatcher, GraphLocus, SeedIndex, SequenceKind},
+    },
     views::gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer},
 };
-use gen_core::{HashId, config::Workspace};
+use gen_core::{HashId, Strand, config::Workspace};
 use gen_graph::GenGraph;
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
     errors::OperationError,
     node::Node,
@@ -398,6 +409,56 @@ fn apply_graph_ops(
         }
     }
     Ok(())
+}
+
+fn parse_sequence_kind_r(s: &str) -> std::result::Result<SequenceKind, String> {
+    match s {
+        "exact" => Ok(SequenceKind::Exact),
+        "dna" => Ok(SequenceKind::Dna),
+        "ssdna" => Ok(SequenceKind::SsDna),
+        "protein" => Ok(SequenceKind::Protein),
+        _ => Err(format!(
+            "Unknown sequence_kind '{s}'; use 'exact', 'dna', 'ssdna', or 'protein'"
+        )),
+    }
+}
+
+fn graph_locus_record(locus: &GraphLocus) -> List {
+    let start_block = locus.blocks[0];
+    let end_block = *locus.blocks.last().unwrap();
+
+    let start = list!(
+        block = node_key_record(
+            start_block.node_id,
+            start_block.sequence_start,
+            start_block.sequence_end
+        ),
+        offset = locus.start_offset as i64
+    );
+    let end = list!(
+        block = node_key_record(
+            end_block.node_id,
+            end_block.sequence_start,
+            end_block.sequence_end
+        ),
+        offset = locus.end_offset as i64
+    );
+    let blocks = locus
+        .blocks
+        .iter()
+        .map(|n| node_key_record(n.node_id, n.sequence_start, n.sequence_end))
+        .collect::<Vec<_>>();
+    let strand = match locus.strand {
+        Strand::Forward => "forward",
+        Strand::Reverse => "reverse",
+        _ => "unknown",
+    };
+    list!(
+        start = start,
+        end = end,
+        blocks = List::from_values(blocks),
+        strand = strand
+    )
 }
 
 /// Initialise a Gen workspace in the current directory.
@@ -1261,27 +1322,6 @@ fn repo_get_block_groups_by_collection(
 }
 
 #[extendr]
-fn repo_create_block_group(
-    db_path: String,
-    name: String,
-    collection_name: String,
-    sample_name: String,
-) -> std::result::Result<List, Error> {
-    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
-    let block_group = BlockGroup::create(
-        &conn,
-        NewBlockGroup {
-            collection_name: &collection_name,
-            sample_name: &sample_name,
-            name: &name,
-            ..Default::default()
-        },
-    )
-    .map_err(|err| Error::Other(err.to_string()))?;
-    Ok(block_group_record(block_group, Some(&db_path)))
-}
-
-#[extendr]
 fn repo_block_group_to_dict(
     db_path: String,
     block_group_id: String,
@@ -1392,6 +1432,302 @@ fn graph_handle_click(
     Ok(controller.handle_click(col as u16, row as u16))
 }
 
+#[extendr]
+fn repo_stitch(
+    workspace_path: String,
+    db_path: String,
+    collection_name: String,
+    sample_name: String,
+    new_sample: String,
+    new_region: String,
+    regions: String,
+) -> std::result::Result<List, Error> {
+    let (context, _, _) =
+        open_db_context(Some(workspace_path), Some(db_path.clone())).map_err(Error::Other)?;
+
+    make_stitch_operation(
+        &context,
+        Some(collection_name.clone()),
+        sample_name,
+        new_sample.clone(),
+        regions,
+        new_region.clone(),
+    )
+    .map_err(|err| Error::Other(format!("Error stitching block groups: {err}")))?;
+
+    let conn = context.graph().conn();
+    BlockGroup::query(
+        conn,
+        "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+        rusqlite::params![collection_name, new_sample, new_region],
+    )
+    .into_iter()
+    .next()
+    .map(|bg| block_group_record(bg, Some(&db_path)))
+    .ok_or_else(|| Error::Other("Stitched block group not found after creation".to_string()))
+}
+
+#[extendr]
+fn repo_build_index(
+    db_path: String,
+    gen_dir: String,
+    block_group_ids: Vec<String>,
+    sequence_kind: String,
+    k: i32,
+) -> std::result::Result<(), Error> {
+    let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
+    let normalized = kind != SequenceKind::Exact;
+    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
+    let index_dir = PathBuf::from(&gen_dir).join("search_index");
+    fs::create_dir_all(&index_dir)
+        .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
+
+    let bgs: Vec<_> = if block_group_ids.is_empty() {
+        BlockGroup::all(&conn)
+    } else {
+        block_group_ids
+            .iter()
+            .filter_map(|id| hash_id_from_string(id).ok())
+            .filter_map(|id| BlockGroup::get_by_id(&conn, &id).ok())
+            .collect()
+    };
+
+    for bg in bgs {
+        let graph = BlockGroup::get_graph(&conn, &bg.id);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(&conn, graph, kind);
+        let index = SeedIndex::build(&matcher, k as usize, normalized);
+        let path = index_dir.join(format!("{}.bin", bg.id));
+        let bytes = index
+            .to_bytes_with_header()
+            .map_err(|e| Error::Other(format!("Failed to serialize index: {e}")))?;
+        fs::write(&path, bytes).map_err(|e| Error::Other(format!("Failed to write index: {e}")))?;
+    }
+    Ok(())
+}
+
+#[extendr]
+fn repo_search(
+    db_path: String,
+    gen_dir: String,
+    query: String,
+    block_group_ids: Vec<String>,
+    sequence_kind: String,
+) -> std::result::Result<List, Error> {
+    let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
+    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
+
+    let bgs: Vec<_> = if block_group_ids.is_empty() {
+        BlockGroup::all(&conn)
+    } else {
+        block_group_ids
+            .iter()
+            .filter_map(|id| hash_id_from_string(id).ok())
+            .filter_map(|id| BlockGroup::get_by_id(&conn, &id).ok())
+            .collect()
+    };
+
+    let query_bytes = query.as_bytes();
+    let index_dir = PathBuf::from(&gen_dir).join("search_index");
+    let mut results = Vec::new();
+
+    for bg in bgs {
+        let graph = BlockGroup::get_graph(&conn, &bg.id);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(&conn, graph, kind);
+
+        let index_path = index_dir.join(format!("{}.bin", bg.id));
+        let index = fs::read(&index_path)
+            .ok()
+            .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok());
+
+        let matches = match index {
+            Some(idx) => matcher
+                .find_all_with_seed_index(&idx, query_bytes)
+                .unwrap_or_else(|_| matcher.find_all(query_bytes)),
+            None => matcher.find_all(query_bytes),
+        };
+
+        if !matches.is_empty() {
+            let locus_records = matches.iter().map(graph_locus_record).collect::<Vec<_>>();
+            results.push(list!(
+                block_group = block_group_record(bg, Some(&db_path)),
+                matches = List::from_values(locus_records)
+            ));
+        }
+    }
+
+    Ok(List::from_values(results))
+}
+
+#[extendr]
+fn repo_clear_index(
+    gen_dir: String,
+    block_group_ids: Vec<String>,
+) -> std::result::Result<(), Error> {
+    let index_dir = PathBuf::from(&gen_dir).join("search_index");
+    if !index_dir.exists() {
+        return Ok(());
+    }
+
+    if block_group_ids.is_empty() {
+        for entry in fs::read_dir(&index_dir)
+            .map_err(|e| Error::Other(format!("Failed to read index dir: {e}")))?
+        {
+            let entry = entry.map_err(|e| Error::Other(format!("Failed to read entry: {e}")))?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("bin") {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    } else {
+        for id in &block_group_ids {
+            let path = index_dir.join(format!("{id}.bin"));
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|e| Error::Other(format!("Failed to delete index: {e}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[extendr]
+fn repo_bg_subgraph(
+    workspace_path: String,
+    db_path: String,
+    collection_name: String,
+    sample_name: String,
+    bg_name: String,
+    new_sample: String,
+    start: i64,
+    end: i64,
+    backbone: Nullable<String>,
+) -> std::result::Result<List, Error> {
+    let (context, _, _) =
+        open_db_context(Some(workspace_path), Some(db_path.clone())).map_err(Error::Other)?;
+
+    let region = format!("{bg_name}:{start}-{end}");
+    derive_subgraph_operation(
+        &context,
+        Some(collection_name.clone()),
+        sample_name,
+        new_sample.clone(),
+        region,
+        nullable_string_to_option(backbone),
+    )
+    .map_err(|e| Error::Other(format!("Error deriving subgraph: {e}")))?;
+
+    let conn = context.graph().conn();
+    BlockGroup::query(
+        conn,
+        "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+        rusqlite::params![collection_name, new_sample, bg_name],
+    )
+    .into_iter()
+    .next()
+    .map(|bg| block_group_record(bg, Some(&db_path)))
+    .ok_or_else(|| Error::Other("Derived subgraph not found after creation".to_string()))
+}
+
+#[extendr]
+fn repo_bg_chunks(
+    workspace_path: String,
+    db_path: String,
+    collection_name: String,
+    sample_name: String,
+    bg_name: String,
+    new_sample: String,
+    breakpoints: Nullable<String>,
+    chunk_size: Nullable<i64>,
+    backbone: Nullable<String>,
+) -> std::result::Result<List, Error> {
+    let (context, _, _) =
+        open_db_context(Some(workspace_path), Some(db_path.clone())).map_err(Error::Other)?;
+
+    derive_chunks_operation(
+        &context,
+        Some(collection_name.clone()),
+        sample_name,
+        new_sample.clone(),
+        bg_name.clone(),
+        nullable_string_to_option(backbone),
+        nullable_string_to_option(breakpoints),
+        match chunk_size {
+            Nullable::NotNull(v) => Some(v),
+            Nullable::Null => None,
+        },
+    )
+    .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
+
+    let conn = context.graph().conn();
+    let prefix = format!("{bg_name}.");
+    let matching = BlockGroup::query(
+        conn,
+        "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2",
+        rusqlite::params![collection_name, new_sample],
+    )
+    .into_iter()
+    .filter(|bg| bg.name == bg_name || bg.name.starts_with(&prefix))
+    .map(|bg| block_group_record(bg, Some(&db_path)))
+    .collect::<Vec<_>>();
+
+    Ok(List::from_values(matching))
+}
+
+#[extendr]
+fn repo_bg_export_fasta(
+    db_path: String,
+    collection_name: String,
+    sample_name: String,
+    filename: String,
+) -> std::result::Result<(), Error> {
+    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
+    fasta_export(
+        &conn,
+        &collection_name,
+        Some(&sample_name),
+        &PathBuf::from(&filename),
+    )
+    .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))
+}
+
+#[extendr]
+fn repo_bg_export_gfa(
+    db_path: String,
+    collection_name: String,
+    sample_name: String,
+    filename: String,
+    node_max: Nullable<i64>,
+) -> std::result::Result<(), Error> {
+    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
+    gfa_export(
+        &conn,
+        &collection_name,
+        &PathBuf::from(&filename),
+        &sample_name,
+        match node_max {
+            Nullable::NotNull(v) => Some(v),
+            Nullable::Null => None,
+        },
+    )
+    .map_err(|e| Error::Other(format!("GFA export failed: {e}")))
+}
+
+#[extendr]
+fn repo_bg_export_genbank(
+    db_path: String,
+    collection_name: String,
+    sample_name: String,
+    filename: String,
+) -> std::result::Result<(), Error> {
+    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
+    let writer = BufWriter::new(
+        File::create(&filename)
+            .map_err(|e| Error::Other(format!("Failed to create file '{filename}': {e}")))?,
+    );
+    genbank_export(&conn, &collection_name, &sample_name, writer)
+        .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))
+}
+
 extendr_module! {
     mod genr;
     fn init;
@@ -1423,9 +1759,17 @@ extendr_module! {
     fn repo_get_block_group_by_id;
     fn repo_get_block_groups;
     fn repo_get_block_groups_by_collection;
-    fn repo_create_block_group;
     fn repo_block_group_to_dict;
     fn repo_get_block_sequence;
+    fn repo_stitch;
+    fn repo_build_index;
+    fn repo_search;
+    fn repo_clear_index;
+    fn repo_bg_subgraph;
+    fn repo_bg_chunks;
+    fn repo_bg_export_fasta;
+    fn repo_bg_export_gfa;
+    fn repo_bg_export_genbank;
     fn graph_render_frame;
     fn graph_handle_click;
 }

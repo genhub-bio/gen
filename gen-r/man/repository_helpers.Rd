@@ -11,7 +11,12 @@ rendering block groups through a \code{GraphController()}.
 \code{get_block_group_by_id}, \code{get_block_groups},
 \code{get_block_groups_by_collection}, \code{block_group_to_dict},
 \code{block_group_to_rustworkx}, \code{block_group_to_networkx},
-\code{create_block_group}, \code{plot}, and \code{get_block_sequence}.
+\code{plot}, \code{get_block_sequence}, \code{stitch},
+\code{build_index}, \code{search}, and \code{clear_index}.
+
+\code{BlockGroup} objects expose \code{plot}, \code{export_fasta},
+\code{export_gfa}, \code{export_genbank}, \code{build_index}, \code{search},
+\code{clear_index}, \code{subgraph}, and \code{chunks}.
 
 \code{GraphController()} returns an environment with the fields \code{db_path},
 \code{block_group_id}, \code{detail}, \code{ops}, \code{rows}, and

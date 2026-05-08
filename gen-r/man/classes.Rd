@@ -72,9 +72,21 @@ single block group.
 \code{block_group_to_dict(block_group)},
 \code{block_group_to_rustworkx(block_group)},
 \code{block_group_to_networkx(block_group)},
-\code{create_block_group(name, collection_name, sample_name)},
-\code{plot(block_group, rows = NULL, cols = NULL, detail = "normal")}, and
-\code{get_block_sequence(node_key)}.
+\code{plot(block_group, rows = NULL, cols = NULL, detail = "normal")},
+\code{get_block_sequence(node_key)},
+\code{stitch(bgs, new_sample, new_region)},
+\code{build_index(bgs = NULL, sequence_kind = "dna", k = 16L)},
+\code{search(query, bgs = NULL, sequence_kind = "dna")}, and
+\code{clear_index(bgs = NULL)}.
+
+\code{BlockGroup} objects expose the methods
+\code{plot(rows = NULL, cols = NULL, detail = "normal")},
+\code{export_fasta(filename)}, \code{export_gfa(filename, node_max = NULL)},
+\code{export_genbank(filename)},
+\code{build_index(sequence_kind = "dna", k = 16L)},
+\code{search(query, sequence_kind = "dna")}, \code{clear_index()},
+\code{subgraph(new_sample, start, end, backbone = NULL)}, and
+\code{chunks(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL)}.
 
 \code{GraphController()} exposes the methods \code{set_detail(detail)},
 \code{render_frame(cols = ctrl$cols, rows = ctrl$rows)}, \code{zoom_in()},
