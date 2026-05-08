@@ -32,6 +32,13 @@ repos:
         files: Cargo\.(toml|lock)
         pass_filenames: false
         args: ["--all-features", "check"]
+      - id: gen-python-tests
+        name: gen-python tests
+        description: Run cargo test in the gen-python subcrate
+        entry: bash -c 'cd gen-python && make pyenv-test'
+        language: system
+        pass_filenames: false
+        files: ^gen-python/.*\.(rs|py)$
   - repo: local
     hooks:
       - id: build-paper

@@ -281,7 +281,7 @@ mod python_tests {
     use std::fs;
 
     use r#gen::test_helpers::{setup_gen, setup_gen_on_disk};
-    use pyo3::{prelude::*, py_run};
+    use pyo3::{PyTypeInfo, prelude::*, py_run};
     use tempfile::tempdir;
 
     use crate::python_api::repository::PyRepository;
