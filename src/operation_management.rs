@@ -239,8 +239,13 @@ pub fn apply(
         &mut session,
         &OperationInfo {
             files: vec![
-                OperationFile::new(format!("{full_op_hash}/changeset"))
-                    .set_file_type(FileTypes::Changeset),
+                OperationFile::new(
+                    operation
+                        .get_changeset_path(workspace)
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .set_file_type(FileTypes::Changeset),
             ],
             description: "changeset_application".to_string(),
         },

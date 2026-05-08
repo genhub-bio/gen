@@ -819,7 +819,7 @@ mod tests {
         net::TcpListener,
         path::PathBuf,
         thread,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
@@ -1175,7 +1175,17 @@ mod tests {
 
     #[test]
     fn test_remote_asset_uri_reads_http_uri() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos() as u16;
+        let base_port = 20_000 + (seed % 20_000);
+        let listener = (0..32)
+            .find_map(|offset| {
+                let port = base_port.saturating_add(offset);
+                TcpListener::bind(("127.0.0.1", port)).ok()
+            })
+            .expect("failed to bind test HTTP listener");
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
