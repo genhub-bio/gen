@@ -127,11 +127,7 @@ fn load_group_annotations(
             } else {
                 Some(AnnotationSpan {
                     id: annotation.id,
-                    name: if inherited {
-                        format!("{} [{}]", annotation.name, entry.sample_name)
-                    } else {
-                        annotation.name
-                    },
+                    name: annotation.name,
                     segments,
                 })
             }

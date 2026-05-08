@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use gen_core::HashId;
 use gen_models::{
     annotations::AnnotationGroup, block_group::BlockGroup, db::GraphConnection,
-    lineage::SqlLineage, sample_lineage::SampleLineage, traits::Query,
+    lineage::SqlLineage, sample_lineage::SampleLineage,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,7 +35,26 @@ pub fn load_annotation_group_entries(
         .chain(ancestor_samples.iter().cloned())
         .enumerate()
         .map(|(idx, sample_name)| (sample_name, idx))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
+    let ancestor_block_groups_by_sample = if ancestor_samples.is_empty() {
+        HashMap::new()
+    } else {
+        let ancestor_block_groups = BlockGroup::find_parent_block_groups(
+            conn,
+            &block_group.collection_name,
+            &block_group.sample_name,
+            &block_group.name,
+            &ancestor_samples,
+        );
+        let mut grouped = HashMap::<String, Vec<BlockGroup>>::new();
+        for ancestor_block_group in ancestor_block_groups {
+            grouped
+                .entry(ancestor_block_group.sample_name.clone())
+                .or_default()
+                .push(ancestor_block_group);
+        }
+        grouped
+    };
 
     entries.extend(
         AnnotationGroup::query_by_sample(conn, &block_group.sample_name)
@@ -53,30 +74,19 @@ pub fn load_annotation_group_entries(
         } else {
             AnnotationGroupOrigin::AncestorSample
         };
-        let ancestor_block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups
-             where collection_name = ?1 AND sample_name = ?2 AND name = ?3
-             order by created_on, id",
-            rusqlite::params![
-                block_group.collection_name,
-                ancestor_sample,
-                block_group.name
-            ],
-        );
-
-        for ancestor_block_group in ancestor_block_groups {
-            entries.extend(
-                AnnotationGroup::query_by_sample(conn, &ancestor_block_group.sample_name)
-                    .into_iter()
-                    .map(|group| AnnotationGroupEntry {
-                        id: format!("{}::{}", ancestor_block_group.sample_name, group.name),
-                        name: group.name,
-                        sample_name: ancestor_block_group.sample_name.clone(),
-                        source_block_group_id: ancestor_block_group.id,
-                        origin,
-                    }),
-            );
+        let groups = AnnotationGroup::query_by_sample(conn, &ancestor_sample);
+        for ancestor_block_group in ancestor_block_groups_by_sample
+            .get(&ancestor_sample)
+            .into_iter()
+            .flatten()
+        {
+            entries.extend(groups.iter().cloned().map(|group| AnnotationGroupEntry {
+                id: format!("{}::{}", ancestor_block_group.sample_name, group.name),
+                name: group.name,
+                sample_name: ancestor_block_group.sample_name.clone(),
+                source_block_group_id: ancestor_block_group.id,
+                origin,
+            }));
         }
     }
 
