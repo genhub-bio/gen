@@ -27,7 +27,7 @@ pub fn load_annotation_group_entries(
     let mut entries = Vec::new();
     let parent_sample_name = block_group
         .parent_block_group_id
-        .map(|parent_id| BlockGroup::get_by_id(conn, &parent_id).sample_name);
+        .map(|parent_id| BlockGroup::get_by_id(conn, &parent_id).unwrap().sample_name);
     let ancestor_samples = SampleLineage::get_ancestors(conn, &block_group.sample_name, None);
     let sample_order = std::iter::once(block_group.sample_name.clone())
         .chain(ancestor_samples.iter().cloned())
@@ -126,10 +126,10 @@ mod tests {
     fn loads_current_parent_and_ancestor_annotation_groups() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        Collection::create(conn, "/test");
+        let _ = Collection::create(conn, "/test");
 
         for sample in ["grand", "parent", "child"] {
-            Sample::get_or_create(conn, sample);
+            let _ = Sample::get_or_create(conn, sample);
         }
         SampleLineage::create(conn, "grand", "parent").unwrap();
         SampleLineage::create(conn, "parent", "child").unwrap();
@@ -142,7 +142,8 @@ mod tests {
                 name: "region",
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let parent = BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -152,7 +153,8 @@ mod tests {
                 parent_block_group_id: Some(&grand.id),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let child = BlockGroup::create(
             conn,
             NewBlockGroup {
@@ -162,13 +164,14 @@ mod tests {
                 parent_block_group_id: Some(&parent.id),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         AnnotationGroupSample::create(conn, "child-group", "child").unwrap();
         AnnotationGroupSample::create(conn, "parent-group", "parent").unwrap();
         AnnotationGroupSample::create(conn, "grand-group", "grand").unwrap();
 
-        let child = BlockGroup::get_by_id(conn, &child.id);
+        let child = BlockGroup::get_by_id(conn, &child.id).unwrap();
         let entries = load_annotation_group_entries(conn, &child);
 
         assert_eq!(

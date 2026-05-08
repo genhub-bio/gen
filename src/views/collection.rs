@@ -25,15 +25,12 @@ use ratatui::{
 use rusqlite::params;
 use tui_widget_list::{ListBuilder, ListState, ListView, hit_test::Hit};
 
-use crate::{
-    theme::get_theme_color,
-    views::{
-        annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
-        annotation_groups::{
-            AnnotationGroupEntry, AnnotationGroupOrigin, load_annotation_group_entries,
-        },
-        samples::{SampleTree, SampleTreeEntry},
+use crate::views::{
+    annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
+    annotation_groups::{
+        AnnotationGroupEntry, AnnotationGroupOrigin, load_annotation_group_entries,
     },
+    samples::{SampleTree, SampleTreeEntry},
 };
 
 /// Represents the different focus zones in the UI
@@ -962,10 +959,7 @@ impl StatefulWidget for &CollectionExplorer {
                 }
                 ExplorerItem::Divider { text } => Paragraph::new(Line::from(vec![
                     Span::raw("     "),
-                    Span::styled(
-                        text,
-                        Style::default().fg(get_theme_color("text_muted").unwrap()),
-                    ),
+                    Span::styled(text, Style::default().fg(current_theme()[0x04])),
                 ]))
                 .wrap(Wrap { trim: false }),
             };
