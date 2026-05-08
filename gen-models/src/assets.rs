@@ -1,6 +1,7 @@
 use std::{
+    fs,
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     string::ToString,
     sync::{Arc, LazyLock, Mutex},
 };
@@ -440,7 +441,11 @@ impl LocalAssetUri {
         workspace: &Workspace,
         path_or_uri: &str,
     ) -> Result<Self, FileAdditionError> {
-        let source_path = Self::resolve_input_source_path(workspace, path_or_uri)?;
+        let source_path = if Self::is_file_uri(path_or_uri) {
+            Self::resolve_source_path(workspace, path_or_uri)?
+        } else {
+            Self::resolve_input_source_path(workspace, path_or_uri)?
+        };
         let asset_uri = Self::asset_uri(&Self::logical_file_path(workspace, &source_path)?);
         Ok(Self {
             asset_uri,
@@ -517,9 +522,11 @@ impl LocalAssetUri {
 
         let provided_path = Path::new(&file_path);
         if provided_path.is_absolute() {
-            Ok(provided_path.to_path_buf())
+            Ok(Self::canonicalize_or_normalize(provided_path))
         } else {
-            Ok(workspace.repo_root()?.join(provided_path))
+            Ok(Self::canonicalize_or_normalize(
+                &workspace.repo_root()?.join(provided_path),
+            ))
         }
     }
 
@@ -534,10 +541,24 @@ impl LocalAssetUri {
 
         let provided_path = Path::new(&file_path);
         if provided_path.is_absolute() {
-            Ok(provided_path.to_path_buf())
-        } else {
-            Ok(workspace.repo_root()?.join(provided_path))
+            return Err(FileAdditionError::PathOutsideRepo {
+                path: provided_path.to_path_buf(),
+                repo_root: workspace.repo_root()?,
+            });
         }
+
+        let repo_root = Self::canonicalize_or_normalize(&workspace.repo_root()?);
+        let joined_path = workspace
+            .repo_root()?
+            .join(Self::sanitize_relative_path(provided_path)?);
+        let normalized_path = Self::canonicalize_or_normalize(&joined_path);
+        if !normalized_path.starts_with(&repo_root) {
+            return Err(FileAdditionError::PathOutsideRepo {
+                path: normalized_path,
+                repo_root,
+            });
+        }
+        Ok(normalized_path)
     }
 
     fn logical_file_path(
@@ -548,14 +569,15 @@ impl LocalAssetUri {
             return Ok(String::new());
         }
 
-        let repo_root = workspace.repo_root()?;
+        let repo_root = Self::canonicalize_or_normalize(&workspace.repo_root()?);
+        let source_path = Self::canonicalize_or_normalize(source_path);
         if let Ok(relative_path) = source_path.strip_prefix(&repo_root) {
             return Ok(relative_path.to_string_lossy().to_string());
         }
 
         Ok(source_path
             .strip_prefix(Path::new("/"))
-            .unwrap_or(source_path)
+            .unwrap_or(&source_path)
             .to_string_lossy()
             .to_string())
     }
@@ -569,7 +591,8 @@ impl LocalAssetUri {
         if source_path.as_os_str().is_empty() {
             return Ok(String::new());
         }
-        let repo_root = workspace.repo_root()?;
+        let repo_root = Self::canonicalize_or_normalize(&workspace.repo_root()?);
+        let source_path = Self::canonicalize_or_normalize(source_path);
 
         if source_path.starts_with(&repo_root) {
             return Ok(source_path
@@ -593,6 +616,43 @@ impl LocalAssetUri {
                 source_path.display()
             ),
         )))
+    }
+
+    fn sanitize_relative_path(path: &Path) -> Result<PathBuf, FileAdditionError> {
+        let mut sanitized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(part) => sanitized.push(part),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(FileAdditionError::FileReadError(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("path escapes workspace root: {}", path.display()),
+                    )));
+                }
+            }
+        }
+        Ok(sanitized)
+    }
+
+    fn canonicalize_or_normalize(path: &Path) -> PathBuf {
+        fs::canonicalize(path).unwrap_or_else(|_| Self::normalize_path(path))
+    }
+
+    fn normalize_path(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+                Component::RootDir => normalized.push(Path::new("/")),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                Component::Normal(part) => normalized.push(part),
+            }
+        }
+        normalized
     }
 
     /// This exists along with store_file because one uses the model Self attributes to
@@ -800,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_source_path_returns_absolute_path_from_file_in_repo() {
+    fn test_resolve_source_path_rejects_absolute_path_from_file_in_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
         let repo_root = workspace.base_dir();
@@ -810,10 +870,9 @@ mod tests {
         fs::write(&absolute_path, b"absolute").unwrap();
         let absolute_string = absolute_path.to_string_lossy().to_string();
 
-        let absolute =
-            LocalAssetUri::resolve_source_path(workspace, absolute_string.as_str()).unwrap();
-
-        assert_eq!(absolute, PathBuf::from(absolute_string));
+        let err =
+            LocalAssetUri::resolve_source_path(workspace, absolute_string.as_str()).unwrap_err();
+        assert!(matches!(err, FileAdditionError::PathOutsideRepo { .. }));
     }
 
     #[test]
@@ -885,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_source_path_returns_absolute_path_outside_repo() {
+    fn test_resolve_source_path_rejects_absolute_path_outside_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
 
@@ -894,10 +953,9 @@ mod tests {
         outside_file.flush().unwrap();
         let outside_string = outside_file.path().to_string_lossy().to_string();
 
-        let absolute =
-            LocalAssetUri::resolve_source_path(workspace, outside_string.as_str()).unwrap();
-
-        assert_eq!(absolute, PathBuf::from(outside_string));
+        let err =
+            LocalAssetUri::resolve_source_path(workspace, outside_string.as_str()).unwrap_err();
+        assert!(matches!(err, FileAdditionError::PathOutsideRepo { .. }));
     }
 
     #[test]
@@ -935,6 +993,123 @@ mod tests {
 
         let absolute = LocalAssetUri::resolve_source_path(workspace, "detached/file.txt").unwrap();
         assert_eq!(absolute, expected);
+    }
+
+    #[test]
+    fn test_resolve_source_path_rejects_parent_traversal() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+
+        let err = LocalAssetUri::resolve_source_path(workspace, "../detached/file.txt")
+            .expect_err("expected traversal to be rejected");
+        assert!(matches!(err, FileAdditionError::FileReadError(_)));
+    }
+
+    mod test_sanitize_relative_path {
+        use super::*;
+
+        #[test]
+        fn keeps_normal_relative_path() {
+            let sanitized = LocalAssetUri::sanitize_relative_path(Path::new("nested/file.txt"))
+                .expect("expected relative path to be allowed");
+            assert_eq!(sanitized, PathBuf::from("nested/file.txt"));
+        }
+
+        #[test]
+        fn rejects_parent_dir() {
+            let err = LocalAssetUri::sanitize_relative_path(Path::new("../nested/file.txt"))
+                .expect_err("expected parent traversal to be rejected");
+            assert!(matches!(err, FileAdditionError::FileReadError(_)));
+        }
+    }
+
+    mod test_normalize_path {
+        use super::*;
+
+        #[test]
+        fn collapses_dot_and_parent_components() {
+            let normalized =
+                LocalAssetUri::normalize_path(Path::new("nested/./deeper/../file.txt"));
+            assert_eq!(normalized, PathBuf::from("nested/file.txt"));
+        }
+    }
+
+    mod test_canonicalize_or_normalize {
+        use super::*;
+
+        #[test]
+        fn normalizes_missing_path() {
+            let normalized = LocalAssetUri::canonicalize_or_normalize(Path::new(
+                "/tmp/gen-models-assets-tests/one/../two/file.txt",
+            ));
+            assert_eq!(
+                normalized,
+                PathBuf::from("/tmp/gen-models-assets-tests/two/file.txt")
+            );
+        }
+
+        #[test]
+        fn canonicalizes_existing_path() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let target_dir = temp_dir.path().join("target");
+            fs::create_dir_all(&target_dir).unwrap();
+            let file_path = target_dir.join("file.txt");
+            fs::write(&file_path, b"data").unwrap();
+
+            let canonicalized = LocalAssetUri::canonicalize_or_normalize(
+                &temp_dir.path().join("target/../target/file.txt"),
+            );
+
+            assert_eq!(canonicalized, fs::canonicalize(&file_path).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_new_for_workspace_rejects_parent_traversal_file_uri() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+
+        let err = LocalAssetUri::new_for_workspace(workspace, "file://../detached/file.txt")
+            .err()
+            .expect("expected traversal file uri to be rejected");
+        assert!(matches!(err, FileAdditionError::FileReadError(_)));
+    }
+
+    #[test]
+    fn test_resolve_source_path_rejects_absolute_asset_uri() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+
+        let absolute_path = workspace.repo_root().unwrap().join("detached/file.txt");
+        let err = LocalAssetUri::resolve_source_path(
+            workspace,
+            &format!("file://{}", absolute_path.display()),
+        )
+        .expect_err("expected absolute asset uri to be rejected");
+        assert!(matches!(err, FileAdditionError::PathOutsideRepo { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_source_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let context = setup_gen();
+        let workspace = context.workspace();
+        let repo_root = workspace.repo_root().unwrap();
+        let mut outside_file = tempfile::NamedTempFile::new().unwrap();
+        outside_file.write_all(b"outside repo").unwrap();
+        outside_file.flush().unwrap();
+
+        let symlink_path = repo_root.join("escape-link.txt");
+        if symlink_path.exists() || symlink_path.symlink_metadata().is_ok() {
+            fs::remove_file(&symlink_path).unwrap();
+        }
+        symlink(outside_file.path(), &symlink_path).unwrap();
+
+        let err = LocalAssetUri::resolve_source_path(workspace, "escape-link.txt")
+            .expect_err("expected symlink escape to be rejected");
+        assert!(matches!(err, FileAdditionError::PathOutsideRepo { .. }));
     }
 
     #[test]
