@@ -6,7 +6,7 @@ use gen_models::{
     block_group::BlockGroup, collection::Collection, db::DbContext, node::Node,
     operations::Defaults, traits::Query,
 };
-use pyo3::{PyTypeInfo, exceptions::PyRuntimeError, prelude::*};
+use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{
     block::PyBlock,
@@ -22,41 +22,55 @@ pub mod imports;
 pub mod search;
 pub mod updates;
 
+fn tx_begin(context: &DbContext) -> PyResult<()> {
+    let conn = context.graph().conn();
+    let op_conn = context.operations().conn();
+    track_database(conn, op_conn)
+        .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
+    conn.execute("BEGIN TRANSACTION", [])
+        .map_err(sqlite_err_to_pyerr)?;
+    op_conn
+        .execute("BEGIN TRANSACTION", [])
+        .map_err(sqlite_err_to_pyerr)?;
+    Ok(())
+}
+
+fn tx_commit(context: &DbContext) -> PyResult<()> {
+    context
+        .graph()
+        .conn()
+        .execute("END TRANSACTION", [])
+        .map_err(sqlite_err_to_pyerr)?;
+    context
+        .operations()
+        .conn()
+        .execute("END TRANSACTION", [])
+        .map_err(sqlite_err_to_pyerr)?;
+    Ok(())
+}
+
+fn tx_rollback(context: &DbContext) {
+    context.graph().conn().execute("ROLLBACK", []).ok();
+    context.operations().conn().execute("ROLLBACK", []).ok();
+}
+
 pub(crate) fn run_write<F, T>(context: &DbContext, managed: bool, op: F) -> PyResult<T>
 where
     F: FnOnce(&DbContext) -> PyResult<T>,
 {
     if managed {
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn)
-            .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
-        conn.execute("BEGIN TRANSACTION", [])
-            .map_err(sqlite_err_to_pyerr)?;
-        op_conn
-            .execute("BEGIN TRANSACTION", [])
-            .map_err(sqlite_err_to_pyerr)?;
+        tx_begin(context)?;
     }
     match op(context) {
         Ok(val) => {
             if managed {
-                context
-                    .graph()
-                    .conn()
-                    .execute("END TRANSACTION", [])
-                    .map_err(sqlite_err_to_pyerr)?;
-                context
-                    .operations()
-                    .conn()
-                    .execute("END TRANSACTION", [])
-                    .map_err(sqlite_err_to_pyerr)?;
+                tx_commit(context)?;
             }
             Ok(val)
         }
         Err(err) => {
             if managed {
-                context.graph().conn().execute("ROLLBACK", []).ok();
-                context.operations().conn().execute("ROLLBACK", []).ok();
+                tx_rollback(context);
             }
             Err(err)
         }
@@ -155,17 +169,7 @@ impl PyRepository {
     }
 
     fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<()> {
-        {
-            let conn = slf.context.graph().conn();
-            let op_conn = slf.context.operations().conn();
-            track_database(conn, op_conn)
-                .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
-            conn.execute("BEGIN TRANSACTION", [])
-                .map_err(sqlite_err_to_pyerr)?;
-            op_conn
-                .execute("BEGIN TRANSACTION", [])
-                .map_err(sqlite_err_to_pyerr)?;
-        }
+        tx_begin(&slf.context)?;
         slf.in_transaction = true;
         Ok(())
     }
@@ -178,19 +182,9 @@ impl PyRepository {
     ) -> PyResult<bool> {
         slf.in_transaction = false;
         if exc_type.is_some() {
-            slf.context.graph().conn().execute("ROLLBACK", []).ok();
-            slf.context.operations().conn().execute("ROLLBACK", []).ok();
+            tx_rollback(&slf.context);
         } else {
-            slf.context
-                .graph()
-                .conn()
-                .execute("END TRANSACTION", [])
-                .map_err(sqlite_err_to_pyerr)?;
-            slf.context
-                .operations()
-                .conn()
-                .execute("END TRANSACTION", [])
-                .map_err(sqlite_err_to_pyerr)?;
+            tx_commit(&slf.context)?;
         }
         Ok(false)
     }
