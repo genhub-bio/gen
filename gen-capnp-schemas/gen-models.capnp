@@ -142,7 +142,7 @@ struct Operation {
 
 struct FileAddition {
   id @0 :List(UInt8);
-  filePath @1 :Text;
+  assetUri @1 :Text;
   fileType @2 :FileType;
   checksum @3 :List(UInt8);
 }

@@ -721,10 +721,10 @@ impl CollectionExplorer {
         // Annotation files
         for entry in &self.data.annotation_files {
             // Extract just the filename from the path
-            let display_name = std::path::Path::new(&entry.file_addition.file_path)
+            let display_name = std::path::Path::new(&entry.file_addition.file_path())
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or(&entry.file_addition.file_path)
+                .unwrap_or(entry.file_addition.file_path())
                 .to_string();
 
             items.push(ExplorerItem::AnnotationFile {

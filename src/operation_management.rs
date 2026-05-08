@@ -239,8 +239,13 @@ pub fn apply(
         &mut session,
         &OperationInfo {
             files: vec![
-                OperationFile::new(format!("{full_op_hash}/changeset"))
-                    .set_file_type(FileTypes::Changeset),
+                OperationFile::new(
+                    operation
+                        .get_changeset_path(workspace)
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .set_file_type(FileTypes::Changeset),
             ],
             description: "changeset_application".to_string(),
         },
@@ -545,8 +550,8 @@ fn apply_operations_to_remote(
         })?;
 
         for file_addition in &manifest_op.file_additions {
-            let src_path = local_base.join(&file_addition.file_addition.file_path);
-            let dst_path = remote_base.join(&file_addition.file_addition.file_path);
+            let src_path = local_base.join(file_addition.file_addition.file_path());
+            let dst_path = remote_base.join(file_addition.file_addition.file_path());
             // we do a conditional transfer because users may be making tmp files to just add nodes/etc. and don't actually
             // care about keeping those files around
             if src_path.exists() {
@@ -557,7 +562,7 @@ fn apply_operations_to_remote(
 
                 fs::copy(&src_path, &dst_path).map_err(|_| {
                     RemoteOperationError::FileTransferError(
-                        file_addition.file_addition.file_path.clone(),
+                        file_addition.file_addition.file_path().to_string(),
                         src_path.to_string_lossy().to_string(),
                         dst_path.to_string_lossy().to_string(),
                     )
@@ -566,8 +571,8 @@ fn apply_operations_to_remote(
         }
 
         for annotation_file in &manifest_op.annotation_file_additions {
-            let src_path = local_base.join(&annotation_file.file_addition.file_path);
-            let dst_path = remote_base.join(&annotation_file.file_addition.file_path);
+            let src_path = local_base.join(annotation_file.file_addition.file_path());
+            let dst_path = remote_base.join(annotation_file.file_addition.file_path());
             if src_path.exists() {
                 if let Some(parent) = dst_path.parent() {
                     fs::create_dir_all(parent)?;
@@ -575,22 +580,22 @@ fn apply_operations_to_remote(
 
                 fs::copy(&src_path, &dst_path).map_err(|_| {
                     RemoteOperationError::FileTransferError(
-                        annotation_file.file_addition.file_path.clone(),
+                        annotation_file.file_addition.file_path().to_string(),
                         src_path.to_string_lossy().to_string(),
                         dst_path.to_string_lossy().to_string(),
                     )
                 })?;
             }
             if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
-                let src_path = local_base.join(&index_file_addition.file_path);
-                let dst_path = remote_base.join(&index_file_addition.file_path);
+                let src_path = local_base.join(index_file_addition.file_path());
+                let dst_path = remote_base.join(index_file_addition.file_path());
                 if src_path.exists() {
                     if let Some(parent) = dst_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
                     fs::copy(&src_path, &dst_path).map_err(|_| {
                         RemoteOperationError::FileTransferError(
-                            index_file_addition.file_path.clone(),
+                            index_file_addition.file_path().to_string(),
                             src_path.to_string_lossy().to_string(),
                             dst_path.to_string_lossy().to_string(),
                         )
@@ -636,7 +641,7 @@ fn apply_operations_to_remote(
                     let remote_file_addition = FileAddition::get_or_create(
                         remote_workspace,
                         remote_op_conn,
-                        &file_addition.file_addition.file_path,
+                        file_addition.file_addition.file_path(),
                         file_addition.file_addition.file_type,
                         None,
                     )?;
@@ -651,7 +656,7 @@ fn apply_operations_to_remote(
                     let remote_file_addition = FileAddition::get_or_create(
                         remote_workspace,
                         remote_op_conn,
-                        &annotation_file.file_addition.file_path,
+                        annotation_file.file_addition.file_path(),
                         annotation_file.file_addition.file_type,
                         Some(annotation_file.file_addition.checksum),
                     )?;
@@ -662,7 +667,7 @@ fn apply_operations_to_remote(
                             FileAddition::get_or_create(
                                 remote_workspace,
                                 remote_op_conn,
-                                &index_file_addition.file_path,
+                                index_file_addition.file_path(),
                                 index_file_addition.file_type,
                                 Some(index_file_addition.checksum),
                             )
@@ -1093,7 +1098,7 @@ fn ingest_manifest_operation(
                 let local_file_addition = FileAddition::get_or_create(
                     workspace,
                     operation_conn,
-                    &file_addition.file_addition.file_path,
+                    file_addition.file_addition.file_path(),
                     file_addition.file_addition.file_type,
                     None,
                 )?;
@@ -1108,7 +1113,7 @@ fn ingest_manifest_operation(
                 let local_file_addition = FileAddition::get_or_create(
                     workspace,
                     operation_conn,
-                    &annotation_file.file_addition.file_path,
+                    annotation_file.file_addition.file_path(),
                     annotation_file.file_addition.file_type,
                     Some(annotation_file.file_addition.checksum),
                 )?;
@@ -1119,7 +1124,7 @@ fn ingest_manifest_operation(
                         FileAddition::get_or_create(
                             workspace,
                             operation_conn,
-                            &index_file_addition.file_path,
+                            index_file_addition.file_path(),
                             index_file_addition.file_type,
                             Some(index_file_addition.checksum),
                         )
@@ -1203,15 +1208,15 @@ fn copy_operation_from_remote_fs(
     let remote_path = remote_workspace.repo_root()?;
     let repo_root = local_workspace.repo_root()?;
     for file_addition in &manifest_operation.file_additions {
-        let src_path = remote_path.join(&file_addition.file_addition.file_path);
-        let dst_path = repo_root.join(&file_addition.file_addition.file_path);
+        let src_path = remote_path.join(file_addition.file_addition.file_path());
+        let dst_path = repo_root.join(file_addition.file_addition.file_path());
         if src_path.exists() {
             if let Some(parent) = dst_path.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::copy(&src_path, &dst_path).map_err(|_| {
                 RemoteOperationError::FileTransferError(
-                    file_addition.file_addition.file_path.clone(),
+                    file_addition.file_addition.file_path().to_string(),
                     src_path.to_string_lossy().to_string(),
                     dst_path.to_string_lossy().to_string(),
                 )
@@ -1219,30 +1224,30 @@ fn copy_operation_from_remote_fs(
         }
     }
     for annotation_file in &manifest_operation.annotation_file_additions {
-        let src_path = remote_path.join(&annotation_file.file_addition.file_path);
-        let dst_path = repo_root.join(&annotation_file.file_addition.file_path);
+        let src_path = remote_path.join(annotation_file.file_addition.file_path());
+        let dst_path = repo_root.join(annotation_file.file_addition.file_path());
         if src_path.exists() {
             if let Some(parent) = dst_path.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::copy(&src_path, &dst_path).map_err(|_| {
                 RemoteOperationError::FileTransferError(
-                    annotation_file.file_addition.file_path.clone(),
+                    annotation_file.file_addition.file_path().to_string(),
                     src_path.to_string_lossy().to_string(),
                     dst_path.to_string_lossy().to_string(),
                 )
             })?;
         }
         if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
-            let src_path = remote_path.join(&index_file_addition.file_path);
-            let dst_path = repo_root.join(&index_file_addition.file_path);
+            let src_path = remote_path.join(index_file_addition.file_path());
+            let dst_path = repo_root.join(index_file_addition.file_path());
             if src_path.exists() {
                 if let Some(parent) = dst_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
                 fs::copy(&src_path, &dst_path).map_err(|_| {
                     RemoteOperationError::FileTransferError(
-                        index_file_addition.file_path.clone(),
+                        index_file_addition.file_path().to_string(),
                         src_path.to_string_lossy().to_string(),
                         dst_path.to_string_lossy().to_string(),
                     )

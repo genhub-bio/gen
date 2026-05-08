@@ -309,7 +309,7 @@ pub fn create_operation(
     hash: impl Into<Option<HashId>>,
 ) -> Operation {
     let repo_root = context.repo_root().unwrap();
-    if file_type != FileTypes::Changeset && file_type != FileTypes::None {
+    if !file_path.is_empty() && file_type != FileTypes::Changeset {
         let full_path = if std::path::Path::new(file_path).is_absolute() {
             PathBuf::from(file_path)
         } else {

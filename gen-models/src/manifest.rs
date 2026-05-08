@@ -483,7 +483,7 @@ mod tests {
             file_additions: vec![ManifestOperationFileAddition {
                 file_addition: FileAddition {
                     id: HashId([1u8; 32]),
-                    file_path: "/path/to/file.fa".to_string(),
+                    asset_uri: "file:///path/to/file.fa".to_string(),
                     file_type: FileTypes::Fasta,
                     checksum: HashId([2u8; 32]),
                 },
@@ -492,7 +492,7 @@ mod tests {
             annotation_file_additions: vec![ManifestAnnotationFileAddition {
                 file_addition: FileAddition {
                     id: HashId([3u8; 32]),
-                    file_path: "/path/to/annotation.gff3".to_string(),
+                    asset_uri: "file:///path/to/annotation.gff3".to_string(),
                     file_type: FileTypes::Gff3,
                     checksum: HashId([4u8; 32]),
                 },

@@ -1855,6 +1855,11 @@ mod tests {
                 phased: 0,
             };
             BlockGroupEdge::bulk_create(conn, &[block_group_edge]);
+            fs::write(
+                context.workspace().repo_root().unwrap().join("test"),
+                b"test file content",
+            )
+            .unwrap();
             let operation = end_operation(
                 &context,
                 &mut session,

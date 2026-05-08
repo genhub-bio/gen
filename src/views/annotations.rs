@@ -277,7 +277,7 @@ fn resolve_annotation_file_path(
     file_addition: &FileAddition,
 ) -> Option<PathBuf> {
     if let Ok(repo_root) = workspace.repo_root() {
-        let repo_path = repo_root.join(&file_addition.file_path);
+        let repo_path = repo_root.join(file_addition.file_path());
         if repo_path.exists() {
             return Some(repo_path);
         }
