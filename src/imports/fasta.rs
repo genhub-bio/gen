@@ -44,6 +44,7 @@ pub fn import_fasta(
 
     let asset_uri = <dyn AssetUri>::new(fasta);
     let file = asset_uri.reader(context.workspace())?;
+    let checksum_handle = file.checksum_handle();
 
     let reader_stream: Box<dyn BufRead> = match path.extension().and_then(|ext| ext.to_str()) {
         Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(file))),
@@ -158,12 +159,23 @@ pub fn import_fasta(
         summary_str.push_str(&format!(" {path_name}: {change_count} changes.\n"));
     }
 
+    let checksum_override = checksum_handle.checksum().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "FASTA reader did not reach EOF before checksum was requested",
+        )
+    })?;
+
     let bar = add_saving_operation_bar(&progress_bar);
     let op = end_operation(
         context,
         &mut session,
         &OperationInfo {
-            files: vec![OperationFile::new(fasta.to_string()).set_file_type(FileTypes::Fasta)],
+            files: vec![
+                OperationFile::new(fasta.to_string())
+                    .set_file_type(FileTypes::Fasta)
+                    .set_checksum_override(checksum_override),
+            ],
             description: "fasta_addition".to_string(),
         },
         &summary_str,

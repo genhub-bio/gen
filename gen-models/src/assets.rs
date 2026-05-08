@@ -2,11 +2,12 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     string::ToString,
-    sync::LazyLock,
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use gen_core::{HashId, Workspace, calculate_hash};
 use opendal::{blocking, services};
+use sha2::{Digest, Sha256};
 use url::{Position, Url};
 
 use crate::{
@@ -39,6 +40,61 @@ fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
 pub struct OpenDalLocation {
     operator: blocking::Operator,
     path: String,
+}
+
+struct ChecksumState {
+    hasher: Sha256,
+    checksum: Option<HashId>,
+}
+
+#[derive(Clone)]
+pub struct ChecksumHandle {
+    state: Arc<Mutex<ChecksumState>>,
+}
+
+impl ChecksumHandle {
+    pub fn checksum(&self) -> Option<HashId> {
+        self.state.lock().unwrap().checksum
+    }
+}
+
+pub struct ChecksummedReader {
+    inner: Box<dyn Read>,
+    state: Arc<Mutex<ChecksumState>>,
+}
+
+impl ChecksummedReader {
+    fn new(inner: Box<dyn Read>) -> Self {
+        Self {
+            inner,
+            state: Arc::new(Mutex::new(ChecksumState {
+                hasher: Sha256::new(),
+                checksum: None,
+            })),
+        }
+    }
+
+    pub fn checksum_handle(&self) -> ChecksumHandle {
+        ChecksumHandle {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl Read for ChecksummedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.inner.read(buf)?;
+        let mut state = self.state.lock().unwrap();
+        if bytes_read == 0 {
+            if state.checksum.is_none() {
+                let finalized = state.hasher.clone().finalize();
+                state.checksum = Some(HashId(finalized.into()));
+            }
+        } else {
+            state.hasher.update(&buf[..bytes_read]);
+        }
+        Ok(bytes_read)
+    }
 }
 
 impl OpenDalLocation {
@@ -106,12 +162,14 @@ impl OpenDalLocation {
         })
     }
 
-    fn reader(self) -> Result<opendal::blocking::StdReader, FileAdditionError> {
-        self.operator
+    fn reader(self) -> Result<ChecksummedReader, FileAdditionError> {
+        let reader = self
+            .operator
             .reader(&self.path)
             .map_err(opendal_file_addition_error)?
             .into_std_read(..)
-            .map_err(opendal_file_addition_error)
+            .map_err(opendal_file_addition_error)?;
+        Ok(ChecksummedReader::new(Box::new(reader)))
     }
 
     fn checksum(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
@@ -164,7 +222,7 @@ impl OpenDalLocation {
 pub trait AssetUri {
     fn uri(&self) -> &str;
 
-    fn reader(&self, workspace: &Workspace) -> Result<Box<dyn Read>, FileAdditionError>;
+    fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError>;
 
     fn checksum(
         &self,
@@ -255,7 +313,7 @@ impl dyn AssetUri {
 pub struct LocalAssetUri {
     asset_uri: String,
     source_path: Option<PathBuf>,
-    read_file: Option<opendal::blocking::StdReader>,
+    read_file: Option<ChecksummedReader>,
     write_file: Option<opendal::blocking::StdWriter>,
 }
 
@@ -264,13 +322,11 @@ impl AssetUri for LocalAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, workspace: &Workspace) -> Result<Box<dyn Read>, FileAdditionError> {
+    fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
-        Ok(Box::new(
-            OpenDalLocation::from_local_path(Path::new(&source_file_path))
-                .map_err(opendal_file_addition_error)?
-                .reader()?,
-        ))
+        OpenDalLocation::from_local_path(Path::new(&source_file_path))
+            .map_err(opendal_file_addition_error)?
+            .reader()
     }
 
     fn checksum(
@@ -578,10 +634,8 @@ impl AssetUri for RemoteAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, _workspace: &Workspace) -> Result<Box<dyn Read>, FileAdditionError> {
-        Ok(Box::new(
-            OpenDalLocation::from_remote_uri(&self.asset_uri)?.reader()?,
-        ))
+    fn reader(&self, _workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
+        OpenDalLocation::from_remote_uri(&self.asset_uri)?.reader()
     }
 
     fn checksum(

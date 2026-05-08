@@ -392,6 +392,11 @@ impl OperationFile {
         self.file_type = file_type;
         self
     }
+
+    pub fn set_checksum_override(mut self, checksum: HashId) -> Self {
+        self.checksum_override = Some(checksum);
+        self
+    }
 }
 
 pub struct OperationInfo {
