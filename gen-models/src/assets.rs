@@ -655,8 +655,9 @@ impl LocalAssetUri {
         normalized
     }
 
-    /// This exists along with store_file because one uses the model Self attributes to
-    /// identify where to store it, while this works without having an initialized model.
+    /// This exists along with store_file because store_file uses an existing FileAddition
+    /// object to determine where to where to store the file, while this method uses the
+    /// provided source_path.
     pub fn ensure_asset_copy(
         workspace: &Workspace,
         source_path: &Path,
