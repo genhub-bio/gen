@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    assets::{AssetUri, FileAssetUri},
+    assets::{AssetUri, LocalAssetUri},
     changesets::{
         ChangesetModels, DatabaseChangeset, get_changeset_dependencies_from_path,
         get_changeset_from_path, write_changeset,
@@ -530,7 +530,7 @@ impl Query for FileAddition {
 impl FileAddition {
     pub fn file_path(&self) -> &str {
         self.asset_uri
-            .strip_prefix(FileAssetUri::SCHEME)
+            .strip_prefix(LocalAssetUri::SCHEME)
             .unwrap_or(&self.asset_uri)
     }
 
@@ -546,7 +546,7 @@ impl FileAddition {
         let stored_asset_uri = asset_uri.stored_asset_uri(workspace, &checksum, file_type)?;
         asset_uri.ensure_asset(workspace, &checksum, file_type)?;
 
-        let id = FileAssetUri::generate_file_addition_id(&checksum, &stored_asset_uri);
+        let id = LocalAssetUri::generate_file_addition_id(&checksum, &stored_asset_uri);
 
         let query = "INSERT INTO file_additions (id, asset_uri, file_type, checksum) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = conn.prepare(query).unwrap();
@@ -618,7 +618,7 @@ impl FileAddition {
     }
 
     pub fn hashed_filename(self) -> String {
-        FileAssetUri::asset_filename(&self.checksum, self.file_type)
+        LocalAssetUri::asset_filename(&self.checksum, self.file_type)
     }
 }
 
@@ -2616,13 +2616,13 @@ mod tests {
         )
         .expect("Failed to create FileAddition");
 
-        assert_eq!(fa1.asset_uri, FileAssetUri::asset_uri(&relative1));
+        assert_eq!(fa1.asset_uri, LocalAssetUri::asset_uri(&relative1));
         assert_eq!(fa1.file_path(), relative1);
 
         let checksum = calculate_file_checksum(&file1_path_str).unwrap();
-        let relative1_id = FileAssetUri::generate_file_addition_id(
+        let relative1_id = LocalAssetUri::generate_file_addition_id(
             &checksum,
-            &FileAssetUri::asset_uri(&relative1),
+            &LocalAssetUri::asset_uri(&relative1),
         );
 
         assert_eq!(fa1.id, relative1_id);
@@ -2696,7 +2696,7 @@ mod tests {
 
         assert_eq!(
             outside.asset_uri,
-            FileAssetUri::asset_uri(&outside_asset_path)
+            LocalAssetUri::asset_uri(&outside_asset_path)
         );
         assert_eq!(outside.file_path(), outside_asset_path);
         assert!(
