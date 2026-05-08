@@ -546,7 +546,7 @@ impl FileAddition {
         file_type: FileTypes,
         checksum_override: Option<HashId>,
     ) -> Result<FileAddition, FileAdditionError> {
-        let asset_uri = <dyn AssetUri>::new(file_path);
+        let asset_uri = <dyn AssetUri>::new(workspace, file_path);
         let checksum = asset_uri.checksum(workspace, checksum_override)?;
         let stored_asset_uri = asset_uri.stored_asset_uri(workspace, &checksum, file_type)?;
         asset_uri.ensure_asset(workspace, &checksum, file_type)?;
@@ -618,7 +618,7 @@ impl FileAddition {
     }
 
     pub fn store_file(&self, workspace: &Workspace) -> Result<(), FileStoreError> {
-        let asset_uri = <dyn AssetUri>::new(&self.asset_uri);
+        let asset_uri = <dyn AssetUri>::new(workspace, &self.asset_uri);
         asset_uri.store_file(self, workspace)
     }
 

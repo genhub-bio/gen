@@ -42,7 +42,7 @@ pub fn import_fasta(
     let mut session = start_operation(conn);
     let path = PathBuf::from(fasta);
 
-    let asset_uri = <dyn AssetUri>::new(fasta);
+    let asset_uri = <dyn AssetUri>::new(context.workspace(), fasta);
     let file = asset_uri.reader(context.workspace())?;
     let checksum_handle = file.checksum_handle();
 

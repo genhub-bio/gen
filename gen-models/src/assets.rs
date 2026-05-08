@@ -45,6 +45,7 @@ pub struct OpenDalLocation {
 struct ChecksumState {
     hasher: Sha256,
     checksum: Option<HashId>,
+    complete: bool,
 }
 
 #[derive(Clone)]
@@ -54,6 +55,11 @@ pub struct ChecksumHandle {
 
 impl ChecksumHandle {
     pub fn checksum(&self) -> Option<HashId> {
+        let state = self.state.lock().unwrap();
+        if state.complete { state.checksum } else { None }
+    }
+
+    pub fn finalized_checksum(&self) -> Option<HashId> {
         self.state.lock().unwrap().checksum
     }
 }
@@ -70,6 +76,7 @@ impl ChecksummedReader {
             state: Arc::new(Mutex::new(ChecksumState {
                 hasher: Sha256::new(),
                 checksum: None,
+                complete: false,
             })),
         }
     }
@@ -90,6 +97,7 @@ impl Read for ChecksummedReader {
                 let finalized = state.hasher.clone().finalize();
                 state.checksum = Some(HashId(finalized.into()));
             }
+            state.complete = true;
         } else {
             state.hasher.update(&buf[..bytes_read]);
         }
@@ -97,33 +105,53 @@ impl Read for ChecksummedReader {
     }
 }
 
+impl Drop for ChecksummedReader {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        if state.checksum.is_none() {
+            let finalized = state.hasher.clone().finalize();
+            state.checksum = Some(HashId(finalized.into()));
+        }
+    }
+}
+
 impl OpenDalLocation {
-    fn from_local_path(path: &Path) -> Result<Self, opendal::Error> {
-        let absolute_path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|err| {
-                    opendal::Error::new(opendal::ErrorKind::Unexpected, "current_dir failed")
-                        .set_source(err)
-                })?
-                .join(path)
-        };
-        let op_path = absolute_path
+    fn new_fs(root: &Path, path: &Path) -> Result<Self, opendal::Error> {
+        let path = path
             .strip_prefix(Path::new("/"))
-            .unwrap_or(&absolute_path)
+            .unwrap_or(path)
             .to_string_lossy()
             .to_string();
         let operator = with_opendal_runtime(|| {
-            let builder = services::Fs::default().root("/");
+            let builder = services::Fs::default().root(&root.to_string_lossy());
             let op = opendal::Operator::new(builder)?.finish();
             blocking::Operator::new(op)
         })?;
 
-        Ok(Self {
-            operator,
-            path: op_path,
-        })
+        Ok(Self { operator, path })
+    }
+
+    fn from_workspace_path(workspace: &Workspace, path: &Path) -> Result<Self, opendal::Error> {
+        let repo_root = workspace.repo_root().map_err(|err| {
+            opendal::Error::new(opendal::ErrorKind::Unexpected, "repo_root failed").set_source(err)
+        })?;
+
+        if path.is_absolute() {
+            Self::new_fs(Path::new("/"), path)
+        } else {
+            Self::new_fs(&repo_root, path)
+        }
+    }
+
+    fn from_absolute_path(path: &Path) -> Result<Self, opendal::Error> {
+        if !path.is_absolute() {
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "local path must be absolute",
+            ));
+        }
+
+        Self::new_fs(Path::new("/"), path)
     }
 
     fn from_remote_uri(asset_uri: &str) -> Result<Self, FileAdditionError> {
@@ -200,8 +228,13 @@ impl OpenDalLocation {
         }
     }
 
-    fn copy_to_local_path(&self, destination_path: &Path) -> io::Result<u64> {
-        let asset_location = Self::from_local_path(destination_path).map_err(io::Error::other)?;
+    fn copy_to_local_path(
+        &self,
+        workspace: &Workspace,
+        destination_path: &Path,
+    ) -> io::Result<u64> {
+        let asset_location =
+            Self::from_workspace_path(workspace, destination_path).map_err(io::Error::other)?;
         let mut reader = self
             .operator
             .reader(&self.path)
@@ -301,10 +334,13 @@ pub trait AssetUri {
 }
 
 impl dyn AssetUri {
-    pub fn new(uri: &str) -> Box<dyn AssetUri> {
+    pub fn new(workspace: &Workspace, uri: &str) -> Box<dyn AssetUri> {
         let (scheme, _) = uri.split_once("://").unwrap_or(("file", uri));
         match scheme.to_ascii_lowercase().as_str() {
-            "file" => Box::new(LocalAssetUri::new(uri)),
+            "file" => Box::new(
+                LocalAssetUri::new_for_workspace(workspace, uri)
+                    .expect("failed to construct local asset uri"),
+            ),
             _ => Box::new(RemoteAssetUri::new(uri)),
         }
     }
@@ -313,6 +349,7 @@ impl dyn AssetUri {
 pub struct LocalAssetUri {
     asset_uri: String,
     source_path: Option<PathBuf>,
+    workspace_root: Option<PathBuf>,
     read_file: Option<ChecksummedReader>,
     write_file: Option<opendal::blocking::StdWriter>,
 }
@@ -324,7 +361,7 @@ impl AssetUri for LocalAssetUri {
 
     fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
-        OpenDalLocation::from_local_path(Path::new(&source_file_path))
+        OpenDalLocation::from_workspace_path(workspace, &source_file_path)
             .map_err(opendal_file_addition_error)?
             .reader()
     }
@@ -339,14 +376,14 @@ impl AssetUri for LocalAssetUri {
         }
 
         let source_file_path = self.resolved_source_file_path(workspace)?;
-        let checksum_path = if Path::new(&source_file_path).is_file() {
-            source_file_path.as_str()
+        let checksum_path = if source_file_path.is_file() {
+            source_file_path
         } else {
-            self.file_path()
+            PathBuf::from(self.file_path())
         };
-        OpenDalLocation::from_local_path(Path::new(checksum_path))
+        OpenDalLocation::from_workspace_path(workspace, &checksum_path)
             .map_err(opendal_file_addition_error)?
-            .checksum(checksum_path)
+            .checksum(&checksum_path.to_string_lossy())
     }
 
     fn stored_asset_uri(
@@ -355,8 +392,12 @@ impl AssetUri for LocalAssetUri {
         checksum: &HashId,
         file_type: FileTypes,
     ) -> Result<String, FileAdditionError> {
-        let relative_file_path =
-            Self::stored_file_path(workspace, &self.asset_uri, checksum, file_type)?;
+        let relative_file_path = Self::stored_relative_path(
+            workspace,
+            &self.resolved_source_file_path(workspace)?,
+            checksum,
+            file_type,
+        )?;
         Ok(Self::asset_uri(&relative_file_path))
     }
 
@@ -367,8 +408,8 @@ impl AssetUri for LocalAssetUri {
         file_type: FileTypes,
     ) -> Result<(), FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
-        if Path::new(&source_file_path).is_file() {
-            Self::ensure_asset_copy(workspace, Path::new(&source_file_path), checksum, file_type)?;
+        if source_file_path.is_file() {
+            Self::ensure_asset_copy(workspace, &source_file_path, checksum, file_type)?;
         }
         Ok(())
     }
@@ -389,6 +430,7 @@ impl LocalAssetUri {
         Self {
             asset_uri: Self::asset_uri(path_or_uri),
             source_path: None,
+            workspace_root: None,
             read_file: None,
             write_file: None,
         }
@@ -398,11 +440,12 @@ impl LocalAssetUri {
         workspace: &Workspace,
         path_or_uri: &str,
     ) -> Result<Self, FileAdditionError> {
-        let asset_uri = Self::asset_uri(path_or_uri);
-        let source_path = Self::source_file_path(workspace, &asset_uri)?;
+        let source_path = Self::resolve_input_source_path(workspace, path_or_uri)?;
+        let asset_uri = Self::asset_uri(&Self::logical_file_path(workspace, &source_path)?);
         Ok(Self {
             asset_uri,
-            source_path: Some(PathBuf::from(source_path)),
+            source_path: Some(source_path),
+            workspace_root: Some(workspace.repo_root()?),
             read_file: None,
             write_file: None,
         })
@@ -413,6 +456,7 @@ impl LocalAssetUri {
     }
 
     pub fn asset_uri(path: &str) -> String {
+        let path = path.strip_prefix('/').unwrap_or(path);
         if Self::is_file_uri(path) {
             path.to_string()
         } else {
@@ -433,9 +477,16 @@ impl LocalAssetUri {
     }
 
     fn io_path(&self) -> PathBuf {
-        self.source_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(self.file_path()))
+        self.source_path.clone().unwrap_or_else(|| {
+            let file_path = PathBuf::from(self.file_path());
+            if file_path.is_absolute() {
+                file_path
+            } else if let Some(workspace_root) = &self.workspace_root {
+                workspace_root.join(file_path)
+            } else {
+                file_path
+            }
+        })
     }
 
     pub fn close_write(&mut self) -> io::Result<()> {
@@ -448,87 +499,100 @@ impl LocalAssetUri {
     fn resolved_source_file_path(
         &self,
         workspace: &Workspace,
-    ) -> Result<String, FileAdditionError> {
-        Self::source_file_path(workspace, &self.asset_uri)
+    ) -> Result<PathBuf, FileAdditionError> {
+        self.source_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| Self::resolve_source_path(workspace, &self.asset_uri))
     }
 
-    /// Returns a usable path for system file access. It prefers returning an absolute path
-    /// when one can be resolved, and otherwise falls back to the original input.
-    pub fn source_file_path(
+    fn resolve_input_source_path(
         workspace: &Workspace,
-        asset_uri: &str,
-    ) -> Result<String, FileAdditionError> {
-        let file_path = Self::path_from_uri(asset_uri).unwrap_or_else(|| asset_uri.to_string());
+        path_or_uri: &str,
+    ) -> Result<PathBuf, FileAdditionError> {
+        let file_path = Self::path_from_uri(path_or_uri).unwrap_or_else(|| path_or_uri.to_string());
         if file_path.is_empty() {
-            return Ok(String::new());
+            return Ok(PathBuf::new());
         }
-        let repo_root = workspace.repo_root()?;
 
         let provided_path = Path::new(&file_path);
-
         if provided_path.is_absolute() {
-            if provided_path.starts_with(&repo_root) {
-                return Ok(provided_path.to_string_lossy().to_string());
-            }
+            Ok(provided_path.to_path_buf())
         } else {
-            let absolute = repo_root.join(provided_path);
-            if absolute.exists() {
-                return Ok(absolute.to_string_lossy().to_string());
-            }
+            Ok(workspace.repo_root()?.join(provided_path))
         }
-
-        Ok(file_path)
     }
 
-    /// Returns the asset URI as it should be stored. If a file is within the gen
-    /// directory, it stores a file URI for the path relative to the repo root.
-    /// Otherwise, if the path is absolute, it stores a file URI for the copied
-    /// asset. If it is not absolute and not within the repo, it is stored as-is
-    /// with a file scheme.
-    pub fn stored_file_path(
+    fn resolve_source_path(
         workspace: &Workspace,
         asset_uri: &str,
+    ) -> Result<PathBuf, FileAdditionError> {
+        let file_path = Self::path_from_uri(asset_uri).unwrap_or_else(|| asset_uri.to_string());
+        if file_path.is_empty() {
+            return Ok(PathBuf::new());
+        }
+
+        let provided_path = Path::new(&file_path);
+        if provided_path.is_absolute() {
+            Ok(provided_path.to_path_buf())
+        } else {
+            Ok(workspace.repo_root()?.join(provided_path))
+        }
+    }
+
+    fn logical_file_path(
+        workspace: &Workspace,
+        source_path: &Path,
+    ) -> Result<String, FileAdditionError> {
+        if source_path.as_os_str().is_empty() {
+            return Ok(String::new());
+        }
+
+        let repo_root = workspace.repo_root()?;
+        if let Ok(relative_path) = source_path.strip_prefix(&repo_root) {
+            return Ok(relative_path.to_string_lossy().to_string());
+        }
+
+        Ok(source_path
+            .strip_prefix(Path::new("/"))
+            .unwrap_or(source_path)
+            .to_string_lossy()
+            .to_string())
+    }
+
+    fn stored_relative_path(
+        workspace: &Workspace,
+        source_path: &Path,
         checksum: &HashId,
         file_type: FileTypes,
     ) -> Result<String, FileAdditionError> {
-        let file_path = Self::path_from_uri(asset_uri).unwrap_or_else(|| asset_uri.to_string());
-        if file_path.is_empty() {
+        if source_path.as_os_str().is_empty() {
             return Ok(String::new());
         }
         let repo_root = workspace.repo_root()?;
 
-        let provided_path = Path::new(&file_path);
-
-        if provided_path.is_absolute() {
-            if provided_path.starts_with(&repo_root) {
-                return Ok(provided_path
-                    .strip_prefix(&repo_root)
-                    .map_err(|_| FileAdditionError::PathOutsideRepo {
-                        path: provided_path.to_path_buf(),
-                        repo_root: repo_root.clone(),
-                    })?
-                    .to_string_lossy()
-                    .to_string());
-            }
-        } else {
-            let absolute = repo_root.join(provided_path);
-            if absolute.exists() {
-                return Ok(absolute
-                    .strip_prefix(&repo_root)
-                    .map_err(|_| FileAdditionError::PathOutsideRepo {
-                        path: absolute.clone(),
-                        repo_root: repo_root.clone(),
-                    })?
-                    .to_string_lossy()
-                    .to_string());
-            }
+        if source_path.starts_with(&repo_root) {
+            return Ok(source_path
+                .strip_prefix(&repo_root)
+                .map_err(|_| FileAdditionError::PathOutsideRepo {
+                    path: source_path.to_path_buf(),
+                    repo_root: repo_root.clone(),
+                })?
+                .to_string_lossy()
+                .to_string());
         }
 
-        if provided_path.is_absolute() {
+        if source_path.is_absolute() {
             return Self::asset_relative_path(workspace, checksum, file_type);
         }
 
-        Ok(file_path)
+        Err(FileAdditionError::FileReadError(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unable to resolve local asset path: {}",
+                source_path.display()
+            ),
+        )))
     }
 
     /// This exists along with store_file because one uses the model Self attributes to
@@ -544,9 +608,9 @@ impl LocalAssetUri {
             return Ok(());
         }
 
-        OpenDalLocation::from_local_path(source_path)
+        OpenDalLocation::from_workspace_path(workspace, source_path)
             .map_err(opendal_file_addition_error)?
-            .copy_to_local_path(&asset_path)
+            .copy_to_local_path(workspace, &asset_path)
             .map_err(FileAdditionError::FileReadError)?;
         Ok(())
     }
@@ -562,19 +626,18 @@ impl LocalAssetUri {
             return Ok(());
         }
 
-        let file_path = Self::path_from_uri(&file_addition.asset_uri)
-            .unwrap_or_else(|| file_addition.asset_uri.clone());
-        let source_path = if Path::new(&file_path).is_absolute() {
-            PathBuf::from(&file_path)
-        } else {
-            workspace.repo_root()?.join(&file_path)
-        };
+        let source_path = Self::resolve_source_path(workspace, &file_addition.asset_uri).map_err(
+            |err| match err {
+                FileAdditionError::FileReadError(err) => FileStoreError::IoError(err),
+                other => FileStoreError::IoError(io::Error::other(other)),
+            },
+        )?;
         if source_path == asset_path {
             return Ok(());
         }
-        OpenDalLocation::from_local_path(&source_path)
+        OpenDalLocation::from_workspace_path(workspace, &source_path)
             .map_err(opendal_file_store_error)?
-            .copy_to_local_path(&asset_path)
+            .copy_to_local_path(workspace, &asset_path)
             .map_err(FileStoreError::IoError)?;
         Ok(())
     }
@@ -583,8 +646,9 @@ impl LocalAssetUri {
 impl Read for LocalAssetUri {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.read_file.is_none() {
+            let io_path = self.io_path();
             self.read_file = Some(
-                OpenDalLocation::from_local_path(&self.io_path())
+                OpenDalLocation::from_absolute_path(&io_path)
                     .map_err(io::Error::other)?
                     .reader()
                     .map_err(io::Error::other)?,
@@ -597,8 +661,9 @@ impl Read for LocalAssetUri {
 impl Write for LocalAssetUri {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.write_file.is_none() {
+            let io_path = self.io_path();
             let location =
-                OpenDalLocation::from_local_path(&self.io_path()).map_err(io::Error::other)?;
+                OpenDalLocation::from_absolute_path(&io_path).map_err(io::Error::other)?;
             self.write_file = Some(
                 location
                     .operator
@@ -735,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_file_path_returns_absolute_path_from_file_in_repo() {
+    fn test_resolve_source_path_returns_absolute_path_from_file_in_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
         let repo_root = workspace.base_dir();
@@ -746,13 +811,13 @@ mod tests {
         let absolute_string = absolute_path.to_string_lossy().to_string();
 
         let absolute =
-            LocalAssetUri::source_file_path(workspace, absolute_string.as_str()).unwrap();
+            LocalAssetUri::resolve_source_path(workspace, absolute_string.as_str()).unwrap();
 
-        assert_eq!(absolute, absolute_string);
+        assert_eq!(absolute, PathBuf::from(absolute_string));
     }
 
     #[test]
-    fn test_stored_file_path_returns_relative_path_from_file_in_repo() {
+    fn test_stored_relative_path_returns_relative_path_from_file_in_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
         let repo_root = workspace.base_dir();
@@ -760,16 +825,15 @@ mod tests {
         let absolute_path = repo_root.join("inputs").join("absolute.txt");
         fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
         fs::write(&absolute_path, b"absolute").unwrap();
-        let absolute_string = absolute_path.to_string_lossy().to_string();
         let relative_string = absolute_path
             .strip_prefix(repo_root)
             .unwrap()
             .to_string_lossy()
             .to_string();
 
-        let relative = LocalAssetUri::stored_file_path(
+        let relative = LocalAssetUri::stored_relative_path(
             workspace,
-            absolute_string.as_str(),
+            &absolute_path,
             &calculate_file_checksum(&absolute_path).unwrap(),
             FileTypes::Fasta,
         )
@@ -779,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_file_path_returns_absolute_path_from_relative_path_in_repo() {
+    fn test_resolve_source_path_returns_absolute_path_from_relative_path_in_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
         let repo_root = workspace.repo_root().unwrap();
@@ -792,13 +856,13 @@ mod tests {
         let absolute_string = absolute_path.to_string_lossy().to_string();
 
         let absolute =
-            LocalAssetUri::source_file_path(workspace, relative_string.as_str()).unwrap();
+            LocalAssetUri::resolve_source_path(workspace, relative_string.as_str()).unwrap();
 
-        assert_eq!(absolute, absolute_string);
+        assert_eq!(absolute, PathBuf::from(absolute_string));
     }
 
     #[test]
-    fn test_stored_file_path_returns_relative_path_from_relative_path_in_repo() {
+    fn test_stored_relative_path_returns_relative_path_from_relative_path_in_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
         let repo_root = workspace.repo_root().unwrap();
@@ -809,9 +873,9 @@ mod tests {
         fs::write(&absolute_path, b"relative").unwrap();
         let relative_string = relative_path.to_string_lossy().to_string();
 
-        let relative = LocalAssetUri::stored_file_path(
+        let relative = LocalAssetUri::stored_relative_path(
             workspace,
-            relative_string.as_str(),
+            &absolute_path,
             &calculate_file_checksum(&absolute_path).unwrap(),
             FileTypes::Fasta,
         )
@@ -821,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_file_path_fallback_to_initial_path() {
+    fn test_resolve_source_path_returns_absolute_path_outside_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
 
@@ -830,25 +894,25 @@ mod tests {
         outside_file.flush().unwrap();
         let outside_string = outside_file.path().to_string_lossy().to_string();
 
-        let absolute = LocalAssetUri::source_file_path(workspace, outside_string.as_str()).unwrap();
+        let absolute =
+            LocalAssetUri::resolve_source_path(workspace, outside_string.as_str()).unwrap();
 
-        assert_eq!(absolute, outside_string);
+        assert_eq!(absolute, PathBuf::from(outside_string));
     }
 
     #[test]
-    fn test_stored_file_path_returns_asset_path_on_file_outside_repo() {
+    fn test_stored_relative_path_returns_asset_path_on_file_outside_repo() {
         let context = setup_gen();
         let workspace = context.workspace();
 
         let mut outside_file = tempfile::NamedTempFile::new().unwrap();
         outside_file.write_all(b"outside repo").unwrap();
         outside_file.flush().unwrap();
-        let outside_string = outside_file.path().to_string_lossy().to_string();
         let checksum = calculate_file_checksum(outside_file.path()).unwrap();
 
-        let relative = LocalAssetUri::stored_file_path(
+        let relative = LocalAssetUri::stored_relative_path(
             workspace,
-            outside_string.as_str(),
+            outside_file.path(),
             &checksum,
             FileTypes::Fasta,
         )
@@ -864,22 +928,23 @@ mod tests {
     }
 
     #[test]
-    fn test_source_file_path_gives_initial_path_if_no_resolution() {
+    fn test_resolve_source_path_anchors_relative_paths_to_workspace() {
         let context = setup_gen();
         let workspace = context.workspace();
+        let expected = workspace.repo_root().unwrap().join("detached/file.txt");
 
-        let absolute = LocalAssetUri::source_file_path(workspace, "detached/file.txt").unwrap();
-        assert_eq!(absolute, "detached/file.txt");
+        let absolute = LocalAssetUri::resolve_source_path(workspace, "detached/file.txt").unwrap();
+        assert_eq!(absolute, expected);
     }
 
     #[test]
-    fn test_stored_file_path_gives_initial_path_if_no_resolution() {
+    fn test_stored_relative_path_keeps_workspace_relative_paths() {
         let context = setup_gen();
         let workspace = context.workspace();
 
-        let relative = LocalAssetUri::stored_file_path(
+        let relative = LocalAssetUri::stored_relative_path(
             workspace,
-            "detached/file.txt",
+            &workspace.repo_root().unwrap().join("detached/file.txt"),
             &HashId::convert_str("detached"),
             FileTypes::Fasta,
         )
@@ -888,22 +953,22 @@ mod tests {
     }
 
     #[test]
-    fn test_source_file_path_empty() {
+    fn test_resolve_source_path_empty() {
         let context = setup_gen();
         let workspace = context.workspace();
 
-        let absolute_empty = LocalAssetUri::source_file_path(workspace, "").unwrap();
-        assert_eq!(absolute_empty, "");
+        let absolute_empty = LocalAssetUri::resolve_source_path(workspace, "").unwrap();
+        assert_eq!(absolute_empty, PathBuf::new());
     }
 
     #[test]
-    fn test_stored_file_path_empty() {
+    fn test_stored_relative_path_empty() {
         let context = setup_gen();
         let workspace = context.workspace();
 
-        let relative_empty = LocalAssetUri::stored_file_path(
+        let relative_empty = LocalAssetUri::stored_relative_path(
             workspace,
-            "",
+            Path::new(""),
             &HashId::convert_str("empty"),
             FileTypes::Fasta,
         )
