@@ -1,6 +1,6 @@
 useDynLib(genr, .registration = TRUE)
 export(DbContext)
-export(GraphController)
+export(GenPlot)
 export(HashId)
 export(NodeKey)
 export(Repository)

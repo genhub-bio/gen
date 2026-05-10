@@ -17,6 +17,12 @@ RoxygenNote: 7.3.2
 SystemRequirements: Prebuilt release binaries require no external toolchain;
     source builds require Cargo (Rust toolchain), libclang, and Cap'n Proto
 Depends: R (>= 4.2)
+Imports:
+    anyhtmlwidget,
+    jsonlite,
+    methods
+Remotes:
+    keller-mark/anyhtmlwidget
 Suggests:
     testthat (>= 3.0.0)
 Config/testthat/edition: 3

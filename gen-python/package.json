@@ -2,7 +2,8 @@
   "name": "gen-jupyter-widget",
   "private": true,
   "scripts": {
-    "build": "esbuild js/index.ts --bundle --format=esm --target=es2020 --sourcemap --banner:js='// Generated from js/index.ts by `npm run build` / `make jupyter`. Edit TypeScript sources, not this file.' --outfile=python/gen/static/jupyter_widget.js",
+    "build-jupyter": "esbuild js/index.ts --bundle --format=esm --target=es2020 --sourcemap --banner:js='// Generated from js/index.ts by `npm run build-jupyter` / `make jupyter`. Edit TypeScript sources, not this file.' --outfile=python/gen/static/jupyter_widget.js",
+    "build-r": "esbuild js/index.ts --bundle --format=esm --target=es2020 --banner:js='// Generated from js/index.ts by `npm run build-r` / `make r-widget`. Edit TypeScript sources, not this file.' --outfile=../gen-r/inst/widget/genplot.esm.js",
     "check": "tsc --noEmit"
   },
   "devDependencies": {

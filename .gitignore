@@ -40,6 +40,10 @@ gen-r/src/rust/Cargo.lock
 # Python bindings
 **/__pycache__/
 gen-python/python/gen/*.so
+
+# R package extension built from Rust
+gen-r/src/genr.so
+gen-r/src/entrypoint.o
 **/node_modules/
 gen-python/python/gen/static/jupyter_widget.js.map
 

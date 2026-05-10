@@ -315,9 +315,13 @@ fn indexed_to_hex(i: u8) -> String {
 
 #[derive(Serialize)]
 struct RenderedCell {
+    x: u16,
+    y: u16,
     text: String,
-    fg: String,
-    bg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fg: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bg: Option<String>,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -331,15 +335,27 @@ struct RenderedFrame {
 }
 
 fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
-    let mut cells = Vec::with_capacity(cols as usize * rows as usize);
+    let neutral_fg = "#cdd6f4";
+    let neutral_bg = "#1e1e2e";
+    let mut cells = Vec::new();
     for row in 0..rows {
         for col in 0..cols {
             let cell = buf.cell((col, row)).expect("cell index in bounds");
+            let text = cell.symbol().to_string();
             let style = cell.style();
+            let fg_str = color_to_hex(style.fg, neutral_fg);
+            let bg_str = color_to_hex(style.bg, neutral_bg);
+
+            if (text == " " || text.is_empty()) && fg_str == neutral_fg && bg_str == neutral_bg {
+                continue;
+            }
+
             cells.push(RenderedCell {
-                text: cell.symbol().to_string(),
-                fg: color_to_hex(style.fg, "#cdd6f4"),
-                bg: color_to_hex(style.bg, "#1e1e2e"),
+                x: col,
+                y: row,
+                text,
+                fg: if fg_str == neutral_fg { None } else { Some(fg_str) },
+                bg: if bg_str == neutral_bg { None } else { Some(bg_str) },
                 bold: style.add_modifier.contains(Modifier::BOLD),
                 italic: style.add_modifier.contains(Modifier::ITALIC),
                 underline: style.add_modifier.contains(Modifier::UNDERLINED),

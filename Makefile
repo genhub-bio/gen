@@ -1,4 +1,4 @@
-.PHONY: python jupyter release-check-js clean build clippy-fix docker-build
+.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build
 python:
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
@@ -7,19 +7,39 @@ python:
 # We check in the compiled jupyter_widget.js alongside the TS so npm is not required to build the widget.
 jupyter: python
 	@if command -v npm >/dev/null 2>&1; then \
-		cd gen-python && npm install && npm run check && npm run build; \
+		cd gen-python && npm install && npm run check && npm run build-jupyter; \
 	else \
 		echo "npm not found; using committed gen-python/python/gen/static/jupyter_widget.js"; \
 		test -f gen-python/python/gen/static/jupyter_widget.js || \
 			(echo "Error: gen-python/python/gen/static/jupyter_widget.js missing. Install npm and run 'make jupyter'." && exit 1); \
 	fi
 	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module --extras jupyter
-r:
-	# Makes the build quiet for CI/agents
+r-test:
+	# CI only: builds and tests inside Linux Docker container
+	@if command -v npm >/dev/null 2>&1; then \
+		mkdir -p gen-r/inst/widget && \
+		cd gen-python && npm install && npm run build-r; \
+	else \
+		echo "npm not found; using committed gen-r/inst/widget/genplot.esm.js"; \
+		test -f gen-r/inst/widget/genplot.esm.js || \
+			(echo "Error: gen-r/inst/widget/genplot.esm.js missing. Install npm and run 'make r'." && exit 1); \
+	fi
 	docker build -t gen-r -f ./gen-r/Dockerfile . 2>&1 | tail -n 25
 	docker run --rm gen-r
+r:
+	# Builds JS widget and installs natively on the host machine
+	@if command -v npm >/dev/null 2>&1; then \
+		mkdir -p gen-r/inst/widget && \
+		cd gen-python && npm install && npm run build-r; \
+	else \
+		echo "npm not found; using committed gen-r/inst/widget/genplot.esm.js"; \
+		test -f gen-r/inst/widget/genplot.esm.js || \
+			(echo "Error: gen-r/inst/widget/genplot.esm.js missing. Install npm and run 'make r'." && exit 1); \
+	fi
+	Rscript -e "if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes'); remotes::install_github('keller-mark/anyhtmlwidget', upgrade='never')"
+	$(if $(filter Darwin,$(shell uname -s)),MACOSX_DEPLOYMENT_TARGET=11.0) R CMD INSTALL gen-r
 release-check-js:
-	cd gen-python && npm ci && npm run check && npm run build
+	cd gen-python && npm ci && npm run check && npm run build-jupyter
 	@echo "Verifying committed jupyter_widget.js/.map match build output..."
 	git diff --exit-code gen-python/python/gen/static/jupyter_widget.js gen-python/python/gen/static/jupyter_widget.js.map
 clean:

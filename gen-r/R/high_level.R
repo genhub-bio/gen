@@ -45,7 +45,7 @@ DbContext <- function(workspace_path = NULL, db_path = NULL) {
     if (is.null(bg$db_path)) {
       stop("plot() requires a db_path; obtain BlockGroup via Repository()", call. = FALSE)
     }
-    GraphController(bg$db_path, bg$id$hash_id, detail = detail, rows = rows, cols = cols)
+    GenPlot(bg$db_path, bg$id$hash_id, detail = detail, rows = rows, cols = cols)
   }
 
   bg$export_fasta <- function(filename) {
@@ -109,7 +109,7 @@ DbContext <- function(workspace_path = NULL, db_path = NULL) {
   bg
 }
 
-GraphController <- function(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL) {
+GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL) {
   ctrl <- new.env(parent = emptyenv())
   ctrl$db_path <- db_path
   ctrl$block_group_id <- if (inherits(block_group_id, "gen_hash_id")) block_group_id$hash_id else as.character(block_group_id)
@@ -159,9 +159,18 @@ GraphController <- function(db_path, block_group_id, detail = "normal", rows = N
     invisible(ctrl)
   }
 
-  class(ctrl) <- "gen_graph_controller"
+  class(ctrl) <- "gen_plot"
   ctrl
 }
+
+print.gen_plot <- function(x, ...) {
+  json <- x$render_frame(x$cols, x$rows)
+  w <- .genplot_widget(json)
+  print(w)
+  invisible(x)
+}
+
+methods::setMethod("show", "gen_plot", function(object) print(object))
 
 Repository <- function(path = NULL) {
   repo <- new.env(parent = emptyenv())
@@ -206,7 +215,7 @@ Repository <- function(path = NULL) {
   }
 
   repo$plot <- function(block_group, rows = NULL, cols = NULL, detail = "normal") {
-    GraphController(repo$db_path, block_group$id$hash_id, detail = detail, rows = rows, cols = cols)
+    GenPlot(repo$db_path, block_group$id$hash_id, detail = detail, rows = rows, cols = cols)
   }
 
   repo$get_block_sequence <- function(node_key) {
