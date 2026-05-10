@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
-use gen_core::{is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode};
+use gen_core::{
+    INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+    is_end_node, is_start_node,
+};
+use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{db::GraphConnection, node::Node, sequence::SequenceError};
 use gen_tui::{
     geometry::{WorldPos, WorldRect},
@@ -188,6 +191,59 @@ pub fn create_gen_graph_widget(
     GraphWidget::with_renderer(renderer)
 }
 
+/// Compute which edges would be removed by `BlockGroup::prune_graph`.
+///
+/// Mirrors the per-source-node, per-chromosome_index deduplication logic: for each
+/// chromosome_index appearing on outgoing edges of a node, the edge with the highest
+/// `created_on` is kept; all others are dimmed. Edges with
+/// `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` are always dimmed; edges with
+/// `NO_CHROMOSOME_INDEX` or `INDETERMINATE_CHROMOSOME_INDEX` are never dimmed.
+fn compute_pruned_edges(graph: &GenGraph) -> Vec<(GraphNode, GraphNode)> {
+    let mut pruned: Vec<(GraphNode, GraphNode)> = Vec::new();
+
+    for node in graph.nodes() {
+        // chromosome_index -> (source, target, best_created_on)
+        let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
+
+        for (source_node, target_node, edge_weights) in graph.edges(node) {
+            for edge_weight in edge_weights {
+                let GraphEdge {
+                    chromosome_index,
+                    created_on,
+                    ..
+                } = *edge_weight;
+
+                if chromosome_index == NO_CHROMOSOME_INDEX
+                    || chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
+                {
+                    continue;
+                }
+                if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
+                    pruned.push((source_node, target_node));
+                    continue;
+                }
+                edges_by_ci
+                    .entry(chromosome_index)
+                    .and_modify(|(best_src, best_tgt, best_ts)| {
+                        if created_on > *best_ts {
+                            pruned.push((*best_src, *best_tgt));
+                            *best_src = source_node;
+                            *best_tgt = target_node;
+                            *best_ts = created_on;
+                        } else {
+                            pruned.push((source_node, target_node));
+                        }
+                    })
+                    .or_insert((source_node, target_node, created_on));
+            }
+        }
+    }
+
+    pruned.sort_unstable();
+    pruned.dedup();
+    pruned
+}
+
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
 ///
 /// This is the standard way to initialize a graph controller for GenGraph visualization.
@@ -202,8 +258,12 @@ pub fn create_gen_graph_widget(
 pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
+    let pruned = compute_pruned_edges(&graph);
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer);
+    for edge in pruned {
+        controller.dim_edge(edge);
+    }
     controller.set_detail_level(VisualDetail::Truncated);
     controller.hide_cursor();
     controller
