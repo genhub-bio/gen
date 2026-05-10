@@ -1,11 +1,33 @@
+#' @useDynLib genr, .registration = TRUE
+NULL
+
 `%||%` <- function(x, y) {
   if (is.null(x)) y else x
 }
 
+#' Construct a HashId
+#'
+#' Wraps a raw hash string as a typed \code{gen_hash_id} object used to
+#' identify block groups and nodes within the Gen database.
+#'
+#' @param hash_id Character. The hex hash string.
+#' @return A \code{gen_hash_id} list.
+#' @export
 HashId <- function(hash_id) {
   structure(list(hash_id = as.character(hash_id)), class = "gen_hash_id")
 }
 
+#' Construct a NodeKey
+#'
+#' A node key identifies a contiguous byte range within a graph node.
+#' Pass the result to \code{repo$get_block_sequence()} to retrieve the
+#' underlying sequence.
+#'
+#' @param node_id Character or \code{gen_hash_id}. Node identifier.
+#' @param sequence_start Integer. Start byte offset (inclusive).
+#' @param sequence_end Integer. End byte offset (exclusive).
+#' @return A \code{gen_node_key} list.
+#' @export
 NodeKey <- function(node_id, sequence_start, sequence_end) {
   structure(
     list(
@@ -17,6 +39,15 @@ NodeKey <- function(node_id, sequence_start, sequence_end) {
   )
 }
 
+#' Construct a SequencePart
+#'
+#' Represents a named sequence element used when importing combinatorial
+#' libraries via \code{repo$import_library()}.
+#'
+#' @param name Character. Display name for the part.
+#' @param sequence Character. Nucleotide or amino-acid sequence string.
+#' @return A \code{gen_sequence_part} list.
+#' @export
 SequencePart <- function(name, sequence) {
   structure(
     list(
@@ -28,6 +59,18 @@ SequencePart <- function(name, sequence) {
   )
 }
 
+#' Construct a DbContext
+#'
+#' Opens the Gen graph database and operations database, returning a context
+#' object used by low-level Rust entry points.  Prefer \code{Repository()}
+#' for day-to-day use.
+#'
+#' @param workspace_path Character or \code{NULL}. Path to the workspace root.
+#'   Defaults to the current working directory.
+#' @param db_path Character or \code{NULL}. Explicit path to the graph SQLite
+#'   database.  When \code{NULL} the path is derived from the workspace.
+#' @return A \code{gen_db_context} object.
+#' @export
 DbContext <- function(workspace_path = NULL, db_path = NULL) {
   structure(db_context(workspace_path = workspace_path, db_path = db_path), class = "gen_db_context")
 }
@@ -109,6 +152,28 @@ DbContext <- function(workspace_path = NULL, db_path = NULL) {
   bg
 }
 
+#' Create a graph plot controller
+#'
+#' Returns a \code{gen_plot} environment that renders the sequence graph for a
+#' block group.  Printing or displaying the object in RStudio / Shiny shows an
+#' interactive htmlwidget.
+#'
+#' @param db_path Character. Path to the Gen graph SQLite database.
+#' @param block_group_id Character or \code{gen_hash_id}. Block group to render.
+#' @param detail Character. Level of node detail: \code{"normal"} (default) or
+#'   \code{"compressed"}.
+#' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
+#' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 80).
+#' @return A \code{gen_plot} environment with methods:
+#'   \describe{
+#'     \item{\code{zoom_in()}}{Step one zoom level in. Returns self invisibly.}
+#'     \item{\code{zoom_out()}}{Step one zoom level out. Returns self invisibly.}
+#'     \item{\code{move_by(dx, dy)}}{Pan the viewport by \code{dx} columns and \code{dy} rows. Returns self invisibly.}
+#'     \item{\code{handle_click(col, row)}}{Send a mouse click; returns \code{TRUE} if a node was hit.}
+#'     \item{\code{set_detail(detail)}}{Change node detail level. Returns self invisibly.}
+#'     \item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
+#'   }
+#' @export
 GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL) {
   ctrl <- new.env(parent = emptyenv())
   ctrl$db_path <- db_path
@@ -159,10 +224,53 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
     invisible(ctrl)
   }
 
+  ctrl$goto_match <- function(match_locus) {
+    ctrl$detail <- "full"
+    block <- match_locus$start$block
+    offset <- match_locus$start$offset
+    node_len <- block$sequence_end - block$sequence_start
+    frac_x <- if (node_len > 1L) offset / (node_len - 1L) else 0.5
+    frac_x <- max(0.0, min(1.0, frac_x))
+    ctrl$ops <- c(ctrl$ops, sprintf("goto,%s,%d,%d,%.6f",
+      block$node_id,
+      as.integer(block$sequence_start),
+      as.integer(block$sequence_end),
+      frac_x))
+    invisible(ctrl)
+  }
+
+  ctrl$highlight_match <- function(match_locus, color = "yellow") {
+    blocks <- match_locus$blocks
+    n <- length(blocks)
+    start_offset <- match_locus$start$offset
+    end_offset <- match_locus$end$offset
+    strand_code <- switch(match_locus$strand, forward = "f", reverse = "r", "u")
+    block_parts <- paste(
+      sapply(blocks, function(b) {
+        sprintf("%s,%d,%d", b$node_id, as.integer(b$sequence_start), as.integer(b$sequence_end))
+      }),
+      collapse = ","
+    )
+    ctrl$ops <- c(ctrl$ops, sprintf("hl,%s,%d,%d,%s,%d,%s",
+      color,
+      as.integer(start_offset),
+      as.integer(end_offset),
+      strand_code,
+      as.integer(n),
+      block_parts))
+    invisible(ctrl)
+  }
+
+  ctrl$clear_highlights <- function() {
+    ctrl$ops <- c(ctrl$ops, "clrhl")
+    invisible(ctrl)
+  }
+
   class(ctrl) <- "gen_plot"
   ctrl
 }
 
+#' @export
 print.gen_plot <- function(x, ...) {
   json <- x$render_frame(x$cols, x$rows)
   w <- .genplot_widget(json)
@@ -170,8 +278,48 @@ print.gen_plot <- function(x, ...) {
   invisible(x)
 }
 
+methods::setOldClass("gen_plot")
 methods::setMethod("show", "gen_plot", function(object) print(object))
 
+#' Open a Gen repository
+#'
+#' The main entry point for working with a Gen sequence graph database.
+#' Discovers the \code{.gen/} directory from \code{path} (or the current
+#' working directory) and opens both the graph and operations databases.
+#'
+#' @param path Character or \code{NULL}. Path to the workspace root.  When
+#'   \code{NULL} the current working directory is used.
+#' @return A \code{gen_repository} environment with the following methods:
+#'   \describe{
+#'     \item{\code{import_fasta(filename, name, sample, shallow)}}{Import a FASTA file as a new block group.}
+#'     \item{\code{import_gfa(filename, name, sample)}}{Import a GFA file.}
+#'     \item{\code{import_genbank(filename, name, sample)}}{Import a GenBank file (plain or gzipped).}
+#'     \item{\code{import_library(library_name, parts_list, name, sample)}}{Import a combinatorial sequence library.}
+#'     \item{\code{import_library_files(library_name, parts, library, name, sample)}}{Import a library from parts/library CSV files.}
+#'     \item{\code{export_fasta(block_group, filename)}}{Export a block group to FASTA.}
+#'     \item{\code{export_gfa(block_group, filename, node_max)}}{Export a block group to GFA.}
+#'     \item{\code{export_genbank(block_group, filename)}}{Export a block group to GenBank.}
+#'     \item{\code{update_with_fasta(filename, sample, new_sample, region_name, ...)}}{Apply a FASTA update to an existing block group.}
+#'     \item{\code{update_with_gfa(filename, sample, new_sample, name)}}{Apply a GFA update.}
+#'     \item{\code{update_with_vcf(filename, name, genotype, sample)}}{Apply a VCF update.}
+#'     \item{\code{update_with_genbank(filename, sample, name, create_missing)}}{Apply a GenBank update.}
+#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, ...)}}{Apply a raw sequence update.}
+#'     \item{\code{update_with_library(name, sample, new_sample_name, path_name, ...)}}{Apply a library update.}
+#'     \item{\code{get_block_groups()}}{Return a list of all block groups.}
+#'     \item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
+#'     \item{\code{get_block_groups_by_collection(collection_name)}}{Return block groups in a collection.}
+#'     \item{\code{get_block_sequence(node_key)}}{Return the sequence string for a \code{NodeKey}.}
+#'     \item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
+#'     \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate block groups end-to-end into a new block group.}
+#'     \item{\code{derive_subgraph(new_sample, start, end, backbone)}}{Derive a subgraph block group.}
+#'     \item{\code{derive_chunks(new_sample, breakpoints, chunk_size, backbone)}}{Split a block group into chunks.}
+#'     \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
+#'     \item{\code{search(query, bgs, sequence_kind)}}{Search for exact sequence occurrences across block groups.}
+#'     \item{\code{clear_index(bgs)}}{Remove cached search index files.}
+#'     \item{\code{execute(query)}}{Run a raw SQL statement against the graph database.}
+#'     \item{\code{query(query)}}{Run a raw SQL query and return results as a list of rows.}
+#'   }
+#' @export
 Repository <- function(path = NULL) {
   repo <- new.env(parent = emptyenv())
   repo$gen_dir <- repo_get_gen_dir(path)

@@ -20,10 +20,12 @@ use r#gen::{
         combinatorial_library::{SequencePart, parse_library},
         graph_search::{GenGraphMatcher, GraphLocus, SeedIndex, SequenceKind},
     },
-    views::gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer},
+    views::gen_graph_widget::{
+        GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
+    },
 };
 use gen_core::{HashId, Strand, config::Workspace};
-use gen_graph::GenGraph;
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
@@ -32,7 +34,10 @@ use gen_models::{
     operations::{Defaults, OperationFile, OperationInfo},
     traits::Query,
 };
-use gen_tui::{graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail};
+use gen_tui::{
+    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
+    plotter::PathStyle,
+};
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use rusqlite::{Connection, types::ValueRef};
 use serde::Serialize;
@@ -354,8 +359,16 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
                 x: col,
                 y: row,
                 text,
-                fg: if fg_str == neutral_fg { None } else { Some(fg_str) },
-                bg: if bg_str == neutral_bg { None } else { Some(bg_str) },
+                fg: if fg_str == neutral_fg {
+                    None
+                } else {
+                    Some(fg_str)
+                },
+                bg: if bg_str == neutral_bg {
+                    None
+                } else {
+                    Some(bg_str)
+                },
                 bold: style.add_modifier.contains(Modifier::BOLD),
                 italic: style.add_modifier.contains(Modifier::ITALIC),
                 underline: style.add_modifier.contains(Modifier::UNDERLINED),
@@ -384,6 +397,29 @@ fn block_group_graph(
     let bg_id = hash_id_from_string(block_group_id)?;
     let graph = BlockGroup::get_graph(&conn, &bg_id);
     Ok((conn, graph))
+}
+
+fn parse_op_color(s: &str) -> std::result::Result<ratatui::style::Color, String> {
+    use ratatui::style::Color;
+    match s {
+        "red" => Ok(Color::Red),
+        "green" => Ok(Color::Green),
+        "yellow" => Ok(Color::Yellow),
+        "blue" => Ok(Color::Blue),
+        "magenta" => Ok(Color::Magenta),
+        "cyan" => Ok(Color::Cyan),
+        "white" => Ok(Color::White),
+        hex if hex.starts_with('#') && hex.len() == 7 => {
+            let r = u8::from_str_radix(&hex[1..3], 16)
+                .map_err(|_| format!("Bad red component in color '{hex}'"))?;
+            let g = u8::from_str_radix(&hex[3..5], 16)
+                .map_err(|_| format!("Bad green component in color '{hex}'"))?;
+            let b = u8::from_str_radix(&hex[5..7], 16)
+                .map_err(|_| format!("Bad blue component in color '{hex}'"))?;
+            Ok(Color::Rgb(r, g, b))
+        }
+        other => Err(format!("Unknown color '{other}'")),
+    }
 }
 
 fn apply_graph_ops(
@@ -420,6 +456,86 @@ fn apply_graph_ops(
                     .map_err(|err| format!("Invalid click row in '{op}': {err}"))?;
                 let _ = controller.handle_click(col, row);
             }
+            Some("goto") => {
+                if parts.len() != 5 {
+                    return Err(format!("Invalid goto op: {op}"));
+                }
+                let node_id = hash_id_from_string(parts[1])
+                    .map_err(|err| format!("Invalid goto node_id in '{op}': {err}"))?;
+                let seq_start = parts[2]
+                    .parse::<i64>()
+                    .map_err(|err| format!("Invalid goto seq_start in '{op}': {err}"))?;
+                let seq_end = parts[3]
+                    .parse::<i64>()
+                    .map_err(|err| format!("Invalid goto seq_end in '{op}': {err}"))?;
+                let frac_x = parts[4]
+                    .parse::<f64>()
+                    .map_err(|err| format!("Invalid goto frac_x in '{op}': {err}"))?;
+                let node = GraphNode {
+                    node_id,
+                    sequence_start: seq_start,
+                    sequence_end: seq_end,
+                };
+                controller.set_detail_level(VisualDetail::Full);
+                center_on_node_offset(controller, node, (frac_x, 0.5));
+                controller.hide_cursor();
+            }
+            Some("hl") => {
+                // hl,{color},{start_offset},{end_offset},{strand},{n},{node_id},{seq_start},{seq_end},...
+                if parts.len() < 6 {
+                    return Err(format!("Invalid hl op (too short): {op}"));
+                }
+                let color = parse_op_color(parts[1])?;
+                let start_offset = parts[2]
+                    .parse::<usize>()
+                    .map_err(|err| format!("Invalid hl start_offset in '{op}': {err}"))?;
+                let end_offset = parts[3]
+                    .parse::<usize>()
+                    .map_err(|err| format!("Invalid hl end_offset in '{op}': {err}"))?;
+                let strand = match parts[4] {
+                    "f" => Strand::Forward,
+                    "r" => Strand::Reverse,
+                    _ => Strand::Unknown,
+                };
+                let n = parts[5]
+                    .parse::<usize>()
+                    .map_err(|err| format!("Invalid hl block count in '{op}': {err}"))?;
+                if parts.len() != 6 + n * 3 {
+                    return Err(format!(
+                        "Invalid hl op: expected {} parts for {n} blocks, got {}",
+                        6 + n * 3,
+                        parts.len()
+                    ));
+                }
+                let mut blocks = Vec::with_capacity(n);
+                for i in 0..n {
+                    let base = 6 + i * 3;
+                    let node_id = hash_id_from_string(parts[base])
+                        .map_err(|err| format!("Invalid hl node_id[{i}] in '{op}': {err}"))?;
+                    let seq_start = parts[base + 1]
+                        .parse::<i64>()
+                        .map_err(|err| format!("Invalid hl seq_start[{i}] in '{op}': {err}"))?;
+                    let seq_end = parts[base + 2]
+                        .parse::<i64>()
+                        .map_err(|err| format!("Invalid hl seq_end[{i}] in '{op}': {err}"))?;
+                    blocks.push(GraphNode {
+                        node_id,
+                        sequence_start: seq_start,
+                        sequence_end: seq_end,
+                    });
+                }
+                let locus = GraphLocus {
+                    start_offset,
+                    end_offset,
+                    blocks,
+                    strand,
+                };
+                let style = PathStyle::new(color)
+                    .with_line_style(LineStyle::Bold)
+                    .with_merge_glyphs(true);
+                highlight_match_range(controller, &locus, style);
+            }
+            Some("clrhl") => controller.clear_all_highlights(),
             Some(other) => return Err(format!("Unknown graph op prefix '{other}'.")),
             None => {}
         }
