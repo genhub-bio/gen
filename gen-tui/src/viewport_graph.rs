@@ -38,6 +38,10 @@ pub struct CroppedGraph {
     /// both inclusive.
     #[allow(clippy::type_complexity)]
     pub cell_highlights: Vec<(WorldPos, (i64, i64), (i64, i64), crate::plotter::PathStyle)>,
+
+    /// Visual edge segments that are dimmed: stored as (source, target) world positions.
+    /// Populated by apply_lowlights from domain-level edge_lowlights on each rebuild.
+    pub edge_lowlights: Vec<(WorldPos, WorldPos)>,
 }
 
 impl CroppedGraph {
@@ -54,6 +58,7 @@ impl CroppedGraph {
             node_highlights: Vec::new(),
             edge_highlights: Vec::new(),
             cell_highlights: Vec::new(),
+            edge_lowlights: Vec::new(),
         }
     }
 

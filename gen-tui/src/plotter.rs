@@ -256,6 +256,7 @@ pub fn plot_viewport_graph<R, G>(
         &[],
         &[],
         &[],
+        &[],
         theme,
     )
 }
@@ -286,6 +287,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     node_highlights: &[(WorldPos, PathStyle)],
     edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
     cell_highlights: &[(WorldPos, (i64, i64), (i64, i64), PathStyle)],
+    lowlights: &[(WorldPos, WorldPos)],
     theme: &Theme,
 ) where
     R: NodeRenderer<G>,
@@ -301,12 +303,24 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             .map(|(_, style)| *style)
             .next_back();
 
+        let is_lowlight = lowlights
+            .iter()
+            .any(|(s, t)| (*s == source && *t == target) || (*s == target && *t == source));
+
         if let Some(style) = highlighted_style {
             let edge_color = match style.color {
                 Color::Reset => theme[0x07],
                 color => color,
             };
-            draw_edge_with_style(buffer, source, target, edge_color, style.line_style);
+            // highlight+lowlight: dashed in the highlight color
+            let line_style = if is_lowlight {
+                LineStyle::Dashed
+            } else {
+                style.line_style
+            };
+            draw_edge_with_style(buffer, source, target, edge_color, line_style);
+        } else if is_lowlight {
+            draw_edge_with_style(buffer, source, target, theme[0x04], LineStyle::Dashed);
         } else if !bundle.is_empty() {
             // Normal edge with data
             draw_edge_with_style(buffer, source, target, theme[0x05], LineStyle::Normal);
@@ -389,15 +403,11 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let highlighted_style = edge_highlights
                     .iter()
                     .filter(|((s, t), _)| {
-                        // A routing node is highlighted if it lies on a highlighted edge segment
-                        // Since edges are either horizontal or vertical, we can check if the point lies between endpoints
                         if s.x == t.x {
-                            // Vertical edge
                             world_pos.x == s.x
                                 && world_pos.y >= s.y.min(t.y)
                                 && world_pos.y <= s.y.max(t.y)
                         } else {
-                            // Horizontal edge
                             world_pos.y == s.y
                                 && world_pos.x >= s.x.min(t.x)
                                 && world_pos.x <= s.x.max(t.x)
@@ -406,9 +416,42 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     .map(|(_, style)| *style)
                     .next_back();
 
+                // For each neighbor, determine if the connection to it is lowlight-only.
+                // A connection (world_pos → nb) is lowlight-only when it lies on a lowlight
+                // segment but not on any highlight segment.
+                let both_on_segment =
+                    |s: WorldPos, t: WorldPos, p: WorldPos, q: WorldPos| -> bool {
+                        if s.x == t.x && p.x == s.x && q.x == s.x {
+                            let lo = s.y.min(t.y);
+                            let hi = s.y.max(t.y);
+                            p.y >= lo && p.y <= hi && q.y >= lo && q.y <= hi
+                        } else if s.y == t.y && p.y == s.y && q.y == s.y {
+                            let lo = s.x.min(t.x);
+                            let hi = s.x.max(t.x);
+                            p.x >= lo && p.x <= hi && q.x >= lo && q.x <= hi
+                        } else {
+                            false
+                        }
+                    };
+
+                let all_neighbors: Vec<WorldPos> = viewport_graph.neighbors(*world_pos).collect();
+
+                let is_lowlight_only_conn = |nb: WorldPos| {
+                    let on_lowlight = lowlights
+                        .iter()
+                        .any(|(s, t)| both_on_segment(*s, *t, *world_pos, nb));
+                    let on_highlight = edge_highlights
+                        .iter()
+                        .any(|((s, t), _)| both_on_segment(*s, *t, *world_pos, nb));
+                    on_lowlight && !on_highlight
+                };
+
+                let any_lowlight_only = all_neighbors.iter().any(|&nb| is_lowlight_only_conn(nb));
+                let all_lowlight_only = !all_neighbors.is_empty()
+                    && all_neighbors.iter().all(|&nb| is_lowlight_only_conn(nb));
+
                 let character = if let Some(style) = highlighted_style {
-                    // Create a temporary graph for the active highlight style
-                    // to compute the correct glyph
+                    // Highlight takes priority; for highlight+lowlight mix, include all edges in glyph.
                     let active_edges: Vec<_> = edge_highlights
                         .iter()
                         .filter(|(_, s)| *s == style)
@@ -417,11 +460,6 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     let highlight_graph = CroppedGraph::from_visual_edges(&active_edges);
                     let high_glyph = compute_junction_glyph(&highlight_graph, *world_pos);
 
-                    // Decision tree:
-                    // 1. Is this routing node part of any highlighted path?
-                    // 2. If it is, do we merge with the current glyph or replace it?
-                    //    - Merge if merge_glyphs is true
-                    //    - Replace if merge_glyphs is false (avoids spiney artefacts with color tinting)
                     if style.merge_glyphs {
                         let high_char = match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
@@ -434,26 +472,36 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             .next()
                             .unwrap_or('?')
                     } else {
-                        // Replace mode: use the highlight glyph directly
                         match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
                             LineStyle::Bold => high_glyph.heavy_glyph(),
                             LineStyle::Dashed => high_glyph.dashed_glyph(),
                         }
                     }
+                } else if all_lowlight_only {
+                    // All neighbors are lowlight-only: show neutral glyph in lowlight color
+                    base_glyph.glyph()
+                } else if any_lowlight_only {
+                    // Mixed: compute glyph from non-lowlight-only neighbors only
+                    let filtered = all_neighbors
+                        .into_iter()
+                        .filter(|&nb| !is_lowlight_only_conn(nb));
+                    compute_junction_glyph_from_neighbors(filtered, *world_pos).glyph()
                 } else {
                     base_glyph.glyph()
                 };
 
-                let fg_color = match highlighted_style {
-                    None => edge_color,
-                    Some(style) => match style.color {
+                let fg_color = if let Some(style) = highlighted_style {
+                    match style.color {
                         Color::Reset => theme[0x07],
                         c => c,
-                    },
+                    }
+                } else if all_lowlight_only {
+                    theme[0x04]
+                } else {
+                    edge_color
                 };
-                let style = Style::default().fg(fg_color);
-                buffer.set_char_styled(*world_pos, character, style);
+                buffer.set_char_styled(*world_pos, character, Style::default().fg(fg_color));
             }
             NodeRole::Stitch(_) => {
                 // Stitch nodes should have been replaced by actual content in ViewportGraph
@@ -466,10 +514,16 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
 
 /// Compute the junction glyph for a routing node based on its connections
 fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> JunctionSymbol {
-    let mut connections = 0u8;
+    compute_junction_glyph_from_neighbors(viewport_graph.neighbors(pos), pos)
+}
 
-    // Check connections in all four directions
-    for neighbor in viewport_graph.neighbors(pos) {
+/// Compute the junction glyph from an explicit set of neighbors (e.g. after filtering lowlights).
+fn compute_junction_glyph_from_neighbors(
+    neighbors: impl Iterator<Item = WorldPos>,
+    pos: WorldPos,
+) -> JunctionSymbol {
+    let mut connections = 0u8;
+    for neighbor in neighbors {
         if neighbor.y < pos.y {
             connections |= 0b0010; // South
         } else if neighbor.y > pos.y {
@@ -481,7 +535,6 @@ fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> Junct
             connections |= 0b0100; // East
         }
     }
-
     JunctionSymbol::new(connections)
 }
 
