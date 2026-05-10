@@ -37,6 +37,7 @@ r:
 			(echo "Error: gen-r/inst/widget/genplot.esm.js missing. Install npm and run 'make r'." && exit 1); \
 	fi
 	Rscript -e "if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes'); remotes::install_github('keller-mark/anyhtmlwidget', upgrade='never')"
+	Rscript -e "roxygen2::roxygenise('gen-r')"
 	$(if $(filter Darwin,$(shell uname -s)),MACOSX_DEPLOYMENT_TARGET=11.0) R CMD INSTALL gen-r
 release-check-js:
 	cd gen-python && npm ci && npm run check && npm run build-jupyter

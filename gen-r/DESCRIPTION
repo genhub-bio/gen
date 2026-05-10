@@ -13,7 +13,6 @@ URL: https://github.com/genhub-bio/gen
 BugReports: https://github.com/genhub-bio/gen/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
 SystemRequirements: Prebuilt release binaries require no external toolchain;
     source builds require Cargo (Rust toolchain), libclang, and Cap'n Proto
 Depends: R (>= 4.2)
@@ -27,3 +26,4 @@ Suggests:
     testthat (>= 3.0.0)
 Config/testthat/edition: 3
 NeedsCompilation: yes
+Config/roxygen2/version: 8.0.0
