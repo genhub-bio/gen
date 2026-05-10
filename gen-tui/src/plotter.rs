@@ -552,7 +552,7 @@ fn draw_edge_with_style(
     let (v_ch, h_ch) = match line_style {
         LineStyle::Normal => ('│', '─'),
         LineStyle::Bold => ('┃', '━'),
-        LineStyle::Dashed => ('┆', '┄'),
+        LineStyle::Dashed => ('┊', '╌'),
     };
 
     if source.x == target.x {
@@ -579,7 +579,7 @@ fn draw_edge_with_style(
 
             // Don't overwrite a vertical line with a horizontal one.
             // Vertical edges take priority at crossings (normal, heavy, and dashed).
-            if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┆')) {
+            if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┊')) {
                 buffer.set_char_styled(pos, h_ch, style);
             }
         }
