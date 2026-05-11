@@ -103,7 +103,6 @@ fn load_group_annotations(
     visible_ranges_by_node: &HashMap<HashId, Vec<(i64, i64)>>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
     let annotations = Annotation::query_by_group(conn, &entry.name)?;
-    let inherited = entry.origin != AnnotationGroupOrigin::CurrentSample;
 
     Ok(annotations
         .into_iter()
