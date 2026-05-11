@@ -88,9 +88,10 @@ impl PyRepository {
                 name.as_ref(),
                 &sample,
                 gen_models::operations::OperationInfo {
-                    files: vec![gen_models::operations::OperationFile {
-                        file_path: filename.clone(),
-                        file_type: gen_models::file_types::FileTypes::GenBank,
+                    files: vec![{
+                        let mut f = gen_models::operations::OperationFile::new(filename.clone());
+                        f.file_type = gen_models::file_types::FileTypes::GenBank;
+                        f
                     }],
                     description: "GenBank Import".to_string(),
                 },
