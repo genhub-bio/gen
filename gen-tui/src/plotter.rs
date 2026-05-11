@@ -285,12 +285,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     detail_level: VisualDetail,
     node_highlights: &[(WorldPos, PathStyle)],
     edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
-    cell_highlights: &[(
-        petgraph::prelude::NodeIndex,
-        (i64, i64),
-        (i64, i64),
-        PathStyle,
-    )],
+    cell_highlights: &[(WorldPos, (i64, i64), (i64, i64), PathStyle)],
     theme: &Theme,
 ) where
     R: NodeRenderer<G>,
@@ -348,7 +343,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let new_style = if ch == NODE_GLYPH {
-                                    style.fg(hl).bg(theme[0x00])
+                                    style.fg(hl)
                                 } else {
                                     style.bg(hl)
                                 };
@@ -362,11 +357,13 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 // tl/br define the top-left and bottom-right corners of the rectangle to
                 // highlight; both are node-local (col, row) positions where (0,0) is the
                 // node's top-left. Both corners are inclusive.
-                if let Some((_, tl, br, path_style)) = cell_highlights
-                    .iter()
-                    .filter(|(idx, ..)| idx == domain_idx)
-                    .next_back()
+                for (_, tl, br, path_style) in
+                    cell_highlights.iter().filter(|(nwp, ..)| nwp == world_pos)
                 {
+                    let hl = match path_style.color {
+                        Color::Reset => theme[0x07],
+                        color => color,
+                    };
                     let x0 = (world_rect.min.x + tl.0).max(world_rect.min.x);
                     let x1 = (world_rect.min.x + br.0).min(world_rect.max.x);
                     let y0 = (world_rect.min.y + tl.1).max(world_rect.min.y);
@@ -375,12 +372,11 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         for x in x0..=x1 {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
-                                let fg = style.fg.unwrap_or(Color::Reset);
-                                let highlight_color = match path_style.color {
-                                    Color::Reset => theme[0x07],
-                                    color => color,
+                                let new_style = if ch == NODE_GLYPH {
+                                    style.fg(hl)
+                                } else {
+                                    style.bg(hl)
                                 };
-                                let new_style = style.fg(fg).bg(highlight_color);
                                 buffer.set_char_styled(pos, ch, new_style);
                             }
                         }

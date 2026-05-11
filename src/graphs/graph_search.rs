@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::GraphConnection, node::Node};
 use petgraph::Direction;
@@ -34,6 +34,43 @@ pub struct GraphLocus {
     pub end_offset: usize,
     /// Ordered sequence of nodes that spell the match. Length is at least 1.
     pub blocks: Vec<GraphNode>,
+    /// Strand of the matched sequence.
+    pub strand: Strand,
+}
+
+/// Return the sequence bytes spanned by `locus`.
+///
+/// Fetches node sequences from the database, concatenates the relevant slices
+/// across all blocks, and reverse-complements the result for `Strand::Reverse`
+/// loci.
+pub fn locus_sequence(conn: &GraphConnection, locus: &GraphLocus) -> Vec<u8> {
+    let node_ids: Vec<HashId> = locus.blocks.iter().map(|n| n.node_id).collect();
+    let sequences = Node::get_sequences_by_node_ids(conn, &node_ids);
+
+    let n = locus.blocks.len();
+    let mut out = Vec::new();
+    for (i, block) in locus.blocks.iter().enumerate() {
+        let full = sequences[&block.node_id]
+            .get_sequence(None, None)
+            .expect("sequence data corrupt")
+            .into_bytes();
+        let block_start = usize::try_from(block.sequence_start).expect("negative sequence_start");
+        let block_end = usize::try_from(block.sequence_end).expect("negative sequence_end");
+        let text = &full[block_start..block_end];
+        let start = if i == 0 { locus.start_offset } else { 0 };
+        let end = if i == n - 1 {
+            locus.end_offset
+        } else {
+            text.len()
+        };
+        out.extend_from_slice(&text[start..end]);
+    }
+
+    if locus.strand == Strand::Reverse {
+        reverse_complement(&out)
+    } else {
+        out
+    }
 }
 
 /// Biological interpretation of the sequences being searched.
@@ -282,8 +319,9 @@ impl GenGraphMatcher {
     /// configured sequence kind.
     ///
     /// For `SequenceKind::Dna`, reverse-complement matches are returned in graph
-    /// coordinates exactly like forward matches. The returned `GraphLocus`
-    /// currently does not record which query orientation matched.
+    /// coordinates exactly like forward matches. The returned strand field
+    /// records which orientation matched - `Forward` for the query as-provided,
+    /// `Reverse` for the reverse-complement.
     pub fn find_all(&self, query: &[u8]) -> Vec<GraphLocus> {
         if query.is_empty() {
             return Vec::new();
@@ -293,9 +331,16 @@ impl GenGraphMatcher {
         let mut out = self.find_all_query_orientation(query, matcher);
 
         if self.sequence_kind == SequenceKind::Dna {
+            for m in out.iter_mut() {
+                m.strand = Strand::Forward;
+            }
             let rc = reverse_complement(query);
             let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
-            out.extend(self.find_all_query_orientation(&rc, rc_matcher));
+            let rc_matches = self.find_all_query_orientation(&rc, rc_matcher);
+            for mut m in rc_matches {
+                m.strand = Strand::Reverse;
+                out.push(m);
+            }
         }
 
         out
@@ -443,6 +488,7 @@ impl GenGraphMatcher {
                     start_offset: ts.start_offset,
                     end_offset: ts.state.offset,
                     blocks: ts.path,
+                    strand: Strand::Unknown,
                 });
                 continue;
             }
