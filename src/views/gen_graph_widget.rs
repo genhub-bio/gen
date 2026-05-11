@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_core::{
     INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
@@ -244,6 +244,34 @@ fn compute_pruned_edges(graph: &GenGraph) -> Vec<(GraphNode, GraphNode)> {
     pruned
 }
 
+/// Find nodes that become inaccessible when all pruned edges are removed.
+///
+/// BFS from all start nodes following only non-pruned edges. Any node not reached
+/// is only reachable through pruned (lowlighted) edges and should be dimmed.
+fn compute_inaccessible_nodes(
+    graph: &GenGraph,
+    pruned: &[(GraphNode, GraphNode)],
+) -> Vec<GraphNode> {
+    let pruned_set: HashSet<(GraphNode, GraphNode)> = pruned.iter().cloned().collect();
+
+    let mut reachable: HashSet<GraphNode> = HashSet::new();
+    let mut queue: VecDeque<GraphNode> =
+        graph.nodes().filter(|n| is_start_node(n.node_id)).collect();
+    for &node in &queue {
+        reachable.insert(node);
+    }
+
+    while let Some(node) = queue.pop_front() {
+        for (src, tgt, _) in graph.edges(node) {
+            if !pruned_set.contains(&(src, tgt)) && reachable.insert(tgt) {
+                queue.push_back(tgt);
+            }
+        }
+    }
+
+    graph.nodes().filter(|n| !reachable.contains(n)).collect()
+}
+
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
 ///
 /// This is the standard way to initialize a graph controller for GenGraph visualization.
@@ -259,10 +287,14 @@ pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
     let pruned = compute_pruned_edges(&graph);
+    let inaccessible = compute_inaccessible_nodes(&graph, &pruned);
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer);
     for edge in pruned {
         controller.dim_edge(edge);
+    }
+    for node in inaccessible {
+        controller.dim_node(node);
     }
     controller.set_detail_level(VisualDetail::Truncated);
     controller.hide_cursor();

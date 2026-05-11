@@ -257,6 +257,7 @@ pub fn plot_viewport_graph<R, G>(
         &[],
         &[],
         &[],
+        &[],
         theme,
     )
 }
@@ -288,6 +289,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
     cell_highlights: &[(WorldPos, (i64, i64), (i64, i64), PathStyle)],
     lowlights: &[(WorldPos, WorldPos)],
+    node_lowlights: &[WorldPos],
     theme: &Theme,
 ) where
     R: NodeRenderer<G>,
@@ -338,6 +340,25 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
+
+                // If lowlighted, dim the node background to theme[0x04].
+                // Applied before highlights so highlights take priority.
+                if node_lowlights.contains(world_pos) {
+                    let dim = theme[0x04];
+                    for y in world_rect.min.y..=world_rect.max.y {
+                        for x in world_rect.min.x..=world_rect.max.x {
+                            let pos = WorldPos::new(x, y);
+                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
+                                let new_style = if ch == NODE_GLYPH {
+                                    style.fg(dim)
+                                } else {
+                                    style.bg(dim)
+                                };
+                                buffer.set_char_styled(pos, ch, new_style);
+                            }
+                        }
+                    }
+                }
 
                 // Check if this node is highlighted
                 let highlighted_style = node_highlights

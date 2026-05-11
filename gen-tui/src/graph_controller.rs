@@ -72,6 +72,9 @@ where
     /// Persistent dimmed edges in domain terms: (src_id, tgt_id)
     pub edge_lowlights: Vec<(G::NodeId, G::NodeId)>,
 
+    /// Persistent dimmed nodes in domain terms
+    pub node_lowlights: Vec<G::NodeId>,
+
     /// When set, the next rebuild with a known viewport size will center the
     /// cursor's viewport position so the camera-anchored formula lands the
     /// camera exactly on the cursor's world position.
@@ -153,6 +156,7 @@ where
             layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
             edge_lowlights: Vec::new(),
+            node_lowlights: Vec::new(),
             go_to_pending: false,
         }
     }
@@ -534,6 +538,40 @@ where
             .collect();
 
         viewport_graph.edge_lowlights.extend(edges);
+    }
+
+    /// Dim a node: store in domain terms so it survives viewport rebuilds.
+    pub fn dim_node(&mut self, node_id: G::NodeId) {
+        self.node_lowlights.push(node_id);
+    }
+
+    /// Return the domain-level list of dimmed nodes.
+    pub fn get_node_lowlights(&self) -> &[G::NodeId] {
+        &self.node_lowlights
+    }
+
+    /// Return the visual (WorldPos) lowlight positions for nodes in the current viewport.
+    pub fn get_viewport_node_lowlights(&self) -> &[WorldPos] {
+        &self.viewport_graph.node_lowlights
+    }
+
+    /// Populate viewport_graph.node_lowlights from domain node ids.
+    fn apply_node_lowlights(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        domain_node_lowlights: &[G::NodeId],
+    ) {
+        let lowlight_indices: Vec<NodeIndex> = domain_node_lowlights
+            .iter()
+            .map(|id| NodeIndex::new(<G as NodeIndexable>::to_index(graph, *id)))
+            .collect();
+
+        let positions: Vec<WorldPos> = lowlight_indices
+            .iter()
+            .filter_map(|idx| viewport_graph.node_positions.get(idx).copied())
+            .collect();
+
+        viewport_graph.node_lowlights.extend(positions);
     }
 
     /// Calculate total bounds needed to display all partitions
@@ -1080,6 +1118,13 @@ where
             &mut self.viewport_graph,
             &self.partition_controller.graph,
             &domain_lowlights,
+        );
+
+        let domain_node_lowlights: Vec<G::NodeId> = self.node_lowlights.clone();
+        Self::apply_node_lowlights(
+            &mut self.viewport_graph,
+            &self.partition_controller.graph,
+            &domain_node_lowlights,
         );
 
         // Update rebuild tracking

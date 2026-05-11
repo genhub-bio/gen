@@ -277,6 +277,7 @@ where
         let edge_highlights = controller.get_edge_highlights();
         let cell_highlights = controller.get_cell_highlights();
         let edge_lowlights = controller.get_edge_lowlights();
+        let node_lowlights = controller.get_viewport_node_lowlights();
         plot_viewport_graph_with_highlights(
             viewport_graph,
             &mut world_buffer,
@@ -287,6 +288,7 @@ where
             edge_highlights,
             cell_highlights,
             edge_lowlights,
+            node_lowlights,
             &theme,
         );
 
