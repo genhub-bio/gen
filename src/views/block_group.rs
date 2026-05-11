@@ -542,6 +542,89 @@ pub fn view_block_group(
                         focus_zone = requested_zone;
                         explorer_state.focus_change_requested = None;
                     }
+                    // Handle annotation file toggle requests
+                    if let Some(toggled_id) = explorer_state.annotation_file_toggle_requested.take()
+                    {
+                        if explorer_state.is_annotation_file_active(&toggled_id) {
+                            if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
+                                && let Some(bg) = current_block_group.as_ref()
+                            {
+                                let query_window =
+                                    current_view_coordinate_window(&graph_controller)
+                                        .map(expand_query_window);
+                                let node_filter: std::collections::HashSet<HashId> =
+                                    block_graph.nodes().map(|node| node.node_id).collect();
+                                let request = AnnotationFileTrackRequest {
+                                    conn,
+                                    workspace,
+                                    collection_name,
+                                    sample_name: bg.sample_name.as_str(),
+                                    block_group_name: Some(&bg.name),
+                                    query_window,
+                                    node_filter: &node_filter,
+                                    entry,
+                                };
+                                match load_annotation_file_track(&request) {
+                                    Ok(load) => {
+                                        annotation_file_tracks.insert(toggled_id, load.track);
+                                        annotation_file_index_available
+                                            .insert(toggled_id, load.index_available);
+                                        if let Some(window) = load.loaded_window {
+                                            annotation_file_loaded_windows
+                                                .insert(toggled_id, window);
+                                        } else {
+                                            annotation_file_loaded_windows.remove(&toggled_id);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        messages.push_warn(format!("{err}"));
+                                        explorer_state.deactivate_annotation_file(&toggled_id);
+                                        annotation_file_tracks.remove(&toggled_id);
+                                        annotation_file_index_available.remove(&toggled_id);
+                                        annotation_file_loaded_windows.remove(&toggled_id);
+                                    }
+                                }
+                            }
+                        } else {
+                            annotation_file_tracks.remove(&toggled_id);
+                            annotation_file_index_available.remove(&toggled_id);
+                            annotation_file_loaded_windows.remove(&toggled_id);
+                        }
+                    }
+                    // Handle annotation group toggle requests
+                    if let Some(toggled_group) =
+                        explorer_state.annotation_group_toggle_requested.take()
+                    {
+                        if explorer_state.is_annotation_group_active(&toggled_group) {
+                            if current_block_group.is_some() {
+                                let visible_node_ranges = visible_ranges_by_node(&block_graph);
+                                let spans = match load_annotations_for_group(
+                                    conn,
+                                    &toggled_group,
+                                    &visible_node_ranges,
+                                ) {
+                                    Ok(spans) => spans,
+                                    Err(err) => {
+                                        messages.push_warn(format!(
+                                            "Failed to load annotations for group {}: {err}",
+                                            toggled_group
+                                        ));
+                                        Vec::new()
+                                    }
+                                };
+                                if spans.is_empty() {
+                                    explorer_state.deactivate_annotation_group(&toggled_group);
+                                } else {
+                                    annotation_group_tracks.insert(
+                                        toggled_group.clone(),
+                                        AnnotationTrack::new(toggled_group, spans),
+                                    );
+                                }
+                            }
+                        } else {
+                            annotation_group_tracks.remove(&toggled_group);
+                        }
+                    }
                 }
                 event::Event::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
@@ -564,12 +647,6 @@ pub fn view_block_group(
                         }
                         mouse_last_pos = None;
                         mouse_is_dragging = false;
-                    }
-                    MouseEventKind::ScrollUp => {
-                        graph_controller.zoom_in();
-                    }
-                    MouseEventKind::ScrollDown => {
-                        graph_controller.zoom_out();
                     }
                     _ => {}
                 },
@@ -735,7 +812,7 @@ pub fn view_block_group(
             if show_sidebar {
                 let theme = current_theme();
                 let sidebar_block = Block::default().padding(Padding::new(0, 0, 1, 1)).style(
-                    Style::default().bg(theme[0x00]).fg(theme[0x05]),
+                    Style::default().bg(theme[0x01]).fg(theme[0x05]),
                 );
                 let sidebar_content_area = sidebar_block.inner(sidebar_area);
 
@@ -764,20 +841,18 @@ pub fn view_block_group(
             // Status bar
             let mut status_message = match focus_zone {
                 FocusZone::Canvas => {
+                    let tab_dest = if show_panel { "to panel" } else { "to sidebar" };
                     if !graph_controller.is_cursor_visible() {
-                        "*drag*: pan | *click node*: select | *scroll*: zoom | *arrows*: keyboard nav"
-                            .to_string()
+                        format!("*drag* pan | *click* select | *↑↓←→* show cursor | *tab* {tab_dest}")
                     } else if graph_controller.cursor.is_coarse_mode() {
-                        "*←→↑↓* move | *enter* fine nav | *+/-* zoom | *p* path | *esc* sidebar"
-                            .to_string()
+                        format!("*←→↑↓* navigate by block | *enter* by character | *+/-* zoom | *p* path | *m* messages | *tab* {tab_dest}")
                     } else {
-                        "*←→↑↓* move | *enter* details | *+/-* zoom | *p* path | *esc* coarse nav"
-                            .to_string()
+                        format!("*←→↑↓* navigate by character | *enter* details | *+/-* zoom | *p* path | *m* messages | *tab* {tab_dest}")
                     }
                 }
                 FocusZone::Panel => match panel_mode {
-                    PanelMode::Messages => "*c* clear | *esc* close panel".to_string(),
-                    PanelMode::Details => "*esc* close panel".to_string(),
+                    PanelMode::Messages => "*c* clear | *esc* close | *tab* to sidebar".to_string(),
+                    PanelMode::Details => "*esc* close | *tab* to sidebar".to_string(),
                 },
                 FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };

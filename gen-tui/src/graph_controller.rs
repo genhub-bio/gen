@@ -68,6 +68,11 @@ where
 
     /// Persistent requested highlights in domain terms
     pub highlights: Vec<(HighlightKind<G::NodeId>, PathStyle)>,
+
+    /// When set, the next rebuild with a known viewport size will center the
+    /// cursor's viewport position so the camera-anchored formula lands the
+    /// camera exactly on the cursor's world position.
+    go_to_pending: bool,
 }
 
 /// Type of element to highlight in the graph
@@ -79,9 +84,8 @@ pub enum HighlightKind<N> {
     Edge(N, N),
     /// A path consisting of a sequence of nodes
     Path(Vec<N>),
-    /// Tint a rectangular region of a single node. The rectangle is defined by the
-    /// (col, row) position of its top-left corner (`tl`) and bottom-right corner (`br`).
-    /// The top-left of the node area is (0, 0). Both corners are inclusive.
+    /// Tint a sub-rectangle of a single node.
+    /// tl/br are (col, row) offsets from the node's top-left corner; br is exclusive.
     Cells {
         node: N,
         tl: (i64, i64),
@@ -145,6 +149,7 @@ where
             rebuild_needed: true,
             layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
+            go_to_pending: false,
         }
     }
 
@@ -313,24 +318,37 @@ where
         }
     }
 
-    /// Pick the next unused accent color from the theme (slots 0x08–0x0F).
+    /// Pick the next accent color from the theme (slots 0x08–0x0F), cycling
+    /// sequentially after each call.
     ///
-    /// Scans `self.highlights` for colors already in use and returns the first
-    /// accent slot that hasn't been claimed yet.  Wraps around to 0x08 once all
-    /// eight accent slots are occupied.
+    /// Walks `self.highlights` in reverse to find the last accent slot that was
+    /// used, then returns the next slot in the cycle.  Prints a warning to stderr
+    /// each time the cycle wraps around (all 8 slots exhausted).
     pub fn next_accent_color(&self) -> Color {
-        use std::collections::HashSet;
         let theme = current_theme();
-        let used: HashSet<Color> = self
+        const ACCENTS: [usize; 8] = [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F];
+        let accent_colors: Vec<Color> = ACCENTS.iter().map(|&i| theme[i]).collect();
+
+        let last_idx = self
             .highlights
             .iter()
-            .filter(|(_, s)| s.color != Color::Reset)
-            .map(|(_, s)| s.color)
-            .collect();
-        (0x08..=0x0F)
-            .map(|i| theme[i])
-            .find(|c| !used.contains(c))
-            .unwrap_or(theme[0x08])
+            .rev()
+            .find_map(|(_, s)| accent_colors.iter().position(|&c| c == s.color));
+
+        let next_idx = match last_idx {
+            None => 0,
+            Some(i) => {
+                let n = (i + 1) % 8;
+                if n == 0 {
+                    eprintln!(
+                        "warning: all 8 accent colours have been used; cycling back to the first"
+                    );
+                }
+                n
+            }
+        };
+
+        accent_colors[next_idx]
     }
 
     /// Highlight a node using the next available theme accent color.
@@ -399,10 +417,8 @@ where
     /// the actual paint to `apply_cell_highlight`. Prefer `add_cell_highlight` when
     /// you don't need to choose the color.
     ///
-    /// `tl`/`br` are the (col, row) positions of the top-left and bottom-right corners
-    /// of the rectangle to highlight. Both corners are inclusive. The top-left of the
-    /// node area is (0, 0).
-    /// Example — columns 5..=12 on the top row:
+    /// `tl`/`br` are node-local (col, row) offsets, exclusive end.
+    /// Example — columns 5..12 on the top row:
     ///   set_cell_highlight(node_id, (5, 0), (12, 0), style)
     pub fn set_cell_highlight(
         &mut self,
@@ -828,6 +844,18 @@ where
             self.initialize_cursor();
         }
 
+        // Step 2 (pre): If a go_to is pending and the viewport is real, center the
+        // cursor's viewport position so the camera formula
+        //   camera = cursor_world - cursor_viewport + half_viewport
+        // resolves to camera = cursor_world, putting the target exactly at screen center.
+        if self.go_to_pending && !viewport_was_uninitialized {
+            let half_w = viewport_bounds_snapshot.width / 2;
+            let half_h = viewport_bounds_snapshot.height / 2;
+            self.cursor
+                .set_viewport_pos(ViewportPos::new(half_w, half_h));
+            self.go_to_pending = false;
+        }
+
         // Step 2: Find which partition the cursor's node belongs to
         let cursor_partition = if let Some(node_idx) = self.cursor.node_idx() {
             let node_id = <G as NodeIndexable>::from_index(
@@ -1078,6 +1106,24 @@ where
     /// Show the cursor and enable camera-following.
     pub fn show_cursor(&mut self) {
         self.cursor.set_visibility(true);
+    }
+
+    /// Jump to a specific node at a fractional offset within it.
+    ///
+    /// Places the cursor on `domain_idx` at `offset` (x, y each 0.0–1.0),
+    /// switches to fine-mode so the cursor renders as a precise indicator,
+    /// and queues a one-shot viewport centering on the next rebuild.  The
+    /// cursor stays visible afterwards; the caller (or user interaction) may
+    /// hide it later via `hide_cursor`.
+    ///
+    /// The caller is responsible for ensuring the relevant partition is loaded
+    /// and set as anchor before calling this.
+    pub fn go_to_node(&mut self, domain_idx: NodeIndex, offset: (f64, f64)) {
+        self.cursor.set_node(domain_idx, offset);
+        self.cursor.set_coarse_mode(false);
+        self.show_cursor();
+        self.go_to_pending = true;
+        self.trigger_rebuild();
     }
 
     /// Pan the camera by a drag delta expressed in terminal coordinates.

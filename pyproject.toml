@@ -5,22 +5,25 @@ build-backend = "maturin"
 [project]
 name = "gen"
 version = "0.1.31"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = []
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 description = "Python bindings for the Gen graph database"
 readme = "README.md"
 
 [project.optional-dependencies]
 jupyter = ["anywidget", "traitlets"]
+
+[project.urls]
+Repository = "https://github.com/genhub-bio/gen"
 
 [tool.maturin]
 manifest-path = "gen-python/Cargo.toml"

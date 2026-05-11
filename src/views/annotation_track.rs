@@ -6,7 +6,8 @@ use std::{
 use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_graph::GenGraph;
 use gen_tui::{
-    GraphController, ViewportState, WorldRect, plotter::NodeSizer, theme::current_theme,
+    GraphController, ViewportState, VisualDetail, WorldRect, plotter::NodeSizer,
+    theme::current_theme,
 };
 use petgraph::visit::NodeIndexable;
 use ratatui::{
@@ -101,8 +102,21 @@ impl AnnotationTrack {
         area: Rect,
         controller: &GraphController<GenGraph, S>,
     ) -> u16 {
-        let (_, segments_by_annotation, truncated_count) =
+        let (_, mut segments_by_annotation, mut truncated_count) =
             collect_visual_segments(self, controller);
+
+        if controller.get_detail_level() == VisualDetail::Minimal {
+            segments_by_annotation.retain(|_, segs| {
+                let all_same_node = segs.windows(2).all(|w| w[0].node_x1 == w[1].node_x1);
+                if all_same_node {
+                    truncated_count += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
         let visible_ranges: AnnotationVisibleRanges = segments_by_annotation
             .iter()
             .map(|(idx, segs)| {
@@ -144,7 +158,7 @@ impl AnnotationTrack {
             } else {
                 self.name.clone()
             };
-            buf.set_string(area.x + 1, area.y, header, Style::default().fg(theme[0x04]));
+            buf.set_string(area.x + 1, area.y, header, Style::default().fg(theme[0x07]));
         }
 
         let inner = Rect {

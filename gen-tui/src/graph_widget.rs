@@ -7,7 +7,7 @@ use petgraph::visit::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Style},
     widgets::{Block, StatefulWidget, Widget},
 };
 
@@ -179,6 +179,28 @@ where
     }
 }
 
+fn lighten_cell(buffer: &mut WorldBuffer, pos: WorldPos) {
+    if let Some((ch, style)) = buffer.get_char_styled(pos) {
+        let lighten = |c: Color| match c {
+            Color::Rgb(r, g, b) => Color::Rgb(
+                (r as f32 + (255.0 - r as f32) * 0.20).round() as u8,
+                (g as f32 + (255.0 - g as f32) * 0.20).round() as u8,
+                (b as f32 + (255.0 - b as f32) * 0.20).round() as u8,
+            ),
+            c => c,
+        };
+        buffer.set_char_styled(
+            pos,
+            ch,
+            Style {
+                fg: style.fg.map(lighten),
+                bg: style.bg.map(lighten),
+                ..style
+            },
+        );
+    }
+}
+
 impl<G, S, R> StatefulWidget for GraphWidget<'_, G, S, R>
 where
     G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
@@ -274,23 +296,8 @@ where
 
         if controller.cursor.is_visible() {
             let viewport_graph = controller.get_viewport_graph();
-            // Apply color, formatting and/or glyph swap
-            let apply_cursor_style = |ch: char, style: Style| -> (char, Style) {
-                if ch == NODE_GLYPH {
-                    let new_style = style
-                        .fg(theme[0x06])
-                        .bg(theme[0x00])
-                        .remove_modifier(Modifier::all());
-                    ('█', new_style) // alternative: ○
-                } else {
-                    let new_style = style
-                        .fg(theme[0x00])
-                        .bg(theme[0x06])
-                        .remove_modifier(Modifier::all())
-                        .add_modifier(Modifier::BOLD);
-                    (ch, new_style)
-                }
-            };
+            let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
+            let arrow_style = Style::default().fg(theme[0x07]);
 
             if controller.cursor.is_coarse_mode() {
                 // Highlight the whole node in coarse mode
@@ -299,41 +306,26 @@ where
                     && let Some(node_data) = viewport_graph.node_data_by_pos.get(&node_center)
                 {
                     let node_rect = BigRect::from_center_and_size(node_center, node_data.size);
-                    let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
-
                     for y in node_rect.bottom()..=node_rect.top() {
                         for x in node_rect.left()..=node_rect.right() {
-                            let pos = WorldPos::new(x, y);
-                            if let Some((current_char, current_style)) =
-                                cursor_buffer.get_char_styled(pos)
-                            {
-                                let (char_to_render, new_style) =
-                                    apply_cursor_style(current_char, current_style);
-                                cursor_buffer.set_char_styled(
-                                    pos,
-                                    char_to_render,
-                                    new_style.add_modifier(Modifier::UNDERLINED),
-                                );
-                            }
+                            lighten_cell(&mut cursor_buffer, WorldPos::new(x, y));
                         }
                     }
+                    let ymid = (node_rect.bottom() + node_rect.top()) / 2;
+                    cursor_buffer.set_char_styled(
+                        WorldPos::new(node_rect.left() - 1, ymid),
+                        '⟨',
+                        arrow_style,
+                    );
+                    cursor_buffer.set_char_styled(
+                        WorldPos::new(node_rect.right() + 1, ymid),
+                        '⟩',
+                        arrow_style,
+                    );
                 }
-            } else {
-                // Single cell cursor in normal mode
-                if let Some(cursor_world_pos) = controller.cursor.to_world_pos(viewport_graph) {
-                    let mut cursor_buffer = WorldBuffer::new(buf, &controller.viewport_state);
-
-                    if let Some((current_char, current_style)) =
-                        cursor_buffer.get_char_styled(cursor_world_pos)
-                    {
-                        let (char_to_render, new_style) =
-                            apply_cursor_style(current_char, current_style);
-                        cursor_buffer.set_char_styled(cursor_world_pos, char_to_render, new_style);
-                    }
-
-                    let below_pos = WorldPos::new(cursor_world_pos.x, cursor_world_pos.y - 1);
-                    cursor_buffer.set_char(below_pos, '^');
-                }
+            } else if let Some(pos) = controller.cursor.to_world_pos(viewport_graph) {
+                lighten_cell(&mut cursor_buffer, pos);
+                cursor_buffer.set_char_styled(WorldPos::new(pos.x, pos.y - 1), '⌃', arrow_style);
             }
         }
     }

@@ -1,7 +1,7 @@
 use pyo3::{prelude::*, pyclass};
 
 /// Exposes a SequencePart to Python.
-#[pyclass]
+#[pyclass(name = "SequencePart")]
 #[derive(Clone)]
 pub struct PySequencePart {
     pub name: String,

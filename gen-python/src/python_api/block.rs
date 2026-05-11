@@ -3,12 +3,11 @@ use pyo3::prelude::*;
 
 use super::hash_id::PyHashId;
 
-// TODO: rename to Block
-/// A Python-friendly representation of a graph node key (node id, sequence start, sequence end)
-/// Used to ensure consistent hashing when used as dictionary keys in Python
-#[pyclass] // pyclass includes  #[derive(IntoPyObject)]
+/// A Python-friendly representation of a block (node id, sequence start, sequence end).
+/// Used to ensure consistent hashing when used as dictionary keys in Python.
+#[pyclass(name = "Block")] // pyclass includes  #[derive(IntoPyObject)]
 #[derive(Clone, Copy)]
-pub struct PyNodeKey {
+pub struct PyBlock {
     pub node_id: HashId,
     #[pyo3(get)]
     pub sequence_start: i64,
@@ -17,10 +16,10 @@ pub struct PyNodeKey {
 }
 
 #[pymethods]
-impl PyNodeKey {
+impl PyBlock {
     #[new]
     pub fn new(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Self {
-        PyNodeKey {
+        PyBlock {
             node_id,
             sequence_start,
             sequence_end,
@@ -34,7 +33,7 @@ impl PyNodeKey {
 
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "NodeKey({}, {}, {})",
+            "Block({}, {}, {})",
             self.node_id, self.sequence_start, self.sequence_end
         ))
     }
@@ -54,8 +53,8 @@ impl PyNodeKey {
         Ok(hash)
     }
 
-    fn __eq__(&self, py: Python<'_>, other: PyObject) -> PyResult<bool> {
-        if let Ok(other_key) = other.extract::<PyRef<PyNodeKey>>(py) {
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(other_key) = other.extract::<PyRef<PyBlock>>() {
             Ok(self.node_id == other_key.node_id
                 && self.sequence_start == other_key.sequence_start
                 && self.sequence_end == other_key.sequence_end)

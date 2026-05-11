@@ -18,8 +18,8 @@ use crate::graphs::graph_search::GraphLocus;
 
 /// Labels for special start/end nodes
 pub mod label {
-    pub const START: &str = "Start >";
-    pub const END: &str = "> End";
+    pub const START: &str = "╟";
+    pub const END: &str = "╢";
 }
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
@@ -31,16 +31,16 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
     fn get_node_size(&self, node: &GraphNode, detail_level: VisualDetail) -> (u64, u64) {
         // Handle special start/end nodes with fixed label sizes (always show full label)
         if is_start_node(node.node_id) {
-            return (label::START.len() as u64, 1u64);
+            return (label::START.chars().count() as u64, 1u64);
         }
         if is_end_node(node.node_id) {
-            return (label::END.len() as u64, 1u64);
+            return (label::END.chars().count() as u64, 1u64);
         }
 
         let sequence_length = (node.sequence_end - node.sequence_start) as u64;
         match detail_level {
             VisualDetail::Minimal => (1u64, 1u64), // Just a glyph
-            VisualDetail::Truncated => (sequence_length.min(13), 1u64), // 13 = 5 border + 1 mid + 5 border + 2
+            VisualDetail::Truncated => (sequence_length.min(13), 1u64), // 13 = 5 border + 3 mid + 5 border
             VisualDetail::Full => (sequence_length, 1u64),              // Full sequence length
         }
     }
@@ -209,12 +209,17 @@ pub fn create_gen_graph_controller(
     controller
 }
 
-/// Center the graph controller on a specific graph node at a given fractional offset.
+/// Position the cursor on a specific graph node at a given fractional offset.
 ///
 /// The caller must supply the full `GraphNode` key (node_id + sequence_start +
 /// sequence_end), because multiple graph nodes can share the same underlying
 /// `node_id` when they represent different sub-ranges of the same sequence.
 /// The offset `(0.5, 0.5)` centers on the middle of the node.
+///
+/// Camera positioning is handled by the cursor-anchored rebuild system: the
+/// caller is responsible for setting the cursor's viewport position to the
+/// desired screen location before the next render (e.g. screen center to
+/// center on the node), then showing the cursor so camera-following engages.
 ///
 /// # Arguments
 /// * `controller` — the graph controller to position
@@ -242,21 +247,9 @@ pub fn center_on_node_offset<S: NodeSizer<GenGraph>>(
     // Resolve the domain NodeIndex from the node key.
     let domain_idx = NodeIndex::new(NodeIndexable::to_index(controller.graph(), node));
 
-    // Look up the node's world position (available once the partition is loaded).
-    let world_pos = match controller.find_domain_node_world_position(domain_idx) {
-        Some(w) => w,
-        None => return,
-    };
-
-    // Snap the camera directly to the node's world position.
-    controller.viewport_state.camera_current = world_pos;
-    controller.viewport_state.camera_target = world_pos;
-    controller.viewport_state.camera_anim = None;
-
-    // Place the cursor on the node at the requested fractional offset.
-    controller.cursor.set_node(domain_idx, offset);
-
-    controller.trigger_rebuild();
+    // Delegate to the controller's go_to method, which sets the cursor,
+    // switches to fine mode, shows it, and queues the one-shot centering.
+    controller.go_to_node(domain_idx, offset);
 }
 
 /// Build a GraphNode → (WorldPos, node_size) lookup from the current viewport graph.
@@ -343,10 +336,12 @@ pub fn locus_label_bounds(
 ///
 /// In `Truncated` mode, interior columns of long nodes map to the `...` region.
 fn clamp_col(col_raw: i64, block_seq_len: i64, detail_level: VisualDetail) -> i64 {
-    if detail_level == VisualDetail::Truncated && block_seq_len > 13 {
-        clamp_truncated_col(col_raw, block_seq_len)
-    } else {
-        col_raw
+    match detail_level {
+        VisualDetail::Minimal => 0,
+        VisualDetail::Truncated if block_seq_len > 13 => {
+            clamp_truncated_col(col_raw, block_seq_len)
+        }
+        _ => col_raw,
     }
 }
 
