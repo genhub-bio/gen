@@ -22,7 +22,7 @@ use noodles::{bed, core::Region, gff, tabix};
 
 use crate::views::{
     annotation_files::AnnotationFileEntry,
-    annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+    annotation_groups::AnnotationGroupEntry,
     annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
 };
 
