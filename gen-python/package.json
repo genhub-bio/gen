@@ -2,8 +2,9 @@
   "name": "gen-jupyter-widget",
   "private": true,
   "scripts": {
-    "build-jupyter": "esbuild js/index.ts --bundle --format=esm --target=es2020 --sourcemap --banner:js='// Generated from js/index.ts by `npm run build-jupyter` / `make jupyter`. Edit TypeScript sources, not this file.' --outfile=python/gen/static/jupyter_widget.js",
-    "build-r": "esbuild js/index.ts --bundle --format=esm --target=es2020 --banner:js='// Generated from js/index.ts by `npm run build-r` / `make r-widget`. Edit TypeScript sources, not this file.' --outfile=../gen-r/inst/widget/genplot.esm.js",
+    "//": "INTERACTIVE=true/false controls whether zoom buttons, cursor changes, and drag/click handlers are compiled in. The R htmlwidget runs statically (no comm back to host), so those features are dead-code eliminated via --minify-syntax in the R build.",
+    "build-jupyter":"esbuild js/index.ts --bundle --format=esm --target=es2020 --define:INTERACTIVE=true --sourcemap --banner:js='// Generated from js/index.ts by `npm run build-jupyter` / `make jupyter`. Edit TypeScript sources, not this file.' --outfile=python/gen/static/jupyter_widget.js",
+    "build-r": "esbuild js/index.ts --bundle --format=esm --target=es2020 --define:INTERACTIVE=false --minify-syntax --banner:js='// Generated from js/index.ts by `npm run build-r` / `make r-widget`. Edit TypeScript sources, not this file.' --outfile=../gen-r/inst/widget/genplot.esm.js",
     "check": "tsc --noEmit"
   },
   "devDependencies": {

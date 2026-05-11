@@ -1,4 +1,4 @@
-// Generated from js/index.ts by `npm run build` / `make jupyter`. Edit TypeScript sources, not this file.
+// Generated from js/index.ts by `npm run build-jupyter` / `make jupyter`. Edit TypeScript sources, not this file.
 
 // js/grid.ts
 var TEXT_SIZE = 14;
@@ -278,37 +278,8 @@ function render({ model, el }) {
   const wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   const canvas = document.createElement("canvas");
-  canvas.style.cssText = "display: block; cursor: grab; border: 2px solid #45475a;";
-  const sharedBtnStyle = [
-    "width: 24px",
-    "height: 24px",
-    "font-size: 16px",
-    "line-height: 1",
-    "cursor: pointer",
-    "background: rgba(30,30,46,0.85)",
-    "color: #cdd6f4",
-    "border: 1px solid #45475a",
-    "border-radius: 4px",
-    "display: flex",
-    "align-items: center",
-    "justify-content: center",
-    "user-select: none",
-    "padding: 0"
-  ].join("; ");
-  const btnContainer = document.createElement("div");
-  btnContainer.style.cssText = "position: absolute; bottom: 8px; right: 8px; display: flex; flex-direction: column; gap: 4px; z-index: 1;";
-  const zoomInBtn = document.createElement("button");
-  zoomInBtn.textContent = "+";
-  zoomInBtn.setAttribute("style", sharedBtnStyle);
-  zoomInBtn.title = "Zoom in (+)";
-  const zoomOutBtn = document.createElement("button");
-  zoomOutBtn.textContent = "\u2212";
-  zoomOutBtn.setAttribute("style", sharedBtnStyle);
-  zoomOutBtn.title = "Zoom out (-)";
-  btnContainer.appendChild(zoomInBtn);
-  btnContainer.appendChild(zoomOutBtn);
+  canvas.style.cssText = `display: block; cursor: ${true ? "grab" : "default"}; border: 2px solid #45475a;`;
   wrapper.appendChild(canvas);
-  wrapper.appendChild(btnContainer);
   el.appendChild(wrapper);
   const ctx = canvas.getContext("2d");
   let nodeCells = /* @__PURE__ */ new Set();
@@ -318,26 +289,57 @@ function render({ model, el }) {
   }
   repaint(model.get("frame"));
   model.on("change:frame", () => repaint(model.get("frame")));
-  model.on("msg:custom", (msg) => {
-    if (msg.type !== "freeze") return;
-    frozen = true;
-    btnContainer.style.display = "none";
-    canvas.style.cursor = "default";
-    wrapper.style.border = "none";
-    const dataUrl = canvas.toDataURL("image/png");
-    const img = document.createElement("img");
-    img.src = dataUrl;
-    img.width = canvas.width;
-    img.height = canvas.height;
-    img.style.cssText = "display:block;cursor:default;font-family:monospace";
-    el.replaceChild(img, wrapper);
-    model.send({ type: "snapshot", data: dataUrl });
-  });
-  zoomInBtn.addEventListener("mousedown", (e) => e.preventDefault());
-  zoomOutBtn.addEventListener("mousedown", (e) => e.preventDefault());
-  zoomInBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "in" }));
-  zoomOutBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "out" }));
-  attachInteraction(canvas, model, grid, () => nodeCells, () => frozen);
+  if (true) {
+    const sharedBtnStyle = [
+      "width: 24px",
+      "height: 24px",
+      "font-size: 16px",
+      "line-height: 1",
+      "cursor: pointer",
+      "background: rgba(30,30,46,0.85)",
+      "color: #cdd6f4",
+      "border: 1px solid #45475a",
+      "border-radius: 4px",
+      "display: flex",
+      "align-items: center",
+      "justify-content: center",
+      "user-select: none",
+      "padding: 0"
+    ].join("; ");
+    const btnContainer = document.createElement("div");
+    btnContainer.style.cssText = "position: absolute; bottom: 8px; right: 8px; display: flex; flex-direction: column; gap: 4px; z-index: 1;";
+    const zoomInBtn = document.createElement("button");
+    zoomInBtn.textContent = "+";
+    zoomInBtn.setAttribute("style", sharedBtnStyle);
+    zoomInBtn.title = "Zoom in (+)";
+    const zoomOutBtn = document.createElement("button");
+    zoomOutBtn.textContent = "\u2212";
+    zoomOutBtn.setAttribute("style", sharedBtnStyle);
+    zoomOutBtn.title = "Zoom out (-)";
+    btnContainer.appendChild(zoomInBtn);
+    btnContainer.appendChild(zoomOutBtn);
+    wrapper.appendChild(btnContainer);
+    model.on("msg:custom", (msg) => {
+      if (msg.type !== "freeze") return;
+      frozen = true;
+      btnContainer.style.display = "none";
+      canvas.style.cursor = "default";
+      wrapper.style.border = "none";
+      const dataUrl = canvas.toDataURL("image/png");
+      const img = document.createElement("img");
+      img.src = dataUrl;
+      img.width = canvas.width;
+      img.height = canvas.height;
+      img.style.cssText = "display:block;cursor:default;font-family:monospace";
+      el.replaceChild(img, wrapper);
+      model.send({ type: "snapshot", data: dataUrl });
+    });
+    zoomInBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    zoomOutBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    zoomInBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "in" }));
+    zoomOutBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "out" }));
+    attachInteraction(canvas, model, grid, () => nodeCells, () => frozen);
+  }
 }
 var index_default = { render };
 export {
