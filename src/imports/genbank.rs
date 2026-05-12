@@ -332,7 +332,8 @@ fn create_accession_for_segments(
     accession_name: &str,
     segments: &[AnnotationSegment],
 ) -> Result<HashId, GenBankError> {
-    let accession = match Accession::get_or_create(conn, accession_name, &path.id, None) {
+    let accession = match Accession::get_or_create(conn, accession_name, &path.block_group_id, None)
+    {
         Ok(accession) => accession,
         Err(err) => return Err(GenBankError::AccessionError(err)),
     };
