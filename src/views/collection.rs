@@ -6,6 +6,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::HashId;
 use gen_models::{
+    block_group::BlockGroup,
     collection::Collection,
     db::{GraphConnection, OperationsConnection},
     file_types::FileTypes,
@@ -24,7 +25,9 @@ use tui_widget_list::{ListBuilder, ListState, ListView, hit_test::Hit};
 
 use crate::views::{
     annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
-    annotation_groups::{AnnotationGroupEntry, load_annotation_group_entries},
+    annotation_groups::{
+        AnnotationGroupEntry, AnnotationGroupOrigin, load_annotation_group_entries,
+    },
     samples::{SampleTree, SampleTreeEntry},
 };
 
@@ -124,7 +127,7 @@ pub struct CollectionExplorerData {
     pub sample_block_groups: HashMap<String, Vec<(gen_core::HashId, String)>>,
     /// Annotation files available in the operations database
     pub annotation_files: Vec<AnnotationFileEntry>,
-    /// Annotation groups associated with the selected sample (if any)
+    /// Annotation groups associated with the selected block-group lineage (if any)
     pub annotation_groups: Vec<AnnotationGroupEntry>,
 }
 
@@ -133,7 +136,7 @@ pub struct CollectionExplorerData {
 pub fn gather_collection_explorer_data(
     conn: &GraphConnection,
     op_conn: &OperationsConnection,
-    sample_name: Option<&str>,
+    selected_block_group: Option<&BlockGroup>,
     full_collection_name: &str,
 ) -> CollectionExplorerData {
     let current_collection = collection_basename(full_collection_name).to_string();
@@ -188,8 +191,8 @@ pub fn gather_collection_explorer_data(
     }
 
     let annotation_files = load_annotation_file_entries(op_conn);
-    let annotation_groups = sample_name
-        .map(|sample_name| load_annotation_group_entries(conn, sample_name))
+    let annotation_groups = selected_block_group
+        .map(|block_group| load_annotation_group_entries(conn, block_group))
         .unwrap_or_default();
 
     CollectionExplorerData {
@@ -233,8 +236,14 @@ pub enum ExplorerItem {
         active: bool,
     },
     AnnotationGroup {
+        id: String,
         name: String,
+        sample_name: String,
+        origin: AnnotationGroupOrigin,
         active: bool,
+    },
+    Divider {
+        text: String,
     },
 }
 
@@ -248,6 +257,7 @@ impl ExplorerItem {
             ExplorerItem::Header { .. } => false,
             ExplorerItem::AnnotationFile { .. } => true,
             ExplorerItem::AnnotationGroup { .. } => true,
+            ExplorerItem::Divider { .. } => false,
         }
     }
 }
@@ -348,22 +358,22 @@ impl CollectionExplorerState {
     }
 
     /// Toggle an annotation group on/off
-    pub fn toggle_annotation_group(&mut self, name: &str) {
-        if self.active_annotation_groups.contains(name) {
-            self.active_annotation_groups.remove(name);
+    pub fn toggle_annotation_group(&mut self, id: &str) {
+        if self.active_annotation_groups.contains(id) {
+            self.active_annotation_groups.remove(id);
         } else {
-            self.active_annotation_groups.insert(name.to_string());
+            self.active_annotation_groups.insert(id.to_string());
         }
     }
 
     /// Deactivate an annotation group
-    pub fn deactivate_annotation_group(&mut self, name: &str) {
-        self.active_annotation_groups.remove(name);
+    pub fn deactivate_annotation_group(&mut self, id: &str) {
+        self.active_annotation_groups.remove(id);
     }
 
     /// Check if an annotation group is active
-    pub fn is_annotation_group_active(&self, name: &str) -> bool {
-        self.active_annotation_groups.contains(name)
+    pub fn is_annotation_group_active(&self, id: &str) -> bool {
+        self.active_annotation_groups.contains(id)
     }
 
     /// Retain only annotation groups that exist in the provided list
@@ -371,9 +381,9 @@ impl CollectionExplorerState {
         &mut self,
         entries: &[crate::views::annotation_groups::AnnotationGroupEntry],
     ) {
-        let valid: HashSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+        let valid: HashSet<String> = entries.iter().map(|entry| entry.id.clone()).collect();
         self.active_annotation_groups
-            .retain(|name| valid.contains(name));
+            .retain(|id| valid.contains(id));
     }
 }
 
@@ -387,10 +397,16 @@ impl CollectionExplorer {
         conn: &GraphConnection,
         op_conn: &gen_models::db::OperationsConnection,
         sample_name: Option<&str>,
+        selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
     ) -> Self {
-        let data =
-            gather_collection_explorer_data(conn, op_conn, sample_name, full_collection_name);
+        let _ = sample_name;
+        let data = gather_collection_explorer_data(
+            conn,
+            op_conn,
+            selected_block_group,
+            full_collection_name,
+        );
         Self { data }
     }
 
@@ -400,16 +416,23 @@ impl CollectionExplorer {
         conn: &GraphConnection,
         op_conn: &gen_models::db::OperationsConnection,
         sample_name: Option<&str>,
+        selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
     ) -> bool {
-        let new_data =
-            gather_collection_explorer_data(conn, op_conn, sample_name, full_collection_name);
+        let _ = sample_name;
+        let new_data = gather_collection_explorer_data(
+            conn,
+            op_conn,
+            selected_block_group,
+            full_collection_name,
+        );
         let changed = self.data.reference_block_groups.len()
             != new_data.reference_block_groups.len()
             || self.data.sample_block_groups != new_data.sample_block_groups
             || self.data.sample_roots != new_data.sample_roots
             || self.data.sample_children != new_data.sample_children
-            || self.data.sample_parents != new_data.sample_parents;
+            || self.data.sample_parents != new_data.sample_parents
+            || self.data.annotation_groups != new_data.annotation_groups;
         self.data = new_data;
         changed
     }
@@ -423,6 +446,13 @@ impl CollectionExplorer {
             .annotation_files
             .iter()
             .find(|entry| entry.file_addition.id == *id)
+    }
+
+    pub fn annotation_group_entry(&self, id: &str) -> Option<&AnnotationGroupEntry> {
+        self.data
+            .annotation_groups
+            .iter()
+            .find(|entry| entry.id == id)
     }
 
     /// Force the widget to reload by resetting its state
@@ -564,10 +594,11 @@ impl CollectionExplorer {
                             state.toggle_annotation_file(*id);
                             state.annotation_file_toggle_requested = Some(*id);
                         }
-                        ExplorerItem::AnnotationGroup { name, .. } => {
-                            state.toggle_annotation_group(name);
-                            state.annotation_group_toggle_requested = Some(name.clone());
+                        ExplorerItem::AnnotationGroup { id, .. } => {
+                            state.toggle_annotation_group(id);
+                            state.annotation_group_toggle_requested = Some(id.clone());
                         }
+                        ExplorerItem::Divider { .. } => {}
                         _ => {}
                     }
                 }
@@ -592,10 +623,11 @@ impl CollectionExplorer {
                     state.toggle_annotation_file(*id);
                     state.annotation_file_toggle_requested = Some(*id);
                 }
-                ExplorerItem::AnnotationGroup { name, .. } => {
-                    state.toggle_annotation_group(name);
-                    state.annotation_group_toggle_requested = Some(name.clone());
+                ExplorerItem::AnnotationGroup { id, .. } => {
+                    state.toggle_annotation_group(id);
+                    state.annotation_group_toggle_requested = Some(id.clone());
                 }
+                ExplorerItem::Divider { .. } => {}
                 _ => {}
             }
         }
@@ -709,11 +741,39 @@ impl CollectionExplorer {
             });
 
             // Annotation groups
-            for entry in &self.data.annotation_groups {
-                items.push(ExplorerItem::AnnotationGroup {
-                    name: entry.name.clone(),
-                    active: state.is_annotation_group_active(&entry.name),
-                });
+            for origin in [
+                AnnotationGroupOrigin::CurrentSample,
+                AnnotationGroupOrigin::ParentSample,
+                AnnotationGroupOrigin::AncestorSample,
+            ] {
+                let entries = self
+                    .data
+                    .annotation_groups
+                    .iter()
+                    .filter(|entry| entry.origin == origin)
+                    .collect::<Vec<_>>();
+                if entries.is_empty() {
+                    continue;
+                }
+                if origin != AnnotationGroupOrigin::CurrentSample {
+                    let text = match origin {
+                        AnnotationGroupOrigin::ParentSample => "---- Parent sample ----",
+                        AnnotationGroupOrigin::AncestorSample => "---- Ancestors ----",
+                        AnnotationGroupOrigin::CurrentSample => unreachable!(),
+                    };
+                    items.push(ExplorerItem::Divider {
+                        text: text.to_string(),
+                    });
+                }
+                for entry in entries {
+                    items.push(ExplorerItem::AnnotationGroup {
+                        id: entry.id.clone(),
+                        name: entry.name.clone(),
+                        sample_name: entry.sample_name.clone(),
+                        origin: entry.origin,
+                        active: state.is_annotation_group_active(&entry.id),
+                    });
+                }
             }
         }
 
@@ -840,14 +900,30 @@ impl StatefulWidget for &CollectionExplorer {
                     ]))
                     .wrap(Wrap { trim: false })
                 }
-                ExplorerItem::AnnotationGroup { name, active } => {
+                ExplorerItem::AnnotationGroup {
+                    name,
+                    sample_name,
+                    origin,
+                    active,
+                    ..
+                } => {
                     let checkbox = if *active { "[✓]" } else { "[ ]" };
+                    let label = if *origin == AnnotationGroupOrigin::CurrentSample {
+                        name.clone()
+                    } else {
+                        format!("{name} ({sample_name})")
+                    };
                     Paragraph::new(Line::from(vec![
                         Span::raw(format!("     {} ", checkbox)),
-                        Span::styled(name, Style::default()),
+                        Span::styled(label, Style::default()),
                     ]))
                     .wrap(Wrap { trim: false })
                 }
+                ExplorerItem::Divider { text } => Paragraph::new(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(text, Style::default().fg(current_theme()[0x04])),
+                ]))
+                .wrap(Wrap { trim: false }),
             };
 
             display_items.push(paragraph);

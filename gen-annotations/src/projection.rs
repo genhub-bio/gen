@@ -16,7 +16,8 @@ pub struct AnnotationSegment {
 
 impl OrderedMerge for AnnotationSegment {
     fn should_merge_with(&self, next: &Self) -> bool {
-        self.strand == next.strand
+        self.node_id == next.node_id
+            && self.strand == next.strand
             && next.range.start >= self.range.start
             && next.range.start <= self.range.end
     }
