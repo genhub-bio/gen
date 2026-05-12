@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 
-use gen_core::{HashId, Strand, calculate_hash, traits::Capnp};
+use gen_core::{
+    HashId, Strand, calculate_hash,
+    region::{Region, RegionResolutionError, RegionResolver},
+    traits::Capnp,
+};
 use itertools::Itertools;
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
@@ -337,6 +341,39 @@ impl Accession {
             where ap.accession_id = ?1 \
             order by ap.index_in_path;";
         AccessionEdge::query(conn, query, params![accession_id])
+    }
+}
+
+impl RegionResolver for Accession {
+    type Connection = GraphConnection;
+    type Error = AccessionError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = Accession::query(
+            conn,
+            "SELECT a.* \
+             FROM accessions a \
+             JOIN paths p ON a.path_id = p.id \
+             JOIN block_groups bg ON p.block_group_id = bg.id \
+             WHERE bg.collection_name = ?1 \
+               AND bg.sample_name = ?2 \
+               AND lower(a.name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple accessions named {}",
+                region.name
+            ))),
+        }
     }
 }
 

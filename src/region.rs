@@ -1,16 +1,17 @@
 pub use gen_core::region::Region;
-use gen_core::{HashId, PathBlock, Strand, is_end_node, is_start_node, region::RegionParseError};
+use gen_core::{
+    HashId, PathBlock, Strand, is_end_node, is_start_node,
+    region::{RegionParseError, RegionResolutionError, RegionResolver},
+};
 use gen_models::{
-    accession::{Accession, AccessionEdge},
-    annotations::Annotation,
+    accession::{Accession, AccessionEdge, AccessionError},
+    annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
     errors::PathError,
     path::Path,
-    sample::Sample,
     traits::Query,
 };
-use rusqlite::params;
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -41,6 +42,10 @@ pub enum GenRegionError {
     BlockGroup(#[from] gen_models::block_group::BlockGroupError),
     #[error("Path error: {0}")]
     Path(#[from] PathError),
+    #[error("Accession error: {0}")]
+    Accession(#[from] AccessionError),
+    #[error("Annotation error: {0}")]
+    Annotation(#[from] AnnotationError),
     #[error("Region not found: {0}")]
     NotFound(String),
     #[error("Region is ambiguous: {0}")]
@@ -89,97 +94,58 @@ struct AccessionSegment {
     end: i64,
 }
 
-pub trait RegionResolverExt {
-    fn resolve(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError>;
-
-    fn resolve_path(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError>;
-
-    fn resolve_block_group(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError>;
-
-    fn resolve_accession(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError>;
-
-    fn resolve_annotation(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError>;
+pub fn resolve(
+    region: &Region,
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+) -> Result<ResolvedGenRegion, GenRegionError> {
+    let target = find_target(region, conn, collection_name, sample_name)?;
+    resolve_target(region, conn, target)
 }
 
-impl RegionResolverExt for Region {
-    fn resolve(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError> {
-        let target = find_target(self, conn, collection_name, sample_name)?;
-        resolve_target(self, conn, target)
-    }
+pub fn resolve_path(
+    region: &Region,
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+) -> Result<ResolvedGenRegion, GenRegionError> {
+    let target = find_path_target(region, conn, collection_name, sample_name)?
+        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
+    resolve_target(region, conn, target)
+}
 
-    fn resolve_path(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError> {
-        let target = find_path_target(self, conn, collection_name, sample_name)?
-            .ok_or_else(|| GenRegionError::NotFound(self.name.clone()))?;
-        resolve_target(self, conn, target)
-    }
+pub fn resolve_block_group(
+    region: &Region,
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+) -> Result<ResolvedGenRegion, GenRegionError> {
+    let target = find_block_group_target(region, conn, collection_name, sample_name)?
+        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
+    resolve_target(region, conn, target)
+}
 
-    fn resolve_block_group(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError> {
-        let target = find_block_group_target(self, conn, collection_name, sample_name)?
-            .ok_or_else(|| GenRegionError::NotFound(self.name.clone()))?;
-        resolve_target(self, conn, target)
-    }
+pub fn resolve_accession(
+    region: &Region,
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+) -> Result<ResolvedGenRegion, GenRegionError> {
+    let target = find_accession_target(region, conn, collection_name, sample_name)?
+        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
+    resolve_target(region, conn, target)
+}
 
-    fn resolve_accession(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError> {
-        let target = find_accession_target(self, conn, collection_name, sample_name)?
-            .ok_or_else(|| GenRegionError::NotFound(self.name.clone()))?;
-        resolve_target(self, conn, target)
-    }
-
-    fn resolve_annotation(
-        &self,
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-    ) -> Result<ResolvedGenRegion, GenRegionError> {
-        let target = find_annotation_target(self, conn, collection_name, sample_name)?
-            .ok_or_else(|| GenRegionError::NotFound(self.name.clone()))?;
-        resolve_target(self, conn, target)
-    }
+pub fn resolve_annotation(
+    region: &Region,
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+) -> Result<ResolvedGenRegion, GenRegionError> {
+    let target = find_annotation_target(region, conn, collection_name, sample_name)?
+        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
+    resolve_target(region, conn, target)
 }
 
 fn resolve_target(
@@ -267,24 +233,11 @@ fn find_path_target(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<Option<RegionTarget>, GenRegionError> {
-    let region_name = region.name.to_lowercase();
-    let matches = Path::query_for_collection_and_sample(conn, collection_name, sample_name)
-        .into_iter()
-        .filter(|path| path.name.to_lowercase() == region_name)
-        .collect::<Vec<_>>();
-
-    if matches.is_empty() {
-        return Ok(None);
-    }
-
-    if matches.len() > 1 {
-        return Err(GenRegionError::Ambiguous(format!(
-            "multiple paths named {}",
-            region.name
-        )));
-    }
-
-    let path = matches.into_iter().next().unwrap();
+    let path = match Path::resolve(region, conn, collection_name, sample_name) {
+        Ok(path) => path,
+        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
+        Err(err) => return Err(map_resolution_error(err)),
+    };
     let block_group = BlockGroup::get_by_id(conn, &path.block_group_id)?;
     let anchor_end = path.length(conn)?;
     Ok(Some(RegionTarget {
@@ -303,37 +256,13 @@ fn find_annotation_target(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<Option<RegionTarget>, GenRegionError> {
-    let region_name = region.name.to_lowercase();
-    let matches = Annotation::query(
-        conn,
-        "select a.* from annotations a \
-         join accessions acc on a.accession_id = acc.id \
-         join paths p on acc.path_id = p.id \
-         join block_groups bg on p.block_group_id = bg.id \
-         where bg.collection_name = ?1 and bg.sample_name = ?2 and lower(a.name) = lower(?3)",
-        params![collection_name, sample_name, region_name],
-    );
-
-    if matches.is_empty() {
-        return Ok(None);
-    }
-
-    if matches.len() > 1 {
-        return Err(GenRegionError::Ambiguous(format!(
-            "multiple annotations named {}",
-            region.name
-        )));
-    }
-
-    let annotation = matches.into_iter().next().unwrap();
-    let accession = Accession::query(
-        conn,
-        "select * from accessions where id = ?1",
-        params![annotation.accession_id],
-    )
-    .into_iter()
-    .next()
-    .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
+    let annotation = match Annotation::resolve(region, conn, collection_name, sample_name) {
+        Ok(annotation) => annotation,
+        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
+        Err(err) => return Err(map_resolution_error(err)),
+    };
+    let accession = Accession::get_by_id(conn, &annotation.accession_id)
+        .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
     target_from_accession(
         region,
         conn,
@@ -351,28 +280,11 @@ fn find_accession_target(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<Option<RegionTarget>, GenRegionError> {
-    let region_name = region.name.to_lowercase();
-    let matches = Accession::query(
-        conn,
-        "select a.* from accessions a \
-         join paths p on a.path_id = p.id \
-         join block_groups bg on p.block_group_id = bg.id \
-         where bg.collection_name = ?1 and bg.sample_name = ?2 and lower(a.name) = lower(?3)",
-        params![collection_name, sample_name, region_name],
-    );
-
-    if matches.is_empty() {
-        return Ok(None);
-    }
-
-    if matches.len() > 1 {
-        return Err(GenRegionError::Ambiguous(format!(
-            "multiple accessions named {}",
-            region.name
-        )));
-    }
-
-    let accession = matches.into_iter().next().unwrap();
+    let accession = match Accession::resolve(region, conn, collection_name, sample_name) {
+        Ok(accession) => accession,
+        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
+        Err(err) => return Err(map_resolution_error(err)),
+    };
     target_from_accession(
         region,
         conn,
@@ -390,24 +302,11 @@ fn find_block_group_target(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<Option<RegionTarget>, GenRegionError> {
-    let region_name = region.name.to_lowercase();
-    let matches = Sample::get_block_groups(conn, collection_name, sample_name)
-        .into_iter()
-        .filter(|block_group| block_group.name.to_lowercase() == region_name)
-        .collect::<Vec<_>>();
-
-    if matches.is_empty() {
-        return Ok(None);
-    }
-
-    if matches.len() > 1 {
-        return Err(GenRegionError::Ambiguous(format!(
-            "multiple block groups named {}",
-            region.name
-        )));
-    }
-
-    let block_group = matches.into_iter().next().unwrap();
+    let block_group = match BlockGroup::resolve(region, conn, collection_name, sample_name) {
+        Ok(block_group) => block_group,
+        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
+        Err(err) => return Err(map_resolution_error(err)),
+    };
     let path = BlockGroup::get_current_path(conn, &block_group.id);
     let anchor_end = path.length(conn)?;
     Ok(Some(RegionTarget {
@@ -418,6 +317,18 @@ fn find_block_group_target(
         anchor_start: 0,
         anchor_end,
     }))
+}
+
+fn map_resolution_error<E>(err: RegionResolutionError<E>) -> GenRegionError
+where
+    E: std::error::Error + 'static,
+    GenRegionError: From<E>,
+{
+    match err {
+        RegionResolutionError::NotFound(name) => GenRegionError::NotFound(name),
+        RegionResolutionError::Ambiguous(name) => GenRegionError::Ambiguous(name),
+        RegionResolutionError::Lookup(err) => err.into(),
+    }
 }
 
 fn target_from_accession(
@@ -656,10 +567,14 @@ mod tests {
     #[test]
     fn resolves_annotation_relative_coordinates() {
         let context = setup_context();
-        let resolved = Region::parse("mreB:-2-3")
-            .unwrap()
-            .resolve(context.graph().conn(), "test", Sample::DEFAULT_NAME)
-            .unwrap();
+        let region = Region::parse("mreB:-2-3").unwrap();
+        let resolved = resolve(
+            &region,
+            context.graph().conn(),
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap();
 
         assert_eq!(resolved.block_group.name, "m123");
         assert_eq!(resolved.start, 3);
@@ -669,10 +584,14 @@ mod tests {
     #[test]
     fn resolves_annotation_without_explicit_coordinates() {
         let context = setup_context();
-        let resolved = Region::parse("mreB")
-            .unwrap()
-            .resolve(context.graph().conn(), "test", Sample::DEFAULT_NAME)
-            .unwrap();
+        let region = Region::parse("mreB").unwrap();
+        let resolved = resolve(
+            &region,
+            context.graph().conn(),
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap();
 
         assert_eq!(resolved.block_group.name, "m123");
         assert_eq!(resolved.start, 5);
@@ -682,10 +601,14 @@ mod tests {
     #[test]
     fn resolves_annotation_case_insensitively() {
         let context = setup_context();
-        let resolved = Region::parse("MREB")
-            .unwrap()
-            .resolve(context.graph().conn(), "test", Sample::DEFAULT_NAME)
-            .unwrap();
+        let region = Region::parse("MREB").unwrap();
+        let resolved = resolve(
+            &region,
+            context.graph().conn(),
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap();
 
         assert_eq!(resolved.block_group.name, "m123");
         assert_eq!(resolved.start, 5);
@@ -695,10 +618,14 @@ mod tests {
     #[test]
     fn resolves_typed_path() {
         let context = setup_context();
-        let resolved = Region::parse("m123")
-            .unwrap()
-            .resolve_path(context.graph().conn(), "test", Sample::DEFAULT_NAME)
-            .unwrap();
+        let region = Region::parse("m123").unwrap();
+        let resolved = resolve_path(
+            &region,
+            context.graph().conn(),
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap();
 
         assert_eq!(resolved.kind, ResolvedRegionKind::Path);
         assert_eq!(resolved.path.name, "m123");
@@ -707,10 +634,14 @@ mod tests {
     #[test]
     fn resolves_typed_block_group() {
         let context = setup_context();
-        let resolved = Region::parse("m123")
-            .unwrap()
-            .resolve_block_group(context.graph().conn(), "test", Sample::DEFAULT_NAME)
-            .unwrap();
+        let region = Region::parse("m123").unwrap();
+        let resolved = resolve_block_group(
+            &region,
+            context.graph().conn(),
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap();
 
         assert_eq!(resolved.kind, ResolvedRegionKind::BlockGroup);
         assert_eq!(resolved.block_group.name, "m123");
@@ -719,10 +650,14 @@ mod tests {
     #[test]
     fn resolves_typed_annotation() {
         let context = setup_context();
-        let resolved = Region::parse("mreB")
-            .unwrap()
-            .resolve_annotation(context.graph().conn(), "test", Sample::DEFAULT_NAME)
-            .unwrap();
+        let region = Region::parse("mreB").unwrap();
+        let resolved = resolve_annotation(
+            &region,
+            context.graph().conn(),
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap();
 
         assert_eq!(resolved.kind, ResolvedRegionKind::Annotation);
         assert_eq!(resolved.start, 5);
@@ -732,10 +667,14 @@ mod tests {
     #[test]
     fn typed_resolver_does_not_cross_kinds() {
         let context = setup_context();
-        let err = Region::parse("mreB")
-            .unwrap()
-            .resolve_path(context.graph().conn(), "test", Sample::DEFAULT_NAME)
-            .unwrap_err();
+        let region = Region::parse("mreB").unwrap();
+        let err = resolve_path(
+            &region,
+            context.graph().conn(),
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap_err();
 
         assert!(matches!(err, GenRegionError::NotFound(name) if name == "mreB"));
     }

@@ -5,7 +5,12 @@ use std::{
 };
 
 use anyhow::anyhow;
-use gen_core::{HashId, calculate_hash, config::Workspace, region::Region, traits::Capnp};
+use gen_core::{
+    HashId, calculate_hash,
+    config::Workspace,
+    region::{Region, RegionResolutionError, RegionResolver},
+    traits::Capnp,
+};
 use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -368,6 +373,40 @@ impl Annotation {
     ) -> Result<Vec<Annotation>, AnnotationError> {
         let query = "select * from annotations where annotation_group = ?1";
         Ok(Annotation::query(conn, query, params![group]))
+    }
+}
+
+impl RegionResolver for Annotation {
+    type Connection = GraphConnection;
+    type Error = AnnotationError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = Annotation::query(
+            conn,
+            "SELECT a.* \
+             FROM annotations a \
+             JOIN accessions acc ON a.accession_id = acc.id \
+             JOIN paths p ON acc.path_id = p.id \
+             JOIN block_groups bg ON p.block_group_id = bg.id \
+             WHERE bg.collection_name = ?1 \
+               AND bg.sample_name = ?2 \
+               AND lower(a.name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple annotations named {}",
+                region.name
+            ))),
+        }
     }
 }
 

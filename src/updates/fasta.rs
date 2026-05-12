@@ -17,7 +17,7 @@ use rusqlite::{self, types::Value as SQLValue};
 
 use crate::{
     fasta::FastaError,
-    region::{GenRegionError, Region, RegionResolverExt, ResolvedRegionKind},
+    region::{GenRegionError, Region, resolve_path},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -27,8 +27,6 @@ pub fn update_with_fasta(
     parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
-    start_coordinate: Option<i64>,
-    end_coordinate: Option<i64>,
     fasta_file_path: &str,
     disable_reference_path_update: bool,
 ) -> Result<Operation, FastaError> {
@@ -36,16 +34,10 @@ pub fn update_with_fasta(
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(crate::region::GenRegionError::from)?;
     let resolved_region =
-        match parsed_region.resolve_block_group(conn, collection_name, parent_sample_name) {
+        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
             Ok(region) => region,
             Err(GenRegionError::NotFound(_)) => {
-                match parsed_region.resolve_path(conn, collection_name, parent_sample_name) {
-                    Ok(region) => region,
-                    Err(GenRegionError::NotFound(_)) => {
-                        return Err(GenRegionError::NotFound(region_name.to_string()).into());
-                    }
-                    Err(err) => return Err(err.into()),
-                }
+                return Err(GenRegionError::NotFound(region_name.to_string()).into());
             }
             Err(err) => return Err(err.into()),
         };
@@ -53,10 +45,7 @@ pub fn update_with_fasta(
         if parsed_region.start.is_some() || parsed_region.end.is_some() {
             (resolved_region.start, resolved_region.end)
         } else {
-            let (start_coordinate, end_coordinate) = start_coordinate
-                .zip(end_coordinate)
-                .ok_or_else(|| FastaError::MissingCoordinates(region_name.to_string()))?;
-            resolved_region.offset_range(conn, start_coordinate, end_coordinate)?
+            return Err(FastaError::MissingCoordinates(region_name.to_string()));
         };
 
     let mut fasta_reader = fasta::io::reader::Builder.build_from_path(fasta_file_path)?;
@@ -93,21 +82,7 @@ pub fn update_with_fasta(
     let mut target_states = target_block_groups
         .iter()
         .map(|target_block_group| -> Result<_, FastaError> {
-            let path = match resolved_region.kind {
-                ResolvedRegionKind::BlockGroup => {
-                    BlockGroup::get_current_path(conn, &target_block_group.id)
-                }
-                ResolvedRegionKind::Path => BlockGroup::get_path_by_name(
-                    conn,
-                    &target_block_group.id,
-                    &resolved_region.path.name,
-                )
-                .ok_or_else(|| FastaError::MissingResolvedPath {
-                    path_name: resolved_region.path.name.clone(),
-                    block_group_name: target_block_group.name.clone(),
-                })?,
-                ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => unreachable!(),
-            };
+            let path = BlockGroup::get_current_path(conn, &target_block_group.id);
             let interval_tree = path.intervaltree(conn)?;
             Ok(TargetBlockGroupState {
                 block_group_id: target_block_group.id,
@@ -260,8 +235,6 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::annotations::add_annotation;
-
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
@@ -301,9 +274,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -355,9 +326,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -366,9 +335,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "other sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update_path.to_str().unwrap(),
             true,
         );
@@ -419,9 +386,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -481,9 +446,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update1_path.to_str().unwrap(),
             false,
         );
@@ -493,9 +456,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(4),
-            Some(6),
+            "m123:4-6",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -554,9 +515,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update1_path.to_str().unwrap(),
             false,
         );
@@ -566,9 +525,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(1),
-            Some(6),
+            "m123:1-6",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -633,9 +590,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update1_path.to_str().unwrap(),
             false,
         );
@@ -645,9 +600,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(1),
-            Some(12),
+            "m123:1-12",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -706,9 +659,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update1_path.to_str().unwrap(),
             false,
         );
@@ -718,9 +669,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(6),
-            Some(12),
+            "m123:6-12",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -777,9 +726,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -789,9 +736,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(4),
-            Some(6),
+            "m123:4-6",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -847,9 +792,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -908,9 +851,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(0),
-            Some(5),
+            "m123:0-5",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -966,9 +907,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(29),
-            Some(34),
+            "m123:29-34",
             fasta_update_path.to_str().unwrap(),
             false,
         );
@@ -990,141 +929,5 @@ mod tests {
             BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
         );
-    }
-
-    #[test]
-    fn test_update_with_region_coordinates_and_optional_args() {
-        let context = setup_gen();
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
-
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let fasta_update_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/aaaaaaaa.fa");
-
-        let collection = "test".to_string();
-
-        import_fasta(
-            &context,
-            &fasta_path.to_str().unwrap().to_string(),
-            &collection,
-            Sample::DEFAULT_NAME,
-            false,
-        )
-        .unwrap();
-        let _ = update_with_fasta(
-            &context,
-            &collection,
-            Sample::DEFAULT_NAME,
-            "child sample",
-            "m123:2-5",
-            None,
-            None,
-            fasta_update_path.to_str().unwrap(),
-            false,
-        )
-        .unwrap();
-
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("child sample".to_string()),
-            ),
-        );
-        assert_eq!(block_groups.len(), 1);
-        let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
-        assert_eq!(
-            latest_path.sequence(conn).unwrap(),
-            "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
-        );
-    }
-
-    #[test]
-    fn test_update_requires_coordinates_when_region_has_none() {
-        let context = setup_gen();
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
-
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let fasta_update_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/aaaaaaaa.fa");
-
-        let collection = "test".to_string();
-
-        import_fasta(
-            &context,
-            &fasta_path.to_str().unwrap().to_string(),
-            &collection,
-            Sample::DEFAULT_NAME,
-            false,
-        )
-        .unwrap();
-        let err = update_with_fasta(
-            &context,
-            &collection,
-            Sample::DEFAULT_NAME,
-            "child sample",
-            "m123",
-            None,
-            None,
-            fasta_update_path.to_str().unwrap(),
-            false,
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, FastaError::MissingCoordinates(region) if region == "m123"));
-    }
-
-    #[test]
-    fn test_update_with_annotation_region_name_is_rejected() {
-        let context = setup_gen();
-        let op_conn = context.operations().conn();
-        track_database(context.graph().conn(), op_conn).unwrap();
-
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let fasta_update_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/aaaaaaaa.fa");
-        let collection = "test".to_string();
-
-        import_fasta(
-            &context,
-            &fasta_path.to_str().unwrap().to_string(),
-            &collection,
-            Sample::DEFAULT_NAME,
-            false,
-        )
-        .unwrap();
-
-        add_annotation(
-            &context,
-            &collection,
-            "mreB",
-            Some("genes"),
-            Sample::DEFAULT_NAME,
-            "m123:5-15",
-        )
-        .unwrap();
-
-        let err = update_with_fasta(
-            &context,
-            &collection,
-            Sample::DEFAULT_NAME,
-            "child sample",
-            "mreB",
-            Some(-2),
-            Some(3),
-            fasta_update_path.to_str().unwrap(),
-            false,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            err,
-            FastaError::RegionError(GenRegionError::NotFound(region)) if region == "mreB"
-        ));
     }
 }

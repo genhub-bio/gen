@@ -5,6 +5,7 @@ use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     calculate_hash, is_end_node, is_start_node,
     range::{Range, RangeMapping},
+    region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
@@ -861,6 +862,38 @@ impl Path {
             }
         }
         Ok(partitioned_nodes)
+    }
+}
+
+impl RegionResolver for Path {
+    type Connection = GraphConnection;
+    type Error = PathError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = Path::query(
+            conn,
+            "SELECT paths.* \
+             FROM paths \
+             JOIN block_groups ON paths.block_group_id = block_groups.id \
+             WHERE block_groups.collection_name = ?1 \
+               AND block_groups.sample_name = ?2 \
+               AND lower(paths.name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple paths named {}",
+                region.name
+            ))),
+        }
     }
 }
 

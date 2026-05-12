@@ -27,6 +27,28 @@ pub enum RegionParseError {
     InvalidCoordinate(#[from] ParseIntError),
 }
 
+#[derive(Debug, Error)]
+pub enum RegionResolutionError<E: std::error::Error + 'static> {
+    #[error("Region not found: {0}")]
+    NotFound(String),
+    #[error("Region is ambiguous: {0}")]
+    Ambiguous(String),
+    #[error(transparent)]
+    Lookup(#[from] E),
+}
+
+pub trait RegionResolver: Sized {
+    type Connection;
+    type Error: std::error::Error + 'static;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>>;
+}
+
 impl Region {
     pub fn parse(region_string: &str) -> Result<Self, RegionParseError> {
         let (name, coordinates) = match region_string.split_once(':') {

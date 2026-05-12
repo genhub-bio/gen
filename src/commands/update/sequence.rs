@@ -25,12 +25,6 @@ pub struct Command {
     /// The name of the region to update (eg "chr1")
     #[arg(long)]
     region_name: String,
-    /// The start coordinate for the region to add the library to
-    #[arg(long)]
-    start: Option<i64>,
-    /// The end coordinate for the region to add the library to
-    #[arg(short, long)]
-    end: Option<i64>,
     /// Do not update the sample's reference path
     #[arg(long, action)]
     no_reference_path_update: bool,
@@ -57,8 +51,6 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.sample.as_str(),
         &cmd.new_sample,
         &cmd.region_name,
-        cmd.start,
-        cmd.end,
         &cmd.sequence,
         cmd.no_reference_path_update,
     ) {

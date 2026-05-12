@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::{
     graphs::{BlockGroupChunk, GraphError, NodePoint, load_block_group_chunk, stitch},
-    region::{Region, RegionResolverExt},
+    region::{Region, resolve},
 };
 
 #[derive(Debug, Error, PartialEq)]
@@ -47,8 +47,7 @@ pub fn get_path(
 ) -> Result<Path, GraphOperationError> {
     let resolved_region = Region::parse(region_name)
         .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
-    let resolved_region = resolved_region
-        .resolve(conn, collection_name, sample_name)
+    let resolved_region = resolve(&resolved_region, conn, collection_name, sample_name)
         .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
     let block_group_id = resolved_region.block_group.id;
 
@@ -284,8 +283,7 @@ fn get_block_group_id(
 ) -> Result<HashId, GraphOperationError> {
     let resolved_region = Region::parse(region_name)
         .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
-    resolved_region
-        .resolve(conn, collection_name, parent_sample_name)
+    resolve(&resolved_region, conn, collection_name, parent_sample_name)
         .map(|resolved| resolved.block_group.id)
         .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))
 }
@@ -608,9 +606,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             "test1",
-            "m123",
-            Some(3),
-            Some(5),
+            "m123:3-5",
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -621,9 +617,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            "m123",
-            Some(15),
-            Some(20),
+            "m123:15-20",
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -726,9 +720,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             "test1",
-            "m123",
-            Some(3),
-            Some(5),
+            "m123:3-5",
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -739,9 +731,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            "m123",
-            Some(15),
-            Some(20),
+            "m123:15-20",
             fasta_update_path.to_str().unwrap(),
             false,
         )

@@ -663,8 +663,6 @@ fn update_with_fasta(
     sample: String,
     new_sample: String,
     region_name: String,
-    start: Nullable<i64>,
-    end: Nullable<i64>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -682,8 +680,6 @@ fn update_with_fasta(
         &sample,
         &new_sample,
         &region_name,
-        nullable_i64_to_option(start),
-        nullable_i64_to_option(end),
         &filename,
         false,
     ) {
@@ -878,8 +874,6 @@ fn update_with_library_files(
     sample: String,
     new_sample: String,
     path_name: String,
-    start: Nullable<i64>,
-    end: Nullable<i64>,
     library: String,
     parts: String,
 ) -> std::result::Result<String, Error> {
@@ -901,8 +895,6 @@ fn update_with_library_files(
         &sample,
         &new_sample,
         &path_name,
-        nullable_i64_to_option(start),
-        nullable_i64_to_option(end),
         parts_list,
         Some(&parts),
         Some(&library),
@@ -926,8 +918,6 @@ fn update_with_library(
     sample: Nullable<String>,
     new_sample_name: String,
     path_name: String,
-    start: Nullable<i64>,
-    end: Nullable<i64>,
     parts_list: Robj,
 ) -> std::result::Result<String, Error> {
     let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
@@ -949,8 +939,6 @@ fn update_with_library(
         &sample_name,
         &new_sample_name,
         &path_name,
-        nullable_i64_to_option(start),
-        nullable_i64_to_option(end),
         rust_parts_list,
         None,
         None,
@@ -975,8 +963,6 @@ fn update_with_sequence(
     sample: String,
     new_sample: String,
     region_name: String,
-    start: Nullable<i64>,
-    end: Nullable<i64>,
     no_reference_path_update: bool,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
@@ -995,8 +981,6 @@ fn update_with_sequence(
         &sample,
         &new_sample,
         &region_name,
-        nullable_i64_to_option(start),
-        nullable_i64_to_option(end),
         &sequence,
         no_reference_path_update,
     ) {

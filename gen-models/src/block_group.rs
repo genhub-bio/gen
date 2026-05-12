@@ -7,7 +7,9 @@ use std::{
 use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
     PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
-    calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp,
+    calculate_hash, is_end_node, is_start_node, is_terminal,
+    region::{Region, RegionResolutionError, RegionResolver},
+    traits::Capnp,
 };
 use gen_graph::{
     GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
@@ -1287,6 +1289,36 @@ impl BlockGroup {
         BlockGroupEdge::bulk_create(conn, &all_edges);
 
         Ok(new_node_ids_by_old)
+    }
+}
+
+impl RegionResolver for BlockGroup {
+    type Connection = GraphConnection;
+    type Error = BlockGroupError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = BlockGroup::query(
+            conn,
+            "SELECT * FROM block_groups \
+             WHERE collection_name = ?1 \
+               AND sample_name = ?2 \
+               AND lower(name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple block groups named {}",
+                region.name
+            ))),
+        }
     }
 }
 

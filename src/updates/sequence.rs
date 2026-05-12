@@ -15,7 +15,7 @@ use rusqlite::{self, params};
 
 use crate::{
     errors::SequenceUpdateError,
-    region::{GenRegionError, Region, RegionResolverExt, ResolvedRegionKind},
+    region::{GenRegionError, Region, resolve_path},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -25,8 +25,6 @@ pub fn update_with_sequence(
     parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
-    start_coordinate: Option<i64>,
-    end_coordinate: Option<i64>,
     sequence: &str,
     disable_reference_path_update: bool,
 ) -> Result<Operation, SequenceUpdateError> {
@@ -34,7 +32,7 @@ pub fn update_with_sequence(
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(crate::region::GenRegionError::from)?;
     let resolved_region =
-        match parsed_region.resolve_path(conn, collection_name, parent_sample_name) {
+        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
             Ok(region) => region,
             Err(GenRegionError::NotFound(_)) => {
                 return Err(GenRegionError::NotFound(region_name.to_string()).into());
@@ -45,10 +43,9 @@ pub fn update_with_sequence(
         if parsed_region.start.is_some() || parsed_region.end.is_some() {
             (resolved_region.start, resolved_region.end)
         } else {
-            let (start_coordinate, end_coordinate) = start_coordinate
-                .zip(end_coordinate)
-                .ok_or_else(|| SequenceUpdateError::MissingCoordinates(region_name.to_string()))?;
-            resolved_region.offset_range(conn, start_coordinate, end_coordinate)?
+            return Err(SequenceUpdateError::MissingCoordinates(
+                region_name.to_string(),
+            ));
         };
 
     let _new_sample = Sample::get_or_create(conn, new_sample_name);
@@ -195,8 +192,6 @@ pub fn update_with_sequence(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::annotations::add_annotation;
-
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
@@ -232,9 +227,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -280,9 +273,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -291,9 +282,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "other sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             true,
         );
@@ -341,9 +330,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -353,9 +340,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(4),
-            Some(6),
+            "m123:4-6",
             "TTTTTTTT",
             false,
         );
@@ -405,9 +390,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -417,9 +400,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(1),
-            Some(6),
+            "m123:1-6",
             "TTTTTTTT",
             false,
         );
@@ -475,9 +456,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -487,9 +466,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(1),
-            Some(12),
+            "m123:1-12",
             "TTTTTTTT",
             false,
         );
@@ -539,9 +516,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -551,9 +526,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(6),
-            Some(12),
+            "m123:6-12",
             "TTTTTTTT",
             false,
         );
@@ -603,9 +576,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -615,9 +586,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            Some(4),
-            Some(6),
+            "m123:4-6",
             "AAAAAAAA",
             false,
         );
@@ -666,9 +635,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            Some(2),
-            Some(5),
+            "m123:2-5",
             "",
             false,
         );
@@ -693,85 +660,5 @@ mod tests {
             latest_path.sequence(conn).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
-    }
-
-    #[test]
-    fn test_update_requires_coordinates_when_region_has_none() {
-        let context = setup_gen();
-        let op_conn = context.operations().conn();
-        track_database(context.graph().conn(), op_conn).unwrap();
-
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let collection = "test".to_string();
-
-        import_fasta(
-            &context,
-            &fasta_path.to_str().unwrap().to_string(),
-            &collection,
-            Sample::DEFAULT_NAME,
-            false,
-        )
-        .unwrap();
-        let err = update_with_sequence(
-            &context,
-            &collection,
-            Sample::DEFAULT_NAME,
-            "child sample",
-            "m123",
-            None,
-            None,
-            "AAAAAAAA",
-            false,
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, SequenceUpdateError::MissingCoordinates(_)));
-    }
-
-    #[test]
-    fn test_update_with_annotation_region_name_is_rejected() {
-        let context = setup_gen();
-        let op_conn = context.operations().conn();
-        track_database(context.graph().conn(), op_conn).unwrap();
-
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let collection = "test".to_string();
-
-        import_fasta(
-            &context,
-            &fasta_path.to_str().unwrap().to_string(),
-            &collection,
-            Sample::DEFAULT_NAME,
-            false,
-        )
-        .unwrap();
-
-        add_annotation(
-            &context,
-            &collection,
-            "mreB",
-            Some("genes"),
-            Sample::DEFAULT_NAME,
-            "m123:5-15",
-        )
-        .unwrap();
-
-        let err = update_with_sequence(
-            &context,
-            &collection,
-            Sample::DEFAULT_NAME,
-            "child sample",
-            "mreB",
-            Some(-2),
-            Some(3),
-            "AAAA",
-            false,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            err,
-            SequenceUpdateError::RegionError(GenRegionError::NotFound(region)) if region == "mreB"
-        ));
     }
 }

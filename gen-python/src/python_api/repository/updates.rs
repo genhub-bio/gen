@@ -19,7 +19,7 @@ use crate::python_api::sequence_part::PySequencePart;
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, sample, new_sample, region_name, start=None, end=None, name=None))]
+    #[pyo3(signature = (filename, sample, new_sample, region_name, name=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_fasta(
         &self,
@@ -27,8 +27,6 @@ impl PyRepository {
         sample: String,
         new_sample: String,
         region_name: String,
-        start: Option<i64>,
-        end: Option<i64>,
         name: Option<String>,
     ) -> PyResult<String> {
         let name = name.unwrap_or_else(|| self.get_default_collection());
@@ -39,8 +37,6 @@ impl PyRepository {
                 &sample,
                 &new_sample,
                 &region_name,
-                start,
-                end,
                 &filename,
                 false,
             )
@@ -165,7 +161,7 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (sequence, sample, new_sample, region_name, start=None, end=None, name=None, no_reference_path_update=false))]
+    #[pyo3(signature = (sequence, sample, new_sample, region_name, name=None, no_reference_path_update=false))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_sequence(
         &self,
@@ -173,8 +169,6 @@ impl PyRepository {
         sample: String,
         new_sample: String,
         region_name: String,
-        start: Option<i64>,
-        end: Option<i64>,
         name: Option<String>,
         no_reference_path_update: bool,
     ) -> PyResult<String> {
@@ -186,8 +180,6 @@ impl PyRepository {
                 &sample,
                 &new_sample,
                 &region_name,
-                start,
-                end,
                 &sequence,
                 no_reference_path_update,
             )
@@ -196,7 +188,7 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (name, sample, new_sample_name, path_name, parts_list, start=None, end=None))]
+    #[pyo3(signature = (name, sample, new_sample_name, path_name, parts_list))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_library(
         &self,
@@ -205,8 +197,6 @@ impl PyRepository {
         new_sample_name: String,
         path_name: String,
         parts_list: Vec<Vec<PySequencePart>>,
-        start: Option<i64>,
-        end: Option<i64>,
     ) -> PyResult<String> {
         let name = name.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
@@ -230,8 +220,6 @@ impl PyRepository {
                 &sample,
                 &new_sample_name,
                 &path_name,
-                start,
-                end,
                 rust_parts_list.clone(),
                 None,
                 None,
@@ -241,7 +229,7 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (name, sample, new_sample, path_name, library, parts, start=None, end=None))]
+    #[pyo3(signature = (name, sample, new_sample, path_name, library, parts))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_library_files(
         &self,
@@ -251,8 +239,6 @@ impl PyRepository {
         path_name: String,
         library: String,
         parts: String,
-        start: Option<i64>,
-        end: Option<i64>,
     ) -> PyResult<String> {
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
@@ -264,8 +250,6 @@ impl PyRepository {
                 &sample,
                 &new_sample,
                 &path_name,
-                start,
-                end,
                 parts_list.clone(),
                 Some(&parts),
                 Some(&library),
