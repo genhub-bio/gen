@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 
-use gen_core::{HashId, Strand, calculate_hash, traits::Capnp};
+use gen_core::{
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
+    traits::Capnp,
+};
+use intervaltree::IntervalTree;
 use itertools::Itertools;
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
@@ -13,7 +17,7 @@ use crate::{
     traits::*,
 };
 
-#[derive(Deserialize, Serialize, Debug, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq)]
 pub struct Accession {
     pub id: HashId,
     pub name: String,
@@ -342,6 +346,52 @@ impl Accession {
             order by ap.index_in_path;";
         AccessionEdge::query(conn, query, params![accession_id])
     }
+
+    pub fn intervaltree(&self, conn: &GraphConnection) -> IntervalTree<i64, NodeIntervalBlock> {
+        let edges = Self::get_edges_by_id(conn, &self.id);
+        assert!(
+            !edges.is_empty(),
+            "Accession {} has no edges in accession_paths",
+            self.id
+        );
+
+        let mut offset = 0;
+        let mut blocks = vec![NodeIntervalBlock {
+            node_id: PATH_START_NODE_ID,
+            start: i64::MIN + 1,
+            end: 0,
+            sequence_start: 0,
+            sequence_end: 0,
+            strand: Strand::Forward,
+        }];
+
+        for (into, out_of) in edges.iter().tuple_windows() {
+            let block_len = out_of.source_coordinate - into.target_coordinate;
+            blocks.push(NodeIntervalBlock {
+                node_id: into.target_node_id,
+                start: offset,
+                end: offset + block_len,
+                sequence_start: into.target_coordinate,
+                sequence_end: out_of.source_coordinate,
+                strand: into.target_strand,
+            });
+            offset += block_len;
+        }
+
+        blocks.push(NodeIntervalBlock {
+            node_id: PATH_END_NODE_ID,
+            start: offset,
+            end: i64::MAX - 1,
+            sequence_start: 0,
+            sequence_end: 0,
+            strand: Strand::Forward,
+        });
+
+        blocks
+            .into_iter()
+            .map(|block| (block.start..block.end, block))
+            .collect()
+    }
 }
 
 impl Query for Accession {
@@ -540,9 +590,13 @@ impl Query for AccessionPath {
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
+    use gen_core::HashId;
 
     use super::*;
-    use crate::test_helpers::{get_connection, setup_block_group};
+    use crate::{
+        block_group::{BlockGroup, PathCache},
+        test_helpers::{get_connection, interval_tree_verify, setup_block_group},
+    };
 
     #[test]
     fn test_accession_capnp_serialization() {
@@ -631,6 +685,41 @@ mod tests {
                 block_group_id,
                 parent_accession_id: None,
             }]
+        );
+    }
+
+    #[test]
+    fn test_intervaltree() {
+        let conn = &get_connection(None).unwrap();
+        let (_bg, path) = setup_block_group(conn);
+        let mut path_cache = PathCache::new(conn);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "test", 10, 30, &mut path_cache).unwrap();
+
+        let tree = accession.intervaltree(conn);
+        interval_tree_verify(
+            &tree,
+            0,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-t-node"),
+                start: 0,
+                end: 10,
+                sequence_start: 0,
+                sequence_end: 10,
+                strand: Strand::Forward,
+            }],
+        );
+        interval_tree_verify(
+            &tree,
+            10,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-c-node"),
+                start: 10,
+                end: 20,
+                sequence_start: 0,
+                sequence_end: 10,
+                strand: Strand::Forward,
+            }],
         );
     }
 }

@@ -5,12 +5,16 @@ use std::{
 };
 
 use anyhow::anyhow;
-use gen_core::{HashId, calculate_hash, config::Workspace, region::Region, traits::Capnp};
+use gen_core::{
+    HashId, NodeIntervalBlock, calculate_hash, config::Workspace, region::Region, traits::Capnp,
+};
+use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    accession::Accession,
     block_group::{BlockGroup, PathCache},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, GraphConnection, OperationsConnection},
@@ -368,6 +372,17 @@ impl Annotation {
     ) -> Result<Vec<Annotation>, AnnotationError> {
         let query = "select * from annotations where annotation_group = ?1";
         Ok(Annotation::query(conn, query, params![group]))
+    }
+
+    pub fn intervaltree(&self, conn: &GraphConnection) -> IntervalTree<i64, NodeIntervalBlock> {
+        Accession::get_by_id(conn, &self.accession_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Missing accession {} for annotation {}",
+                    self.accession_id, self.id
+                )
+            })
+            .intervaltree(conn)
     }
 }
 
