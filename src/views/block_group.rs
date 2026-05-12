@@ -627,28 +627,44 @@ pub fn view_block_group(
                         explorer_state.annotation_group_toggle_requested.take()
                     {
                         if explorer_state.is_annotation_group_active(&toggled_group) {
-                            if current_block_group.is_some() {
+                            if let Some(bg) = current_block_group.as_ref() {
                                 let visible_node_ranges = visible_ranges_by_node(&block_graph);
-                                let spans = match load_annotations_for_group(
-                                    conn,
-                                    &toggled_group,
-                                    &visible_node_ranges,
-                                ) {
-                                    Ok(spans) => spans,
-                                    Err(err) => {
+                                let entry = explorer.annotation_group_entry(&toggled_group);
+                                let spans = match entry.map(|entry| {
+                                    load_annotations_for_group(&AnnotationGroupTrackRequest {
+                                        conn,
+                                        current_block_group: bg,
+                                        entry,
+                                        visible_ranges_by_node: &visible_node_ranges,
+                                    })
+                                }) {
+                                    Some(Ok(spans)) => spans,
+                                    Some(Err(err)) => {
                                         messages.push_warn(format!(
                                             "Failed to load annotations for group {}: {err}",
                                             toggled_group
                                         ));
                                         Vec::new()
                                     }
+                                    None => Vec::new(),
                                 };
                                 if spans.is_empty() {
                                     explorer_state.deactivate_annotation_group(&toggled_group);
                                 } else {
+                                    let title = if let Some(entry) =
+                                        explorer.annotation_group_entry(&toggled_group)
+                                    {
+                                        if bg.sample_name == entry.sample_name {
+                                            entry.name.clone()
+                                        } else {
+                                            format!("{} ({})", entry.name, entry.sample_name)
+                                        }
+                                    } else {
+                                        toggled_group.clone()
+                                    };
                                     annotation_group_tracks.insert(
                                         toggled_group.clone(),
-                                        AnnotationTrack::new(toggled_group, spans),
+                                        AnnotationTrack::new(title, spans),
                                     );
                                 }
                             }
