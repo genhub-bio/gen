@@ -1,10 +1,8 @@
+use gen_annotations::projection::{accession_edges_to_segments, project_annotation_segments};
 pub use gen_core::region::Region;
-use gen_core::{
-    HashId, PathBlock, Strand, is_end_node, is_start_node,
-    region::{RegionParseError, RegionResolutionError, RegionResolver},
-};
+use gen_core::region::{RegionParseError, RegionResolutionError, RegionResolver};
 use gen_models::{
-    accession::{Accession, AccessionEdge, AccessionError},
+    accession::{Accession, AccessionError},
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
@@ -87,21 +85,31 @@ struct RegionTarget {
     anchor_end: i64,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct AccessionSegment {
-    node_id: HashId,
-    start: i64,
-    end: i64,
-}
-
 pub fn resolve(
     region: &Region,
     conn: &GraphConnection,
     collection_name: &str,
     sample_name: &str,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let target = find_target(region, conn, collection_name, sample_name)?;
-    resolve_target(region, conn, target)
+    match resolve_block_group(region, conn, collection_name, sample_name) {
+        Ok(region) => return Ok(region),
+        Err(GenRegionError::NotFound(_)) => {}
+        Err(err) => return Err(err),
+    }
+
+    match resolve_path(region, conn, collection_name, sample_name) {
+        Ok(region) => return Ok(region),
+        Err(GenRegionError::NotFound(_)) => {}
+        Err(err) => return Err(err),
+    }
+
+    match resolve_annotation(region, conn, collection_name, sample_name) {
+        Ok(region) => return Ok(region),
+        Err(GenRegionError::NotFound(_)) => {}
+        Err(err) => return Err(err),
+    }
+
+    resolve_accession(region, conn, collection_name, sample_name)
 }
 
 pub fn resolve_path(
@@ -110,9 +118,28 @@ pub fn resolve_path(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let target = find_path_target(region, conn, collection_name, sample_name)?
-        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
-    resolve_target(region, conn, target)
+    let path = match Path::resolve(region, conn, collection_name, sample_name) {
+        Ok(path) => path,
+        Err(RegionResolutionError::NotFound(_)) => {
+            return Err(GenRegionError::NotFound(region.name.clone()));
+        }
+        Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
+        Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
+    };
+    let block_group = BlockGroup::get_by_id(conn, &path.block_group_id)?;
+    let anchor_end = path.length(conn)?;
+    resolve_target(
+        region,
+        conn,
+        RegionTarget {
+            kind: RegionTargetKind::Path,
+            block_group,
+            path,
+            accession: None,
+            anchor_start: 0,
+            anchor_end,
+        },
+    )
 }
 
 pub fn resolve_block_group(
@@ -121,9 +148,28 @@ pub fn resolve_block_group(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let target = find_block_group_target(region, conn, collection_name, sample_name)?
-        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
-    resolve_target(region, conn, target)
+    let block_group = match BlockGroup::resolve(region, conn, collection_name, sample_name) {
+        Ok(block_group) => block_group,
+        Err(RegionResolutionError::NotFound(_)) => {
+            return Err(GenRegionError::NotFound(region.name.clone()));
+        }
+        Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
+        Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
+    };
+    let path = BlockGroup::get_current_path(conn, &block_group.id);
+    let anchor_end = path.length(conn)?;
+    resolve_target(
+        region,
+        conn,
+        RegionTarget {
+            kind: RegionTargetKind::BlockGroup,
+            block_group,
+            path,
+            accession: None,
+            anchor_start: 0,
+            anchor_end,
+        },
+    )
 }
 
 pub fn resolve_accession(
@@ -132,8 +178,22 @@ pub fn resolve_accession(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let target = find_accession_target(region, conn, collection_name, sample_name)?
-        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
+    let accession = match Accession::resolve(region, conn, collection_name, sample_name) {
+        Ok(accession) => accession,
+        Err(RegionResolutionError::NotFound(_)) => {
+            return Err(GenRegionError::NotFound(region.name.clone()));
+        }
+        Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
+        Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
+    };
+    let target = target_from_accession(
+        region,
+        conn,
+        collection_name,
+        sample_name,
+        RegionTargetKind::Accession,
+        accession,
+    )?;
     resolve_target(region, conn, target)
 }
 
@@ -143,8 +203,24 @@ pub fn resolve_annotation(
     collection_name: &str,
     sample_name: &str,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let target = find_annotation_target(region, conn, collection_name, sample_name)?
-        .ok_or_else(|| GenRegionError::NotFound(region.name.clone()))?;
+    let annotation = match Annotation::resolve(region, conn, collection_name, sample_name) {
+        Ok(annotation) => annotation,
+        Err(RegionResolutionError::NotFound(_)) => {
+            return Err(GenRegionError::NotFound(region.name.clone()));
+        }
+        Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
+        Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
+    };
+    let accession = Accession::get_by_id(conn, &annotation.accession_id)
+        .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
+    let target = target_from_accession(
+        region,
+        conn,
+        collection_name,
+        sample_name,
+        RegionTargetKind::Annotation,
+        accession,
+    )?;
     resolve_target(region, conn, target)
 }
 
@@ -200,135 +276,6 @@ fn resolve_target(
         start,
         end,
     })
-}
-
-fn find_target(
-    region: &Region,
-    conn: &GraphConnection,
-    collection_name: &str,
-    sample_name: &str,
-) -> Result<RegionTarget, GenRegionError> {
-    if let Some(target) = find_block_group_target(region, conn, collection_name, sample_name)? {
-        return Ok(target);
-    }
-
-    if let Some(target) = find_path_target(region, conn, collection_name, sample_name)? {
-        return Ok(target);
-    }
-
-    if let Some(target) = find_annotation_target(region, conn, collection_name, sample_name)? {
-        return Ok(target);
-    }
-
-    if let Some(target) = find_accession_target(region, conn, collection_name, sample_name)? {
-        return Ok(target);
-    }
-
-    Err(GenRegionError::NotFound(region.name.clone()))
-}
-
-fn find_path_target(
-    region: &Region,
-    conn: &GraphConnection,
-    collection_name: &str,
-    sample_name: &str,
-) -> Result<Option<RegionTarget>, GenRegionError> {
-    let path = match Path::resolve(region, conn, collection_name, sample_name) {
-        Ok(path) => path,
-        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
-        Err(err) => return Err(map_resolution_error(err)),
-    };
-    let block_group = BlockGroup::get_by_id(conn, &path.block_group_id)?;
-    let anchor_end = path.length(conn)?;
-    Ok(Some(RegionTarget {
-        kind: RegionTargetKind::Path,
-        block_group,
-        path,
-        accession: None,
-        anchor_start: 0,
-        anchor_end,
-    }))
-}
-
-fn find_annotation_target(
-    region: &Region,
-    conn: &GraphConnection,
-    collection_name: &str,
-    sample_name: &str,
-) -> Result<Option<RegionTarget>, GenRegionError> {
-    let annotation = match Annotation::resolve(region, conn, collection_name, sample_name) {
-        Ok(annotation) => annotation,
-        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
-        Err(err) => return Err(map_resolution_error(err)),
-    };
-    let accession = Accession::get_by_id(conn, &annotation.accession_id)
-        .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
-    target_from_accession(
-        region,
-        conn,
-        collection_name,
-        sample_name,
-        RegionTargetKind::Annotation,
-        accession,
-    )
-    .map(Some)
-}
-
-fn find_accession_target(
-    region: &Region,
-    conn: &GraphConnection,
-    collection_name: &str,
-    sample_name: &str,
-) -> Result<Option<RegionTarget>, GenRegionError> {
-    let accession = match Accession::resolve(region, conn, collection_name, sample_name) {
-        Ok(accession) => accession,
-        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
-        Err(err) => return Err(map_resolution_error(err)),
-    };
-    target_from_accession(
-        region,
-        conn,
-        collection_name,
-        sample_name,
-        RegionTargetKind::Accession,
-        accession,
-    )
-    .map(Some)
-}
-
-fn find_block_group_target(
-    region: &Region,
-    conn: &GraphConnection,
-    collection_name: &str,
-    sample_name: &str,
-) -> Result<Option<RegionTarget>, GenRegionError> {
-    let block_group = match BlockGroup::resolve(region, conn, collection_name, sample_name) {
-        Ok(block_group) => block_group,
-        Err(RegionResolutionError::NotFound(_)) => return Ok(None),
-        Err(err) => return Err(map_resolution_error(err)),
-    };
-    let path = BlockGroup::get_current_path(conn, &block_group.id);
-    let anchor_end = path.length(conn)?;
-    Ok(Some(RegionTarget {
-        kind: RegionTargetKind::BlockGroup,
-        block_group,
-        path,
-        accession: None,
-        anchor_start: 0,
-        anchor_end,
-    }))
-}
-
-fn map_resolution_error<E>(err: RegionResolutionError<E>) -> GenRegionError
-where
-    E: std::error::Error + 'static,
-    GenRegionError: From<E>,
-{
-    match err {
-        RegionResolutionError::NotFound(name) => GenRegionError::NotFound(name),
-        RegionResolutionError::Ambiguous(name) => GenRegionError::Ambiguous(name),
-        RegionResolutionError::Lookup(err) => err.into(),
-    }
 }
 
 fn target_from_accession(
@@ -390,103 +337,18 @@ fn accession_bounds(
     path: &Path,
     accession: &Accession,
 ) -> Result<(i64, i64), GenRegionError> {
-    let blocks = path.blocks(conn)?;
-    let segments = accession_segments(conn, &accession.id);
+    let projected = project_annotation_segments(
+        &accession_edges_to_segments(&Accession::get_edges_by_id(conn, &accession.id)),
+        &path.blocks(conn)?,
+        false,
+    );
 
-    let mut min_coordinate = None;
-    let mut max_coordinate = None;
+    let start = projected.iter().map(|segment| segment.range.start).min();
+    let end = projected.iter().map(|segment| segment.range.end).max();
 
-    for segment in segments {
-        let block = blocks
-            .iter()
-            .find(|block| {
-                block.node_id == segment.node_id
-                    && segment.start >= block.sequence_start
-                    && segment.end <= block.sequence_end
-            })
-            .ok_or_else(|| GenRegionError::Unmappable(accession.name.clone()))?;
-        let start = translate_coordinate(block, segment.start);
-        let end = translate_coordinate(block, segment.end);
-        let segment_start = start.min(end);
-        let segment_end = start.max(end);
-        min_coordinate = Some(
-            min_coordinate
-                .map(|current: i64| current.min(segment_start))
-                .unwrap_or(segment_start),
-        );
-        max_coordinate = Some(
-            max_coordinate
-                .map(|current: i64| current.max(segment_end))
-                .unwrap_or(segment_end),
-        );
-    }
-
-    match (min_coordinate, max_coordinate) {
-        (Some(start), Some(end)) => Ok((start, end)),
+    match (start, end) {
+        (Some(start), Some(end)) if start <= end => Ok((start, end)),
         _ => Err(GenRegionError::Unmappable(accession.name.clone())),
-    }
-}
-
-fn accession_segments(conn: &GraphConnection, accession_id: &HashId) -> Vec<AccessionSegment> {
-    let edges = Accession::get_edges_by_id(conn, accession_id);
-    edges_to_segments(&edges)
-}
-
-fn edges_to_segments(edges: &[AccessionEdge]) -> Vec<AccessionSegment> {
-    let mut segments = Vec::new();
-    let mut current_node = None;
-    let mut current_start = None;
-
-    for edge in edges {
-        if is_start_node(edge.source_node_id) {
-            current_node = Some(edge.target_node_id);
-            current_start = Some(edge.target_coordinate);
-            continue;
-        }
-
-        if is_end_node(edge.target_node_id) {
-            if let (Some(node_id), Some(start)) = (current_node, current_start) {
-                let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                    (start, edge.source_coordinate)
-                } else {
-                    (edge.source_coordinate, start)
-                };
-                segments.push(AccessionSegment {
-                    node_id,
-                    start: segment_start,
-                    end: segment_end,
-                });
-            }
-            break;
-        }
-
-        if let (Some(node_id), Some(start)) = (current_node, current_start) {
-            let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                (start, edge.source_coordinate)
-            } else {
-                (edge.source_coordinate, start)
-            };
-            segments.push(AccessionSegment {
-                node_id,
-                start: segment_start,
-                end: segment_end,
-            });
-        }
-
-        current_node = Some(edge.target_node_id);
-        current_start = Some(edge.target_coordinate);
-    }
-
-    segments
-}
-
-fn translate_coordinate(block: &PathBlock, coordinate: i64) -> i64 {
-    match block.strand {
-        Strand::Forward => block.path_start + coordinate - block.sequence_start,
-        Strand::Reverse => block.path_start + block.sequence_end - coordinate,
-        Strand::Unknown | Strand::ImportantButUnknown => {
-            block.path_start + coordinate - block.sequence_start
-        }
     }
 }
 
