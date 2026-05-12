@@ -180,6 +180,7 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   ctrl$block_group_id <- if (inherits(block_group_id, "gen_hash_id")) block_group_id$hash_id else as.character(block_group_id)
   ctrl$detail <- detail
   ctrl$ops <- character()
+  ctrl$track_specs <- list()
   ctrl$rows <- rows %||% 24L
   ctrl$cols <- cols %||% 80L
 
@@ -191,7 +192,23 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   ctrl$render_frame <- function(cols = ctrl$cols, rows = ctrl$rows) {
     ctrl$cols <- cols
     ctrl$rows <- rows
-    graph_render_frame(ctrl$db_path, ctrl$block_group_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"))
+    graph_render_frame(ctrl$db_path, ctrl$block_group_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE))
+  }
+
+  ctrl$add_track_group <- function(group) {
+    ctrl$track_specs <- c(ctrl$track_specs, list(list(type = "group", name = group)))
+    invisible(ctrl)
+  }
+
+  ctrl$add_track_file <- function(path, name = NULL, sample = NULL) {
+    spec <- list(type = "file", path = path, name = name, sample = sample)
+    ctrl$track_specs <- c(ctrl$track_specs, list(spec))
+    invisible(ctrl)
+  }
+
+  ctrl$clear_tracks <- function() {
+    ctrl$track_specs <- list()
+    invisible(ctrl)
   }
 
   ctrl$zoom_in <- function() {

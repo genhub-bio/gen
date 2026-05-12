@@ -1,6 +1,7 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{BufWriter, Read},
+    io::{BufReader, BufWriter, Cursor, Read},
     path::{Path, PathBuf},
 };
 
@@ -20,11 +21,19 @@ use r#gen::{
         combinatorial_library::{SequencePart, parse_library},
         graph_search::{GenGraphMatcher, GraphLocus, SeedIndex, SequenceKind},
     },
-    views::gen_graph_widget::{
-        GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
+    views::{
+        annotation_track::AnnotationTrack,
+        annotations::{
+            load_annotations_for_group, parse_translated_bed, parse_translated_bed_file,
+            parse_translated_gff, parse_translated_gff_file,
+        },
+        gen_graph_widget::{
+            GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
+        },
     },
 };
-use gen_core::{HashId, Strand, config::Workspace};
+use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
+use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
@@ -40,7 +49,7 @@ use gen_tui::{
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use rusqlite::{Connection, types::ValueRef};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 fn nullable_string_to_option(value: Nullable<String>) -> Option<String> {
     match value {
@@ -376,6 +385,133 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
         }
     }
     RenderedFrame { cols, rows, cells }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum TrackSpec {
+    Group {
+        name: String,
+    },
+    File {
+        path: String,
+        name: Option<String>,
+        sample: Option<String>,
+    },
+}
+
+fn load_tracks_from_specs(
+    conn: &GraphConnection,
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+    block_group_id: &HashId,
+    tracks_json: &str,
+) -> Vec<AnnotationTrack> {
+    let specs: Vec<TrackSpec> = match serde_json::from_str(tracks_json) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    if specs.is_empty() {
+        return Vec::new();
+    }
+
+    let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = controller
+        .graph()
+        .nodes()
+        .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+        .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
+        .collect();
+    let node_filter: HashSet<HashId> = node_ranges.keys().copied().collect();
+
+    let mut tracks = Vec::new();
+    for spec in specs {
+        match spec {
+            TrackSpec::Group { name } => {
+                if let Ok(spans) = load_annotations_for_group(conn, &name, &node_ranges) {
+                    tracks.push(AnnotationTrack::new(name, spans));
+                }
+            }
+            TrackSpec::File { path, name, sample } => {
+                let display_name = name.as_deref().unwrap_or(&path);
+                tracks.push(load_annotation_file_as_track(
+                    conn,
+                    block_group_id,
+                    &path,
+                    display_name,
+                    sample.as_deref(),
+                    &node_filter,
+                ));
+            }
+        }
+    }
+    tracks
+}
+
+fn load_annotation_file_as_track(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+    file_path: &str,
+    display_name: &str,
+    sample: Option<&str>,
+    node_filter: &HashSet<HashId>,
+) -> AnnotationTrack {
+    let path = Path::new(file_path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if let (Some(sample_name), Ok(bg)) = (sample, BlockGroup::get_by_id(conn, block_group_id)) {
+        let mut buffer: Vec<u8> = Vec::new();
+        let translated = match ext.as_str() {
+            "gff" | "gff3" => File::open(file_path)
+                .ok()
+                .and_then(|f| {
+                    translate_gff(
+                        conn,
+                        &bg.collection_name,
+                        sample_name,
+                        BufReader::new(f),
+                        &mut buffer,
+                    )
+                    .ok()
+                })
+                .is_some(),
+            "bed" => File::open(file_path)
+                .ok()
+                .and_then(|f| {
+                    translate_bed(conn, &bg.collection_name, sample_name, f, &mut buffer).ok()
+                })
+                .is_some(),
+            _ => false,
+        };
+        if translated && !buffer.is_empty() {
+            let spans = match ext.as_str() {
+                "gff" | "gff3" => parse_translated_gff(
+                    Cursor::new(buffer),
+                    node_filter,
+                    display_name,
+                    HashMap::new(),
+                ),
+                _ => parse_translated_bed(
+                    Cursor::new(buffer),
+                    node_filter,
+                    display_name,
+                    HashMap::new(),
+                ),
+            };
+            return AnnotationTrack::new(display_name.to_string(), spans);
+        }
+    }
+
+    let spans = match ext.as_str() {
+        "gff" | "gff3" => {
+            parse_translated_gff_file(path, node_filter, display_name).unwrap_or_default()
+        }
+        "bed" => parse_translated_bed_file(path, node_filter, display_name).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    AnnotationTrack::new(display_name.to_string(), spans)
 }
 
 fn visual_detail(detail: &str) -> std::result::Result<VisualDetail, String> {
@@ -1529,8 +1665,10 @@ fn graph_render_frame(
     cols: i32,
     rows: i32,
     ops: String,
+    tracks_json: String,
 ) -> std::result::Result<String, Error> {
     let (conn, graph) = block_group_graph(&db_path, &block_group_id).map_err(Error::Other)?;
+    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer);
     controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -1541,6 +1679,16 @@ fn graph_render_frame(
     let mut buf = Buffer::empty(area);
     let renderer = GenGraphNodeRenderer::new(&conn);
     GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
+
+    let tracks = load_tracks_from_specs(&conn, &controller, &bg_id, &tracks_json);
+    let mut remaining = area;
+    for track in tracks.iter().rev() {
+        let height = track.draw(&mut buf, remaining, &controller);
+        if height == 0 {
+            break;
+        }
+        remaining.height = remaining.height.saturating_sub(height);
+    }
 
     serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))
         .map_err(|err| Error::Other(err.to_string()))
