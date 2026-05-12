@@ -15,7 +15,10 @@ use gen_models::{
 };
 use thiserror::Error;
 
-use crate::graphs::{BlockGroupChunk, GraphError, NodePoint, load_block_group_chunk, stitch};
+use crate::{
+    graphs::{BlockGroupChunk, GraphError, NodePoint, load_block_group_chunk, stitch},
+    region::{Region, RegionResolverExt},
+};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum GraphOperationError {
@@ -42,7 +45,12 @@ pub fn get_path(
     region_name: &str,
     backbone: Option<&str>,
 ) -> Result<Path, GraphOperationError> {
-    let block_group_id = get_block_group_id(conn, collection_name, sample_name, region_name)?;
+    let resolved_region = Region::parse(region_name)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
+    let resolved_region = resolved_region
+        .resolve(conn, collection_name, sample_name)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
+    let block_group_id = resolved_region.block_group.id;
 
     if let Some(backbone) = backbone {
         let path = BlockGroup::get_path_by_name(conn, &block_group_id, backbone);
@@ -53,7 +61,7 @@ pub fn get_path(
         }
         Ok(path.unwrap())
     } else {
-        Ok(BlockGroup::get_current_path(conn, &block_group_id))
+        Ok(resolved_region.path)
     }
 }
 
@@ -274,17 +282,12 @@ fn get_block_group_id(
     parent_sample_name: &str,
     region_name: &str,
 ) -> Result<HashId, GraphOperationError> {
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
-
-    for block_group in &block_groups {
-        if block_group.name == region_name {
-            return Ok(block_group.id);
-        }
-    }
-
-    Err(GraphOperationError::RegionNotFound(format!(
-        "No region found with name: {region_name}"
-    )))
+    let resolved_region = Region::parse(region_name)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
+    resolved_region
+        .resolve(conn, collection_name, parent_sample_name)
+        .map(|resolved| resolved.block_group.id)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))
 }
 
 /// Given a sample and one or more region (block group) names, creates a new graph where all the end nodes of one block
@@ -606,8 +609,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "test1",
             "m123",
-            3,
-            5,
+            Some(3),
+            Some(5),
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -619,8 +622,8 @@ mod tests {
             "test1",
             "test2",
             "m123",
-            15,
-            20,
+            Some(15),
+            Some(20),
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -724,8 +727,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "test1",
             "m123",
-            3,
-            5,
+            Some(3),
+            Some(5),
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -737,8 +740,8 @@ mod tests {
             "test1",
             "test2",
             "m123",
-            15,
-            20,
+            Some(15),
+            Some(20),
             fasta_update_path.to_str().unwrap(),
             false,
         )

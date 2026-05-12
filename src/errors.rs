@@ -5,6 +5,7 @@ use gen_models::errors::{
 };
 use thiserror::Error;
 
+use crate::region::GenRegionError;
 pub use crate::{
     diffs::gfa::GfaDiffError,
     exports::{fasta::FastaExportError, genbank::GenbankExportError, gfa::GfaExportError},
@@ -36,4 +37,19 @@ pub enum SequenceUpdateError {
     EmptyPath(String),
     #[error("No path block found for path id {path_id} at coordinate {coordinate}")]
     MissingPathBlock { path_id: String, coordinate: i64 },
+    #[error("Region Error: {0}")]
+    RegionError(#[from] GenRegionError),
+    #[error(
+        "Missing coordinates for region '{0}'. Provide them in the region name or pass both start and end."
+    )]
+    MissingCoordinates(String),
+    #[error(
+        "Unsupported region type for sequence update: {0}. Only paths and block groups are supported."
+    )]
+    UnsupportedRegionType(String),
+    #[error("Resolved path '{path_name}' was not found in target block group '{block_group_name}'")]
+    MissingResolvedPath {
+        path_name: String,
+        block_group_name: String,
+    },
 }

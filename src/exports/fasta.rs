@@ -134,8 +134,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "child sample",
             "m123",
-            2,
-            5,
+            Some(2),
+            Some(5),
             fasta_update_path.to_str().unwrap(),
             false,
         );

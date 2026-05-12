@@ -25,10 +25,10 @@ pub struct Command {
     path_name: String,
     /// The start coordinate for the region to add the library to
     #[arg(long)]
-    start: i64,
+    start: Option<i64>,
     /// The end coordinate for the region to add the library to
     #[arg(short, long)]
-    end: i64,
+    end: Option<i64>,
     /// A CSV with combinatorial library information
     #[arg(short, long)]
     library: String,

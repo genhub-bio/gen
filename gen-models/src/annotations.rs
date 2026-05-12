@@ -531,8 +531,7 @@ pub fn add_annotation(
     let graph_conn = context.graph().conn();
     let operation_conn = context.operations().conn();
     let parsed_region = Region::parse(region)?;
-    let start = parsed_region.start;
-    let end = parsed_region.end;
+    let (start, end) = parsed_region.require_coordinates()?;
 
     let block_groups = Sample::get_block_groups(graph_conn, collection, sample);
     let block_group = block_groups

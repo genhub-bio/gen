@@ -11,13 +11,16 @@ use gen_models::{
 };
 use thiserror::Error;
 
-use crate::graphs::{
-    BlockGroupChunk,
-    combinatorial_library::{
-        CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
-        create_library,
+use crate::{
+    graphs::{
+        BlockGroupChunk,
+        combinatorial_library::{
+            CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
+            create_library,
+        },
+        operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
     },
-    operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
+    region::{GenRegionError, Region, RegionResolverExt},
 };
 
 #[derive(Error, Debug)]
@@ -34,6 +37,16 @@ pub enum UpdateWithLibraryError {
     FileParse(CombinatorialLibraryParseError),
     #[error("Failed to create library")]
     LibraryCreation(CombinatorialLibraryCreationError),
+    #[error("Failed to resolve region")]
+    Region(crate::region::GenRegionError),
+    #[error(
+        "Missing coordinates for region '{0}'. Provide them in the region name or pass both start and end."
+    )]
+    MissingCoordinates(String),
+    #[error(
+        "Unsupported region type for library update: {0}. Only paths and block groups are supported."
+    )]
+    UnsupportedRegionType(String),
 }
 
 impl From<CombinatorialLibraryParseError> for UpdateWithLibraryError {
@@ -54,6 +67,12 @@ impl From<CombinatorialLibraryCreationError> for UpdateWithLibraryError {
     }
 }
 
+impl From<crate::region::GenRegionError> for UpdateWithLibraryError {
+    fn from(err: crate::region::GenRegionError) -> Self {
+        UpdateWithLibraryError::Region(err)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_library(
     context: &DbContext,
@@ -61,19 +80,42 @@ pub fn update_with_library(
     parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
-    start_coordinate: i64,
-    end_coordinate: i64,
+    start_coordinate: Option<i64>,
+    end_coordinate: Option<i64>,
     parts_list: Vec<Vec<SequencePart>>,
     library_file_path: Option<&str>,
     parts_file_path: Option<&str>,
 ) -> Result<(), UpdateWithLibraryError> {
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
+    let parsed_region = Region::parse(region_name).map_err(crate::region::GenRegionError::from)?;
+    let resolved_region =
+        match parsed_region.resolve_block_group(conn, collection_name, parent_sample_name) {
+            Ok(region) => region,
+            Err(GenRegionError::NotFound(_)) => {
+                match parsed_region.resolve_path(conn, collection_name, parent_sample_name) {
+                    Ok(region) => region,
+                    Err(GenRegionError::NotFound(_)) => {
+                        return Err(GenRegionError::NotFound(region_name.to_string()).into());
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            Err(err) => return Err(err.into()),
+        };
+    let (start_coordinate, end_coordinate) = if parsed_region.start.is_some()
+        || parsed_region.end.is_some()
+    {
+        (resolved_region.start, resolved_region.end)
+    } else {
+        let (start_coordinate, end_coordinate) = start_coordinate
+            .zip(end_coordinate)
+            .ok_or_else(|| UpdateWithLibraryError::MissingCoordinates(region_name.to_string()))?;
+        resolved_region.offset_range(conn, start_coordinate, end_coordinate)?
+    };
 
     let _new_sample = Sample::create(conn, new_sample_name);
-
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
-    let parent_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
+    let parent_path = resolved_region.path.clone();
     let parent_path_length = parent_path.length(conn)?;
 
     let mut chunk_ranges = vec![];
@@ -109,7 +151,7 @@ pub fn update_with_library(
         collection_name,
         parent_sample_name,
         new_sample_name,
-        region_name,
+        &resolved_region.block_group.name,
         None,
         chunk_ranges,
         Some(child_block_group.id),
@@ -251,8 +293,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "new sample",
             "m123",
-            7,
-            20,
+            Some(7),
+            Some(20),
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -313,8 +355,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "new sample",
             "m123",
-            7,
-            20,
+            Some(7),
+            Some(20),
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -375,8 +417,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "new sample",
             "m123",
-            7,
-            20,
+            Some(7),
+            Some(20),
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -436,8 +478,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "new sample",
             "m123",
-            0,
-            34, // Full sequence replacement
+            Some(0),
+            Some(34), // Full sequence replacement
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -492,8 +534,8 @@ mod tests {
             Sample::DEFAULT_NAME,
             "new sample",
             "m123",
-            0,
-            34, // Full sequence replacement
+            Some(0),
+            Some(34), // Full sequence replacement
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -517,6 +559,100 @@ mod tests {
                 .map(|x| x.to_string())
                 .collect()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn coordinates_from_region_name_are_optional() -> Result<()> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
+
+        update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "new sample",
+            "m123:7-20",
+            None,
+            None,
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )?;
+
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
+        let block_group = &block_groups[0];
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        assert!(all_sequences.contains("ATCGATCAAAAGGAACACACAGAGA"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn missing_coordinates_without_region_range_is_rejected() -> Result<()> {
+        let context = setup_gen();
+        let op_conn = context.operations().conn();
+        track_database(context.graph().conn(), op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
+
+        let err = update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "new sample",
+            "m123",
+            None,
+            None,
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            UpdateWithLibraryError::MissingCoordinates(region) if region == "m123"
+        ));
 
         Ok(())
     }
