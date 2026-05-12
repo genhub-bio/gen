@@ -540,7 +540,7 @@ pub fn add_annotation(
         .ok_or_else(|| anyhow!("Graph {} not found for sample {sample}", parsed_region.name))?;
     let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
     let path_length = path.length(graph_conn)?;
-    if start < 0 || end < 0 || start > end || end > path_length {
+    if start < 0 || end < 0 || start > path_length || end > path_length {
         return Err(anyhow!("Region {region} is outside the path bounds (0-{path_length})").into());
     }
 

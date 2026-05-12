@@ -59,9 +59,6 @@ impl Region {
                         let end = coordinates[(index + 1)..]
                             .parse::<i64>()
                             .map_err(RegionParseError::InvalidCoordinate)?;
-                        if start > end {
-                            return Err(RegionParseError::InvalidRange);
-                        }
                         (Some(start), Some(end))
                     }
                     None => (
@@ -87,9 +84,6 @@ impl Region {
     pub fn require_coordinates(&self) -> Result<(i64, i64), RegionParseError> {
         let start = self.start.ok_or(RegionParseError::NoCoordinates)?;
         let end = self.end.ok_or(RegionParseError::NoEndCoordinate)?;
-        if start > end {
-            return Err(RegionParseError::InvalidRange);
-        }
         Ok((start, end))
     }
 }
@@ -170,7 +164,14 @@ mod tests {
     #[test]
     fn test_parse_start_greater_than_end() {
         let region = Region::parse("chr1:300-200");
-        assert_eq!(region, Err(RegionParseError::InvalidRange));
+        assert_eq!(
+            region,
+            Ok(Region {
+                name: "chr1".to_string(),
+                start: Some(300),
+                end: Some(200),
+            })
+        );
     }
 
     #[test]

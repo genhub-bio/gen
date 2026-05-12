@@ -210,14 +210,6 @@ fn resolve_target(
         (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
     };
 
-    if start > end {
-        return Err(GenRegionError::InvalidRange {
-            region: region.to_string(),
-            start,
-            end,
-        });
-    }
-
     if start < 0 || end > path_length {
         return Err(GenRegionError::OutOfBounds {
             region: region.to_string(),
@@ -468,14 +460,6 @@ impl ResolvedGenRegion {
             ),
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => (start_offset, end_offset),
         };
-
-        if start > end {
-            return Err(GenRegionError::InvalidRange {
-                region: self.path.name.clone(),
-                start,
-                end,
-            });
-        }
 
         if start < 0 || end > path_length {
             return Err(GenRegionError::OutOfBounds {
