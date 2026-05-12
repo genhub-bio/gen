@@ -6,9 +6,10 @@ use std::{
 };
 
 use gb_io::reader;
+use gen_annotations::projection::AnnotationSegment;
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
-    range::{OrderedMerge, Range, merge_ordered_items},
+    range::{Range, merge_ordered_items},
 };
 use gen_models::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
@@ -74,26 +75,6 @@ struct FinalSequenceSegment {
     final_range: Range,
     node_id: HashId,
     sequence_range: Range,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct NodeSequenceSegment {
-    node_id: HashId,
-    sequence_range: Range,
-    strand: Strand,
-}
-
-impl OrderedMerge for NodeSequenceSegment {
-    fn should_merge_with(&self, next: &Self) -> bool {
-        self.node_id == next.node_id
-            && self.strand == next.strand
-            && next.sequence_range.start >= self.sequence_range.start
-            && next.sequence_range.start <= self.sequence_range.end
-    }
-
-    fn merge_with(&mut self, next: &Self) {
-        self.sequence_range.end = self.sequence_range.end.max(next.sequence_range.end);
-    }
 }
 
 struct LocusAnnotationImport<'a> {
@@ -245,13 +226,13 @@ fn build_final_sequence_segments(
 /// - `[0, 3)` then `[5, 7)` does not merge
 /// - Same coordinates on different nodes or strands do not merge
 fn merge_node_sequence_segments(
-    segments: Vec<NodeSequenceSegment>,
-) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
+    segments: Vec<AnnotationSegment>,
+) -> Result<Vec<AnnotationSegment>, GenBankError> {
     for segment in &segments {
-        if segment.sequence_range.end <= segment.sequence_range.start {
+        if segment.range.end <= segment.range.start {
             return Err(GenBankError::ParseError(format!(
                 "Invalid node sequence segment: start {} must be less than end {}",
-                segment.sequence_range.start, segment.sequence_range.end
+                segment.range.start, segment.range.end
             )));
         }
     }
@@ -300,7 +281,7 @@ fn map_annotation_segments(
     annotation_segments: &[GenBankAnnotationSegment],
     final_segments: &[FinalSequenceSegment],
     preserve_part_boundaries: bool,
-) -> Result<Vec<NodeSequenceSegment>, GenBankError> {
+) -> Result<Vec<AnnotationSegment>, GenBankError> {
     let mapped = annotation_segments
         .iter()
         .map(|annotation_segment| {
@@ -321,9 +302,9 @@ fn map_annotation_segments(
                         let segment_end = final_segment.sequence_range.start
                             + (overlap_end - final_segment.final_range.start);
 
-                        Some(NodeSequenceSegment {
+                        Some(AnnotationSegment {
                             node_id: final_segment.node_id,
-                            sequence_range: Range {
+                            range: Range {
                                 start: segment_start,
                                 end: segment_end,
                             },
@@ -349,7 +330,7 @@ fn create_accession_for_segments(
     conn: &gen_models::db::GraphConnection,
     path: &Path,
     accession_name: &str,
-    segments: &[NodeSequenceSegment],
+    segments: &[AnnotationSegment],
 ) -> Result<HashId, GenBankError> {
     let accession = match Accession::get_or_create(conn, accession_name, &path.id, None) {
         Ok(accession) => accession,
@@ -365,7 +346,7 @@ fn create_accession_for_segments(
         source_coordinate: -1,
         source_strand: Strand::Forward,
         target_node_id: first.node_id,
-        target_coordinate: first.sequence_range.start,
+        target_coordinate: first.range.start,
         target_strand: first.strand,
         chromosome_index: 0,
     });
@@ -375,10 +356,10 @@ fn create_accession_for_segments(
         let next = &window[1];
         edges.push(AccessionEdgeData {
             source_node_id: current.node_id,
-            source_coordinate: current.sequence_range.end,
+            source_coordinate: current.range.end,
             source_strand: current.strand,
             target_node_id: next.node_id,
-            target_coordinate: next.sequence_range.start,
+            target_coordinate: next.range.start,
             target_strand: next.strand,
             chromosome_index: 0,
         });
@@ -387,7 +368,7 @@ fn create_accession_for_segments(
     let last = segments.last().unwrap();
     edges.push(AccessionEdgeData {
         source_node_id: last.node_id,
-        source_coordinate: last.sequence_range.end,
+        source_coordinate: last.range.end,
         source_strand: last.strand,
         target_node_id: PATH_END_NODE_ID,
         target_coordinate: -1,
@@ -455,10 +436,7 @@ fn import_locus_annotations(
             .map(|segment| {
                 format!(
                     "{}:{}:{}:{}",
-                    segment.node_id,
-                    segment.sequence_range.start,
-                    segment.sequence_range.end,
-                    segment.strand
+                    segment.node_id, segment.range.start, segment.range.end, segment.strand
                 )
             })
             .collect::<Vec<_>>()
@@ -720,14 +698,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{HashMap, HashSet},
-        fs::File,
-        io::BufReader,
-        path::PathBuf,
-    };
+    use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_core::is_terminal;
+    use gen_annotations::projection::accession_edges_to_segments;
     use gen_models::{
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
@@ -737,14 +710,7 @@ mod tests {
     use noodles::fasta;
 
     use super::*;
-    use crate::{
-        test_helpers::setup_gen,
-        track_database,
-        views::{
-            annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
-            annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
-        },
-    };
+    use crate::{test_helpers::setup_gen, track_database};
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -866,29 +832,29 @@ mod tests {
         let other_node_id = HashId::convert_str("other");
 
         let merged = merge_node_sequence_segments(vec![
-            NodeSequenceSegment {
+            AnnotationSegment {
                 node_id,
-                sequence_range: Range { start: 0, end: 3 },
+                range: Range { start: 0, end: 3 },
                 strand: Strand::Forward,
             },
-            NodeSequenceSegment {
+            AnnotationSegment {
                 node_id,
-                sequence_range: Range { start: 3, end: 5 },
+                range: Range { start: 3, end: 5 },
                 strand: Strand::Forward,
             },
-            NodeSequenceSegment {
+            AnnotationSegment {
                 node_id,
-                sequence_range: Range { start: 4, end: 7 },
+                range: Range { start: 4, end: 7 },
                 strand: Strand::Forward,
             },
-            NodeSequenceSegment {
+            AnnotationSegment {
                 node_id,
-                sequence_range: Range { start: 1, end: 2 },
+                range: Range { start: 1, end: 2 },
                 strand: Strand::Reverse,
             },
-            NodeSequenceSegment {
+            AnnotationSegment {
                 node_id: other_node_id,
-                sequence_range: Range { start: 0, end: 1 },
+                range: Range { start: 0, end: 1 },
                 strand: Strand::Forward,
             },
         ])
@@ -897,19 +863,19 @@ mod tests {
         assert_eq!(
             merged,
             vec![
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id,
-                    sequence_range: Range { start: 0, end: 7 },
+                    range: Range { start: 0, end: 7 },
                     strand: Strand::Forward,
                 },
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id,
-                    sequence_range: Range { start: 1, end: 2 },
+                    range: Range { start: 1, end: 2 },
                     strand: Strand::Reverse,
                 },
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id: other_node_id,
-                    sequence_range: Range { start: 0, end: 1 },
+                    range: Range { start: 0, end: 1 },
                     strand: Strand::Forward,
                 },
             ]
@@ -921,9 +887,9 @@ mod tests {
         let node_id = HashId::convert_str("node");
 
         assert_eq!(
-            merge_node_sequence_segments(vec![NodeSequenceSegment {
+            merge_node_sequence_segments(vec![AnnotationSegment {
                 node_id,
-                sequence_range: Range { start: 7, end: 7 },
+                range: Range { start: 7, end: 7 },
                 strand: Strand::Forward,
             }]),
             Err(GenBankError::ParseError(
@@ -967,19 +933,19 @@ mod tests {
         assert_eq!(
             mapped,
             vec![
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id: wt_node_id,
-                    sequence_range: Range { start: 1, end: 2 },
+                    range: Range { start: 1, end: 2 },
                     strand: Strand::Forward,
                 },
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id: insertion_node_id,
-                    sequence_range: Range { start: 0, end: 2 },
+                    range: Range { start: 0, end: 2 },
                     strand: Strand::Forward,
                 },
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id: wt_node_id,
-                    sequence_range: Range { start: 2, end: 4 },
+                    range: Range { start: 2, end: 4 },
                     strand: Strand::Forward,
                 },
             ]
@@ -1015,14 +981,14 @@ mod tests {
         assert_eq!(
             mapped,
             vec![
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id: wt_node_id,
-                    sequence_range: Range { start: 0, end: 2 },
+                    range: Range { start: 0, end: 2 },
                     strand: Strand::Forward,
                 },
-                NodeSequenceSegment {
+                AnnotationSegment {
                     node_id: wt_node_id,
-                    sequence_range: Range { start: 2, end: 5 },
+                    range: Range { start: 2, end: 5 },
                     strand: Strand::Forward,
                 },
             ]
@@ -1179,59 +1145,33 @@ mod tests {
             Some(&GenBankLocationOperator::Join)
         );
 
-        let block_group = Sample::get_block_groups(conn, "fixtures", "puc19-sample")
-            .into_iter()
-            .next()
-            .unwrap();
-        let path = BlockGroup::get_current_path(conn, &block_group.id);
-        let mut visible_ranges_by_node: HashMap<HashId, Vec<(i64, i64)>> = HashMap::new();
-        for block in path.blocks(conn).unwrap() {
-            if is_terminal(block.node_id) {
-                continue;
-            }
-            visible_ranges_by_node
-                .entry(block.node_id)
-                .or_default()
-                .push((block.sequence_start, block.sequence_end));
-        }
-
-        let entry = AnnotationGroupEntry {
-            id: format!("{}::{}", block_group.sample_name, groups[0].name),
-            name: groups[0].name.clone(),
-            sample_name: block_group.sample_name.clone(),
-            source_block_group_id: block_group.id,
-            origin: AnnotationGroupOrigin::CurrentSample,
-        };
-        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
-            conn,
-            current_block_group: &block_group,
-            entry: &entry,
-            visible_ranges_by_node: &visible_ranges_by_node,
-        })
-        .unwrap();
-        let m13_forward = spans
+        let m13_forward = annotations
             .iter()
             .find(|annotation| annotation.name == "M13 Forward")
             .unwrap();
-        assert_eq!(m13_forward.segments.len(), 1);
-        assert_eq!(m13_forward.segments[0].start, 688);
-        assert_eq!(m13_forward.segments[0].end, 706);
-        assert_eq!(m13_forward.segments[0].strand, Strand::Reverse);
+        let m13_forward_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
+            conn,
+            &m13_forward.accession_id,
+        ));
+        assert_eq!(m13_forward_segments.len(), 1);
+        assert_eq!(m13_forward_segments[0].range.start, 688);
+        assert_eq!(m13_forward_segments[0].range.end, 706);
+        assert_eq!(m13_forward_segments[0].strand, Strand::Reverse);
 
-        let ori = spans
-            .iter()
-            .find(|annotation| annotation.name == "ori")
-            .unwrap();
-        assert_eq!(ori.segments.len(), 2);
+        let ori_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
+            conn,
+            &ori_annotation.accession_id,
+        ));
+        assert_eq!(ori_segments.len(), 2);
         assert!(
-            ori.segments
+            ori_segments
                 .iter()
-                .any(|segment| segment.start == 2314 && segment.end == 2686)
+                .any(|segment| { segment.range.start == 2314 && segment.range.end == 2686 })
         );
         assert!(
-            ori.segments
+            ori_segments
                 .iter()
-                .any(|segment| segment.start == 0 && segment.end == 217)
+                .any(|segment| segment.range.start == 0 && segment.range.end == 217)
         );
     }
 
