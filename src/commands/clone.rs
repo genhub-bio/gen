@@ -7,8 +7,10 @@ use gen_models::{
 };
 
 use crate::{
-    commands::remote::login_remote, get_connection, get_operation_connection,
-    operation_management::pull, track_database,
+    commands::remote::login_remote,
+    get_connection, get_operation_connection,
+    operation_management::{RemoteOperationError, pull},
+    track_database,
 };
 
 const ORIGIN: &str = "origin";
@@ -30,14 +32,34 @@ pub fn execute(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     Defaults::set_default_remote(&operation_conn, Some(ORIGIN))?;
     println!("Default remote set to '{ORIGIN}'");
 
-    login_remote(&operation_conn, Some(ORIGIN))?;
-
     let graph_conn = get_connection(workspace.ensure_gen_dir().join("default.db"))?;
     let context = DbContext::new(workspace, graph_conn, operation_conn);
     track_database(context.graph().conn(), context.operations().conn())?;
-    pull(&context, None)?;
+    pull_with_login_on_auth_error(
+        || pull(&context, None),
+        || login_remote(context.operations().conn(), Some(ORIGIN)),
+    )?;
 
     Ok(())
+}
+
+fn pull_with_login_on_auth_error<P, L>(
+    mut pull_repo: P,
+    login: L,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    P: FnMut() -> Result<(), RemoteOperationError>,
+    L: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+{
+    match pull_repo() {
+        Ok(()) => Ok(()),
+        Err(RemoteOperationError::AuthError(_)) => {
+            login()?;
+            pull_repo()?;
+            Ok(())
+        }
+        Err(err) => Err(Box::new(err)),
+    }
 }
 
 fn infer_repo_name(repo_url: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -56,6 +78,8 @@ fn infer_repo_name(repo_url: &str) -> Result<String, Box<dyn std::error::Error>>
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, io};
+
     use super::*;
 
     #[test]
@@ -72,5 +96,95 @@ mod tests {
             infer_repo_name("https://www.genhub.bio/api/repos/foo/bar/").unwrap(),
             "bar"
         );
+    }
+
+    #[test]
+    fn pull_without_login_when_initial_pull_succeeds() {
+        let pull_count = Cell::new(0);
+        let login_count = Cell::new(0);
+
+        pull_with_login_on_auth_error(
+            || {
+                pull_count.set(pull_count.get() + 1);
+                Ok(())
+            },
+            || {
+                login_count.set(login_count.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pull_count.get(), 1);
+        assert_eq!(login_count.get(), 0);
+    }
+
+    #[test]
+    fn login_and_retry_pull_after_auth_error() {
+        let pull_count = Cell::new(0);
+        let login_count = Cell::new(0);
+
+        pull_with_login_on_auth_error(
+            || {
+                pull_count.set(pull_count.get() + 1);
+                if pull_count.get() == 1 {
+                    Err(RemoteOperationError::AuthError("missing token".to_string()))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                login_count.set(login_count.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pull_count.get(), 2);
+        assert_eq!(login_count.get(), 1);
+    }
+
+    #[test]
+    fn non_auth_pull_errors_do_not_login() {
+        let pull_count = Cell::new(0);
+        let login_count = Cell::new(0);
+
+        let result = pull_with_login_on_auth_error(
+            || {
+                pull_count.set(pull_count.get() + 1);
+                Err(RemoteOperationError::InvalidRemoteUrl(
+                    "not-a-url".to_string(),
+                ))
+            },
+            || {
+                login_count.set(login_count.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(pull_count.get(), 1);
+        assert_eq!(login_count.get(), 0);
+    }
+
+    #[test]
+    fn login_errors_stop_before_retrying_pull() {
+        let pull_count = Cell::new(0);
+        let login_count = Cell::new(0);
+
+        let result = pull_with_login_on_auth_error(
+            || {
+                pull_count.set(pull_count.get() + 1);
+                Err(RemoteOperationError::AuthError("missing token".to_string()))
+            },
+            || {
+                login_count.set(login_count.get() + 1);
+                Err(Box::new(io::Error::other("login failed")))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(pull_count.get(), 1);
+        assert_eq!(login_count.get(), 1);
     }
 }
