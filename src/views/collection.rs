@@ -113,8 +113,8 @@ pub struct CollectionExplorerData {
     /// The final segment of the current collection name. For example,
     /// if the full collection is "/foo/bar", this would be "bar".
     pub current_collection: String,
-    /// The block groups in the *entire* collection that have is_reference set
-    pub reference_block_groups: Vec<(gen_core::HashId, String)>,
+    /// Reference samples in the current collection.
+    pub reference_samples: Vec<String>,
     /// The samples in the entire collection
     pub collection_samples: Vec<String>,
     /// Root samples for the lineage tree.
@@ -142,10 +142,10 @@ pub fn gather_collection_explorer_data(
     let current_collection = collection_basename(full_collection_name).to_string();
     let _parent = parent_collection(full_collection_name);
 
-    let reference_block_groups = BlockGroup::get_reference_block_groups(conn, full_collection_name)
+    let reference_samples = Sample::get_reference_samples(conn)
         .into_iter()
-        .map(|block_group| (block_group.id, block_group.name))
-        .collect::<Vec<_>>();
+        .map(|sample| sample.name)
+        .collect::<HashSet<_>>();
 
     // 3) Gather all samples associated with the entire collection
     let all_blocks = Collection::get_block_groups(conn, full_collection_name);
@@ -153,6 +153,12 @@ pub fn gather_collection_explorer_data(
         all_blocks.iter().map(|bg| bg.sample_name.clone()).collect();
     let mut collection_samples: Vec<String> = sample_names.drain().collect();
     collection_samples.sort();
+    let mut reference_samples = collection_samples
+        .iter()
+        .filter(|sample_name| reference_samples.contains(*sample_name))
+        .cloned()
+        .collect::<Vec<_>>();
+    reference_samples.sort();
 
     let collection_sample_set: HashSet<String> = collection_samples.iter().cloned().collect();
     let mut sample_children = HashMap::new();
@@ -200,7 +206,7 @@ pub fn gather_collection_explorer_data(
 
     CollectionExplorerData {
         current_collection,
-        reference_block_groups,
+        reference_samples,
         collection_samples,
         sample_roots,
         sample_children,
@@ -429,8 +435,7 @@ impl CollectionExplorer {
             selected_block_group,
             full_collection_name,
         );
-        let changed = self.data.reference_block_groups.len()
-            != new_data.reference_block_groups.len()
+        let changed = self.data.reference_samples != new_data.reference_samples
             || self.data.sample_block_groups != new_data.sample_block_groups
             || self.data.sample_roots != new_data.sample_roots
             || self.data.sample_children != new_data.sample_children
@@ -662,13 +667,25 @@ impl CollectionExplorer {
             text: "Reference graphs:".to_string(),
         });
 
-        // Reference block groups
-        for (id, name) in &self.data.reference_block_groups {
-            items.push(ExplorerItem::BlockGroup {
-                id: *id,
-                name: name.clone(),
+        for sample_name in &self.data.reference_samples {
+            let block_groups = self
+                .data
+                .sample_block_groups
+                .get(sample_name)
+                .cloned()
+                .unwrap_or_default();
+            let expanded = state.is_sample_expanded(sample_name, true);
+            items.push(ExplorerItem::Sample {
+                name: sample_name.clone(),
+                expanded,
                 depth: 0,
+                has_children: !block_groups.is_empty(),
             });
+            if expanded {
+                for (id, name) in block_groups {
+                    items.push(ExplorerItem::BlockGroup { id, name, depth: 1 });
+                }
+            }
         }
 
         // Blank line
@@ -832,32 +849,20 @@ impl StatefulWidget for &CollectionExplorer {
                             .wrap(Wrap { trim: false })
                     }
                 }
-                ExplorerItem::BlockGroup { id, name, depth } => {
-                    // Check if this block group is one of the sample_name = NULL reference block groups
-                    // This influences the indentation
-                    let is_reference = self
-                        .data
-                        .reference_block_groups
-                        .iter()
-                        .any(|(ref_id, _)| ref_id == id);
+                ExplorerItem::BlockGroup { id: _, name, depth } => {
                     let scroll = if *depth > 0 {
                         state.sample_tree_scroll
                     } else {
                         0
                     };
 
-                    if is_reference {
-                        Paragraph::new(Line::from(vec![Span::raw(format!("  • {}", name))]))
-                            .wrap(Wrap { trim: false })
-                    } else {
-                        Paragraph::new(Line::from(vec![Span::raw(format!(
-                            "  {}• {}",
-                            "  ".repeat(*depth),
-                            name
-                        ))]))
-                        .scroll((0, scroll))
-                        .wrap(Wrap { trim: false })
-                    }
+                    Paragraph::new(Line::from(vec![Span::raw(format!(
+                        "  {}• {}",
+                        "  ".repeat(*depth),
+                        name
+                    ))]))
+                    .scroll((0, scroll))
+                    .wrap(Wrap { trim: false })
                 }
                 ExplorerItem::Sample {
                     name,
@@ -1079,15 +1084,10 @@ mod tests {
         // (A) The final path component is "bar"
         assert_eq!(explorer_data.current_collection, "bar");
 
-        // (B) Reference block groups are populated from reference samples
-        let reference_bg_names = explorer_data
-            .reference_block_groups
-            .iter()
-            .map(|(_, name)| name.clone())
-            .collect::<Vec<_>>();
+        // (B) Reference samples are populated and their block groups are available by sample
         assert_eq!(
-            reference_bg_names,
-            vec!["BG_ReferenceA".to_string(), "BG_ReferenceB".to_string()]
+            explorer_data.reference_samples,
+            vec![Sample::DEFAULT_NAME.to_string()]
         );
 
         // (C) Collection samples
