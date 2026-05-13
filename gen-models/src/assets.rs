@@ -1,13 +1,14 @@
 use std::{
     fs,
-    io::{self, Read, Write},
+    future::Future,
+    io::{self, Cursor, Read, Write},
     path::{Component, Path, PathBuf},
     string::ToString,
     sync::{Arc, LazyLock, Mutex},
 };
 
 use gen_core::{HashId, Workspace, calculate_hash};
-use opendal::{blocking, services};
+use opendal::{Operator, services};
 use sha2::{Digest, Sha256};
 use url::{Position, Url};
 
@@ -24,9 +25,8 @@ static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("failed to build OpenDAL runtime")
 });
 
-fn with_opendal_runtime<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = OPENDAL_RUNTIME.enter();
-    f()
+fn block_on_opendal<T>(future: impl Future<Output = T>) -> T {
+    OPENDAL_RUNTIME.block_on(future)
 }
 
 fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
@@ -39,7 +39,7 @@ fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
 
 #[doc(hidden)]
 pub struct OpenDalLocation {
-    operator: blocking::Operator,
+    operator: Operator,
     path: String,
 }
 
@@ -123,11 +123,8 @@ impl OpenDalLocation {
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        let operator = with_opendal_runtime(|| {
-            let builder = services::Fs::default().root(&root.to_string_lossy());
-            let op = opendal::Operator::new(builder)?.finish();
-            blocking::Operator::new(op)
-        })?;
+        let builder = services::Fs::default().root(&root.to_string_lossy());
+        let operator = Operator::new(builder)?.finish();
 
         Ok(Self { operator, path })
     }
@@ -167,12 +164,10 @@ impl OpenDalLocation {
                 ))
             })?;
 
-            let operator = with_opendal_runtime(|| {
-                let builder = services::S3::default().bucket(bucket).allow_anonymous();
-                let op = opendal::Operator::new(builder)?.finish();
-                blocking::Operator::new(op)
-            })
-            .map_err(opendal_file_addition_error)?;
+            let builder = services::S3::default().bucket(bucket).allow_anonymous();
+            let operator = Operator::new(builder)
+                .map_err(opendal_file_addition_error)?
+                .finish();
 
             return Ok(Self {
                 operator,
@@ -182,8 +177,8 @@ impl OpenDalLocation {
 
         let operator_uri = url[..Position::BeforePath].to_string();
         opendal::init_default_registry();
-        let operator = with_opendal_runtime(|| blocking::Operator::from_uri(operator_uri.as_str()))
-            .map_err(opendal_file_addition_error)?;
+        let operator =
+            Operator::from_uri(operator_uri.as_str()).map_err(opendal_file_addition_error)?;
 
         Ok(Self {
             operator,
@@ -192,17 +187,29 @@ impl OpenDalLocation {
     }
 
     fn reader(self) -> Result<ChecksummedReader, FileAdditionError> {
+        block_on_opendal(self.reader_async())
+    }
+
+    async fn reader_async(self) -> Result<ChecksummedReader, FileAdditionError> {
         let reader = self
             .operator
             .reader(&self.path)
+            .await
             .map_err(opendal_file_addition_error)?
-            .into_std_read(..)
+            .read(..)
+            .await
             .map_err(opendal_file_addition_error)?;
-        Ok(ChecksummedReader::new(Box::new(reader)))
+        Ok(ChecksummedReader::new(Box::new(Cursor::new(
+            reader.to_vec(),
+        ))))
     }
 
     fn checksum(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
-        let reader = match self.operator.reader(&self.path) {
+        block_on_opendal(self.checksum_async(display_path))
+    }
+
+    async fn checksum_async(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
+        let reader = match self.operator.reader(&self.path).await {
             Ok(reader) => reader,
             Err(err) => {
                 return match err.kind() {
@@ -214,10 +221,11 @@ impl OpenDalLocation {
                 };
             }
         }
-        .into_std_read(..)
+        .read(..)
+        .await
         .map_err(opendal_file_addition_error)?;
 
-        match calculate_reader_checksum(reader) {
+        match calculate_reader_checksum(Cursor::new(reader.to_vec())) {
             Ok(checksum) => Ok(checksum),
             Err(err) => match err.kind() {
                 io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
@@ -234,21 +242,32 @@ impl OpenDalLocation {
         workspace: &Workspace,
         destination_path: &Path,
     ) -> io::Result<u64> {
+        block_on_opendal(self.copy_to_local_path_async(workspace, destination_path))
+    }
+
+    async fn copy_to_local_path_async(
+        &self,
+        workspace: &Workspace,
+        destination_path: &Path,
+    ) -> io::Result<u64> {
         let asset_location =
             Self::from_workspace_path(workspace, destination_path).map_err(io::Error::other)?;
-        let mut reader = self
+        let buffer = self
             .operator
             .reader(&self.path)
+            .await
             .map_err(io::Error::other)?
-            .into_std_read(..)
+            .read(..)
+            .await
             .map_err(io::Error::other)?;
+        let bytes_copied = buffer.len() as u64;
         let mut writer = asset_location
             .operator
             .writer(&asset_location.path)
-            .map_err(io::Error::other)?
-            .into_std_write();
-        let bytes_copied = io::copy(&mut reader, &mut writer)?;
-        writer.close()?;
+            .await
+            .map_err(io::Error::other)?;
+        writer.write(buffer).await.map_err(io::Error::other)?;
+        writer.close().await.map_err(io::Error::other)?;
         Ok(bytes_copied)
     }
 }
@@ -352,7 +371,7 @@ pub struct LocalAssetUri {
     source_path: Option<PathBuf>,
     workspace_root: Option<PathBuf>,
     read_file: Option<ChecksummedReader>,
-    write_file: Option<opendal::blocking::StdWriter>,
+    write_file: Option<fs::File>,
 }
 
 impl AssetUri for LocalAssetUri {
@@ -496,7 +515,7 @@ impl LocalAssetUri {
 
     pub fn close_write(&mut self) -> io::Result<()> {
         if let Some(mut file) = self.write_file.take() {
-            file.close()?;
+            file.flush()?;
         }
         Ok(())
     }
@@ -731,15 +750,7 @@ impl Write for LocalAssetUri {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.write_file.is_none() {
             let io_path = self.io_path();
-            let location =
-                OpenDalLocation::from_absolute_path(&io_path).map_err(io::Error::other)?;
-            self.write_file = Some(
-                location
-                    .operator
-                    .writer(&location.path)
-                    .map_err(io::Error::other)?
-                    .into_std_write(),
-            );
+            self.write_file = Some(fs::File::create(io_path)?);
         }
         self.write_file.as_mut().unwrap().write(buf)
     }
