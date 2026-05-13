@@ -167,7 +167,13 @@ pub fn update_with_library(
         block_group_chunks.push(pathless_end_chunk);
     }
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
 
     // Create (re-create) the reference sequence/path out of the derived chunks,
     // in the child block group

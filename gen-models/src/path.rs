@@ -895,7 +895,14 @@ mod tests {
     };
 
     fn create_test_block_group(conn: &GraphConnection) -> BlockGroup {
-        Sample::get_or_create(conn, "test-sample").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "test-sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         BlockGroup::create(
             conn,
             NewBlockGroup {

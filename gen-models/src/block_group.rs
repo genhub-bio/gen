@@ -308,6 +308,21 @@ impl BlockGroup {
         }
     }
 
+    pub fn get_reference_block_groups(
+        conn: &GraphConnection,
+        collection_name: &str,
+    ) -> Vec<BlockGroup> {
+        BlockGroup::query(
+            conn,
+            "select bg.*
+             from block_groups bg
+             join samples s on s.name = bg.sample_name
+             where bg.collection_name = ?1 and s.is_reference = 1
+             order by bg.name, bg.sample_name, bg.created_on, bg.id;",
+            params![collection_name],
+        )
+    }
+
     fn copy_paths_and_accessions_into(
         &self,
         conn: &GraphConnection,
@@ -1388,11 +1403,25 @@ mod tests {
     fn test_blockgroup_create() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let bg1 = create_bg(conn, "test", Sample::DEFAULT_NAME, "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
-        Sample::get_or_create(conn, "sample").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let bg2 = create_bg(conn, "test", "sample", "hg19");
         assert_eq!(bg2.collection_name, "test");
         assert_eq!(bg2.name, "hg19");
@@ -1404,8 +1433,22 @@ mod tests {
     fn test_blockgroup_delete() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, "sample1").unwrap();
-        Sample::get_or_create(conn, "sample2").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "sample1",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "sample2",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let bg1 = create_bg(conn, "test", "sample1", "hg19");
         let bg2 = create_bg(conn, "test", "sample2", "hg19");
 
@@ -1420,11 +1463,25 @@ mod tests {
     fn test_blockgroup_clone() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let bg1 = create_bg(conn, "test", Sample::DEFAULT_NAME, "hg19");
         assert_eq!(bg1.collection_name, "test");
         assert_eq!(bg1.name, "hg19");
-        Sample::get_or_create(conn, "sample").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let bg2 = get_single_bg_id(
             conn,
             "test",
@@ -1442,9 +1499,30 @@ mod tests {
     fn test_blockgroup_copies_immediate_parent_block_groups() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, "parent_a").unwrap();
-        Sample::get_or_create(conn, "parent_b").unwrap();
-        Sample::get_or_create(conn, "child").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "parent_a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "parent_b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let parent_a_bg = create_bg(conn, "test", "parent_a", "chr1");
         let parent_b_bg = create_bg(conn, "test", "parent_b", "chr1");
@@ -1601,7 +1679,14 @@ mod tests {
     fn test_get_or_create_sample_block_groups_creates_root_block_group_if_no_parents() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, "root_sample").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "root_sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let block_groups = BlockGroup::get_or_create_sample_block_groups(
             conn,
@@ -1623,8 +1708,22 @@ mod tests {
     fn test_get_or_create_sample_block_groups_seeds_from_parents_without_block_groups() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, "parent_sample").unwrap();
-        Sample::get_or_create(conn, "child_sample").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "parent_sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "child_sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let block_groups = BlockGroup::get_or_create_sample_block_groups(
             conn,
@@ -1647,9 +1746,30 @@ mod tests {
     fn test_blockgroup_merge_from_multiple_parents_preserves_paths_and_accessions() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, "parent_a").unwrap();
-        Sample::get_or_create(conn, "parent_b").unwrap();
-        Sample::get_or_create(conn, "child").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "parent_a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "parent_b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let parent_a_bg = create_bg(conn, "test", "parent_a", "chr1");
         let parent_b_bg = create_bg(conn, "test", "parent_b", "chr1");
@@ -1890,7 +2010,14 @@ mod tests {
             }]
         );
 
-        Sample::get_or_create(conn, "sample2").unwrap();
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "sample2",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let _bg2 = get_single_bg_id(conn, "test", "sample2", "chr1", vec!["test".to_string()]);
         assert_eq!(
             Accession::query(
@@ -2892,7 +3019,14 @@ mod tests {
     fn test_blockgroup_interval_tree() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(conn);
-        let _new_sample = Sample::get_or_create(conn, "child").unwrap();
+        let _new_sample = Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
@@ -3064,7 +3198,14 @@ mod tests {
     fn test_changes_against_derivative_blockgroups() {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
-        let _new_sample = Sample::get_or_create(conn, "child").unwrap();
+        let _new_sample = Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
@@ -3108,7 +3249,14 @@ mod tests {
         );
 
         // Now, we make a change against another descendant
-        let _new_sample = Sample::get_or_create(conn, "grandchild").unwrap();
+        let _new_sample = Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "grandchild",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let gc_bg_id = get_single_bg_id(
             conn,
             "test",
@@ -3158,7 +3306,14 @@ mod tests {
         // we can modify regions downstream of them.
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
-        let _new_sample = Sample::get_or_create(conn, "child").unwrap();
+        let _new_sample = Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
@@ -3205,7 +3360,14 @@ mod tests {
         );
 
         // Now, we make a change against another descendant
-        let _new_sample = Sample::get_or_create(conn, "grandchild").unwrap();
+        let _new_sample = Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "grandchild",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let gc_bg_id = get_single_bg_id(
             conn,
             "test",
@@ -3272,7 +3434,14 @@ mod tests {
         // This test ensures that we do not allow ambiguous changes by coordinates
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, _path) = setup_block_group(conn);
-        let _new_sample = Sample::get_or_create(conn, "child").unwrap();
+        let _new_sample = Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
         let new_path = Path::query(
             conn,
@@ -3321,7 +3490,14 @@ mod tests {
         );
 
         // Now, we make a change against another descendant and get an error
-        let _new_sample = Sample::get_or_create(conn, "grandchild").unwrap();
+        let _new_sample = Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: "grandchild",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let gc_bg_id = get_single_bg_id(
             conn,
             "test",

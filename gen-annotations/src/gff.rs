@@ -146,7 +146,14 @@ mod tests {
 
     fn create_block_group(conn: &GraphConnection) {
         let collection = Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -222,7 +229,14 @@ mod tests {
     }
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
-        Sample::get_or_create(conn, "child sample").unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "child sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let _ = Sample::get_or_create_child(
             conn,
             "test",

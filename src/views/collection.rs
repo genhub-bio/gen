@@ -142,7 +142,10 @@ pub fn gather_collection_explorer_data(
     let current_collection = collection_basename(full_collection_name).to_string();
     let _parent = parent_collection(full_collection_name);
 
-    let reference_block_groups: Vec<(HashId, String)> = vec![];
+    let reference_block_groups = BlockGroup::get_reference_block_groups(conn, full_collection_name)
+        .into_iter()
+        .map(|block_group| (block_group.id, block_group.name))
+        .collect::<Vec<_>>();
 
     // 3) Gather all samples associated with the entire collection
     let all_blocks = Collection::get_block_groups(conn, full_collection_name);
@@ -1001,9 +1004,30 @@ mod tests {
         Collection::create(conn, "/foo/baz").unwrap();
 
         // Create samples
-        let sample_reference = Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
-        let sample_alpha = Sample::get_or_create(conn, "SampleAlpha").unwrap();
-        let sample_beta = Sample::get_or_create(conn, "SampleBeta").unwrap();
+        let sample_reference = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                is_reference: true,
+            },
+        )
+        .unwrap();
+        let sample_alpha = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "SampleAlpha",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let sample_beta = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "SampleBeta",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Create block groups for three explicit samples
         BlockGroup::create(
@@ -1055,8 +1079,16 @@ mod tests {
         // (A) The final path component is "bar"
         assert_eq!(explorer_data.current_collection, "bar");
 
-        // (B) There are no special reference block groups now
-        assert!(explorer_data.reference_block_groups.is_empty());
+        // (B) Reference block groups are populated from reference samples
+        let reference_bg_names = explorer_data
+            .reference_block_groups
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reference_bg_names,
+            vec!["BG_ReferenceA".to_string(), "BG_ReferenceB".to_string()]
+        );
 
         // (C) Collection samples
         // We expect reference, SampleAlpha, and SampleBeta

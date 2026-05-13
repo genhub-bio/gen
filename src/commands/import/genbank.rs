@@ -5,7 +5,7 @@ use clap::Args;
 use gen_models::{
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
-    sample::Sample,
+    sample::{NewSample, Sample},
 };
 
 use crate::{
@@ -61,7 +61,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.reference.as_deref(),
     )?;
     if is_reference {
-        Sample::get_or_create_reference(conn, sample_name)?;
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: sample_name,
+                is_reference: true,
+            },
+        )?;
     }
     let mut options = GenBankImportOptions::default().annotation_name_from_path(&cmd.path);
     options.add_annotations = !cmd.no_annotations;

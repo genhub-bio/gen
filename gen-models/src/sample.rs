@@ -35,6 +35,10 @@ pub enum SampleError {
     SqliteError(#[from] rusqlite::Error),
     #[error("Sample already exists")]
     Duplicate(Sample),
+    #[error("Sample not found: {0}")]
+    NotFound(String),
+    #[error("Sample is not a reference sample: {0}")]
+    NotReference(String),
     #[error("Block group creation error: {0}")]
     BlockGroup(#[from] BlockGroupError),
 }
@@ -107,28 +111,16 @@ impl Sample {
         }
     }
 
-    pub fn get_or_create(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
-        Sample::get_or_create_with_reference(conn, name, false)
-    }
-
-    pub fn get_or_create_reference(
+    pub fn get_or_create(
         conn: &GraphConnection,
-        name: &str,
+        new_sample: NewSample<'_>,
     ) -> Result<Sample, SampleError> {
-        Sample::get_or_create_with_reference(conn, name, true)
-    }
-
-    pub fn get_or_create_with_reference(
-        conn: &GraphConnection,
-        name: &str,
-        is_reference: bool,
-    ) -> Result<Sample, SampleError> {
-        match Sample::create(conn, NewSample { name, is_reference }) {
+        match Sample::create(conn, new_sample.clone()) {
             Ok(sample) => Ok(sample),
             Err(SampleError::Duplicate(sample)) => {
-                if is_reference && !sample.is_reference {
-                    Sample::set_reference(conn, name, true)?;
-                    Ok(Sample::get_by_name(conn, name)?)
+                if new_sample.is_reference && !sample.is_reference {
+                    Sample::set_reference(conn, new_sample.name, true)?;
+                    Ok(Sample::get_by_name(conn, new_sample.name)?)
                 } else {
                     Ok(sample)
                 }
@@ -147,6 +139,29 @@ impl Sample {
             params![name, is_reference],
         )?;
         Ok(())
+    }
+
+    pub fn get_reference_samples(conn: &GraphConnection) -> Vec<Sample> {
+        Sample::query(
+            conn,
+            "select * from samples where is_reference = 1 order by name;",
+            params![],
+        )
+    }
+
+    pub fn get_sample_reference_block_groups(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Vec<BlockGroup>, SampleError> {
+        let sample = Sample::get_by_name(conn, sample_name)
+            .map_err(|_| SampleError::NotFound(sample_name.to_string()))?;
+
+        if !sample.is_reference {
+            return Err(SampleError::NotReference(sample_name.to_string()));
+        }
+
+        Ok(Sample::get_block_groups(conn, collection_name, sample_name))
     }
 
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {
@@ -362,10 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_create_reference_sets_reference_flag() {
+    fn test_get_or_create_sets_reference_flag() {
         let conn = &get_connection(None).unwrap();
 
-        let sample = Sample::get_or_create_reference(conn, "ref").unwrap();
+        let sample = Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "ref",
+                is_reference: true,
+            },
+        )
+        .unwrap();
 
         assert_eq!(
             sample,
@@ -377,11 +399,25 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_create_reference_upgrades_existing_sample() {
+    fn test_get_or_create_upgrades_existing_sample_to_reference() {
         let conn = &get_connection(None).unwrap();
-        Sample::get_or_create(conn, "existing").unwrap();
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "existing",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        let sample = Sample::get_or_create_reference(conn, "existing").unwrap();
+        let sample = Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "existing",
+                is_reference: true,
+            },
+        )
+        .unwrap();
 
         assert!(sample.is_reference);
         assert!(Sample::get_by_name(conn, "existing").unwrap().is_reference);
@@ -390,8 +426,22 @@ mod tests {
     #[test]
     fn test_get_or_create_child_does_not_add_lineage_for_existing_sample() {
         let conn = &get_connection(None).unwrap();
-        Sample::get_or_create(conn, "parent").unwrap();
-        Sample::get_or_create(conn, "child").unwrap();
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "parent",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         Sample::get_or_create_child(conn, "test", "child", vec!["parent".to_string()]).unwrap();
 
@@ -448,5 +498,95 @@ mod tests {
                 "parent_c".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_get_reference_samples_returns_only_reference_samples() {
+        let conn = &get_connection(None).unwrap();
+        Sample::create(
+            conn,
+            NewSample {
+                name: "reference-a",
+                is_reference: true,
+            },
+        )
+        .unwrap();
+        Sample::create(
+            conn,
+            NewSample {
+                name: "sample-b",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+        Sample::create(
+            conn,
+            NewSample {
+                name: "reference-c",
+                is_reference: true,
+            },
+        )
+        .unwrap();
+
+        let reference_names = Sample::get_reference_samples(conn)
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(reference_names, vec!["reference-a", "reference-c"]);
+    }
+
+    #[test]
+    fn test_get_sample_reference_block_groups_returns_reference_block_groups() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test").unwrap();
+
+        Sample::create(
+            conn,
+            NewSample {
+                name: "reference-root",
+                is_reference: true,
+            },
+        )
+        .unwrap();
+        create_bg(conn, "test", "reference-root", "chr1");
+        create_bg(conn, "test", "reference-root", "chr2");
+
+        let reference_block_group_names =
+            Sample::get_sample_reference_block_groups(conn, "test", "reference-root")
+                .unwrap()
+                .into_iter()
+                .map(|block_group| block_group.name)
+                .collect::<Vec<_>>();
+
+        assert_eq!(reference_block_group_names, vec!["chr1", "chr2"]);
+    }
+
+    #[test]
+    fn test_get_sample_reference_block_groups_errors_for_non_reference_sample() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test").unwrap();
+        Sample::create(
+            conn,
+            NewSample {
+                name: "child",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+
+        let err = Sample::get_sample_reference_block_groups(conn, "test", "child").unwrap_err();
+
+        assert_eq!(err, SampleError::NotReference("child".to_string()));
+    }
+
+    #[test]
+    fn test_get_sample_reference_block_groups_errors_for_missing_sample() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test").unwrap();
+
+        let err = Sample::get_sample_reference_block_groups(conn, "test", "missing").unwrap_err();
+
+        assert_eq!(err, SampleError::NotFound("missing".to_string()));
     }
 }

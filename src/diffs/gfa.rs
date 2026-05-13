@@ -541,7 +541,13 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
-        let _sample = Sample::get_or_create(conn, "test sample");
+        let _sample = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "test sample",
+                ..Default::default()
+            },
+        );
         let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -644,7 +650,13 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
-        let _sample = Sample::get_or_create(conn, "test sample");
+        let _sample = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "test sample",
+                ..Default::default()
+            },
+        );
         let block_group = create_bg(conn, collection_name, "test sample", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -747,7 +759,13 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
-        let _sample1 = Sample::get_or_create(conn, "sample1");
+        let _sample1 = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "sample1",
+                ..Default::default()
+            },
+        );
         let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -807,7 +825,13 @@ mod tests {
 
         let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
-        let _sample2 = Sample::get_or_create(conn, "sample2");
+        let _sample2 = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "sample2",
+                ..Default::default()
+            },
+        );
         let block_group2 = create_bg(conn, collection_name, "sample2", "test block group 2");
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
@@ -904,7 +928,13 @@ mod tests {
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
-        let _sample1 = Sample::get_or_create(conn, "sample1");
+        let _sample1 = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "sample1",
+                ..Default::default()
+            },
+        );
         let block_group = create_bg(conn, collection_name, "sample1", "test block group");
         let sequence1 = Sequence::new()
             .sequence_type("DNA")
@@ -964,7 +994,13 @@ mod tests {
 
         let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
 
-        let _sample2 = Sample::get_or_create(conn, "sample2");
+        let _sample2 = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "sample2",
+                ..Default::default()
+            },
+        );
         let block_group2 = create_bg(conn, collection_name, "sample2", "test block group");
         let sequence3 = Sequence::new()
             .sequence_type("DNA")

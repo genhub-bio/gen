@@ -841,7 +841,13 @@ pub fn apply_changeset(
     }
 
     for sample in dependencies.samples.iter() {
-        Sample::get_or_create(conn, &sample.name)?;
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: &sample.name,
+                ..Default::default()
+            },
+        )?;
     }
 
     for sequence in dependencies.sequences.iter() {
@@ -905,7 +911,13 @@ pub fn apply_changeset(
         Collection::create(conn, &collection.name)?;
     }
     for sample in &changeset.samples {
-        Sample::get_or_create(conn, &sample.name)?;
+        Sample::get_or_create(
+            conn,
+            crate::sample::NewSample {
+                name: &sample.name,
+                ..Default::default()
+            },
+        )?;
     }
     for sample_lineage in &changeset.sample_lineages {
         SampleLineage::create(

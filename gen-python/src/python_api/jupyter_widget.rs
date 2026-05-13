@@ -9,8 +9,9 @@ use r#gen::{
     get_connection,
     graphs::graph_search::GraphLocus,
     views::{
+        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
         annotation_track::{AnnotationSpan, AnnotationTrack},
-        annotations::load_annotations_for_group,
+        annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
             GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
             locus_label_bounds, viewport_pos_map,
@@ -270,8 +271,25 @@ impl PyGraphController {
         conn: &GraphConnection,
         group: &str,
     ) -> Result<AnnotationTrack, AnnotationError> {
+        let block_group_id = self.block_group_id.ok_or(AnnotationError::DatabaseError(
+            rusqlite::Error::QueryReturnedNoRows,
+        ))?;
+        let current_block_group = BlockGroup::get_by_id(conn, &block_group_id)
+            .map_err(|_| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
         let ranges = self.all_node_ranges();
-        let spans = load_annotations_for_group(conn, group, &ranges)?;
+        let entry = AnnotationGroupEntry {
+            id: format!("{}::{}", current_block_group.sample_name, group),
+            name: group.to_string(),
+            sample_name: current_block_group.sample_name.clone(),
+            source_block_group_id: current_block_group.id,
+            origin: AnnotationGroupOrigin::CurrentSample,
+        };
+        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            current_block_group: &current_block_group,
+            entry: &entry,
+            visible_ranges_by_node: &ranges,
+        })?;
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }
 }

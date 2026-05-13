@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::{errors::OperationError, sample::Sample};
+use gen_models::{
+    errors::OperationError,
+    sample::{NewSample, Sample},
+};
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -47,7 +50,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.reference.as_deref(),
     )?;
     if is_reference {
-        Sample::get_or_create_reference(conn, sample_name)?;
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: sample_name,
+                is_reference: true,
+            },
+        )?;
     }
     match import_fasta(context, &cmd.path.clone(), name, sample_name, cmd.shallow) {
         Ok(_) => {
