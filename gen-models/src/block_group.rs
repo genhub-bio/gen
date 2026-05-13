@@ -329,11 +329,10 @@ impl BlockGroup {
             path_map.insert(path.id, new_path.id);
         }
 
-        let source_block_group_id = existing_paths[0].block_group_id;
         for accession in Accession::query(
             conn,
             "select * from accessions where block_group_id = ?1;",
-            params![source_block_group_id],
+            params![self.id],
         ) {
             let edges = AccessionPath::query(
                 conn,
