@@ -694,16 +694,28 @@ mod tests {
         let (_bg, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);
         let accession =
-            BlockGroup::add_accession(conn, &path, "test", 10, 30, &mut path_cache).unwrap();
+            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
 
         let tree = accession.intervaltree(conn);
         interval_tree_verify(
             &tree,
             0,
             &[NodeIntervalBlock {
-                node_id: HashId::convert_str("test-t-node"),
+                node_id: HashId::convert_str("test-a-node"),
                 start: 0,
-                end: 10,
+                end: 5,
+                sequence_start: 5,
+                sequence_end: 10,
+                strand: Strand::Forward,
+            }],
+        );
+        interval_tree_verify(
+            &tree,
+            5,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-t-node"),
+                start: 5,
+                end: 15,
                 sequence_start: 0,
                 sequence_end: 10,
                 strand: Strand::Forward,
@@ -711,13 +723,25 @@ mod tests {
         );
         interval_tree_verify(
             &tree,
-            10,
+            15,
             &[NodeIntervalBlock {
                 node_id: HashId::convert_str("test-c-node"),
-                start: 10,
-                end: 20,
+                start: 15,
+                end: 25,
                 sequence_start: 0,
                 sequence_end: 10,
+                strand: Strand::Forward,
+            }],
+        );
+        interval_tree_verify(
+            &tree,
+            25,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-g-node"),
+                start: 25,
+                end: 30,
+                sequence_start: 0,
+                sequence_end: 5,
                 strand: Strand::Forward,
             }],
         );
