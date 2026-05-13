@@ -19,7 +19,7 @@ use crate::{
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
-    sample::Sample,
+    sample::{NewSample, Sample},
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
 };
@@ -32,7 +32,7 @@ pub fn create_bg(
 ) -> BlockGroup {
     Sample::get_or_create(
         conn,
-        crate::sample::NewSample {
+        NewSample {
             name: sample_name,
             ..Default::default()
         },
@@ -123,7 +123,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     Collection::get_or_create(conn, "test").unwrap();
     Sample::get_or_create(
         conn,
-        crate::sample::NewSample {
+        NewSample {
             name: "test",
             ..Default::default()
         },

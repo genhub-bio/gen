@@ -1336,7 +1336,7 @@ mod tests {
     use crate::{
         collection::Collection,
         node::Node,
-        sample::Sample,
+        sample::{NewSample, Sample},
         sequence::Sequence,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
     };
@@ -1405,7 +1405,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: Sample::DEFAULT_NAME,
                 ..Default::default()
             },
@@ -1416,7 +1416,7 @@ mod tests {
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "sample",
                 ..Default::default()
             },
@@ -1435,7 +1435,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "sample1",
                 ..Default::default()
             },
@@ -1443,7 +1443,7 @@ mod tests {
         .unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "sample2",
                 ..Default::default()
             },
@@ -1465,7 +1465,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: Sample::DEFAULT_NAME,
                 ..Default::default()
             },
@@ -1476,7 +1476,7 @@ mod tests {
         assert_eq!(bg1.name, "hg19");
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "sample",
                 ..Default::default()
             },
@@ -1501,7 +1501,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "parent_a",
                 ..Default::default()
             },
@@ -1509,7 +1509,7 @@ mod tests {
         .unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "parent_b",
                 ..Default::default()
             },
@@ -1517,7 +1517,7 @@ mod tests {
         .unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child",
                 ..Default::default()
             },
@@ -1681,7 +1681,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "root_sample",
                 ..Default::default()
             },
@@ -1710,7 +1710,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "parent_sample",
                 ..Default::default()
             },
@@ -1718,7 +1718,7 @@ mod tests {
         .unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child_sample",
                 ..Default::default()
             },
@@ -1748,7 +1748,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "parent_a",
                 ..Default::default()
             },
@@ -1756,7 +1756,7 @@ mod tests {
         .unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "parent_b",
                 ..Default::default()
             },
@@ -1764,7 +1764,7 @@ mod tests {
         .unwrap();
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child",
                 ..Default::default()
             },
@@ -2012,7 +2012,7 @@ mod tests {
 
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "sample2",
                 ..Default::default()
             },
@@ -3021,7 +3021,7 @@ mod tests {
         let (block_group_id, path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child",
                 ..Default::default()
             },
@@ -3200,7 +3200,7 @@ mod tests {
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child",
                 ..Default::default()
             },
@@ -3251,7 +3251,7 @@ mod tests {
         // Now, we make a change against another descendant
         let _new_sample = Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "grandchild",
                 ..Default::default()
             },
@@ -3308,7 +3308,7 @@ mod tests {
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child",
                 ..Default::default()
             },
@@ -3362,7 +3362,7 @@ mod tests {
         // Now, we make a change against another descendant
         let _new_sample = Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "grandchild",
                 ..Default::default()
             },
@@ -3436,7 +3436,7 @@ mod tests {
         let (_block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child",
                 ..Default::default()
             },
@@ -3492,7 +3492,7 @@ mod tests {
         // Now, we make a change against another descendant and get an error
         let _new_sample = Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "grandchild",
                 ..Default::default()
             },

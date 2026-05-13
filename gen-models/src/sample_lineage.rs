@@ -138,7 +138,11 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
-    use crate::{lineage::SqlLineage, sample::Sample, test_helpers::get_connection};
+    use crate::{
+        lineage::SqlLineage,
+        sample::{NewSample, Sample},
+        test_helpers::get_connection,
+    };
 
     #[test]
     fn test_capnp_serialization() {
@@ -162,7 +166,7 @@ mod tests {
         for sample in ["root", "left", "right", "leaf", "sibling"] {
             Sample::get_or_create(
                 &conn,
-                crate::sample::NewSample {
+                NewSample {
                     name: sample,
                     ..Default::default()
                 },
@@ -270,7 +274,7 @@ mod tests {
         for sample in ["root", "left", "right", "leaf", "sibling"] {
             Sample::get_or_create(
                 &conn,
-                crate::sample::NewSample {
+                NewSample {
                     name: sample,
                     ..Default::default()
                 },
@@ -307,7 +311,7 @@ mod tests {
         let conn = get_connection(None).unwrap();
         Sample::get_or_create(
             &conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "sample",
                 ..Default::default()
             },
@@ -338,7 +342,7 @@ mod tests {
         ] {
             Sample::get_or_create(
                 &conn,
-                crate::sample::NewSample {
+                NewSample {
                     name: sample,
                     ..Default::default()
                 },

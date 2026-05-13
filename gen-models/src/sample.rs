@@ -85,27 +85,23 @@ impl Sample {
         new_sample: NewSample<'_>,
     ) -> Result<Sample, SampleError> {
         let mut stmt =
-            match conn.prepare(
-                "INSERT INTO samples (name, is_reference) VALUES (?1, ?2) returning name, is_reference;",
-            ) {
+            match conn.prepare("INSERT INTO samples (name, is_reference) VALUES (?1, ?2);") {
                 Ok(stmt) => stmt,
                 Err(err) => return Err(SampleError::SqliteError(err)),
             };
 
-        match stmt.query_row((new_sample.name, new_sample.is_reference), |row| {
-            Ok(Sample {
-                name: row.get(0)?,
-                is_reference: row.get(1)?,
-            })
-        }) {
-            Ok(sample) => Ok(sample),
+        match stmt.execute(params![new_sample.name, new_sample.is_reference]) {
+            Ok(_) => Ok(Sample {
+                name: new_sample.name.to_string(),
+                is_reference: new_sample.is_reference,
+            }),
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Err(SampleError::Duplicate(Sample::get_by_name(
-                    conn,
-                    new_sample.name,
-                )?))
+                Err(SampleError::Duplicate(Sample {
+                    name: new_sample.name.to_string(),
+                    is_reference: new_sample.is_reference,
+                }))
             }
             Err(err) => Err(SampleError::SqliteError(err)),
         }
@@ -117,14 +113,7 @@ impl Sample {
     ) -> Result<Sample, SampleError> {
         match Sample::create(conn, new_sample.clone()) {
             Ok(sample) => Ok(sample),
-            Err(SampleError::Duplicate(sample)) => {
-                if new_sample.is_reference && !sample.is_reference {
-                    Sample::set_reference(conn, new_sample.name, true)?;
-                    Ok(Sample::get_by_name(conn, new_sample.name)?)
-                } else {
-                    Ok(sample)
-                }
-            }
+            Err(SampleError::Duplicate(sample)) => Ok(sample),
             Err(e) => Err(e),
         }
     }
@@ -374,53 +363,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(matches, vec!["BarFooBaz", "QuxFood", "foo"]);
-    }
-
-    #[test]
-    fn test_get_or_create_sets_reference_flag() {
-        let conn = &get_connection(None).unwrap();
-
-        let sample = Sample::get_or_create(
-            conn,
-            NewSample {
-                name: "ref",
-                is_reference: true,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            sample,
-            Sample {
-                name: "ref".to_string(),
-                is_reference: true,
-            }
-        );
-    }
-
-    #[test]
-    fn test_get_or_create_upgrades_existing_sample_to_reference() {
-        let conn = &get_connection(None).unwrap();
-        Sample::get_or_create(
-            conn,
-            NewSample {
-                name: "existing",
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let sample = Sample::get_or_create(
-            conn,
-            NewSample {
-                name: "existing",
-                is_reference: true,
-            },
-        )
-        .unwrap();
-
-        assert!(sample.is_reference);
-        assert!(Sample::get_by_name(conn, "existing").unwrap().is_reference);
     }
 
     #[test]

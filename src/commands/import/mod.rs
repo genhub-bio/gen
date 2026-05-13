@@ -43,7 +43,9 @@ pub fn resolve_import_sample<'a>(
     match (sample, reference) {
         (Some(sample), None) => Ok((sample, false)),
         (None, Some(reference)) => Ok((reference, true)),
-        (None, None) => Ok((gen_models::sample::Sample::DEFAULT_NAME, false)),
+        (None, None) => Err(anyhow::anyhow!(
+            "one of --sample or --reference must be provided"
+        )),
         (Some(_), Some(_)) => Err(anyhow::anyhow!(
             "--sample and --reference are mutually exclusive"
         )),

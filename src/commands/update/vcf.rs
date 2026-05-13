@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::{errors::OperationError, sample::Sample};
+use gen_models::errors::OperationError;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -26,8 +26,7 @@ pub struct Command {
     #[arg(
         long = "parent-samples",
         aliases = ["parent-sample", "ps", "reference"],
-        value_delimiter = ',',
-        default_values_t = [Sample::DEFAULT_NAME.to_string()]
+        value_delimiter = ','
     )]
     parent_samples: Vec<String>,
     /// Apply edits in-place instead of using parent sample's reference coordinates
@@ -49,6 +48,14 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
+
+    if cmd.sample.is_none() && cmd.parent_samples.is_empty() {
+        conn.execute("ROLLBACK TRANSACTION;", [])?;
+        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
+        return Err(anyhow::anyhow!(
+            "one of --sample or --reference must be provided"
+        ));
+    }
 
     match update_with_vcf(
         context,

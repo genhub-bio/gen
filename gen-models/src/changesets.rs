@@ -29,7 +29,7 @@ use crate::{
     operations::Operation,
     path::Path,
     path_edge::PathEdge,
-    sample::Sample,
+    sample::{NewSample, Sample},
     sample_lineage::SampleLineage,
     sequence::{NewSequence, Sequence},
     session_operations::DependencyModels,
@@ -843,9 +843,9 @@ pub fn apply_changeset(
     for sample in dependencies.samples.iter() {
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: &sample.name,
-                ..Default::default()
+                is_reference: sample.is_reference,
             },
         )?;
     }
@@ -913,9 +913,9 @@ pub fn apply_changeset(
     for sample in &changeset.samples {
         Sample::get_or_create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: &sample.name,
-                ..Default::default()
+                is_reference: sample.is_reference,
             },
         )?;
     }
@@ -1285,6 +1285,7 @@ mod tests {
     use crate::{
         file_types::FileTypes,
         operations::{OperationFile, OperationInfo},
+        sample::{NewSample, Sample},
         session_operations::{end_operation, start_operation},
         test_helpers::{setup_block_group, setup_gen},
         traits::Query,
@@ -1589,7 +1590,7 @@ mod tests {
 
         let _ = Sample::create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "sample-1",
                 is_reference: false,
             },
@@ -1652,7 +1653,7 @@ mod tests {
 
         let _ = Sample::create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "parent",
                 is_reference: false,
             },
@@ -1662,7 +1663,7 @@ mod tests {
         let mut session = start_operation(conn);
         let _ = Sample::create(
             conn,
-            crate::sample::NewSample {
+            NewSample {
                 name: "child",
                 is_reference: false,
             },
@@ -1805,7 +1806,7 @@ mod tests {
             // make a blockgroup with an edge from our parent blockgroup
             let _ = Sample::create(
                 conn,
-                crate::sample::NewSample {
+                NewSample {
                     name: "new",
                     is_reference: false,
                 },
