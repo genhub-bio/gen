@@ -753,7 +753,7 @@ mod tests {
         };
         let change = PathChange {
             block_group_id,
-            path: path.clone(),
+            intervaltree_source: path.clone(),
             path_accession: None,
             start: 7,
             end: 15,
@@ -762,8 +762,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(&conn).unwrap();
-        BlockGroup::insert_change(&conn, &change, &tree).unwrap();
+        BlockGroup::insert_change(&conn, &change).unwrap();
         let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
 
         let blocks = Edge::blocks_from_edges(&conn, &edges);
