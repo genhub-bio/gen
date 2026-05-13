@@ -35,3 +35,17 @@ pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
         Commands::Library(cmd) => crate::commands::import::library::execute(ctx, cmd),
     }
 }
+
+pub fn resolve_import_sample<'a>(
+    sample: Option<&'a str>,
+    reference: Option<&'a str>,
+) -> anyhow::Result<(&'a str, bool)> {
+    match (sample, reference) {
+        (Some(sample), None) => Ok((sample, false)),
+        (None, Some(reference)) => Ok((reference, true)),
+        (None, None) => Ok((gen_models::sample::Sample::DEFAULT_NAME, false)),
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "--sample and --reference are mutually exclusive"
+        )),
+    }
+}

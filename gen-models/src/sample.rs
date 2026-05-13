@@ -18,6 +18,13 @@ use crate::{
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
     pub name: String,
+    pub is_reference: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NewSample<'a> {
+    pub name: &'a str,
+    pub is_reference: bool,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -38,11 +45,13 @@ impl<'a> Capnp<'a> for Sample {
 
     fn write_capnp(&self, builder: &mut Self::Builder) {
         builder.set_name(&self.name);
+        builder.set_is_reference(self.is_reference);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
         let name = reader.get_name().unwrap().to_string().unwrap();
-        Sample { name }
+        let is_reference = reader.get_is_reference();
+        Sample { name, is_reference }
     }
 }
 
@@ -55,6 +64,7 @@ impl Query for Sample {
     fn process_row(row: &Row) -> Self::Model {
         Sample {
             name: row.get(0).unwrap(),
+            is_reference: row.get(1).unwrap(),
         }
     }
 }
@@ -66,32 +76,77 @@ impl Sample {
         SampleLineage::get_parents(conn, sample_name)
     }
 
-    pub fn create(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
+    pub fn create(
+        conn: &GraphConnection,
+        new_sample: NewSample<'_>,
+    ) -> Result<Sample, SampleError> {
         let mut stmt =
-            match conn.prepare("INSERT INTO samples (name) VALUES (?1) returning (name);") {
+            match conn.prepare(
+                "INSERT INTO samples (name, is_reference) VALUES (?1, ?2) returning name, is_reference;",
+            ) {
                 Ok(stmt) => stmt,
                 Err(err) => return Err(SampleError::SqliteError(err)),
             };
 
-        match stmt.query_row((name,), |row| Ok(Sample { name: row.get(0)? })) {
+        match stmt.query_row((new_sample.name, new_sample.is_reference), |row| {
+            Ok(Sample {
+                name: row.get(0)?,
+                is_reference: row.get(1)?,
+            })
+        }) {
             Ok(sample) => Ok(sample),
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Err(SampleError::Duplicate(Sample {
-                    name: name.to_string(),
-                }))
+                Err(SampleError::Duplicate(Sample::get_by_name(
+                    conn,
+                    new_sample.name,
+                )?))
             }
             Err(err) => Err(SampleError::SqliteError(err)),
         }
     }
 
     pub fn get_or_create(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
-        match Sample::create(conn, name) {
+        Sample::get_or_create_with_reference(conn, name, false)
+    }
+
+    pub fn get_or_create_reference(
+        conn: &GraphConnection,
+        name: &str,
+    ) -> Result<Sample, SampleError> {
+        Sample::get_or_create_with_reference(conn, name, true)
+    }
+
+    pub fn get_or_create_with_reference(
+        conn: &GraphConnection,
+        name: &str,
+        is_reference: bool,
+    ) -> Result<Sample, SampleError> {
+        match Sample::create(conn, NewSample { name, is_reference }) {
             Ok(sample) => Ok(sample),
-            Err(SampleError::Duplicate(sample)) => Ok(sample),
+            Err(SampleError::Duplicate(sample)) => {
+                if is_reference && !sample.is_reference {
+                    Sample::set_reference(conn, name, true)?;
+                    Ok(Sample::get_by_name(conn, name)?)
+                } else {
+                    Ok(sample)
+                }
+            }
             Err(e) => Err(e),
         }
+    }
+
+    pub fn set_reference(
+        conn: &GraphConnection,
+        name: &str,
+        is_reference: bool,
+    ) -> Result<(), SampleError> {
+        conn.execute(
+            "UPDATE samples SET is_reference = ?2 WHERE name = ?1",
+            params![name, is_reference],
+        )?;
+        Ok(())
     }
 
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {
@@ -137,7 +192,13 @@ impl Sample {
         sample_name: &str,
         parent_samples: Vec<String>,
     ) -> Result<Sample, SampleError> {
-        match Sample::create(conn, sample_name) {
+        match Sample::create(
+            conn,
+            NewSample {
+                name: sample_name,
+                is_reference: false,
+            },
+        ) {
             Ok(new_sample) => {
                 if !parent_samples.is_empty() {
                     let parent_block_groups = BlockGroup::query(
@@ -236,6 +297,7 @@ mod tests {
     fn test_capnp_serialization() {
         let sample = Sample {
             name: "test_sample".to_string(),
+            is_reference: true,
         };
 
         let mut message = TypedBuilder::<sample::Owned>::new_default();
@@ -250,8 +312,22 @@ mod tests {
     fn test_delete_by_name() {
         let conn = &get_connection(None).unwrap();
 
-        let _ = Sample::create(conn, "sample1").unwrap();
-        let _ = Sample::create(conn, "sample2").unwrap();
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "sample1",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "sample2",
+                is_reference: false,
+            },
+        )
+        .unwrap();
 
         assert!(Sample::get_by_name(conn, "sample1").is_ok());
         assert!(Sample::get_by_name(conn, "sample2").is_ok());
@@ -267,7 +343,14 @@ mod tests {
         let conn = &get_connection(None).unwrap();
 
         for sample in ["alpha", "BarFooBaz", "foo", "QuxFood", "zzz"] {
-            Sample::create(conn, sample).unwrap();
+            Sample::create(
+                conn,
+                NewSample {
+                    name: sample,
+                    is_reference: false,
+                },
+            )
+            .unwrap();
         }
 
         let matches = Sample::search_name(conn, "FoO")
@@ -276,6 +359,32 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(matches, vec!["BarFooBaz", "QuxFood", "foo"]);
+    }
+
+    #[test]
+    fn test_get_or_create_reference_sets_reference_flag() {
+        let conn = &get_connection(None).unwrap();
+
+        let sample = Sample::get_or_create_reference(conn, "ref").unwrap();
+
+        assert_eq!(
+            sample,
+            Sample {
+                name: "ref".to_string(),
+                is_reference: true,
+            }
+        );
+    }
+
+    #[test]
+    fn test_get_or_create_reference_upgrades_existing_sample() {
+        let conn = &get_connection(None).unwrap();
+        Sample::get_or_create(conn, "existing").unwrap();
+
+        let sample = Sample::get_or_create_reference(conn, "existing").unwrap();
+
+        assert!(sample.is_reference);
+        assert!(Sample::get_by_name(conn, "existing").unwrap().is_reference);
     }
 
     #[test]

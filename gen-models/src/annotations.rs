@@ -875,8 +875,22 @@ mod tests {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
 
-        let _ = Sample::create(&conn, "sample-1").unwrap();
-        let _ = Sample::create(&conn, "sample-2").unwrap();
+        let _ = Sample::create(
+            &conn,
+            crate::sample::NewSample {
+                name: "sample-1",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+        let _ = Sample::create(
+            &conn,
+            crate::sample::NewSample {
+                name: "sample-2",
+                is_reference: false,
+            },
+        )
+        .unwrap();
 
         let mut cache = PathCache::new(&conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();

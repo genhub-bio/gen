@@ -345,7 +345,14 @@ mod tests {
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
 
-        Sample::create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::create(
+            conn,
+            gen_models::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                is_reference: false,
+            },
+        )
+        .unwrap();
         let block_group = BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {

@@ -597,7 +597,10 @@ pub fn process_changesetiter(
                 }
                 "samples" => {
                     let name = parse_string(item, pk_column);
-                    created_samples.push(Sample { name: name.clone() });
+                    created_samples.push(Sample {
+                        name: name.clone(),
+                        is_reference: parse_number(item, 1) != 0,
+                    });
                     created_samples_set.insert(name);
                 }
                 "sample_lineage" => {
@@ -1286,6 +1289,7 @@ mod tests {
             }],
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
+                is_reference: false,
             }],
             sample_lineages: vec![SampleLineage {
                 parent_sample_name: "parent_sample".to_string(),
@@ -1452,6 +1456,7 @@ mod tests {
             }],
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
+                is_reference: false,
             }],
             sample_lineages: vec![SampleLineage {
                 parent_sample_name: "parent_sample".to_string(),
@@ -1570,7 +1575,14 @@ mod tests {
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
-        let _ = Sample::create(conn, "sample-1").unwrap();
+        let _ = Sample::create(
+            conn,
+            crate::sample::NewSample {
+                name: "sample-1",
+                is_reference: false,
+            },
+        )
+        .unwrap();
         let (block_group_id, path) = setup_block_group(conn);
         let mut cache = PathCache::new(conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
@@ -1626,10 +1638,24 @@ mod tests {
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
-        let _ = Sample::create(conn, "parent").unwrap();
+        let _ = Sample::create(
+            conn,
+            crate::sample::NewSample {
+                name: "parent",
+                is_reference: false,
+            },
+        )
+        .unwrap();
 
         let mut session = start_operation(conn);
-        let _ = Sample::create(conn, "child").unwrap();
+        let _ = Sample::create(
+            conn,
+            crate::sample::NewSample {
+                name: "child",
+                is_reference: false,
+            },
+        )
+        .unwrap();
         SampleLineage::create(conn, "parent", "child").unwrap();
 
         let operation = end_operation(
@@ -1765,7 +1791,14 @@ mod tests {
 
             let mut session = start_operation(conn);
             // make a blockgroup with an edge from our parent blockgroup
-            let _ = Sample::create(conn, "new").unwrap();
+            let _ = Sample::create(
+                conn,
+                crate::sample::NewSample {
+                    name: "new",
+                    is_reference: false,
+                },
+            )
+            .unwrap();
             let new_bg = BlockGroup::create(
                 conn,
                 NewBlockGroup {

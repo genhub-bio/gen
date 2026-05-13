@@ -25,7 +25,7 @@ pub struct Command {
     /// Use the given samples as the parent samples for changes. Repeat the flag or use commas.
     #[arg(
         long = "parent-samples",
-        aliases = ["parent-sample", "ps"],
+        aliases = ["parent-sample", "ps", "reference"],
         value_delimiter = ',',
         default_values_t = [Sample::DEFAULT_NAME.to_string()]
     )]

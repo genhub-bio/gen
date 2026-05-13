@@ -19,8 +19,11 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// A sample name to associate the GFA file with
-    #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
-    sample: String,
+    #[arg(short, long, conflicts_with = "reference")]
+    sample: Option<String>,
+    /// Create or use a reference sample with this name
+    #[arg(long, conflicts_with = "sample")]
+    reference: Option<String>,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -37,12 +40,14 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
-    match import_gfa(
-        context,
-        &PathBuf::from(cmd.path.clone()),
-        name,
-        cmd.sample.as_str(),
-    ) {
+    let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
+        cmd.sample.as_deref(),
+        cmd.reference.as_deref(),
+    )?;
+    if is_reference {
+        Sample::get_or_create_reference(conn, sample_name)?;
+    }
+    match import_gfa(context, &PathBuf::from(cmd.path.clone()), name, sample_name) {
         Ok(_) => {
             println!("GFA imported.");
             conn.execute("END TRANSACTION;", []).unwrap();
