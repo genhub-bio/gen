@@ -33,10 +33,6 @@ fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
     FileAdditionError::FileReadError(io::Error::other(err))
 }
 
-fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
-    FileStoreError::IoError(io::Error::other(err))
-}
-
 #[doc(hidden)]
 pub struct OpenDalLocation {
     operator: Operator,
@@ -117,41 +113,6 @@ impl Drop for ChecksummedReader {
 }
 
 impl OpenDalLocation {
-    fn new_fs(root: &Path, path: &Path) -> Result<Self, opendal::Error> {
-        let path = path
-            .strip_prefix(Path::new("/"))
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-        let builder = services::Fs::default().root(&root.to_string_lossy());
-        let operator = Operator::new(builder)?.finish();
-
-        Ok(Self { operator, path })
-    }
-
-    fn from_workspace_path(workspace: &Workspace, path: &Path) -> Result<Self, opendal::Error> {
-        let repo_root = workspace.repo_root().map_err(|err| {
-            opendal::Error::new(opendal::ErrorKind::Unexpected, "repo_root failed").set_source(err)
-        })?;
-
-        if path.is_absolute() {
-            Self::new_fs(Path::new("/"), path)
-        } else {
-            Self::new_fs(&repo_root, path)
-        }
-    }
-
-    fn from_absolute_path(path: &Path) -> Result<Self, opendal::Error> {
-        if !path.is_absolute() {
-            return Err(opendal::Error::new(
-                opendal::ErrorKind::Unexpected,
-                "local path must be absolute",
-            ));
-        }
-
-        Self::new_fs(Path::new("/"), path)
-    }
-
     fn from_remote_uri(asset_uri: &str) -> Result<Self, FileAdditionError> {
         let url = Url::parse(asset_uri)
             .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
@@ -202,73 +163,6 @@ impl OpenDalLocation {
         Ok(ChecksummedReader::new(Box::new(Cursor::new(
             reader.to_vec(),
         ))))
-    }
-
-    fn checksum(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
-        block_on_opendal(self.checksum_async(display_path))
-    }
-
-    async fn checksum_async(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
-        let reader = match self.operator.reader(&self.path).await {
-            Ok(reader) => reader,
-            Err(err) => {
-                return match err.kind() {
-                    opendal::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
-                    opendal::ErrorKind::PermissionDenied => Err(
-                        FileAdditionError::FilePermissionDenied(display_path.to_string()),
-                    ),
-                    _ => Err(opendal_file_addition_error(err)),
-                };
-            }
-        }
-        .read(..)
-        .await
-        .map_err(opendal_file_addition_error)?;
-
-        match calculate_reader_checksum(Cursor::new(reader.to_vec())) {
-            Ok(checksum) => Ok(checksum),
-            Err(err) => match err.kind() {
-                io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
-                io::ErrorKind::PermissionDenied => Err(FileAdditionError::FilePermissionDenied(
-                    display_path.to_string(),
-                )),
-                _ => Err(FileAdditionError::FileReadError(err)),
-            },
-        }
-    }
-
-    fn copy_to_local_path(
-        &self,
-        workspace: &Workspace,
-        destination_path: &Path,
-    ) -> io::Result<u64> {
-        block_on_opendal(self.copy_to_local_path_async(workspace, destination_path))
-    }
-
-    async fn copy_to_local_path_async(
-        &self,
-        workspace: &Workspace,
-        destination_path: &Path,
-    ) -> io::Result<u64> {
-        let asset_location =
-            Self::from_workspace_path(workspace, destination_path).map_err(io::Error::other)?;
-        let buffer = self
-            .operator
-            .reader(&self.path)
-            .await
-            .map_err(io::Error::other)?
-            .read(..)
-            .await
-            .map_err(io::Error::other)?;
-        let bytes_copied = buffer.len() as u64;
-        let mut writer = asset_location
-            .operator
-            .writer(&asset_location.path)
-            .await
-            .map_err(io::Error::other)?;
-        writer.write(buffer).await.map_err(io::Error::other)?;
-        writer.close().await.map_err(io::Error::other)?;
-        Ok(bytes_copied)
     }
 }
 
@@ -381,9 +275,9 @@ impl AssetUri for LocalAssetUri {
 
     fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
-        OpenDalLocation::from_workspace_path(workspace, &source_file_path)
-            .map_err(opendal_file_addition_error)?
-            .reader()
+        fs::File::open(&source_file_path)
+            .map(|file| ChecksummedReader::new(Box::new(file)))
+            .map_err(FileAdditionError::FileReadError)
     }
 
     fn checksum(
@@ -396,14 +290,16 @@ impl AssetUri for LocalAssetUri {
         }
 
         let source_file_path = self.resolved_source_file_path(workspace)?;
-        let checksum_path = if source_file_path.is_file() {
-            source_file_path
-        } else {
-            PathBuf::from(self.file_path())
-        };
-        OpenDalLocation::from_workspace_path(workspace, &checksum_path)
-            .map_err(opendal_file_addition_error)?
-            .checksum(&checksum_path.to_string_lossy())
+        match fs::File::open(&source_file_path).and_then(calculate_reader_checksum) {
+            Ok(checksum) => Ok(checksum),
+            Err(err) => match err.kind() {
+                io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                io::ErrorKind::PermissionDenied => Err(FileAdditionError::FilePermissionDenied(
+                    source_file_path.to_string_lossy().to_string(),
+                )),
+                _ => Err(FileAdditionError::FileReadError(err)),
+            },
+        }
     }
 
     fn stored_asset_uri(
@@ -696,10 +592,7 @@ impl LocalAssetUri {
             return Ok(());
         }
 
-        OpenDalLocation::from_workspace_path(workspace, source_path)
-            .map_err(opendal_file_addition_error)?
-            .copy_to_local_path(workspace, &asset_path)
-            .map_err(FileAdditionError::FileReadError)?;
+        fs::copy(source_path, &asset_path).map_err(FileAdditionError::FileReadError)?;
         Ok(())
     }
 
@@ -723,10 +616,7 @@ impl LocalAssetUri {
         if source_path == asset_path {
             return Ok(());
         }
-        OpenDalLocation::from_workspace_path(workspace, &source_path)
-            .map_err(opendal_file_store_error)?
-            .copy_to_local_path(workspace, &asset_path)
-            .map_err(FileStoreError::IoError)?;
+        fs::copy(source_path, asset_path).map_err(FileStoreError::IoError)?;
         Ok(())
     }
 }
@@ -735,12 +625,8 @@ impl Read for LocalAssetUri {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.read_file.is_none() {
             let io_path = self.io_path();
-            self.read_file = Some(
-                OpenDalLocation::from_absolute_path(&io_path)
-                    .map_err(io::Error::other)?
-                    .reader()
-                    .map_err(io::Error::other)?,
-            );
+            let file = fs::File::open(io_path)?;
+            self.read_file = Some(ChecksummedReader::new(Box::new(file)));
         }
         self.read_file.as_mut().unwrap().read(buf)
     }
