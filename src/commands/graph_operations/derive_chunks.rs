@@ -19,8 +19,6 @@ use crate::{
 pub enum DeriveChunksOperationError {
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
-    #[error("Invalid breakpoint: {0}")]
-    InvalidBreakpoint(String),
     #[error("No chunking method provided: {0}")]
     NoChunkingMethod(String),
     #[error("No chunk coordinates provided: {0}")]
@@ -42,7 +40,7 @@ pub fn derive_chunks_operation(
     new_sample: String,
     region: String,
     backbone: Option<String>,
-    breakpoints: Option<String>,
+    breakpoints: Option<Vec<i64>>,
     chunk_size: Option<i64>,
 ) -> Result<(), Error> {
     let operation_conn = db_context.operations().conn();
@@ -71,26 +69,23 @@ pub fn derive_chunks_operation(
     .length(graph_conn)?;
 
     let chunk_points = if let Some(breakpoints) = breakpoints {
-        let mut result = vec![];
-        for breakpoint in breakpoints.split(",") {
-            match breakpoint.parse::<i64>() {
-                Ok(parsed_value) => result.push(parsed_value),
-                Err(_) => {
-                    return Err(DeriveChunksOperationError::InvalidBreakpoint(format!(
-                        "Invalid breakpoint: {breakpoint}"
-                    ))
-                    .into());
-                }
-            }
+        if breakpoints.is_empty() {
+            return Err(DeriveChunksOperationError::NoChunkCoordinates(
+                "No chunk coordinates provided.".to_string(),
+            )
+            .into());
         }
-
-        result.into_iter().sorted().collect::<Vec<i64>>()
+        breakpoints.into_iter().sorted().collect::<Vec<i64>>()
     } else if let Some(chunk_size) = chunk_size {
-        let chunk_count = path_length / chunk_size;
-        (1..=chunk_count)
-            .map(|i| i * chunk_size)
-            .filter(|&p| p < path_length)
-            .collect::<Vec<i64>>()
+        if chunk_size >= path_length {
+            vec![]
+        } else {
+            let chunk_count = path_length / chunk_size;
+            (1..=chunk_count)
+                .map(|i| i * chunk_size)
+                .filter(|&p| p < path_length)
+                .collect::<Vec<i64>>()
+        }
     } else {
         return Err(DeriveChunksOperationError::NoChunkingMethod(
             "No chunking method specified.".to_string(),
@@ -200,6 +195,27 @@ mod tests {
                     .unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn empty_breakpoints_errors() {
+        let context = setup_with_fasta("fixtures/simple.fa");
+        let result = derive_chunks_operation(
+            &context,
+            Some("test".into()),
+            Sample::DEFAULT_NAME.into(),
+            "chunks".into(),
+            "m123".into(),
+            None,
+            Some(vec![]),
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("No chunk coordinates provided"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
