@@ -683,8 +683,6 @@ impl BlockGroup {
         let end_blocks: Vec<&NodeIntervalBlock> = tree.query_point(end).map(|x| &x.value).collect();
         assert_eq!(end_blocks.len(), 1);
         let end_block = end_blocks[0];
-        // we make a start/end edge for the accession start/end, then fill in the middle
-        // with any existing edges
         let start_edge = AccessionEdgeData {
             source_node_id: PATH_START_NODE_ID,
             source_coordinate: -1,
@@ -723,7 +721,6 @@ impl BlockGroup {
                     in_range
                 })
                 .collect::<Vec<_>>();
-            // if start and end block are not the same, we will always have at least 2 elements in path_blocks
             for (block, next_block) in path_blocks.iter().zip(path_blocks[1..].iter()) {
                 path_edges.push(AccessionEdgeData {
                     source_node_id: block.node_id,
@@ -745,39 +742,48 @@ impl BlockGroup {
         Ok(accession)
     }
 
-    pub fn insert_changes(
+    pub fn insert_changes<T: IntervalTreeSource + Clone + Eq + Hash>(
         conn: &GraphConnection,
-        changes: &[BlockGroupChange<Path>],
-        cache: &mut PathCache,
-        modify_blockgroup: bool,
+        changes: &[BlockGroupChange<T>],
     ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
-            HashMap::<&HashId, Vec<AugmentedEdgeData>>::new();
-        let mut new_accession_edges = HashMap::new();
+            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
+        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
         let mut tree_map = HashMap::new();
         for change in changes {
-            let tree = if modify_blockgroup {
-                tree_map.entry(change.block_group_id).or_insert_with(|| {
-                    BlockGroup::intervaltree_for(conn, &change.block_group_id, true)
-                })
-            } else {
-                PathCache::get_intervaltree(cache, &change.intervaltree_source)?
-            };
+            if !tree_map.contains_key(&change.intervaltree_source) {
+                tree_map.insert(
+                    change.intervaltree_source.clone(),
+                    change.intervaltree_source.intervaltree(conn)?,
+                );
+            }
+            let tree = tree_map.get(&change.intervaltree_source).unwrap();
             let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
             new_augmented_edges_by_block_group
-                .entry(&change.block_group_id)
+                .entry(change.block_group_id)
                 .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
                 .or_insert_with(|| new_augmented_edges.clone());
             if let Some(accession) = &change.path_accession {
                 new_accession_edges
-                    .entry((&change.intervaltree_source, accession))
+                    .entry((change.block_group_id, accession.clone()))
                     .and_modify(|new_edge_data: &mut Vec<AugmentedEdgeData>| {
                         new_edge_data.extend(new_augmented_edges.clone())
                     })
                     .or_insert_with(|| new_augmented_edges.clone());
             }
         }
+        Self::persist_insert_changes(
+            conn,
+            new_augmented_edges_by_block_group,
+            new_accession_edges,
+        )
+    }
 
+    fn persist_insert_changes(
+        conn: &GraphConnection,
+        new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
+        new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
+    ) -> Result<(), BlockGroupError> {
         let mut edge_data_map = HashMap::new();
 
         for (block_group_id, new_augmented_edges) in new_augmented_edges_by_block_group {
@@ -793,7 +799,7 @@ impl BlockGroup {
                 .iter()
                 .enumerate()
                 .map(|(i, edge_id)| BlockGroupEdgeData {
-                    block_group_id: *block_group_id,
+                    block_group_id,
                     edge_id: *edge_id,
                     chromosome_index: new_augmented_edges[i].chromosome_index,
                     phased: new_augmented_edges[i].phased,
@@ -802,11 +808,11 @@ impl BlockGroup {
             BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
         }
 
-        for ((path, accession_name), path_edges) in new_accession_edges {
+        for ((block_group_id, accession_name), path_edges) in new_accession_edges {
             match Accession::get(
                 conn,
                 "select * from accessions where name = ?1 AND block_group_id = ?2",
-                params![accession_name, path.block_group_id],
+                params![accession_name, block_group_id],
             ) {
                 Ok(_) => {
                     println!(
@@ -821,7 +827,7 @@ impl BlockGroup {
                             .map(AccessionEdgeData::from)
                             .collect::<Vec<_>>(),
                     );
-                    let acc = Accession::create(conn, accession_name, &path.block_group_id, None)
+                    let acc = Accession::create(conn, &accession_name, &block_group_id, None)
                         .expect("Accession could not be created.");
                     AccessionPath::create(conn, &acc.id, &acc_edges)?;
                 }
@@ -838,23 +844,21 @@ impl BlockGroup {
     ) -> Result<(), BlockGroupError> {
         let tree = change.intervaltree_source.intervaltree(conn)?;
         let new_augmented_edges = BlockGroup::set_up_new_edges(change, &tree)?;
-        let new_edges = new_augmented_edges
-            .iter()
-            .map(|augmented_edge| augmented_edge.edge_data)
-            .collect::<Vec<_>>();
-        let edge_ids = Edge::bulk_create(conn, &new_edges);
-        let new_block_group_edges = edge_ids
-            .iter()
-            .enumerate()
-            .map(|(i, edge_id)| BlockGroupEdgeData {
-                block_group_id: change.block_group_id,
-                edge_id: *edge_id,
-                chromosome_index: new_augmented_edges[i].chromosome_index,
-                phased: new_augmented_edges[i].phased,
-            })
-            .collect::<Vec<_>>();
-        BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-        Ok(())
+        let mut new_augmented_edges_by_block_group = HashMap::new();
+        new_augmented_edges_by_block_group
+            .insert(change.block_group_id, new_augmented_edges.clone());
+        let mut new_accession_edges = HashMap::new();
+        if let Some(accession) = &change.path_accession {
+            new_accession_edges.insert(
+                (change.block_group_id, accession.clone()),
+                new_augmented_edges,
+            );
+        }
+        Self::persist_insert_changes(
+            conn,
+            new_augmented_edges_by_block_group,
+            new_accession_edges,
+        )
     }
 
     fn set_up_new_edges<T: IntervalTreeSource>(

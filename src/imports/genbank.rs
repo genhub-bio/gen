@@ -609,7 +609,7 @@ where
                             )?;
                             PathChange {
                                 block_group_id: block_group.id,
-                                path: path.clone(),
+                                intervaltree_source: path.clone(),
                                 path_accession: None,
                                 start,
                                 end,
@@ -629,7 +629,7 @@ where
                         }
                         EditType::Deletion => PathChange {
                             block_group_id: block_group.id,
-                            path: path.clone(),
+                            intervaltree_source: path.clone(),
                             path_accession: None,
                             start,
                             end,
@@ -647,8 +647,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    let tree = path.intervaltree(conn)?;
-                    BlockGroup::insert_change(conn, &change, &tree).unwrap();
+                    BlockGroup::insert_change(conn, &change).unwrap();
                     applied_changes.push((edit, change_node_id));
                 }
 

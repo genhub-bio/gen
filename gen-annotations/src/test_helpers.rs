@@ -140,8 +140,6 @@ pub fn setup_test_data(conn: &GraphConnection) {
     .expect("should create child block group")[0]
         .id;
     let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
-    let tree = sample_path.intervaltree(conn).unwrap();
-
     let alt_seq = "C";
 
     let sequence = Sequence::new()
@@ -161,7 +159,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
     .unwrap();
     let change = PathChange {
         block_group_id: sample_bg_id,
-        path: sample_path,
+        intervaltree_source: sample_path,
         path_accession: None,
         start: 3,
         end: 4,
@@ -179,5 +177,5 @@ pub fn setup_test_data(conn: &GraphConnection) {
         preserve_edge: false,
     };
 
-    BlockGroup::insert_change(conn, &change, &tree).expect("should apply variant change");
+    BlockGroup::insert_change(conn, &change).expect("should apply variant change");
 }
