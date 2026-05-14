@@ -5,18 +5,17 @@ use std::{
 
 use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_graph::GenGraph;
+use gen_models::locus::{BlockSlice, GraphLocus};
 use gen_tui::{
     GraphController, ViewportState, VisualDetail, WorldRect, plotter::NodeSizer,
     theme::current_theme,
 };
-use petgraph::visit::NodeIndexable;
+use petgraph::visit::{IntoNodeIdentifiers, NodeIndexable};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
 };
-
-use crate::graphs::graph_search::GraphLocus;
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSegment {
@@ -43,28 +42,14 @@ pub struct AnnotationTrack {
 }
 
 pub fn graphlocus_to_annotation_span(locus: &GraphLocus, name: &str) -> AnnotationSpan {
-    let n = locus.blocks.len();
     let segments = locus
-        .blocks
+        .slices
         .iter()
-        .enumerate()
-        .map(|(i, node)| {
-            let start = if i == 0 {
-                node.sequence_start + locus.start_offset as i64
-            } else {
-                node.sequence_start
-            };
-            let end = if i == n - 1 {
-                node.sequence_start + locus.end_offset as i64
-            } else {
-                node.sequence_end
-            };
-            AnnotationSegment {
-                node_id: node.node_id,
-                start,
-                end,
-                strand: locus.strand,
-            }
+        .map(|s| AnnotationSegment {
+            node_id: s.node.node_id,
+            start: s.node.sequence_start + s.start as i64,
+            end: s.node.sequence_start + s.end as i64,
+            strand: locus.strand,
         })
         .collect();
     AnnotationSpan {
@@ -72,6 +57,31 @@ pub fn graphlocus_to_annotation_span(locus: &GraphLocus, name: &str) -> Annotati
         name: name.to_string(),
         segments,
     }
+}
+
+pub fn graph_locus_from_annotation_span(
+    span: &AnnotationSpan,
+    graph: &GenGraph,
+) -> Option<GraphLocus> {
+    if span.segments.is_empty() {
+        return None;
+    }
+    let strand = span.segments.first()?.strand;
+    let node_map: HashMap<_, _> = graph.node_identifiers().map(|n| (n.node_id, n)).collect();
+    let slices: Option<Vec<BlockSlice>> = span
+        .segments
+        .iter()
+        .map(|seg| {
+            let node = *node_map.get(&seg.node_id)?;
+            let start = (seg.start - node.sequence_start).max(0) as usize;
+            let end = (seg.end - node.sequence_start).max(0) as usize;
+            Some(BlockSlice { node, start, end })
+        })
+        .collect();
+    Some(GraphLocus {
+        slices: slices?,
+        strand,
+    })
 }
 
 impl AnnotationTrack {

@@ -15,6 +15,7 @@ pub mod files;
 pub mod generated;
 pub use generated::gen_models_capnp;
 pub mod lineage;
+pub mod locus;
 pub mod manifest;
 pub mod metadata;
 pub mod migrations;
