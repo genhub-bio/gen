@@ -19,7 +19,7 @@ use crate::python_api::sequence_part::PySequencePart;
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, sample, new_sample, region_name, name=None))]
+    #[pyo3(signature = (filename, sample, new_sample, region_name, collection=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_fasta(
         &self,
@@ -27,13 +27,13 @@ impl PyRepository {
         sample: String,
         new_sample: String,
         region_name: String,
-        name: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_fasta(
                 ctx,
-                &name,
+                &collection,
                 &sample,
                 &new_sample,
                 &region_name,
@@ -50,17 +50,17 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (filename, sample, new_sample, name=None))]
+    #[pyo3(signature = (filename, sample, new_sample, collection=None))]
     fn update_with_gfa(
         &self,
         filename: String,
         sample: String,
         new_sample: String,
-        name: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_gfa(ctx, &name, &sample, &new_sample, &filename)
+            update_with_gfa(ctx, &collection, &sample, &new_sample, &filename)
                 .map(|_| format!("Updated from '{}'.", filename))
                 .map_err(|e| {
                     PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
@@ -68,22 +68,22 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (filename, csv, sample, name=None, parent_sample=None))]
+    #[pyo3(signature = (filename, csv, sample, parent_sample=None, collection=None))]
     fn update_with_gaf(
         &self,
         filename: String,
         csv: String,
         sample: String,
-        name: Option<String>,
         parent_sample: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_gaf(
                 ctx,
                 &filename,
                 &csv,
-                &name,
+                &collection,
                 &sample,
                 parent_sample.as_deref(),
             )
@@ -94,22 +94,22 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (filename, name=None, genotype=None, sample=None, parent_samples=None, in_place=false))]
+    #[pyo3(signature = (filename, genotype=None, sample=None, parent_samples=None, in_place=false, collection=None))]
     fn update_with_vcf(
         &self,
         filename: String,
-        name: Option<String>,
         genotype: Option<String>,
         sample: Option<String>,
         parent_samples: Option<Vec<String>>,
         in_place: bool,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_vcf(
                 ctx,
                 &filename,
-                &name,
+                &collection,
                 genotype.clone().unwrap_or_default(),
                 sample.as_deref(),
                 parent_samples.unwrap_or_default(),
@@ -125,16 +125,16 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (filename, sample, name=None, create_missing=false))]
+    #[pyo3(signature = (filename, sample, create_missing=false, collection=None))]
     fn update_with_genbank(
         &self,
         filename: String,
         sample: String,
-        name: Option<String>,
         create_missing: bool,
+        collection: Option<String>,
     ) -> PyResult<String> {
         use std::fs::File;
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             let file = File::open(&filename).map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to open '{}': {e}", filename))
@@ -142,7 +142,7 @@ impl PyRepository {
             update_with_genbank(
                 ctx,
                 &file,
-                name.as_ref(),
+                collection.as_ref(),
                 &sample,
                 create_missing,
                 &gen_models::operations::OperationInfo {
@@ -161,7 +161,7 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (sequence, sample, new_sample, region_name, name=None, no_reference_path_update=false))]
+    #[pyo3(signature = (sequence, sample, new_sample, region_name, no_reference_path_update=false, collection=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_sequence(
         &self,
@@ -169,14 +169,14 @@ impl PyRepository {
         sample: String,
         new_sample: String,
         region_name: String,
-        name: Option<String>,
         no_reference_path_update: bool,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_sequence(
                 ctx,
-                &name,
+                &collection,
                 &sample,
                 &new_sample,
                 &region_name,
@@ -188,17 +188,17 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (name, sample, new_sample_name, path_name, parts_list))]
+    #[pyo3(signature = (sample, new_sample_name, path_name, parts_list, collection=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_library(
         &self,
-        name: Option<String>,
         sample: Option<String>,
         new_sample_name: String,
         path_name: String,
         parts_list: Vec<Vec<PySequencePart>>,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         let rust_parts_list: Vec<Vec<SequencePart>> = parts_list
             .iter()
@@ -216,7 +216,7 @@ impl PyRepository {
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_library(
                 ctx,
-                &name,
+                &collection,
                 &sample,
                 &new_sample_name,
                 &path_name,
@@ -229,24 +229,24 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (name, sample, new_sample, path_name, library, parts))]
+    #[pyo3(signature = (sample, new_sample, path_name, library, parts, collection=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_library_files(
         &self,
-        name: Option<String>,
         sample: String,
         new_sample: String,
         path_name: String,
         library: String,
         parts: String,
+        collection: Option<String>,
     ) -> PyResult<String> {
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_library(
                 ctx,
-                &name,
+                &collection,
                 &sample,
                 &new_sample,
                 &path_name,

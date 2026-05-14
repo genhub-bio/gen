@@ -10,17 +10,17 @@ use crate::python_api::block_group::PyBlockGroup;
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (sample, new_sample, region, name=None, backbone=None, breakpoints=None, chunk_size=None))]
+    #[pyo3(signature = (sample, new_sample, region, backbone=None, breakpoints=None, chunk_size=None, collection=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn derive_chunks(
         &self,
         sample: String,
         new_sample: String,
         region: String,
-        name: Option<String>,
         backbone: Option<String>,
         breakpoints: Option<Vec<i64>>,
         chunk_size: Option<i64>,
+        collection: Option<String>,
     ) -> PyResult<()> {
         if self.in_transaction {
             return Err(PyRuntimeError::new_err(
@@ -29,7 +29,7 @@ impl PyRepository {
         }
         derive_chunks_operation(
             &self.context,
-            name,
+            collection,
             sample,
             new_sample,
             region,
@@ -40,40 +40,54 @@ impl PyRepository {
         .map_err(|e| PyRuntimeError::new_err(format!("Error deriving chunks: {e}")))
     }
 
-    #[pyo3(signature = (sample, new_sample, region, name=None, backbone=None))]
+    #[pyo3(signature = (sample, new_sample, region, backbone=None, collection=None))]
     fn derive_subgraph(
         &self,
         sample: String,
         new_sample: String,
         region: String,
-        name: Option<String>,
         backbone: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<()> {
         if self.in_transaction {
             return Err(PyRuntimeError::new_err(
                 "derive_subgraph cannot be called inside a transaction block",
             ));
         }
-        derive_subgraph_operation(&self.context, name, sample, new_sample, region, backbone)
-            .map_err(|e| PyRuntimeError::new_err(format!("Error deriving subgraph: {e}")))
+        derive_subgraph_operation(
+            &self.context,
+            collection,
+            sample,
+            new_sample,
+            region,
+            backbone,
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("Error deriving subgraph: {e}")))
     }
 
-    #[pyo3(signature = (sample, new_sample, regions, new_region, name=None))]
+    #[pyo3(signature = (sample, new_sample, regions, new_region, collection=None))]
     fn make_stitch(
         &self,
         sample: String,
         new_sample: String,
         regions: String,
         new_region: String,
-        name: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<()> {
         if self.in_transaction {
             return Err(PyRuntimeError::new_err(
                 "make_stitch cannot be called inside a transaction block",
             ));
         }
-        make_stitch_operation(&self.context, name, sample, new_sample, regions, new_region)
-            .map_err(|e| PyRuntimeError::new_err(format!("Error making stitch: {e}")))
+        make_stitch_operation(
+            &self.context,
+            collection,
+            sample,
+            new_sample,
+            regions,
+            new_region,
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("Error making stitch: {e}")))
     }
 
     /// Stitch multiple block groups into a single new block group.

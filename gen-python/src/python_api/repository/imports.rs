@@ -18,18 +18,18 @@ use crate::python_api::sequence_part::PySequencePart;
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, name=None, sample=None, shallow=false))]
+    #[pyo3(signature = (filename, sample=None, shallow=false, collection=None))]
     pub fn import_fasta(
         &self,
         filename: String,
-        name: Option<String>,
         sample: Option<String>,
         shallow: bool,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_write(&self.context, !self.in_transaction, |ctx| {
-            import_fasta(ctx, &filename, &name, &sample, shallow)
+            import_fasta(ctx, &filename, &collection, &sample, shallow)
                 .map(|_| format!("'{}' imported.", filename))
                 .map_err(|e| match e {
                     FastaError::OperationError(OperationError::NoChanges) => {
@@ -40,17 +40,17 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (filename, name=None, sample=None))]
+    #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_gfa(
         &self,
         filename: String,
-        name: Option<String>,
         sample: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_write(&self.context, !self.in_transaction, |ctx| {
-            import_gfa(ctx, &PathBuf::from(&filename), &name, &sample)
+            import_gfa(ctx, &PathBuf::from(&filename), &collection, &sample)
                 .map(|_| format!("'{}' imported.", filename))
                 .map_err(|e| match e {
                     GFAImportError::OperationError(OperationError::NoChanges) => {
@@ -61,15 +61,15 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (filename, name=None, sample=None))]
+    #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_genbank(
         &self,
         filename: String,
-        name: Option<String>,
         sample: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<String> {
         use std::fs::File;
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_write(&self.context, !self.in_transaction, |ctx| {
             let mut reader: Box<dyn std::io::Read> = if filename.ends_with(".gz") {
@@ -85,7 +85,7 @@ impl PyRepository {
             import_genbank(
                 ctx,
                 &mut reader,
-                name.as_ref(),
+                collection.as_ref(),
                 &sample,
                 gen_models::operations::OperationInfo {
                     files: vec![{
@@ -102,15 +102,15 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (library_name, parts_list, name=None, sample=None))]
+    #[pyo3(signature = (library_name, parts_list, sample=None, collection=None))]
     fn import_library(
         &self,
         library_name: String,
         parts_list: Vec<Vec<PySequencePart>>,
-        name: Option<String>,
         sample: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<String> {
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         let rust_parts_list: Vec<Vec<SequencePart>> = parts_list
             .iter()
@@ -128,7 +128,7 @@ impl PyRepository {
         run_write(&self.context, !self.in_transaction, |ctx| {
             import_library(
                 ctx,
-                &name,
+                &collection,
                 &sample,
                 &library_name,
                 rust_parts_list.clone(),
@@ -148,23 +148,23 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (library_name, parts, library, name=None, sample=None))]
+    #[pyo3(signature = (library_name, parts, library, sample=None, collection=None))]
     fn import_library_files(
         &self,
         library_name: String,
         parts: String,
         library: String,
-        name: Option<String>,
         sample: Option<String>,
+        collection: Option<String>,
     ) -> PyResult<String> {
         let parts_list = parse_library(&parts, &library)
             .map_err(|e| PyRuntimeError::new_err(format!("Problem parsing library files: {e}")))?;
-        let name = name.unwrap_or_else(|| self.get_default_collection());
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_write(&self.context, !self.in_transaction, |ctx| {
             import_library(
                 ctx,
-                &name,
+                &collection,
                 &sample,
                 &library_name,
                 parts_list.clone(),
