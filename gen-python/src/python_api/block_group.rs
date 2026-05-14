@@ -567,7 +567,7 @@ impl PyBlockGroup {
     fn chunks(
         &self,
         new_sample: String,
-        breakpoints: Option<String>,
+        breakpoints: Option<Vec<i64>>,
         chunk_size: Option<i64>,
         backbone: Option<String>,
     ) -> PyResult<Vec<PyBlockGroup>> {
