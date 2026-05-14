@@ -331,24 +331,18 @@ impl BlockGroup {
 
         for accession in Accession::query(
             conn,
-            "select * from accessions where path_id IN rarray(?1);",
-            rusqlite::params!(Rc::new(
-                existing_paths
-                    .iter()
-                    .map(|path| SQLValue::from(path.id))
-                    .collect::<Vec<SQLValue>>()
-            )),
+            "select * from accessions where block_group_id = ?1;",
+            params![self.id],
         ) {
             let edges = AccessionPath::query(
                 conn,
                 "Select * from accession_paths where accession_id = ?1 order by index_in_path ASC;",
                 rusqlite::params!(SQLValue::from(accession.id)),
             );
-            let new_path_id = path_map.get(&accession.path_id).unwrap();
             let obj = Accession::get_or_create(
                 conn,
                 &accession.name,
-                new_path_id,
+                target_block_group_id,
                 accession.parent_accession_id.as_ref(),
             )?;
             AccessionPath::create(
@@ -649,8 +643,8 @@ impl BlockGroup {
             target_strand: Strand::Forward,
             chromosome_index: 0,
         };
-        let accession =
-            Accession::create(conn, name, &path.id, None).expect("Unable to create accession.");
+        let accession = Accession::create(conn, name, &path.block_group_id, None)
+            .expect("Unable to create accession.");
         let mut path_edges = vec![start_edge];
         if start_block == end_block {
             path_edges.push(end_edge);
@@ -751,8 +745,8 @@ impl BlockGroup {
         for ((path, accession_name), path_edges) in new_accession_edges {
             match Accession::get(
                 conn,
-                "select * from accessions where name = ?1 AND path_id = ?2",
-                params![accession_name, path.id],
+                "select * from accessions where name = ?1 AND block_group_id = ?2",
+                params![accession_name, path.block_group_id],
             ) {
                 Ok(_) => {
                     println!(
@@ -767,7 +761,7 @@ impl BlockGroup {
                             .map(AccessionEdgeData::from)
                             .collect::<Vec<_>>(),
                     );
-                    let acc = Accession::create(conn, accession_name, &path.id, None)
+                    let acc = Accession::create(conn, accession_name, &path.block_group_id, None)
                         .expect("Accession could not be created.");
                     AccessionPath::create(conn, &acc.id, &acc_edges)?;
                 }
@@ -1845,7 +1839,7 @@ mod tests {
 
         let child_a_accessions = Accession::query(
             conn,
-            "select accessions.* from accessions join paths on accessions.path_id = paths.id where paths.block_group_id = ?1 order by accessions.name",
+            "select * from accessions where block_group_id = ?1 order by name",
             params![child_a.id],
         );
         assert_eq!(
@@ -1858,7 +1852,7 @@ mod tests {
 
         let child_b_accessions = Accession::query(
             conn,
-            "select accessions.* from accessions join paths on accessions.path_id = paths.id where paths.block_group_id = ?1 order by accessions.name",
+            "select * from accessions where block_group_id = ?1 order by name",
             params![child_b.id],
         );
         assert_eq!(
@@ -1885,7 +1879,7 @@ mod tests {
             vec![Accession {
                 id: acc_1.id,
                 name: "test".to_string(),
-                path_id: path.id,
+                block_group_id: path.block_group_id,
                 parent_accession_id: None,
             }]
         );

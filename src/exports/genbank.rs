@@ -95,7 +95,7 @@ fn export_annotations(
         let Some(accession) = Accession::get_by_id(conn, &annotation.accession_id) else {
             continue;
         };
-        if accession.path_id != path.id {
+        if accession.block_group_id != path.block_group_id {
             continue;
         }
 
@@ -578,7 +578,7 @@ mod tests {
             chromosome_index: 0,
         });
 
-        let accession = Accession::get_or_create(conn, name, &path.id, None).unwrap();
+        let accession = Accession::get_or_create(conn, name, &path.block_group_id, None).unwrap();
         let edge_ids = AccessionEdge::bulk_create(conn, &edges);
         AccessionPath::create(conn, &accession.id, &edge_ids);
         Annotation::create_with_samples(

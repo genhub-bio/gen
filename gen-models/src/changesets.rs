@@ -657,19 +657,19 @@ pub fn process_changesetiter(
                 }
                 "accessions" => {
                     let accession_id = HashId(parse_blob(item, pk_column));
-                    let path_id = HashId(parse_blob(item, 2));
+                    let block_group_id = HashId(parse_blob(item, 2));
                     let parent_accession_id = parse_maybe_hashid(item, 3);
 
                     created_accessions.push(Accession {
                         id: accession_id,
                         name: parse_string(item, 1),
-                        path_id,
+                        block_group_id,
                         parent_accession_id,
                     });
 
                     created_accessions_set.insert(accession_id);
-                    if !created_paths_set.contains(&path_id) {
-                        previous_paths.insert(path_id);
+                    if !created_block_groups_set.contains(&block_group_id) {
+                        previous_block_groups.insert(block_group_id);
                     }
                     if let Some(id) = parent_accession_id
                         && !created_accessions_set.contains(&id)
@@ -893,7 +893,7 @@ pub fn apply_changeset(
         Accession::get_or_create(
             conn,
             &accession.name,
-            &accession.path_id,
+            &accession.block_group_id,
             accession.parent_accession_id.as_ref(),
         )?;
     }
@@ -971,7 +971,7 @@ pub fn apply_changeset(
         Accession::get_or_create(
             conn,
             &accession.name,
-            &accession.path_id,
+            &accession.block_group_id,
             accession.parent_accession_id.as_ref(),
         )?;
         let edges = changeset
@@ -1349,7 +1349,7 @@ mod tests {
             accessions: vec![Accession {
                 id: HashId::pad_str(1),
                 name: "test_accession".to_string(),
-                path_id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
                 parent_accession_id: None,
             }],
             accession_edges: vec![AccessionEdge {
@@ -1515,7 +1515,7 @@ mod tests {
             accessions: vec![Accession {
                 id: HashId::pad_str(1),
                 name: "test_accession".to_string(),
-                path_id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
                 parent_accession_id: None,
             }],
             accession_edges: vec![AccessionEdge {

@@ -48,14 +48,13 @@ CREATE UNIQUE INDEX path_uidx ON paths(block_group_id, name);
 CREATE TABLE accessions (
   id BLOB PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
---  path accessions can reference other path accessions
-  path_id BLOB NOT NULL,
+  block_group_id BLOB NOT NULL,
   parent_accession_id BLOB,
-  FOREIGN KEY(path_id) REFERENCES paths(id),
+  FOREIGN KEY(block_group_id) REFERENCES block_groups(id),
   FOREIGN KEY(parent_accession_id) REFERENCES accessions(id)
 ) STRICT;
-CREATE UNIQUE INDEX accession_uidx ON accessions(path_id, parent_accession_id, name) WHERE parent_accession_id is not null;
-CREATE UNIQUE INDEX accession_null_aid_uidx ON accessions(path_id, name) WHERE parent_accession_id is null;
+CREATE UNIQUE INDEX accession_uidx ON accessions(block_group_id, parent_accession_id, name) WHERE parent_accession_id is not null;
+CREATE UNIQUE INDEX accession_null_aid_uidx ON accessions(block_group_id, name) WHERE parent_accession_id is null;
 
 CREATE TABLE accession_edges (
   id BLOB PRIMARY KEY NOT NULL,
