@@ -157,8 +157,6 @@ impl PyGraphLocus {
 #[derive(Clone)]
 pub struct PyAnnotation {
     pub inner: AnnotationSpan,
-    /// Source loci retained for viewport-aware midpoint computation at render time.
-    pub loci: Vec<GraphLocus>,
 }
 
 #[pymethods]
@@ -167,20 +165,18 @@ impl PyAnnotation {
     fn new(locus_or_loci: &Bound<'_, PyAny>, name: &str) -> PyResult<Self> {
         if let Ok(single) = locus_or_loci.extract::<PyRef<PyGraphLocus>>() {
             let span = graphlocus_to_annotation_span(&single.inner, name);
-            let loci = vec![single.inner.clone()];
-            Ok(PyAnnotation { inner: span, loci })
+            Ok(PyAnnotation { inner: span })
         } else if let Ok(list) = locus_or_loci.extract::<Vec<PyRef<PyGraphLocus>>>() {
-            let loci: Vec<GraphLocus> = list.iter().map(|l| l.inner.clone()).collect();
-            let segments: Vec<AnnotationSegment> = loci
+            let segments: Vec<AnnotationSegment> = list
                 .iter()
-                .flat_map(|l| graphlocus_to_annotation_span(l, name).segments)
+                .flat_map(|l| graphlocus_to_annotation_span(&l.inner, name).segments)
                 .collect();
             let span = AnnotationSpan {
                 id: HashId::convert_str(name),
                 name: name.to_string(),
                 segments,
             };
-            Ok(PyAnnotation { inner: span, loci })
+            Ok(PyAnnotation { inner: span })
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
                 "first argument must be a GraphLocus or list[GraphLocus]",

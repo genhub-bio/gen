@@ -9,7 +9,10 @@ use r#gen::{
     get_connection,
     views::{
         annotation_groups::load_annotation_group_entries,
-        annotation_track::{AnnotationSpan, AnnotationTrack},
+        annotation_track::{
+            AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
+            graphlocus_to_annotation_span,
+        },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
             GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
@@ -18,14 +21,17 @@ use r#gen::{
         inline_label_placement::draw_label_near_pos,
     },
 };
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_models::{
-    annotations::AnnotationError, block_group::BlockGroup, db::GraphConnection, locus::GraphLocus,
+    annotations::AnnotationError,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    locus::{BlockSlice, GraphLocus},
 };
 use gen_tui::{
-    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    plotter::PathStyle, theme::current_theme,
+    LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
+    layout::VisualDetail, plotter::PathStyle, theme::current_theme,
 };
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -206,6 +212,32 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
     }
 }
 
+/// Build a `GraphLocus` from an `AnnotationSpan` using only nodes visible in
+/// the current viewport (`pos_map`).  Segments whose node is not in the map
+/// are silently dropped; `locus_label_bounds` handles partial coverage fine.
+fn locus_from_span_and_pos_map(
+    span: &AnnotationSpan,
+    pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
+) -> GraphLocus {
+    let node_by_id: HashMap<HashId, GraphNode> = pos_map.keys().map(|n| (n.node_id, *n)).collect();
+    let slices = span
+        .segments
+        .iter()
+        .filter_map(|seg| {
+            let node = *node_by_id.get(&seg.node_id)?;
+            let start = (seg.start - node.sequence_start).max(0) as usize;
+            let end = (seg.end - node.sequence_start).max(0) as usize;
+            Some(BlockSlice { node, start, end })
+        })
+        .collect();
+    let strand = span
+        .segments
+        .first()
+        .map(|s| s.strand)
+        .unwrap_or(Strand::Unknown);
+    GraphLocus { slices, strand }
+}
+
 /// Internal graph controller for the Jupyter notebook widget.
 ///
 /// Not intended for direct use from Python — users should call
@@ -225,10 +257,10 @@ pub struct PyGraphController {
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     track_annotations: Vec<AnnotationTrack>,
-    /// Each entry: (track_name, [(locus, label)], style).
-    /// Loci are stored so the label midpoint can be recomputed each render
-    /// as the viewport changes.
-    inline_annotations: Vec<(String, Vec<(GraphLocus, String)>, PathStyle)>,
+    /// Each entry: (track_name, [(span, label)], style).
+    /// Spans are stored so the label midpoint can be recomputed each render
+    /// from viewport-visible nodes only.
+    inline_annotations: Vec<(String, Vec<(AnnotationSpan, String)>, PathStyle)>,
 }
 
 impl PyGraphController {
@@ -368,15 +400,16 @@ impl PyGraphController {
             let theme = current_theme();
             let pos_map = viewport_pos_map(&self.controller);
             let detail_level = self.controller.get_detail_level();
-            for (_, loci_with_labels, style) in &self.inline_annotations {
+            for (_, spans_with_labels, style) in &self.inline_annotations {
                 let color = match style.color {
                     ratatui::style::Color::Reset => theme[0x06],
                     c => c,
                 };
                 // Anonymous highlights (from highlight_match) have an empty label and are skipped here.
-                for (locus, label) in loci_with_labels.iter().filter(|(_, l)| !l.is_empty()) {
+                for (span, label) in spans_with_labels.iter().filter(|(_, l)| !l.is_empty()) {
+                    let locus = locus_from_span_and_pos_map(span, &pos_map);
                     let Some((left_pos, right_pos)) =
-                        locus_label_bounds(locus, &pos_map, detail_level)
+                        locus_label_bounds(&locus, &pos_map, detail_level)
                     else {
                         continue;
                     };
@@ -425,10 +458,19 @@ impl PyGraphController {
         for style in &styles {
             self.controller.clear_highlight(style);
         }
-        for (_, loci_with_labels, style) in &self.inline_annotations {
-            for (locus, _) in loci_with_labels {
-                highlight_match_range(&mut self.controller, locus, *style);
-            }
+        // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
+        let loci_with_styles: Vec<(GraphLocus, PathStyle)> = self
+            .inline_annotations
+            .iter()
+            .flat_map(|(_, spans, style)| {
+                spans.iter().filter_map(|(span, _)| {
+                    graph_locus_from_annotation_span(span, self.controller.graph())
+                        .map(|l| (l, *style))
+                })
+            })
+            .collect();
+        for (locus, style) in &loci_with_styles {
+            highlight_match_range(&mut self.controller, locus, *style);
         }
     }
 
@@ -500,11 +542,9 @@ impl PyGraphController {
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
         highlight_match_range(&mut self.controller, &locus.inner, style);
-        self.inline_annotations.push((
-            String::new(),
-            vec![(locus.inner.clone(), String::new())],
-            style,
-        ));
+        let span = graphlocus_to_annotation_span(&locus.inner, "");
+        self.inline_annotations
+            .push((String::new(), vec![(span, String::new())], style));
         Ok(())
     }
 
@@ -782,16 +822,20 @@ impl PyGraphController {
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        let mut loci_with_labels: Vec<(GraphLocus, String)> = Vec::new();
-        for ann in &annotations {
-            let label = ann.inner.name.clone();
-            for locus in &ann.loci {
-                highlight_match_range(&mut self.controller, locus, style);
-                loci_with_labels.push((locus.clone(), label.clone()));
-            }
+        let spans_with_labels: Vec<(AnnotationSpan, String)> = annotations
+            .iter()
+            .map(|ann| (ann.inner.clone(), ann.inner.name.clone()))
+            .collect();
+        // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
+        let loci: Vec<Option<GraphLocus>> = spans_with_labels
+            .iter()
+            .map(|(span, _)| graph_locus_from_annotation_span(span, self.controller.graph()))
+            .collect();
+        for locus in loci.into_iter().flatten() {
+            highlight_match_range(&mut self.controller, &locus, style);
         }
         self.inline_annotations
-            .push((name.to_string(), loci_with_labels, style));
+            .push((name.to_string(), spans_with_labels, style));
     }
 
     /// Return a JSON list of inline annotation names currently loaded.
@@ -809,11 +853,11 @@ impl PyGraphController {
     /// If the same name was added more than once, all copies are removed.
     pub fn remove_inline_annotation(&mut self, name: &str) {
         let mut remaining = Vec::with_capacity(self.inline_annotations.len());
-        for (track_name, loci, style) in self.inline_annotations.drain(..) {
+        for (track_name, spans, style) in self.inline_annotations.drain(..) {
             if track_name == name {
                 self.controller.clear_highlight(&style);
             } else {
-                remaining.push((track_name, loci, style));
+                remaining.push((track_name, spans, style));
             }
         }
         self.inline_annotations = remaining;
