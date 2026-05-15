@@ -329,6 +329,23 @@ impl PyGraphController {
         })?;
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }
+
+    fn navigate_to_span(&mut self, span: &AnnotationSpan) {
+        let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
+            return;
+        };
+        let slice = &locus.slices[0];
+        let node_len = slice.node.length();
+        let frac_x = if node_len > 1 {
+            slice.start as f64 / (node_len - 1) as f64
+        } else {
+            0.0
+        };
+        self.controller.set_detail_level(VisualDetail::Full);
+        center_on_node_offset(&mut self.controller, slice.node, (frac_x, 0.5));
+        self.controller.queue_snap_left();
+        self.controller.hide_cursor();
+    }
 }
 
 #[pymethods]
@@ -785,16 +802,23 @@ impl PyGraphController {
         Ok(())
     }
 
+    /// Navigate to an `Annotation` object.
+    pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation) {
+        self.navigate_to_span(&annotation.inner);
+    }
+
+    /// Navigate to a `GraphLocus`.
+    pub fn go_to_locus(&mut self, locus: &PyGraphLocus) {
+        let span = annotation_span_from_graph_locus(&locus.inner, "");
+        self.navigate_to_span(&span);
+    }
+
     /// Navigate the camera to the first annotation span whose name matches
     /// `annotation_name` across all loaded track panels.
     ///
-    /// Returns `True` if a match was found, `False` otherwise.
-    ///
-    /// TODO: when multiple spans share the same name (across tracks or within
-    /// one track), expose a way to cycle through them.  That will require
-    /// surfacing the rank/index from `GraphController`, keeping a per-widget
-    /// match index in Python state, and wiring up next/previous helpers.
-    pub fn go_to_annotation(&mut self, annotation_name: &str) -> PyResult<PyGraphPos> {
+    /// Returns the `GraphPos` the camera moved to.  Raises `KeyError` if no
+    /// annotation with that name is found in any track.
+    pub fn go_to_annotation_by_name(&mut self, annotation_name: &str) -> PyResult<PyGraphPos> {
         let segment = self
             .annotations
             .iter()
@@ -828,6 +852,7 @@ impl PyGraphController {
         };
         self.controller.set_detail_level(VisualDetail::Full);
         center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
+        self.controller.queue_snap_left();
         self.controller.hide_cursor();
 
         Ok(PyGraphPos::new(node, segment.start as usize))

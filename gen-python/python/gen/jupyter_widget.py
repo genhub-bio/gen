@@ -187,13 +187,14 @@ class GenGraphWidget(anywidget.AnyWidget):
         self._frozen = True
         self.send({"type": "freeze"})
 
-    def go_to(self, pos) -> None:
-        """Instantly move the camera to a graph position.
+    def go_to(self, target) -> None:
+        """Instantly move the camera to a graph position or annotation.
 
         Parameters
         ----------
-        pos:
-            A ``GraphPos`` obtained from ``locus.start()`` or ``locus.end()``.
+        target:
+            A ``GraphPos`` (from ``locus.start()`` / ``locus.end()``),
+            or an ``Annotation`` object.
 
         Example
         -------
@@ -201,10 +202,18 @@ class GenGraphWidget(anywidget.AnyWidget):
 
             matches = repo.search(bg, "ACGT...")
             widget.go_to(matches[0].start())
+
+            ann = repo.list_annotations(bg)[0]
+            widget.go_to(ann)
         """
         if self._frozen:
             return
-        self._controller.go_to_pos(pos)
+        from gen import Annotation  # noqa: PLC0415
+
+        if isinstance(target, Annotation):
+            self._controller.go_to_annotation_obj(target)
+        else:
+            self._controller.go_to_pos(target)
         self._render()
 
     def show(self, locus, color: str | None = None) -> None:
@@ -386,27 +395,20 @@ class GenGraphWidget(anywidget.AnyWidget):
         """Return list of loaded track-panel annotation names."""
         return json.loads(self._controller.get_track_names())
 
-    def go_to_annotation(self, name: str):
-        """Navigate to the first annotation span matching ``name`` across all loaded tracks.
+    def go_to_annotation_by_name(self, name: str):
+        """Navigate to the first track annotation whose name matches ``name``.
 
         Returns the ``GraphPos`` the camera moved to.  Raises ``KeyError`` if
-        no annotation with that name is loaded.
+        no annotation with that name is loaded in any track.
 
         Parameters
         ----------
         name : str
             Annotation name to search for (e.g. ``"STL1"``).
-
-        Note
-        ----
-        When multiple spans share the same name the camera jumps to the first
-        one found.  Cycling through multiple matches (next/previous) is not yet
-        implemented — that will require surfacing match rank from the graph
-        controller and maintaining index state here.
         """
         if self._frozen:
             return
-        pos = self._controller.go_to_annotation(name)
+        pos = self._controller.go_to_annotation_by_name(name)
         self._render()
         return pos
 
