@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     block_group::BlockGroup,
-    db::GraphConnection,
+    db::{DbWorker, DbWorkerError, GraphConnection},
     errors::{BlockGroupError, QueryError},
     gen_models_capnp::sample,
     sample_lineage::SampleLineage,
@@ -66,6 +66,16 @@ impl Sample {
         SampleLineage::get_parents(conn, sample_name)
     }
 
+    pub async fn get_parent_names_async(
+        worker: &DbWorker,
+        sample_name: impl Into<String>,
+    ) -> Result<Vec<String>, DbWorkerError> {
+        let sample_name = sample_name.into();
+        worker
+            .run(move |context| Sample::get_parent_names(context.graph().conn(), &sample_name))
+            .await
+    }
+
     pub fn create(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
         let mut stmt =
             match conn.prepare("INSERT INTO samples (name) VALUES (?1) returning (name);") {
@@ -86,6 +96,16 @@ impl Sample {
         }
     }
 
+    pub async fn create_async(
+        worker: &DbWorker,
+        name: impl Into<String>,
+    ) -> Result<Result<Sample, SampleError>, DbWorkerError> {
+        let name = name.into();
+        worker
+            .run(move |context| Sample::create(context.graph().conn(), &name))
+            .await
+    }
+
     pub fn get_or_create(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
         match Sample::create(conn, name) {
             Ok(sample) => Ok(sample),
@@ -94,9 +114,29 @@ impl Sample {
         }
     }
 
+    pub async fn get_or_create_async(
+        worker: &DbWorker,
+        name: impl Into<String>,
+    ) -> Result<Result<Sample, SampleError>, DbWorkerError> {
+        let name = name.into();
+        worker
+            .run(move |context| Sample::get_or_create(context.graph().conn(), &name))
+            .await
+    }
+
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {
         let mut stmt = conn.prepare("delete from samples where name = ?1").unwrap();
         stmt.execute([name]).unwrap();
+    }
+
+    pub async fn delete_by_name_async(
+        worker: &DbWorker,
+        name: impl Into<String>,
+    ) -> Result<(), DbWorkerError> {
+        let name = name.into();
+        worker
+            .run(move |context| Sample::delete_by_name(context.graph().conn(), &name))
+            .await
     }
 
     pub fn get_graph(conn: &GraphConnection, collection: &str, name: &str) -> GenGraph {
@@ -119,6 +159,18 @@ impl Sample {
         sample_graph
     }
 
+    pub async fn get_graph_async(
+        worker: &DbWorker,
+        collection: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<GenGraph, DbWorkerError> {
+        let collection = collection.into();
+        let name = name.into();
+        worker
+            .run(move |context| Sample::get_graph(context.graph().conn(), &collection, &name))
+            .await
+    }
+
     pub fn get_all_sequences(
         conn: &GraphConnection,
         collection_name: &str,
@@ -129,6 +181,26 @@ impl Sample {
             .into_iter()
             .flat_map(|block_group| BlockGroup::get_all_sequences(conn, &block_group.id, prune))
             .collect()
+    }
+
+    pub async fn get_all_sequences_async(
+        worker: &DbWorker,
+        collection_name: impl Into<String>,
+        sample_name: impl Into<String>,
+        prune: bool,
+    ) -> Result<HashSet<String>, DbWorkerError> {
+        let collection_name = collection_name.into();
+        let sample_name = sample_name.into();
+        worker
+            .run(move |context| {
+                Sample::get_all_sequences(
+                    context.graph().conn(),
+                    &collection_name,
+                    &sample_name,
+                    prune,
+                )
+            })
+            .await
     }
 
     pub fn get_or_create_child(
@@ -185,6 +257,26 @@ impl Sample {
         }
     }
 
+    pub async fn get_or_create_child_async(
+        worker: &DbWorker,
+        collection_name: impl Into<String>,
+        sample_name: impl Into<String>,
+        parent_samples: Vec<String>,
+    ) -> Result<Result<Sample, SampleError>, DbWorkerError> {
+        let collection_name = collection_name.into();
+        let sample_name = sample_name.into();
+        worker
+            .run(move |context| {
+                Sample::get_or_create_child(
+                    context.graph().conn(),
+                    &collection_name,
+                    &sample_name,
+                    parent_samples,
+                )
+            })
+            .await
+    }
+
     pub fn get_block_groups(
         conn: &GraphConnection,
         collection_name: &str,
@@ -197,9 +289,29 @@ impl Sample {
         )
     }
 
+    pub async fn get_block_groups_async(
+        worker: &DbWorker,
+        collection_name: impl Into<String>,
+        sample_name: impl Into<String>,
+    ) -> Result<Vec<BlockGroup>, DbWorkerError> {
+        let collection_name = collection_name.into();
+        let sample_name = sample_name.into();
+        worker
+            .run(move |context| {
+                Sample::get_block_groups(context.graph().conn(), &collection_name, &sample_name)
+            })
+            .await
+    }
+
     pub fn get_all_names(conn: &GraphConnection) -> Vec<String> {
         let samples = Sample::query(conn, "select * from samples;", rusqlite::params!());
         samples.iter().map(|s| s.name.clone()).collect()
+    }
+
+    pub async fn get_all_names_async(worker: &DbWorker) -> Result<Vec<String>, DbWorkerError> {
+        worker
+            .run(move |context| Sample::get_all_names(context.graph().conn()))
+            .await
     }
 
     pub fn get_by_name(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
@@ -208,6 +320,16 @@ impl Sample {
             "select * from samples where name = ?1;",
             rusqlite::params!(name),
         )
+    }
+
+    pub async fn get_by_name_async(
+        worker: &DbWorker,
+        name: impl Into<String>,
+    ) -> Result<SQLResult<Sample>, DbWorkerError> {
+        let name = name.into();
+        worker
+            .run(move |context| Sample::get_by_name(context.graph().conn(), &name))
+            .await
     }
 
     pub fn search_name(conn: &GraphConnection, name: &str) -> Vec<Sample> {
@@ -219,18 +341,43 @@ impl Sample {
             rusqlite::params!(name),
         )
     }
+
+    pub async fn search_name_async(
+        worker: &DbWorker,
+        name: impl Into<String>,
+    ) -> Result<Vec<Sample>, DbWorkerError> {
+        let name = name.into();
+        worker
+            .run(move |context| Sample::search_name(context.graph().conn(), &name))
+            .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
+    use gen_core::config::Workspace;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
         collection::Collection,
+        db::DbWorker,
         errors::SampleError,
         test_helpers::{create_bg, get_connection},
     };
+
+    fn file_backed_worker() -> DbWorker {
+        let tmp_dir = tempdir().unwrap().keep();
+        let workspace = Workspace::new(&tmp_dir);
+        let gen_dir = workspace.ensure_gen_dir();
+        DbWorker::spawn_from_paths(
+            workspace,
+            tmp_dir.join("graph.db"),
+            gen_dir.join("operations.db"),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn test_capnp_serialization() {
@@ -276,6 +423,76 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(matches, vec!["BarFooBaz", "QuxFood", "foo"]);
+    }
+
+    #[tokio::test]
+    async fn test_async_sample_create_search_and_delete_uses_db_worker() {
+        let worker = file_backed_worker();
+
+        Sample::create_async(&worker, "alpha")
+            .await
+            .unwrap()
+            .unwrap();
+        Sample::create_async(&worker, "BarFooBaz")
+            .await
+            .unwrap()
+            .unwrap();
+        Sample::create_async(&worker, "QuxFood")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let matches = Sample::search_name_async(&worker, "FoO")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+        assert_eq!(matches, vec!["BarFooBaz", "QuxFood"]);
+
+        Sample::delete_by_name_async(&worker, "BarFooBaz")
+            .await
+            .unwrap();
+        assert!(
+            Sample::get_by_name_async(&worker, "BarFooBaz")
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_get_or_create_child_uses_db_worker() {
+        let worker = file_backed_worker();
+
+        worker
+            .run(|context| {
+                let conn = context.graph().conn();
+                Collection::create(conn, "test").unwrap();
+                create_bg(conn, "test", "parent_a", "chr1");
+                create_bg(conn, "test", "parent_b", "chr2");
+            })
+            .await
+            .unwrap();
+
+        let child = Sample::get_or_create_child_async(
+            &worker,
+            "test",
+            "child",
+            vec!["parent_a".to_string(), "parent_b".to_string()],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let mut block_group_names = Sample::get_block_groups_async(&worker, "test", child.name)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|block_group| block_group.name)
+            .collect::<Vec<_>>();
+        block_group_names.sort();
+        assert_eq!(block_group_names, vec!["chr1", "chr2"]);
     }
 
     #[test]

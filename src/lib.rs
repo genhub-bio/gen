@@ -38,9 +38,10 @@ pub use gen_graph as graph;
 #[cfg(feature = "models")]
 pub use gen_models as models;
 use gen_models::{
-    db::{GraphConnection, OperationsConnection},
+    db::{
+        GraphConnection, OperationsConnection, open_graph_connection, open_operations_connection,
+    },
     files::GenDatabase,
-    migrations::{run_migrations, run_operation_migrations},
 };
 use noodles::vcf::variant::record::samples::series::value::genotype::Phasing;
 use rusqlite::{Connection, OptionalExtension};
@@ -48,12 +49,7 @@ use rusqlite::{Connection, OptionalExtension};
 pub fn get_connection(
     db_path: impl Into<PathBuf>,
 ) -> Result<GraphConnection, core::errors::ConnectionError> {
-    let db_path = db_path.into();
-    let mut conn = Connection::open(&db_path)?;
-    rusqlite::vtab::array::load_module(&conn).unwrap();
-    run_migrations(&mut conn);
-
-    Ok(GraphConnection(conn))
+    open_graph_connection(db_path.into())
 }
 
 pub fn track_database(
@@ -134,10 +130,7 @@ pub fn get_operation_connection(
     } else {
         Workspace::from_current_dir().gen_db_path()?
     };
-    let mut conn = Connection::open(&path)?;
-    rusqlite::vtab::array::load_module(&conn).unwrap();
-    run_operation_migrations(&mut conn);
-    Ok(OperationsConnection(conn))
+    open_operations_connection(path)
 }
 
 pub fn run_query(conn: &Connection, query: &str) {

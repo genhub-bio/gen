@@ -23,7 +23,7 @@ use r#gen::{
         remote::handle_remote_command,
     },
     diffs::gfa::gfa_sample_diff,
-    get_connection, get_operation_connection,
+    get_operation_connection,
     graphs::graph_search::{GenGraphMatcher, GraphLocus, SeedIndex},
     operation_management,
     operation_management::{parse_patch_operations, pull, push},
@@ -77,7 +77,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
+    let operation_db_path = workspace.gen_db_path()?;
+    let operation_conn = get_operation_connection(Some(operation_db_path.clone()))?;
     if let Some(Commands::Defaults {
         database,
         collection,
@@ -134,8 +135,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let db = binding.as_str();
-    let graph_connection = get_connection(db)?;
-    let db_context = DbContext::new(workspace.clone(), graph_connection, operation_conn);
+    drop(operation_conn);
+    let db_context = DbContext::from_paths(workspace.clone(), db, &operation_db_path)?;
     let operation_conn = db_context.operations().conn();
     let graph_conn = db_context.graph().conn();
     let db_uuid = metadata::get_db_uuid(graph_conn);
