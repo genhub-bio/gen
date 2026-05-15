@@ -777,7 +777,94 @@ fn draw_label_clipped_over_existing(
 
 #[cfg(test)]
 mod tests {
+    use gen_graph::{GenGraph, GraphNode};
+
     use super::*;
+
+    fn make_node(node_id: &str, seq_start: i64, seq_end: i64) -> GraphNode {
+        GraphNode {
+            node_id: HashId::convert_str(node_id),
+            sequence_start: seq_start,
+            sequence_end: seq_end,
+        }
+    }
+
+    fn make_graph(nodes: &[GraphNode]) -> GenGraph {
+        let mut g = GenGraph::new();
+        for &n in nodes {
+            g.add_node(n);
+        }
+        g
+    }
+
+    #[test]
+    fn annotation_span_from_graph_locus_preserves_name_and_coordinates() {
+        let node = make_node("n1", 100, 200);
+        let locus = GraphLocus {
+            slices: vec![BlockSlice {
+                node,
+                start: 5,
+                end: 15,
+            }],
+            strand: Strand::Forward,
+        };
+        let span = annotation_span_from_graph_locus(&locus, "my_gene");
+        assert_eq!(span.name, "my_gene");
+        assert_eq!(span.segments.len(), 1);
+        let seg = &span.segments[0];
+        assert_eq!(seg.node_id, node.node_id);
+        assert_eq!(seg.start, 105); // sequence_start + slice.start
+        assert_eq!(seg.end, 115); // sequence_start + slice.end
+        assert_eq!(seg.strand, Strand::Forward);
+    }
+
+    #[test]
+    fn graph_locus_from_annotation_span_inverts_to_annotation_span() {
+        let node = make_node("n1", 100, 200);
+        let graph = make_graph(&[node]);
+        let locus = GraphLocus {
+            slices: vec![BlockSlice {
+                node,
+                start: 5,
+                end: 15,
+            }],
+            strand: Strand::Forward,
+        };
+        let span = annotation_span_from_graph_locus(&locus, "");
+        let recovered = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        assert_eq!(recovered.slices.len(), 1);
+        assert_eq!(recovered.slices[0].node, node);
+        assert_eq!(recovered.slices[0].start, 5);
+        assert_eq!(recovered.slices[0].end, 15);
+        assert_eq!(recovered.strand, Strand::Forward);
+    }
+
+    #[test]
+    fn graph_locus_from_annotation_span_returns_none_for_empty_span() {
+        let graph = make_graph(&[]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![],
+        };
+        assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+    }
+
+    #[test]
+    fn graph_locus_from_annotation_span_returns_none_when_node_missing_from_graph() {
+        let node = make_node("n1", 0, 100);
+        let graph = make_graph(&[]); // node not in graph
+        let locus = GraphLocus {
+            slices: vec![BlockSlice {
+                node,
+                start: 0,
+                end: 10,
+            }],
+            strand: Strand::Forward,
+        };
+        let span = annotation_span_from_graph_locus(&locus, "");
+        assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+    }
 
     fn track_with_names(names: &[&str]) -> AnnotationTrack {
         AnnotationTrack::new(
