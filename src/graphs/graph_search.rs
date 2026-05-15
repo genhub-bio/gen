@@ -442,7 +442,7 @@ impl GenGraphMatcher {
                     .into_iter()
                     .enumerate()
                     .map(|(i, node)| BlockSlice {
-                        node,
+                        block: node,
                         start: if i == 0 { ts.start_offset } else { 0 },
                         end: if i == n - 1 {
                             ts.state.offset

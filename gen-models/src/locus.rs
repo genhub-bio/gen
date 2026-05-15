@@ -17,24 +17,24 @@ use crate::{db::GraphConnection, node::Node};
 // Block space
 // ---------------------------------------------------------------------------
 
-/// A slice of a single graph node: the node itself plus local start/end byte
-/// offsets within that node's sequence.  Middle blocks in a multi-node locus
-/// span the full node (`start = 0`, `end = node.length()`).
+/// A slice of a single graph block: the block itself plus local start/end byte
+/// offsets within that block's sequence.  Middle blocks in a multi-block locus
+/// span the full block (`start = 0`, `end = block.length()`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockSlice {
-    pub node: GraphNode,
-    /// Local start offset within the node's sequence slice (`0..node.length()`).
+    pub block: GraphNode,
+    /// Local start offset within the block's sequence slice (`0..block.length()`).
     pub start: usize,
-    /// Local end offset, exclusive (`start..=node.length()`).
+    /// Local end offset, exclusive (`start..=block.length()`).
     pub end: usize,
 }
 
 impl BlockSlice {
-    pub fn full(node: GraphNode) -> Self {
+    pub fn full(block: GraphNode) -> Self {
         Self {
-            node,
+            block,
             start: 0,
-            end: node.length() as usize,
+            end: block.length() as usize,
         }
     }
 }
@@ -51,17 +51,17 @@ pub struct GraphLocus {
 impl GraphLocus {
     /// Concatenate the sequence bytes covered by this locus.
     pub fn sequence(&self, conn: &GraphConnection) -> Vec<u8> {
-        let node_ids: Vec<HashId> = self.slices.iter().map(|s| s.node.node_id).collect();
+        let node_ids: Vec<HashId> = self.slices.iter().map(|s| s.block.node_id).collect();
         let sequences = Node::get_sequences_by_node_ids(conn, &node_ids);
 
         let mut out = Vec::new();
         for s in &self.slices {
-            let full = sequences[&s.node.node_id]
+            let full = sequences[&s.block.node_id]
                 .get_sequence(None, None)
                 .expect("sequence data corrupt")
                 .into_bytes();
-            let block_start = s.node.sequence_start as usize;
-            let text = &full[block_start..block_start + s.node.length() as usize];
+            let block_start = s.block.sequence_start as usize;
+            let text = &full[block_start..block_start + s.block.length() as usize];
             out.extend_from_slice(&text[s.start..s.end]);
         }
 

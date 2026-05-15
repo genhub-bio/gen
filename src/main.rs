@@ -710,12 +710,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .slices
                         .iter()
                         .map(|s| {
-                            let hash = format!("{}", s.node.node_id);
+                            let hash = format!("{}", s.block.node_id);
                             format!(
                                 "{}:{}-{}",
                                 &hash[..12],
-                                s.node.sequence_start,
-                                s.node.sequence_end
+                                s.block.sequence_start,
+                                s.block.sequence_end
                             )
                         })
                         .collect();

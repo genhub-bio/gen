@@ -46,9 +46,9 @@ pub fn graphlocus_to_annotation_span(locus: &GraphLocus, name: &str) -> Annotati
         .slices
         .iter()
         .map(|s| AnnotationSegment {
-            node_id: s.node.node_id,
-            start: s.node.sequence_start + s.start as i64,
-            end: s.node.sequence_start + s.end as i64,
+            node_id: s.block.node_id,
+            start: s.block.sequence_start + s.start as i64,
+            end: s.block.sequence_start + s.end as i64,
             strand: locus.strand,
         })
         .collect();
@@ -72,10 +72,10 @@ pub fn graph_locus_from_annotation_span(
         .segments
         .iter()
         .map(|seg| {
-            let node = *node_map.get(&seg.node_id)?;
-            let start = (seg.start - node.sequence_start).max(0) as usize;
-            let end = (seg.end - node.sequence_start).max(0) as usize;
-            Some(BlockSlice { node, start, end })
+            let block = *node_map.get(&seg.node_id)?;
+            let start = (seg.start - block.sequence_start).max(0) as usize;
+            let end = (seg.end - block.sequence_start).max(0) as usize;
+            Some(BlockSlice { block, start, end })
         })
         .collect();
     Some(GraphLocus {
