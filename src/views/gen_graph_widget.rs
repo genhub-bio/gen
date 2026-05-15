@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gen_core::{is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{db::GraphConnection, node::Node, sequence::SequenceError};
+use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
     geometry::{WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
@@ -13,8 +13,6 @@ use gen_tui::{
 };
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::style::Style;
-
-use crate::graphs::graph_search::GraphLocus;
 
 /// Labels for special start/end nodes
 pub mod label {
@@ -291,31 +289,26 @@ pub fn locus_label_bounds(
         Some(WorldPos::new(rect.min.x + col, center.y))
     };
 
-    let last = locus.blocks.len() - 1;
+    let last = locus.slices.len() - 1;
 
-    let left_pos = locus.blocks.iter().enumerate().find_map(|(i, &block)| {
-        let col_raw = if i == 0 { locus.start_offset as i64 } else { 0 };
-        block_world_pos(block, col_raw)
+    let left_pos = locus.slices.iter().enumerate().find_map(|(i, s)| {
+        let col_raw = if i == 0 { s.start as i64 } else { 0 };
+        block_world_pos(s.node, col_raw)
     })?;
 
-    let right_pos = locus
-        .blocks
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, &block)| {
-            let col_raw = if i == last {
-                locus.end_offset.saturating_sub(1) as i64
-            } else {
-                block.length() - 1
-            };
-            block_world_pos(block, col_raw)
-        })?;
+    let right_pos = locus.slices.iter().enumerate().rev().find_map(|(i, s)| {
+        let col_raw = if i == last {
+            s.end.saturating_sub(1) as i64
+        } else {
+            s.node.length() - 1
+        };
+        block_world_pos(s.node, col_raw)
+    })?;
 
     let mut y_min = i64::MAX;
     let mut y_max = i64::MIN;
-    for &block in &locus.blocks {
-        let Some(&(center, _)) = pos_map.get(&block) else {
+    for s in &locus.slices {
+        let Some(&(center, _)) = pos_map.get(&s.node) else {
             continue;
         };
         y_min = y_min.min(center.y);
@@ -375,24 +368,19 @@ pub fn highlight_match_range<S: NodeSizer<GenGraph>>(
 ) {
     let detail_level = controller.get_detail_level();
 
-    let path_len = m.blocks.len();
-    for (i, &node) in m.blocks.iter().enumerate() {
-        let block_seq_len = node.length();
-        let col_start_raw = if i == 0 { m.start_offset as i64 } else { 0 };
-        let col_end_raw = if i == path_len - 1 {
-            m.end_offset.saturating_sub(1) as i64
-        } else {
-            block_seq_len - 1
-        };
+    for s in &m.slices {
+        let block_seq_len = s.node.length();
+        let col_start_raw = s.start as i64;
+        let col_end_raw = s.end.saturating_sub(1) as i64;
         let (col_start, col_end) = (
             clamp_col(col_start_raw, block_seq_len, detail_level),
             clamp_col(col_end_raw, block_seq_len, detail_level),
         );
-        controller.set_cell_highlight(node, (col_start, 0), (col_end, 0), style);
+        controller.set_cell_highlight(s.node, (col_start, 0), (col_end, 0), style);
     }
 
-    for (&src, &dst) in m.blocks.iter().zip(m.blocks.iter().skip(1)) {
-        controller.set_edge_highlight((src, dst), style);
+    for (s, t) in m.slices.iter().zip(m.slices.iter().skip(1)) {
+        controller.set_edge_highlight((s.node, t.node), style);
     }
 }
 
