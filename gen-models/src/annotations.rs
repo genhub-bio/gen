@@ -369,6 +369,74 @@ impl Annotation {
         let query = "select * from annotations where annotation_group = ?1";
         Ok(Annotation::query(conn, query, params![group]))
     }
+
+    /// Search all annotations by case-insensitive name substring.
+    ///
+    /// Returns one `AnnotationNameMatch` per matching annotation, joined
+    /// with its owning block group.  Optionally restrict to annotations
+    /// that belong to a specific sample via `annotation_group_samples`.
+    pub fn search_by_name(
+        conn: &GraphConnection,
+        query: &str,
+        sample: Option<&str>,
+    ) -> Result<Vec<AnnotationNameMatch>, AnnotationError> {
+        let like_pattern = format!("%{}%", query.to_lowercase());
+        let mut results = Vec::new();
+
+        macro_rules! collect_rows {
+            ($stmt:expr, $params:expr) => {{
+                let rows = $stmt.query_map($params, |row| {
+                    Ok(AnnotationNameMatch {
+                        block_group_id: row.get(0)?,
+                        block_group_name: row.get(1)?,
+                        collection_name: row.get(2)?,
+                        sample_name: row.get(3)?,
+                        annotation_name: row.get(4)?,
+                        annotation_group: row.get(5)?,
+                    })
+                })?;
+                for row in rows {
+                    results.push(row?);
+                }
+            }};
+        }
+
+        if let Some(sample_name) = sample {
+            let sql = "SELECT bg.id, bg.name, bg.collection_name, bg.sample_name, \
+                              a.name, a.annotation_group \
+                       FROM annotations a \
+                       JOIN accessions acc ON a.accession_id = acc.id \
+                       JOIN block_groups bg ON acc.block_group_id = bg.id \
+                       JOIN annotation_group_samples ags ON a.annotation_group = ags.annotation_group \
+                       WHERE LOWER(a.name) LIKE ?1 AND ags.sample_name = ?2 \
+                       ORDER BY bg.collection_name, bg.sample_name, bg.name, a.name";
+            let mut stmt = conn.prepare(sql)?;
+            collect_rows!(stmt, params![like_pattern, sample_name]);
+        } else {
+            let sql = "SELECT bg.id, bg.name, bg.collection_name, bg.sample_name, \
+                              a.name, a.annotation_group \
+                       FROM annotations a \
+                       JOIN accessions acc ON a.accession_id = acc.id \
+                       JOIN block_groups bg ON acc.block_group_id = bg.id \
+                       WHERE LOWER(a.name) LIKE ?1 \
+                       ORDER BY bg.collection_name, bg.sample_name, bg.name, a.name";
+            let mut stmt = conn.prepare(sql)?;
+            collect_rows!(stmt, params![like_pattern]);
+        }
+
+        Ok(results)
+    }
+}
+
+/// One annotation-name match with its owning block group info.
+#[derive(Debug)]
+pub struct AnnotationNameMatch {
+    pub block_group_id: HashId,
+    pub block_group_name: String,
+    pub collection_name: String,
+    pub sample_name: String,
+    pub annotation_name: String,
+    pub annotation_group: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

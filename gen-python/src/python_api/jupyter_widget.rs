@@ -9,6 +9,7 @@ use r#gen::{
     get_connection,
     views::{
         annotation_groups::load_annotation_group_entries,
+        annotation_search::{AnnotationSearchState, match_style, selected_match_style},
         annotation_track::{
             AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
             graph_locus_from_annotation_span,
@@ -269,6 +270,7 @@ pub struct PyGraphController {
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     annotations: Vec<AnnotationDisplay>,
+    search_state: AnnotationSearchState,
 }
 
 impl PyGraphController {
@@ -281,6 +283,7 @@ impl PyGraphController {
             block_group_id: None,
             controller,
             annotations: Vec::new(),
+            search_state: AnnotationSearchState::new(),
         }
     }
 
@@ -345,6 +348,32 @@ impl PyGraphController {
         center_on_node_offset(&mut self.controller, slice.node, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
+    }
+
+    fn apply_search_highlights(&mut self) {
+        self.controller.clear_highlight(&match_style());
+        self.controller.clear_highlight(&selected_match_style());
+        let loci_with_rank: Vec<(usize, gen_models::locus::GraphLocus)> = self
+            .search_state
+            .results
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, &ann_idx)| {
+                graph_locus_from_annotation_span(
+                    &self.annotations[ann_idx].span,
+                    self.controller.graph(),
+                )
+                .map(|locus| (rank, locus))
+            })
+            .collect();
+        for (rank, locus) in loci_with_rank {
+            let style = if rank == self.search_state.cursor {
+                selected_match_style()
+            } else {
+                match_style()
+            };
+            highlight_match_range(&mut self.controller, &locus, style);
+        }
     }
 }
 
@@ -508,6 +537,9 @@ impl PyGraphController {
             .collect();
         for (locus, style) in &loci_with_styles {
             highlight_match_range(&mut self.controller, locus, *style);
+        }
+        if !self.search_state.is_empty() {
+            self.apply_search_highlights();
         }
     }
 
@@ -946,6 +978,53 @@ impl PyGraphController {
             self.controller.clear_highlight(style);
         }
         self.annotations.retain(|d| d.style.is_none());
+    }
+
+    /// Search annotation names (track + inline) for a case-insensitive substring.
+    /// Navigates to the first match and highlights all matches. Returns match count.
+    pub fn search_annotations(&mut self, query: &str) -> usize {
+        let count = self
+            .search_state
+            .search(query, self.annotations.iter().map(|d| d.span.name.as_str()));
+        self.apply_search_highlights();
+        if let Some(idx) = self.search_state.current_annotation_idx() {
+            let span = self.annotations[idx].span.clone();
+            self.navigate_to_span(&span);
+        }
+        count
+    }
+
+    /// Advance to the next search result. Returns false if no results are loaded.
+    pub fn search_next(&mut self) -> bool {
+        if !self.search_state.advance() {
+            return false;
+        }
+        self.apply_search_highlights();
+        if let Some(idx) = self.search_state.current_annotation_idx() {
+            let span = self.annotations[idx].span.clone();
+            self.navigate_to_span(&span);
+        }
+        true
+    }
+
+    /// Go to the previous search result. Returns false if no results are loaded.
+    pub fn search_prev(&mut self) -> bool {
+        if !self.search_state.retreat() {
+            return false;
+        }
+        self.apply_search_highlights();
+        if let Some(idx) = self.search_state.current_annotation_idx() {
+            let span = self.annotations[idx].span.clone();
+            self.navigate_to_span(&span);
+        }
+        true
+    }
+
+    /// Clear search results and remove all search highlights.
+    pub fn clear_search(&mut self) {
+        self.controller.clear_highlight(&match_style());
+        self.controller.clear_highlight(&selected_match_style());
+        self.search_state.clear();
     }
 }
 

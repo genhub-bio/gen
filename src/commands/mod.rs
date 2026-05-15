@@ -299,6 +299,19 @@ pub enum Commands {
         #[arg(short, long)]
         collection: Option<String>,
     },
+    /// Search for annotations by name substring across all block groups
+    #[command(arg_required_else_help(true), name = "search-annotation")]
+    SearchAnnotation {
+        /// Substring to search for in annotation names (case-insensitive)
+        #[clap(index = 1)]
+        query: String,
+        /// Restrict to annotations belonging to a specific sample
+        #[arg(short, long)]
+        sample: Option<String>,
+        /// The collection to search in (defaults to configured default)
+        #[arg(short, long)]
+        collection: Option<String>,
+    },
     /// List all samples in the current collection
     ListSamples {},
     #[command()]

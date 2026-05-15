@@ -19,7 +19,13 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 
-use crate::views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget};
+use crate::views::{
+    annotation_search::{AnnotationSearchState, match_style, selected_match_style},
+    annotation_track::{AnnotationSpan, graph_locus_from_annotation_span},
+    gen_graph_widget::{
+        GenGraphNodeSizer, center_on_node_offset, create_gen_graph_widget, highlight_match_range,
+    },
+};
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
 fn get_path_nodes(
@@ -119,6 +125,8 @@ pub struct InlineGenGraphState<'a> {
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
+    annotations: Vec<AnnotationSpan>,
+    search_state: AnnotationSearchState,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -127,11 +135,78 @@ impl<'a> InlineGenGraphState<'a> {
         let mut graph_controller = GraphController::new(graph.clone(), node_sizer);
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
-        let paths = Vec::new();
         Self {
             controller: graph_controller,
             conn,
-            paths,
+            paths: Vec::new(),
+            annotations: Vec::new(),
+            search_state: AnnotationSearchState::new(),
+        }
+    }
+
+    /// Pre-load annotation matches for cycling with n/N in the widget.
+    pub fn set_annotations(&mut self, spans: Vec<AnnotationSpan>) {
+        self.annotations = spans;
+        self.search_state.results = (0..self.annotations.len()).collect();
+        self.search_state.cursor = 0;
+        self.apply_annotation_highlights();
+        self.navigate_to_current();
+    }
+
+    fn navigate_to_current(&mut self) {
+        let Some(idx) = self.search_state.current_annotation_idx() else {
+            return;
+        };
+        let span = &self.annotations[idx];
+        let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
+            return;
+        };
+        let slice = &locus.slices[0];
+        let node_len = slice.block.length();
+        let frac_x = if node_len > 1 {
+            slice.start as f64 / (node_len - 1) as f64
+        } else {
+            0.0
+        };
+        self.controller.set_detail_level(VisualDetail::Full);
+        center_on_node_offset(&mut self.controller, slice.block, (frac_x, 0.5));
+        self.controller.queue_snap_left();
+    }
+
+    fn apply_annotation_highlights(&mut self) {
+        self.controller.clear_highlight(&match_style());
+        self.controller.clear_highlight(&selected_match_style());
+        let loci_with_rank: Vec<(usize, gen_models::locus::GraphLocus)> = self
+            .search_state
+            .results
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, &idx)| {
+                graph_locus_from_annotation_span(&self.annotations[idx], self.controller.graph())
+                    .map(|locus| (rank, locus))
+            })
+            .collect();
+        for (rank, locus) in loci_with_rank {
+            let style = if rank == self.search_state.cursor {
+                selected_match_style()
+            } else {
+                match_style()
+            };
+            highlight_match_range(&mut self.controller, &locus, style);
+        }
+    }
+
+    fn annotation_next(&mut self) {
+        if self.search_state.advance() {
+            self.apply_annotation_highlights();
+            self.navigate_to_current();
+        }
+    }
+
+    fn annotation_prev(&mut self) {
+        if self.search_state.retreat() {
+            self.apply_annotation_highlights();
+            self.navigate_to_current();
         }
     }
 
@@ -168,6 +243,7 @@ pub fn show_inline_gen_graph_widget(
     conn: &GraphConnection,
     graph: &GenGraph,
     paths: Vec<Path>,
+    annotations: Vec<AnnotationSpan>,
     height: u16,
 ) -> Result<bool> {
     let terminal_result = panic::catch_unwind(|| {
@@ -181,6 +257,9 @@ pub fn show_inline_gen_graph_widget(
             let mut state = InlineGenGraphState::new(graph, conn);
             for path in paths {
                 state.add_path(&path, conn)?;
+            }
+            if !annotations.is_empty() {
+                state.set_annotations(annotations);
             }
             // Set up tick-based event loop for 60 FPS (16ms per frame)
             let tick_rate = Duration::from_millis(16);
@@ -243,6 +322,12 @@ pub fn show_inline_gen_graph_widget(
                                     } else {
                                         eprintln!("No paths available for path highlighting");
                                     }
+                                }
+                                KeyCode::Char('n') if !state.annotations.is_empty() => {
+                                    state.annotation_next();
+                                }
+                                KeyCode::Char('N') if !state.annotations.is_empty() => {
+                                    state.annotation_prev();
                                 }
                                 _ => {
                                     let _ = state.controller.handle_key_event(key);
@@ -337,11 +422,20 @@ fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
 }
 
 fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    let help_text = if state.controller.highlights.is_empty() {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
+    let annotation_hint = if !state.annotations.is_empty() {
+        let total = state.annotations.len();
+        let current = state.search_state.cursor + 1;
+        format!(" | n/N: Match {current}/{total}")
     } else {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
+        String::new()
     };
+    let path_label = if state.controller.highlights.is_empty() {
+        "p: Show Path"
+    } else {
+        "p: Hide Path"
+    };
+    let help_text =
+        format!("←→↑↓: Nav | +/-: Zoom | f: Full window | {path_label}{annotation_hint} | q: Exit");
 
     let paragraph =
         ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));

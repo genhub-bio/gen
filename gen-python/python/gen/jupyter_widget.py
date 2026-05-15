@@ -472,3 +472,61 @@ class GenGraphWidget(anywidget.AnyWidget):
             return
         self._controller.clear_all_inline_annotations()
         self._render()
+
+    # ── Annotation search API ─────────────────────────────────────────────────
+
+    def search(self, query: str) -> int:
+        """Search annotation names for a case-insensitive substring; navigate to first match.
+
+        Highlights all matches (orange) with the current match in green/bold.
+
+        Parameters
+        ----------
+        query : str
+            Substring to search for in annotation names.
+
+        Returns
+        -------
+        int
+            Number of matching annotations found.
+        """
+        if self._frozen:
+            return 0
+        count = self._controller.search_annotations(query)
+        self._render()
+        return count
+
+    def next_result(self) -> bool:
+        """Advance to the next search result and navigate to it.
+
+        Returns
+        -------
+        bool
+            False if no search results are loaded.
+        """
+        if self._frozen:
+            return False
+        found = self._controller.search_next()
+        self._render()
+        return found
+
+    def prev_result(self) -> bool:
+        """Go to the previous search result and navigate to it.
+
+        Returns
+        -------
+        bool
+            False if no search results are loaded.
+        """
+        if self._frozen:
+            return False
+        found = self._controller.search_prev()
+        self._render()
+        return found
+
+    def clear_search(self) -> None:
+        """Clear search results and remove all search highlights."""
+        if self._frozen:
+            return
+        self._controller.clear_search()
+        self._render()

@@ -32,8 +32,14 @@ use r#gen::{
     track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
-        diff::view_diff, operations::view_operations, patch::view_patches,
+        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+        annotation_track::AnnotationSpan,
+        annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
+        block_group::view_block_group,
+        block_group_inline::show_inline_gen_graph_widget,
+        diff::view_diff,
+        operations::view_operations,
+        patch::view_patches,
         tui_runtime::install_global_panic_hook,
     },
 };
@@ -41,7 +47,7 @@ use gen_annotations::translate;
 use gen_core::{config::Workspace, range::Range, region::Region};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
-    annotations::{add_annotation, add_annotation_file},
+    annotations::{Annotation, add_annotation, add_annotation_file},
     block_group::BlockGroup,
     collection::Collection,
     db::{DbContext, OperationsConnection},
@@ -189,6 +195,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                             graph_conn,
                             &block_graph,
                             vec![current_path],
+                            vec![],
                             10,
                         ) {
                             Ok(true) => {
@@ -728,6 +735,114 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+            Ok(())
+        }
+        Some(Commands::SearchAnnotation {
+            query,
+            sample,
+            collection: _collection,
+        }) => {
+            use std::{
+                collections::HashMap,
+                io::{BufRead, Write},
+            };
+
+            use gen_core::{is_end_node, is_start_node};
+
+            let matches = Annotation::search_by_name(graph_conn, &query, sample.as_deref())
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if matches.is_empty() {
+                println!("No annotations matching {:?}.", query);
+                return Ok(());
+            }
+
+            // Group matches by block group (preserve insertion order for stable numbering).
+            let mut bg_order: Vec<gen_core::HashId> = Vec::new();
+            let mut bg_matches: HashMap<gen_core::HashId, Vec<_>> = HashMap::new();
+            for m in matches {
+                if !bg_matches.contains_key(&m.block_group_id) {
+                    bg_order.push(m.block_group_id);
+                }
+                bg_matches.entry(m.block_group_id).or_default().push(m);
+            }
+
+            println!();
+            for (i, bg_id) in bg_order.iter().enumerate() {
+                let ms = &bg_matches[bg_id];
+                let m = &ms[0];
+                let count = ms.len();
+                println!(
+                    "  {}. {} ({}/{})  — {} match{}",
+                    i + 1,
+                    m.block_group_name,
+                    m.collection_name,
+                    m.sample_name,
+                    count,
+                    if count == 1 { "" } else { "es" },
+                );
+            }
+            println!();
+            print!("Select [1-{}]: ", bg_order.len());
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().lock().read_line(&mut input)?;
+            let selection: usize = input.trim().parse().unwrap_or(0);
+            if selection < 1 || selection > bg_order.len() {
+                eprintln!("Invalid selection.");
+                return Ok(());
+            }
+
+            let selected_bg_id = &bg_order[selection - 1];
+            let selected_matches = &bg_matches[selected_bg_id];
+            let bg =
+                BlockGroup::get_by_id(graph_conn, selected_bg_id).map_err(|e| anyhow!("{e}"))?;
+            let graph = BlockGroup::get_graph(graph_conn, selected_bg_id);
+
+            // Build visible_ranges covering all nodes so load_annotations_for_group
+            // does not filter out any segments.
+            let visible_ranges: HashMap<gen_core::HashId, Vec<(i64, i64)>> = graph
+                .nodes()
+                .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+                .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
+                .collect();
+
+            // Collect unique annotation groups that had matches in this BG.
+            let mut seen_groups: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let matching_names: std::collections::HashSet<&str> = selected_matches
+                .iter()
+                .map(|m| m.annotation_name.as_str())
+                .collect();
+
+            let mut annotation_spans: Vec<AnnotationSpan> = Vec::new();
+            for m in selected_matches {
+                if !seen_groups.insert(m.annotation_group.as_str()) {
+                    continue;
+                }
+                let entry = AnnotationGroupEntry {
+                    id: m.annotation_group.clone(),
+                    name: m.annotation_group.clone(),
+                    sample_name: m.sample_name.clone(),
+                    source_block_group_id: bg.id,
+                    origin: AnnotationGroupOrigin::CurrentSample,
+                };
+                let request = AnnotationGroupTrackRequest {
+                    conn: graph_conn,
+                    current_block_group: &bg,
+                    entry: &entry,
+                    visible_ranges_by_node: &visible_ranges,
+                };
+                if let Ok(spans) = load_annotations_for_group(&request) {
+                    annotation_spans.extend(
+                        spans
+                            .into_iter()
+                            .filter(|s| matching_names.contains(s.name.as_str())),
+                    );
+                }
+            }
+
+            show_inline_gen_graph_widget(graph_conn, &graph, vec![], annotation_spans, 15)?;
             Ok(())
         }
         Some(Commands::ListSamples {}) => {
