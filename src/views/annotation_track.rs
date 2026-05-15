@@ -41,7 +41,7 @@ pub struct AnnotationTrack {
     pub max_rows: usize,
 }
 
-pub fn graphlocus_to_annotation_span(locus: &GraphLocus, name: &str) -> AnnotationSpan {
+pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> AnnotationSpan {
     let segments = locus
         .slices
         .iter()

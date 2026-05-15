@@ -10,8 +10,8 @@ use r#gen::{
     views::{
         annotation_groups::load_annotation_group_entries,
         annotation_track::{
-            AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
-            graphlocus_to_annotation_span,
+            AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
+            graph_locus_from_annotation_span,
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
@@ -238,6 +238,18 @@ fn locus_from_span_and_pos_map(
     GraphLocus { slices, strand }
 }
 
+/// A single annotation entry that may render as an inline canvas highlight,
+/// a track panel row, or both.
+///
+/// `span.name` doubles as the inline label (empty = no label drawn).
+/// `track` names a horizontal panel below the graph.
+/// `style` drives the inline canvas tinting.
+struct AnnotationDisplay {
+    span: AnnotationSpan,
+    track: Option<String>,
+    style: Option<PathStyle>,
+}
+
 /// Internal graph controller for the Jupyter notebook widget.
 ///
 /// Not intended for direct use from Python — users should call
@@ -256,11 +268,7 @@ pub struct PyGraphController {
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
-    track_annotations: Vec<AnnotationTrack>,
-    /// Each entry: (track_name, [(span, label)], style).
-    /// Spans are stored so the label midpoint can be recomputed each render
-    /// from viewport-visible nodes only.
-    inline_annotations: Vec<(String, Vec<(AnnotationSpan, String)>, PathStyle)>,
+    annotations: Vec<AnnotationDisplay>,
 }
 
 impl PyGraphController {
@@ -272,8 +280,7 @@ impl PyGraphController {
             db_path,
             block_group_id: None,
             controller,
-            track_annotations: Vec::new(),
-            inline_annotations: Vec::new(),
+            annotations: Vec::new(),
         }
     }
 
@@ -396,18 +403,20 @@ impl PyGraphController {
 
         // Draw inline annotation labels (tinting was applied at add time via highlight system).
         // Midpoints are recomputed each render because the viewport may have changed.
-        if !self.inline_annotations.is_empty() {
+        let has_inline = self.annotations.iter().any(|d| d.style.is_some());
+        if has_inline {
             let theme = current_theme();
             let pos_map = viewport_pos_map(&self.controller);
             let detail_level = self.controller.get_detail_level();
-            for (_, spans_with_labels, style) in &self.inline_annotations {
+            for d in self.annotations.iter().filter(|d| d.style.is_some()) {
+                let style = d.style.unwrap();
                 let color = match style.color {
                     ratatui::style::Color::Reset => theme[0x06],
                     c => c,
                 };
-                // Anonymous highlights (from highlight_match) have an empty label and are skipped here.
-                for (span, label) in spans_with_labels.iter().filter(|(_, l)| !l.is_empty()) {
-                    let locus = locus_from_span_and_pos_map(span, &pos_map);
+                // Anonymous highlights (from highlight_match) have an empty name and are skipped.
+                if !d.span.name.is_empty() {
+                    let locus = locus_from_span_and_pos_map(&d.span, &pos_map);
                     let Some((left_pos, right_pos)) =
                         locus_label_bounds(&locus, &pos_map, detail_level)
                     else {
@@ -422,7 +431,7 @@ impl PyGraphController {
                         &mut buf,
                         graph_area,
                         (left_pos, right_pos),
-                        label,
+                        &d.span.name,
                         color,
                         &self.controller.viewport_state,
                         max_distance,
@@ -432,8 +441,24 @@ impl PyGraphController {
         }
 
         // Overlay annotation tracks at the bottom of the canvas area.
+        // Tracks are rebuilt at render time by grouping displays by track name.
         let mut remaining = Rect::new(0, 0, cols, rows);
-        for track in self.track_annotations.iter_mut().rev() {
+        let mut track_names: Vec<String> = Vec::new();
+        let mut track_spans: HashMap<String, Vec<AnnotationSpan>> = HashMap::new();
+        for d in &self.annotations {
+            if let Some(ref name) = d.track {
+                if !track_spans.contains_key(name) {
+                    track_names.push(name.clone());
+                }
+                track_spans
+                    .entry(name.clone())
+                    .or_default()
+                    .push(d.span.clone());
+            }
+        }
+        for name in track_names.iter().rev() {
+            let spans = track_spans.remove(name).unwrap_or_default();
+            let track = AnnotationTrack::new(name.clone(), spans);
             let height = track.draw(&mut buf, remaining, &self.controller);
             if height == 0 {
                 break;
@@ -450,23 +475,18 @@ impl PyGraphController {
     /// Highlight column offsets are clamped at registration time, so they go stale
     /// when the detail level changes. Call this after any zoom to re-clamp everything.
     fn reapply_inline_highlight_ranges(&mut self) {
-        let styles: Vec<PathStyle> = self
-            .inline_annotations
-            .iter()
-            .map(|(_, _, style)| *style)
-            .collect();
+        let styles: Vec<PathStyle> = self.annotations.iter().filter_map(|d| d.style).collect();
         for style in &styles {
             self.controller.clear_highlight(style);
         }
         // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
         let loci_with_styles: Vec<(GraphLocus, PathStyle)> = self
-            .inline_annotations
+            .annotations
             .iter()
-            .flat_map(|(_, spans, style)| {
-                spans.iter().filter_map(|(span, _)| {
-                    graph_locus_from_annotation_span(span, self.controller.graph())
-                        .map(|l| (l, *style))
-                })
+            .filter(|d| d.style.is_some())
+            .filter_map(|d| {
+                graph_locus_from_annotation_span(&d.span, self.controller.graph())
+                    .map(|l| (l, d.style.unwrap()))
             })
             .collect();
         for (locus, style) in &loci_with_styles {
@@ -542,9 +562,12 @@ impl PyGraphController {
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
         highlight_match_range(&mut self.controller, &locus.inner, style);
-        let span = graphlocus_to_annotation_span(&locus.inner, "");
-        self.inline_annotations
-            .push((String::new(), vec![(span, String::new())], style));
+        let span = annotation_span_from_graph_locus(&locus.inner, "");
+        self.annotations.push(AnnotationDisplay {
+            span,
+            track: None,
+            style: Some(style),
+        });
         Ok(())
     }
 
@@ -641,16 +664,26 @@ impl PyGraphController {
         let track = self
             .load_group_as_track(&conn, group)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        self.track_annotations.push(track);
+        for span in track.annotations {
+            self.annotations.push(AnnotationDisplay {
+                span,
+                track: Some(group.to_string()),
+                style: None,
+            });
+        }
         Ok(())
     }
 
     /// Build a track panel from a list of `Annotation` objects.
     /// Each `Annotation` becomes one span; all are grouped under `name`.
     pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
-        let spans: Vec<AnnotationSpan> = annotations.iter().map(|a| a.inner.clone()).collect();
-        self.track_annotations
-            .push(AnnotationTrack::new(name, spans));
+        for ann in &annotations {
+            self.annotations.push(AnnotationDisplay {
+                span: ann.inner.clone(),
+                track: Some(name.to_string()),
+                style: None,
+            });
+        }
     }
 
     /// Load annotations from a GFF3 or BED file and add them as a
@@ -742,7 +775,13 @@ impl PyGraphController {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
 
-        self.track_annotations.push(track);
+        for span in track.annotations {
+            self.annotations.push(AnnotationDisplay {
+                span,
+                track: Some(name.to_string()),
+                style: None,
+            });
+        }
         Ok(())
     }
 
@@ -757,9 +796,10 @@ impl PyGraphController {
     /// match index in Python state, and wiring up next/previous helpers.
     pub fn go_to_annotation(&mut self, annotation_name: &str) -> PyResult<PyGraphPos> {
         let segment = self
-            .track_annotations
+            .annotations
             .iter()
-            .flat_map(|t| &t.annotations)
+            .filter(|d| d.track.is_some())
+            .map(|d| &d.span)
             .find(|span| span.name == annotation_name)
             .and_then(|span| span.segments.first())
             .cloned()
@@ -795,80 +835,92 @@ impl PyGraphController {
 
     /// Return a JSON list of track-panel annotation names currently loaded.
     pub fn get_track_names(&self) -> PyResult<String> {
-        let names: Vec<&str> = self
-            .track_annotations
-            .iter()
-            .map(|t| t.name.as_str())
-            .collect();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut names: Vec<&str> = Vec::new();
+        for d in &self.annotations {
+            if let Some(ref name) = d.track {
+                if seen.insert(name.as_str()) {
+                    names.push(name.as_str());
+                }
+            }
+        }
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Remove a track-panel annotation by name.
     pub fn remove_track(&mut self, name: &str) {
-        self.track_annotations.retain(|t| t.name != name);
+        self.annotations
+            .retain(|d| d.track.as_deref() != Some(name));
     }
 
     /// Clear all track-panel annotations.
     pub fn clear_all_annotations(&mut self) {
-        self.track_annotations.clear();
+        self.annotations.retain(|d| d.track.is_none());
     }
 
     /// Add a single inline annotation rendered directly on the graph canvas.
     /// The annotation is tinted with an accent colour and labelled below its span.
-    pub fn add_inline_annotation(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
+    pub fn add_inline_annotation(&mut self, annotations: Vec<PyRef<PyAnnotation>>, _name: &str) {
         let theme = current_theme();
         const ACCENT: [usize; 8] = [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F];
-        let color = theme[ACCENT[self.inline_annotations.len() % ACCENT.len()]];
+        let inline_count = self
+            .annotations
+            .iter()
+            .filter(|d| d.style.is_some())
+            .count();
+        let color = theme[ACCENT[inline_count % ACCENT.len()]];
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        let spans_with_labels: Vec<(AnnotationSpan, String)> = annotations
-            .iter()
-            .map(|ann| (ann.inner.clone(), ann.inner.name.clone()))
-            .collect();
         // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
-        let loci: Vec<Option<GraphLocus>> = spans_with_labels
+        let loci: Vec<Option<GraphLocus>> = annotations
             .iter()
-            .map(|(span, _)| graph_locus_from_annotation_span(span, self.controller.graph()))
+            .map(|ann| graph_locus_from_annotation_span(&ann.inner, self.controller.graph()))
             .collect();
         for locus in loci.into_iter().flatten() {
             highlight_match_range(&mut self.controller, &locus, style);
         }
-        self.inline_annotations
-            .push((name.to_string(), spans_with_labels, style));
+        for ann in &annotations {
+            self.annotations.push(AnnotationDisplay {
+                span: ann.inner.clone(),
+                track: None,
+                style: Some(style),
+            });
+        }
     }
 
     /// Return a JSON list of inline annotation names currently loaded.
     pub fn get_inline_annotation_names(&self) -> PyResult<String> {
         let names: Vec<&str> = self
-            .inline_annotations
+            .annotations
             .iter()
-            .map(|(name, _, _)| name.as_str())
+            .filter(|d| d.style.is_some())
+            .map(|d| d.span.name.as_str())
             .collect();
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Remove an inline annotation by name.
-    /// Remove all inline annotations whose name matches `name`.
+    /// Remove all inline annotations whose span name matches `name`.
     /// If the same name was added more than once, all copies are removed.
     pub fn remove_inline_annotation(&mut self, name: &str) {
-        let mut remaining = Vec::with_capacity(self.inline_annotations.len());
-        for (track_name, spans, style) in self.inline_annotations.drain(..) {
-            if track_name == name {
-                self.controller.clear_highlight(&style);
+        let mut remaining = Vec::with_capacity(self.annotations.len());
+        for d in self.annotations.drain(..) {
+            if d.style.is_some() && d.span.name == name {
+                self.controller.clear_highlight(&d.style.unwrap());
             } else {
-                remaining.push((track_name, spans, style));
+                remaining.push(d);
             }
         }
-        self.inline_annotations = remaining;
+        self.annotations = remaining;
     }
 
     /// Clear all inline annotations.
     pub fn clear_all_inline_annotations(&mut self) {
-        for (_, _, style) in &self.inline_annotations {
+        let styles: Vec<PathStyle> = self.annotations.iter().filter_map(|d| d.style).collect();
+        for style in &styles {
             self.controller.clear_highlight(style);
         }
-        self.inline_annotations.clear();
+        self.annotations.retain(|d| d.style.is_none());
     }
 }
 

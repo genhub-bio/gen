@@ -1,6 +1,8 @@
 use r#gen::{
     graphs::graph_search::GraphPos,
-    views::annotation_track::{AnnotationSegment, AnnotationSpan, graphlocus_to_annotation_span},
+    views::annotation_track::{
+        AnnotationSegment, AnnotationSpan, annotation_span_from_graph_locus,
+    },
 };
 use gen_core::{HashId, Strand};
 use gen_graph::GraphNode;
@@ -164,12 +166,12 @@ impl PyAnnotation {
     #[new]
     fn new(locus_or_loci: &Bound<'_, PyAny>, name: &str) -> PyResult<Self> {
         if let Ok(single) = locus_or_loci.extract::<PyRef<PyGraphLocus>>() {
-            let span = graphlocus_to_annotation_span(&single.inner, name);
+            let span = annotation_span_from_graph_locus(&single.inner, name);
             Ok(PyAnnotation { inner: span })
         } else if let Ok(list) = locus_or_loci.extract::<Vec<PyRef<PyGraphLocus>>>() {
             let segments: Vec<AnnotationSegment> = list
                 .iter()
-                .flat_map(|l| graphlocus_to_annotation_span(&l.inner, name).segments)
+                .flat_map(|l| annotation_span_from_graph_locus(&l.inner, name).segments)
                 .collect();
             let span = AnnotationSpan {
                 id: HashId::convert_str(name),
