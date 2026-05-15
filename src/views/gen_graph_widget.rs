@@ -573,4 +573,74 @@ mod tests {
         let truncated = inner_truncation(s, 3);
         assert_eq!(truncated, NODE_GLYPH.to_string());
     }
+
+    #[test]
+    fn snapshot_zygosity_pruned_edges() {
+        use std::path::PathBuf;
+
+        use gen_models::sample::Sample;
+        use gen_tui::{graph_widget::GraphWidget, testing::create_test_terminal};
+        use ratatui::widgets::StatefulWidget as _;
+
+        use crate::{
+            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
+            updates::vcf::update_with_vcf,
+        };
+
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple_zygosity.vcf")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path,
+            collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1");
+        let mut controller = create_gen_graph_controller(gen_graph);
+
+        let mut terminal = create_test_terminal(120, 30);
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                controller.viewport_state.viewport_bounds = area;
+                controller.ensure_camera_coverage().unwrap();
+                controller.rebuild_viewport_graph().unwrap();
+                GraphWidget::with_renderer(GenGraphNodeRenderer::new(conn)).render(
+                    area,
+                    f.buffer_mut(),
+                    &mut controller,
+                );
+            })
+            .unwrap();
+
+        insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
+    }
 }

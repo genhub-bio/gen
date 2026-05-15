@@ -1,0 +1,11 @@
+##fileformat=VCFv4.2
+##reference=simple.fa
+##contig=<ID=m123,length=34>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE1
+m123	3	.	C	T	60	PASS	.	GT	1|1
+m123	7	.	C	A	60	PASS	.	GT	0|1
+m123	11	.	CG	C	60	PASS	.	GT	1|1
+m123	16	.	GA	G	60	PASS	.	GT	0|1
+m123	22	.	A	ATTT	60	PASS	.	GT	1|1
+m123	28	.	C	G	60	PASS	.	GT	0|1
