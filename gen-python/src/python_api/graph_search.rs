@@ -72,7 +72,7 @@ impl PyGraphLocus {
 
     /// Return the raw node sequence for highlight operations.
     pub fn locus_nodes(&self) -> Vec<GraphNode> {
-        self.inner.slices.iter().map(|s| s.node).collect()
+        self.inner.slices.iter().map(|s| s.block).collect()
     }
 }
 
@@ -81,13 +81,13 @@ impl PyGraphLocus {
     /// Position of the first matched byte (start of the locus).
     fn start(&self) -> PyGraphPos {
         let s = &self.inner.slices[0];
-        PyGraphPos::new(s.node, s.start)
+        PyGraphPos::new(s.block, s.start)
     }
 
     /// Position one past the last matched byte (exclusive end of the locus).
     fn end(&self) -> PyGraphPos {
         let s = self.inner.slices.last().unwrap();
-        PyGraphPos::new(s.node, s.end)
+        PyGraphPos::new(s.block, s.end)
     }
 
     /// Ordered sequence of blocks that span this locus.
@@ -101,7 +101,13 @@ impl PyGraphLocus {
         self.inner
             .slices
             .iter()
-            .map(|s| PyBlock::new(s.node.node_id, s.node.sequence_start, s.node.sequence_end))
+            .map(|s| {
+                PyBlock::new(
+                    s.block.node_id,
+                    s.block.sequence_start,
+                    s.block.sequence_end,
+                )
+            })
             .collect()
     }
 
@@ -118,8 +124,8 @@ impl PyGraphLocus {
     fn __repr__(&self) -> String {
         let first = &self.inner.slices[0];
         let last = self.inner.slices.last().unwrap();
-        let sh = format!("{}", first.node.node_id);
-        let eh = format!("{}", last.node.node_id);
+        let sh = format!("{}", first.block.node_id);
+        let eh = format!("{}", last.block.node_id);
         let strand = match self.inner.strand {
             Strand::Forward => "+",
             Strand::Reverse => "-",
@@ -128,12 +134,12 @@ impl PyGraphLocus {
         format!(
             "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks, strand={})",
             &sh[..8],
-            first.node.sequence_start,
-            first.node.sequence_end,
+            first.block.sequence_start,
+            first.block.sequence_end,
             first.start,
             &eh[..8],
-            last.node.sequence_start,
-            last.node.sequence_end,
+            last.block.sequence_start,
+            last.block.sequence_end,
             last.end,
             self.inner.slices.len(),
             strand,

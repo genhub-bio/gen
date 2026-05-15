@@ -381,22 +381,22 @@ pub fn locus_label_bounds(
 
     let left_pos = locus.slices.iter().enumerate().find_map(|(i, s)| {
         let col_raw = if i == 0 { s.start as i64 } else { 0 };
-        block_world_pos(s.node, col_raw)
+        block_world_pos(s.block, col_raw)
     })?;
 
     let right_pos = locus.slices.iter().enumerate().rev().find_map(|(i, s)| {
         let col_raw = if i == last {
             s.end.saturating_sub(1) as i64
         } else {
-            s.node.length() - 1
+            s.block.length() - 1
         };
-        block_world_pos(s.node, col_raw)
+        block_world_pos(s.block, col_raw)
     })?;
 
     let mut y_min = i64::MAX;
     let mut y_max = i64::MIN;
     for s in &locus.slices {
-        let Some(&(center, _)) = pos_map.get(&s.node) else {
+        let Some(&(center, _)) = pos_map.get(&s.block) else {
             continue;
         };
         y_min = y_min.min(center.y);
@@ -457,18 +457,18 @@ pub fn highlight_match_range<S: NodeSizer<GenGraph>>(
     let detail_level = controller.get_detail_level();
 
     for s in &m.slices {
-        let block_seq_len = s.node.length();
+        let block_seq_len = s.block.length();
         let col_start_raw = s.start as i64;
         let col_end_raw = s.end.saturating_sub(1) as i64;
         let (col_start, col_end) = (
             clamp_col(col_start_raw, block_seq_len, detail_level),
             clamp_col(col_end_raw, block_seq_len, detail_level),
         );
-        controller.set_cell_highlight(s.node, (col_start, 0), (col_end, 0), style);
+        controller.set_cell_highlight(s.block, (col_start, 0), (col_end, 0), style);
     }
 
     for (s, t) in m.slices.iter().zip(m.slices.iter().skip(1)) {
-        controller.set_edge_highlight((s.node, t.node), style);
+        controller.set_edge_highlight((s.block, t.block), style);
     }
 }
 
