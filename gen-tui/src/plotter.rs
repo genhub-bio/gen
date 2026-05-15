@@ -507,32 +507,41 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     }
 }
 
-fn both_on_segment(s: WorldPos, t: WorldPos, p: WorldPos, q: WorldPos) -> bool {
-    if s.x == t.x && p.x == s.x && q.x == s.x {
-        let lo = s.y.min(t.y);
-        let hi = s.y.max(t.y);
-        p.y >= lo && p.y <= hi && q.y >= lo && q.y <= hi
-    } else if s.y == t.y && p.y == s.y && q.y == s.y {
-        let lo = s.x.min(t.x);
-        let hi = s.x.max(t.x);
-        p.x >= lo && p.x <= hi && q.x >= lo && q.x <= hi
+/// Returns true if both `point_a` and `point_b` lie on the axis-aligned segment
+/// from `seg_start` to `seg_end`.
+fn both_points_on_segment(
+    seg_start: WorldPos,
+    seg_end: WorldPos,
+    point_a: WorldPos,
+    point_b: WorldPos,
+) -> bool {
+    if seg_start.x == seg_end.x && point_a.x == seg_start.x && point_b.x == seg_start.x {
+        let lo = seg_start.y.min(seg_end.y);
+        let hi = seg_start.y.max(seg_end.y);
+        point_a.y >= lo && point_a.y <= hi && point_b.y >= lo && point_b.y <= hi
+    } else if seg_start.y == seg_end.y && point_a.y == seg_start.y && point_b.y == seg_start.y {
+        let lo = seg_start.x.min(seg_end.x);
+        let hi = seg_start.x.max(seg_end.x);
+        point_a.x >= lo && point_a.x <= hi && point_b.x >= lo && point_b.x <= hi
     } else {
         false
     }
 }
 
+/// Returns true if the connection from `routing_node` to `neighbor` lies on a lowlight
+/// segment but not on any highlight segment — meaning it should be rendered dimmed.
 fn is_lowlight_only_connection(
-    pos: WorldPos,
-    nb: WorldPos,
+    routing_node: WorldPos,
+    neighbor: WorldPos,
     lowlights: &[(WorldPos, WorldPos)],
     edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
 ) -> bool {
     let on_lowlight = lowlights
         .iter()
-        .any(|(s, t)| both_on_segment(*s, *t, pos, nb));
+        .any(|(start, end)| both_points_on_segment(*start, *end, routing_node, neighbor));
     let on_highlight = edge_highlights
         .iter()
-        .any(|((s, t), _)| both_on_segment(*s, *t, pos, nb));
+        .any(|((start, end), _)| both_points_on_segment(*start, *end, routing_node, neighbor));
     on_lowlight && !on_highlight
 }
 
