@@ -418,7 +418,8 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             }
             NodeRole::Routing => {
                 let edge_color = theme[0x05];
-                let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
+                let base_glyph =
+                    compute_junction_glyph(viewport_graph.neighbors(*world_pos), *world_pos);
 
                 // Check if this routing node is part of any highlighted edge
                 let highlighted_style = edge_highlights
@@ -448,7 +449,8 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         .cloned()
                         .collect();
                     let highlight_graph = CroppedGraph::from_visual_edges(&active_edges);
-                    let high_glyph = compute_junction_glyph(&highlight_graph, *world_pos);
+                    let high_glyph =
+                        compute_junction_glyph(highlight_graph.neighbors(*world_pos), *world_pos);
                     let ch = if style.merge_glyphs {
                         let high_char = match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
@@ -489,7 +491,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             .iter()
                             .zip(&lowlight_mask)
                             .filter_map(|(&nb, &dim)| (!dim).then_some(nb));
-                        compute_junction_glyph_from_neighbors(lit, *world_pos).glyph()
+                        compute_junction_glyph(lit, *world_pos).glyph()
                     } else {
                         base_glyph.glyph()
                     };
@@ -545,13 +547,8 @@ fn is_lowlight_only_connection(
     on_lowlight && !on_highlight
 }
 
-/// Compute the junction glyph for a routing node based on its connections
-fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> JunctionSymbol {
-    compute_junction_glyph_from_neighbors(viewport_graph.neighbors(pos), pos)
-}
-
-/// Compute the junction glyph from an explicit set of neighbors (e.g. after filtering lowlights).
-fn compute_junction_glyph_from_neighbors(
+/// Compute the junction glyph for a routing node given its neighbors.
+fn compute_junction_glyph(
     neighbors: impl Iterator<Item = WorldPos>,
     pos: WorldPos,
 ) -> JunctionSymbol {
