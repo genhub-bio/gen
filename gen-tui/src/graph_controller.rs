@@ -73,6 +73,10 @@ where
     /// cursor's viewport position so the camera-anchored formula lands the
     /// camera exactly on the cursor's world position.
     go_to_pending: bool,
+    /// When set, snaps left instead of centering: column 1 if the cursor is
+    /// hidden, or as far left as possible (soft-zone boundary) if visible,
+    /// moving the cursor there too.
+    go_to_snap_left: bool,
 }
 
 /// Type of element to highlight in the graph
@@ -150,6 +154,7 @@ where
             layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
             go_to_pending: false,
+            go_to_snap_left: false,
         }
     }
 
@@ -849,11 +854,21 @@ where
         //   camera = cursor_world - cursor_viewport + half_viewport
         // resolves to camera = cursor_world, putting the target exactly at screen center.
         if self.go_to_pending && !viewport_was_uninitialized {
-            let half_w = viewport_bounds_snapshot.width / 2;
+            let col_x = if self.go_to_snap_left {
+                self.go_to_snap_left = false;
+                if self.cursor.is_visible() {
+                    self.viewport_state.soft_zone
+                } else {
+                    1
+                }
+            } else {
+                viewport_bounds_snapshot.width / 2
+            };
             let half_h = viewport_bounds_snapshot.height / 2;
             self.cursor
-                .set_viewport_pos(ViewportPos::new(half_w, half_h));
+                .set_viewport_pos(ViewportPos::new(col_x, half_h));
             self.go_to_pending = false;
+            self.layout_changed = true;
         }
 
         // Step 2: Find which partition the cursor's node belongs to
@@ -1124,6 +1139,12 @@ where
         self.show_cursor();
         self.go_to_pending = true;
         self.trigger_rebuild();
+    }
+
+    /// Request that the next pending go_to snap left rather than center.
+    /// Call immediately after `go_to_node`.
+    pub fn queue_snap_left(&mut self) {
+        self.go_to_snap_left = true;
     }
 
     /// Pan the camera by a drag delta expressed in terminal coordinates.
