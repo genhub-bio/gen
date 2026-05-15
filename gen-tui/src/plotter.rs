@@ -437,42 +437,11 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     .map(|(_, style)| *style)
                     .next_back();
 
-                // For each neighbor, determine if the connection to it is lowlight-only.
-                // A connection (world_pos → nb) is lowlight-only when it lies on a lowlight
-                // segment but not on any highlight segment.
-                let both_on_segment =
-                    |s: WorldPos, t: WorldPos, p: WorldPos, q: WorldPos| -> bool {
-                        if s.x == t.x && p.x == s.x && q.x == s.x {
-                            let lo = s.y.min(t.y);
-                            let hi = s.y.max(t.y);
-                            p.y >= lo && p.y <= hi && q.y >= lo && q.y <= hi
-                        } else if s.y == t.y && p.y == s.y && q.y == s.y {
-                            let lo = s.x.min(t.x);
-                            let hi = s.x.max(t.x);
-                            p.x >= lo && p.x <= hi && q.x >= lo && q.x <= hi
-                        } else {
-                            false
-                        }
-                    };
-
+                // Collect neighbors once; reused for both glyph shape and color decisions.
                 let all_neighbors: Vec<WorldPos> = viewport_graph.neighbors(*world_pos).collect();
 
-                let is_lowlight_only_conn = |nb: WorldPos| {
-                    let on_lowlight = lowlights
-                        .iter()
-                        .any(|(s, t)| both_on_segment(*s, *t, *world_pos, nb));
-                    let on_highlight = edge_highlights
-                        .iter()
-                        .any(|((s, t), _)| both_on_segment(*s, *t, *world_pos, nb));
-                    on_lowlight && !on_highlight
-                };
-
-                let any_lowlight_only = all_neighbors.iter().any(|&nb| is_lowlight_only_conn(nb));
-                let all_lowlight_only = !all_neighbors.is_empty()
-                    && all_neighbors.iter().all(|&nb| is_lowlight_only_conn(nb));
-
-                let character = if let Some(style) = highlighted_style {
-                    // Highlight takes priority; for highlight+lowlight mix, include all edges in glyph.
+                // Highlight takes full priority: skip lowlight logic entirely when present.
+                let (character, fg_color) = if let Some(style) = highlighted_style {
                     let active_edges: Vec<_> = edge_highlights
                         .iter()
                         .filter(|(_, s)| *s == style)
@@ -480,8 +449,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         .collect();
                     let highlight_graph = CroppedGraph::from_visual_edges(&active_edges);
                     let high_glyph = compute_junction_glyph(&highlight_graph, *world_pos);
-
-                    if style.merge_glyphs {
+                    let ch = if style.merge_glyphs {
                         let high_char = match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
                             LineStyle::Bold => high_glyph.heavy_glyph(),
@@ -498,29 +466,35 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             LineStyle::Bold => high_glyph.heavy_glyph(),
                             LineStyle::Dashed => high_glyph.dashed_glyph(),
                         }
-                    }
-                } else if all_lowlight_only {
-                    // All neighbors are lowlight-only: show neutral glyph in lowlight color
-                    base_glyph.glyph()
-                } else if any_lowlight_only {
-                    // Mixed: compute glyph from non-lowlight-only neighbors only
-                    let filtered = all_neighbors
-                        .into_iter()
-                        .filter(|&nb| !is_lowlight_only_conn(nb));
-                    compute_junction_glyph_from_neighbors(filtered, *world_pos).glyph()
-                } else {
-                    base_glyph.glyph()
-                };
-
-                let fg_color = if let Some(style) = highlighted_style {
-                    match style.color {
+                    };
+                    let color = match style.color {
                         Color::Reset => theme[0x07],
                         c => c,
-                    }
-                } else if all_lowlight_only {
-                    theme[0x04]
+                    };
+                    (ch, color)
                 } else {
-                    edge_color
+                    // Compute once, share between glyph and color decisions below.
+                    let lowlight_mask: Vec<bool> = all_neighbors
+                        .iter()
+                        .map(|&nb| {
+                            is_lowlight_only_connection(*world_pos, nb, lowlights, edge_highlights)
+                        })
+                        .collect();
+                    let all_dim = !lowlight_mask.is_empty() && lowlight_mask.iter().all(|&x| x);
+                    let any_dim = lowlight_mask.iter().any(|&x| x);
+                    // Mixed junction: exclude lowlight-only arms so the glyph reflects only the
+                    // live connections, avoiding spurious branches pointing into dimmed edges.
+                    let ch = if any_dim && !all_dim {
+                        let lit = all_neighbors
+                            .iter()
+                            .zip(&lowlight_mask)
+                            .filter_map(|(&nb, &dim)| (!dim).then_some(nb));
+                        compute_junction_glyph_from_neighbors(lit, *world_pos).glyph()
+                    } else {
+                        base_glyph.glyph()
+                    };
+                    let color = if all_dim { theme[0x04] } else { edge_color };
+                    (ch, color)
                 };
                 buffer.set_char_styled(*world_pos, character, Style::default().fg(fg_color));
             }
@@ -531,6 +505,35 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             }
         }
     }
+}
+
+fn both_on_segment(s: WorldPos, t: WorldPos, p: WorldPos, q: WorldPos) -> bool {
+    if s.x == t.x && p.x == s.x && q.x == s.x {
+        let lo = s.y.min(t.y);
+        let hi = s.y.max(t.y);
+        p.y >= lo && p.y <= hi && q.y >= lo && q.y <= hi
+    } else if s.y == t.y && p.y == s.y && q.y == s.y {
+        let lo = s.x.min(t.x);
+        let hi = s.x.max(t.x);
+        p.x >= lo && p.x <= hi && q.x >= lo && q.x <= hi
+    } else {
+        false
+    }
+}
+
+fn is_lowlight_only_connection(
+    pos: WorldPos,
+    nb: WorldPos,
+    lowlights: &[(WorldPos, WorldPos)],
+    edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
+) -> bool {
+    let on_lowlight = lowlights
+        .iter()
+        .any(|(s, t)| both_on_segment(*s, *t, pos, nb));
+    let on_highlight = edge_highlights
+        .iter()
+        .any(|((s, t), _)| both_on_segment(*s, *t, pos, nb));
+    on_lowlight && !on_highlight
 }
 
 /// Compute the junction glyph for a routing node based on its connections

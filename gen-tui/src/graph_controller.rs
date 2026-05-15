@@ -1113,18 +1113,15 @@ where
         }
 
         // Apply domain-level lowlights to the new viewport graph
-        let domain_lowlights: Vec<(G::NodeId, G::NodeId)> = self.edge_lowlights.clone();
         Self::apply_lowlights(
             &mut self.viewport_graph,
             &self.partition_controller.graph,
-            &domain_lowlights,
+            &self.edge_lowlights,
         );
-
-        let domain_node_lowlights: Vec<G::NodeId> = self.node_lowlights.clone();
         Self::apply_node_lowlights(
             &mut self.viewport_graph,
             &self.partition_controller.graph,
-            &domain_node_lowlights,
+            &self.node_lowlights,
         );
 
         // Update rebuild tracking

@@ -198,8 +198,8 @@ pub fn create_gen_graph_widget(
 /// `created_on` is kept; all others are dimmed. Edges with
 /// `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` are always dimmed; edges with
 /// `NO_CHROMOSOME_INDEX` or `INDETERMINATE_CHROMOSOME_INDEX` are never dimmed.
-fn compute_pruned_edges(graph: &GenGraph) -> Vec<(GraphNode, GraphNode)> {
-    let mut pruned: Vec<(GraphNode, GraphNode)> = Vec::new();
+fn compute_pruned_edges(graph: &GenGraph) -> HashSet<(GraphNode, GraphNode)> {
+    let mut pruned: HashSet<(GraphNode, GraphNode)> = HashSet::new();
 
     for node in graph.nodes() {
         // chromosome_index -> (source, target, best_created_on)
@@ -219,19 +219,19 @@ fn compute_pruned_edges(graph: &GenGraph) -> Vec<(GraphNode, GraphNode)> {
                     continue;
                 }
                 if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-                    pruned.push((source_node, target_node));
+                    pruned.insert((source_node, target_node));
                     continue;
                 }
                 edges_by_ci
                     .entry(chromosome_index)
                     .and_modify(|(best_src, best_tgt, best_ts)| {
                         if created_on > *best_ts {
-                            pruned.push((*best_src, *best_tgt));
+                            pruned.insert((*best_src, *best_tgt));
                             *best_src = source_node;
                             *best_tgt = target_node;
                             *best_ts = created_on;
                         } else {
-                            pruned.push((source_node, target_node));
+                            pruned.insert((source_node, target_node));
                         }
                     })
                     .or_insert((source_node, target_node, created_on));
@@ -239,8 +239,6 @@ fn compute_pruned_edges(graph: &GenGraph) -> Vec<(GraphNode, GraphNode)> {
         }
     }
 
-    pruned.sort_unstable();
-    pruned.dedup();
     pruned
 }
 
@@ -250,10 +248,8 @@ fn compute_pruned_edges(graph: &GenGraph) -> Vec<(GraphNode, GraphNode)> {
 /// is only reachable through pruned (lowlighted) edges and should be dimmed.
 fn compute_inaccessible_nodes(
     graph: &GenGraph,
-    pruned: &[(GraphNode, GraphNode)],
+    pruned: &HashSet<(GraphNode, GraphNode)>,
 ) -> Vec<GraphNode> {
-    let pruned_set: HashSet<(GraphNode, GraphNode)> = pruned.iter().cloned().collect();
-
     let mut reachable: HashSet<GraphNode> = HashSet::new();
     let mut queue: VecDeque<GraphNode> =
         graph.nodes().filter(|n| is_start_node(n.node_id)).collect();
@@ -263,7 +259,7 @@ fn compute_inaccessible_nodes(
 
     while let Some(node) = queue.pop_front() {
         for (src, tgt, _) in graph.edges(node) {
-            if !pruned_set.contains(&(src, tgt)) && reachable.insert(tgt) {
+            if !pruned.contains(&(src, tgt)) && reachable.insert(tgt) {
                 queue.push_back(tgt);
             }
         }
