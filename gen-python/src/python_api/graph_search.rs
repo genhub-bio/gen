@@ -1,9 +1,10 @@
 use r#gen::{
-    graphs::graph_search::{GraphLocus, GraphPos},
+    graphs::graph_search::GraphPos,
     views::annotation_track::{AnnotationSegment, AnnotationSpan, graphlocus_to_annotation_span},
 };
 use gen_core::{HashId, Strand};
 use gen_graph::GraphNode;
+use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
 use super::block::PyBlock;
@@ -71,7 +72,7 @@ impl PyGraphLocus {
 
     /// Return the raw node sequence for highlight operations.
     pub fn locus_nodes(&self) -> Vec<GraphNode> {
-        self.inner.blocks.clone()
+        self.inner.slices.iter().map(|s| s.node).collect()
     }
 }
 
@@ -79,12 +80,14 @@ impl PyGraphLocus {
 impl PyGraphLocus {
     /// Position of the first matched byte (start of the locus).
     fn start(&self) -> PyGraphPos {
-        PyGraphPos::new(self.inner.blocks[0], self.inner.start_offset)
+        let s = &self.inner.slices[0];
+        PyGraphPos::new(s.node, s.start)
     }
 
     /// Position one past the last matched byte (exclusive end of the locus).
     fn end(&self) -> PyGraphPos {
-        PyGraphPos::new(*self.inner.blocks.last().unwrap(), self.inner.end_offset)
+        let s = self.inner.slices.last().unwrap();
+        PyGraphPos::new(s.node, s.end)
     }
 
     /// Ordered sequence of blocks that span this locus.
@@ -96,9 +99,9 @@ impl PyGraphLocus {
     #[getter]
     fn blocks(&self) -> Vec<PyBlock> {
         self.inner
-            .blocks
+            .slices
             .iter()
-            .map(|n| PyBlock::new(n.node_id, n.sequence_start, n.sequence_end))
+            .map(|s| PyBlock::new(s.node.node_id, s.node.sequence_start, s.node.sequence_end))
             .collect()
     }
 
@@ -113,10 +116,10 @@ impl PyGraphLocus {
     }
 
     fn __repr__(&self) -> String {
-        let sn = self.inner.blocks[0];
-        let en = *self.inner.blocks.last().unwrap();
-        let sh = format!("{}", sn.node_id);
-        let eh = format!("{}", en.node_id);
+        let first = &self.inner.slices[0];
+        let last = self.inner.slices.last().unwrap();
+        let sh = format!("{}", first.node.node_id);
+        let eh = format!("{}", last.node.node_id);
         let strand = match self.inner.strand {
             Strand::Forward => "+",
             Strand::Reverse => "-",
@@ -125,14 +128,14 @@ impl PyGraphLocus {
         format!(
             "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks, strand={})",
             &sh[..8],
-            sn.sequence_start,
-            sn.sequence_end,
-            self.inner.start_offset,
+            first.node.sequence_start,
+            first.node.sequence_end,
+            first.start,
             &eh[..8],
-            en.sequence_start,
-            en.sequence_end,
-            self.inner.end_offset,
-            self.inner.blocks.len(),
+            last.node.sequence_start,
+            last.node.sequence_end,
+            last.end,
+            self.inner.slices.len(),
             strand,
         )
     }
