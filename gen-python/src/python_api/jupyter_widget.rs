@@ -265,11 +265,18 @@ impl PyAnnotationRecord {
         self.locus.clone().map(PyGraphLocus::from_locus)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "AnnotationRecord(name={:?}, track={:?})",
-            self.name, self.track,
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let locus = match &self.locus {
+            Some(l) => {
+                let bound = Py::new(py, PyGraphLocus::from_locus(l.clone()))?;
+                bound.bind(py).repr()?.to_string_lossy().into_owned()
+            }
+            None => "None".to_string(),
+        };
+        Ok(format!(
+            "AnnotationRecord(name={:?}, track={:?}, locus={})",
+            self.name, self.track, locus,
+        ))
     }
 }
 
