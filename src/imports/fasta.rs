@@ -59,7 +59,13 @@ pub fn import_fasta(
         Err(e) => return Err(FastaError::CollectionError(e)),
     };
 
-    match Sample::get_or_create(conn, sample) {
+    match Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: sample,
+            ..Default::default()
+        },
+    ) {
         Ok(_) => {}
         Err(SampleError::Duplicate(_)) => {}
         Err(e) => {

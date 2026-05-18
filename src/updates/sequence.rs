@@ -30,7 +30,13 @@ pub fn update_with_sequence(
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
     let mut target_block_groups = vec![];

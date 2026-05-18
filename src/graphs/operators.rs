@@ -78,7 +78,13 @@ pub fn derive_chunks(
     create_block_group: bool,
 ) -> Result<Vec<BlockGroupChunk>, GraphOperationError> {
     let conn = context.graph().conn();
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
 
     let parent_block_group_id =
         get_block_group_id(conn, collection_name, parent_sample_name, region_name)?;
@@ -310,7 +316,13 @@ pub fn make_stitch(
         }
     }
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
 
     let child_block_group = BlockGroup::create(
         conn,

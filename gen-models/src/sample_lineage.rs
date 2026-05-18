@@ -138,7 +138,11 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
-    use crate::{lineage::SqlLineage, sample::Sample, test_helpers::get_connection};
+    use crate::{
+        lineage::SqlLineage,
+        sample::{NewSample, Sample},
+        test_helpers::get_connection,
+    };
 
     #[test]
     fn test_capnp_serialization() {
@@ -160,7 +164,14 @@ mod tests {
         let conn = get_connection(None).unwrap();
 
         for sample in ["root", "left", "right", "leaf", "sibling"] {
-            Sample::get_or_create(&conn, sample).unwrap();
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: sample,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         }
 
         SampleLineage::create(&conn, "root", "left").unwrap();
@@ -261,7 +272,14 @@ mod tests {
         let conn = get_connection(None).unwrap();
 
         for sample in ["root", "left", "right", "leaf", "sibling"] {
-            Sample::get_or_create(&conn, sample).unwrap();
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: sample,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         }
 
         SampleLineage::create(&conn, "root", "left").unwrap();
@@ -291,7 +309,14 @@ mod tests {
     #[test]
     fn test_self_references_are_rejected() {
         let conn = get_connection(None).unwrap();
-        Sample::get_or_create(&conn, "sample").unwrap();
+        Sample::get_or_create(
+            &conn,
+            NewSample {
+                name: "sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let err = SampleLineage::create(&conn, "sample", "sample").unwrap_err();
         assert!(matches!(
@@ -315,7 +340,14 @@ mod tests {
             "QuxFood",
             "zzz",
         ] {
-            Sample::get_or_create(&conn, sample).unwrap();
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: sample,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         }
 
         SampleLineage::create(&conn, "alpha", "BarFooBaz").unwrap();

@@ -27,7 +27,14 @@ pub fn create_bg(
     sample_name: &str,
     name: &str,
 ) -> BlockGroup {
-    Sample::get_or_create(conn, sample_name).unwrap();
+    Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: sample_name,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     BlockGroup::create(
         conn,
         NewBlockGroup {
@@ -153,7 +160,14 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     )
     .unwrap();
     let _collection = Collection::create(conn, "test");
-    Sample::get_or_create(conn, "test").unwrap();
+    Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: "test",
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let block_group = create_bg(conn, "test", "test", "chr1");
     let edge0 = Edge::create(
         conn,

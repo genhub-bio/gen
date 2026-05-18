@@ -70,7 +70,13 @@ pub fn update_with_library(
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
 
-    let _new_sample = Sample::create(conn, new_sample_name);
+    let _new_sample = Sample::create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            is_reference: false,
+        },
+    );
 
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
     let parent_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
@@ -161,7 +167,13 @@ pub fn update_with_library(
         block_group_chunks.push(pathless_end_chunk);
     }
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
 
     // Create (re-create) the reference sequence/path out of the derived chunks,
     // in the child block group

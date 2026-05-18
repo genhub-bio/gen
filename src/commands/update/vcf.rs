@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::{errors::OperationError, sample::Sample};
+use gen_models::errors::OperationError;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -25,9 +25,8 @@ pub struct Command {
     /// Use the given samples as the parent samples for changes. Repeat the flag or use commas.
     #[arg(
         long = "parent-samples",
-        aliases = ["parent-sample", "ps"],
-        value_delimiter = ',',
-        default_values_t = [Sample::DEFAULT_NAME.to_string()]
+        aliases = ["parent-sample", "ps", "reference"],
+        value_delimiter = ','
     )]
     parent_samples: Vec<String>,
     /// Apply edits in-place instead of using parent sample's reference coordinates
@@ -41,6 +40,12 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let context = cli_context.context;
     let operation_conn = context.operations().conn();
     let conn = context.graph().conn();
+
+    if cmd.sample.is_none() && cmd.parent_samples.is_empty() {
+        return Err(anyhow::anyhow!(
+            "one of --sample or --reference must be provided"
+        ));
+    }
 
     conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;

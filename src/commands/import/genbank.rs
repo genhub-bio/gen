@@ -5,7 +5,7 @@ use clap::Args;
 use gen_models::{
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
-    sample::Sample,
+    sample::{NewSample, Sample},
 };
 
 use crate::{
@@ -23,8 +23,11 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// A sample name to associate the Genbank file with
-    #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
-    sample: String,
+    #[arg(short, long, conflicts_with = "reference")]
+    sample: Option<String>,
+    /// Create or use a reference sample with this name
+    #[arg(long, conflicts_with = "sample")]
+    reference: Option<String>,
     /// Override the annotation group name created for imported GenBank annotations
     #[arg(long = "annotation-group")]
     annotation_group: Option<String>,
@@ -53,6 +56,19 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     } else {
         Box::new(File::open(cmd.path.clone()).unwrap())
     };
+    let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
+        cmd.sample.as_deref(),
+        cmd.reference.as_deref(),
+    )?;
+    if is_reference {
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: sample_name,
+                is_reference: true,
+            },
+        )?;
+    }
     let mut options = GenBankImportOptions::default().annotation_name_from_path(&cmd.path);
     options.add_annotations = !cmd.no_annotations;
     options.annotation_group = cmd.annotation_group.clone();
@@ -60,7 +76,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         context,
         &mut reader,
         name.as_ref(),
-        cmd.sample.as_str(),
+        sample_name,
         OperationInfo {
             files: vec![OperationFile::new(cmd.path.clone()).set_file_type(FileTypes::GenBank)],
             description: "GenBank Import".to_string(),
