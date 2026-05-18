@@ -74,8 +74,7 @@ where
     /// camera exactly on the cursor's world position.
     go_to_pending: bool,
     /// When set, snaps left instead of centering: column 1 if the cursor is
-    /// hidden, or as far left as possible (soft-zone boundary) if visible,
-    /// moving the cursor there too.
+    /// hidden, or as far left as possible (soft-zone boundary) if visible.
     go_to_snap_left: bool,
 }
 

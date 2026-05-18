@@ -327,7 +327,7 @@ impl PyGraphController {
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }
 
-    pub fn auto_load_annotation_groups(&mut self, conn: &GraphConnection) {
+    pub(crate) fn auto_load_annotation_groups(&mut self, conn: &GraphConnection) {
         let Some(bg_id) = self.block_group_id else {
             return;
         };
@@ -780,13 +780,22 @@ impl PyGraphController {
         self.navigate_to_span(&annotation.inner);
     }
 
-    /// Highlight an `Annotation` object.
+    /// Highlight an `Annotation` object directly on the graph without adding an inline track.
     pub fn highlight_annotation_obj(
         &mut self,
         annotation: &PyAnnotation,
         color: Option<&str>,
     ) -> PyResult<()> {
-        self.highlight_span(&annotation.inner, color)
+        let c = self.resolve_color(color)?;
+        let style = PathStyle::new(c)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        if let Some(locus) =
+            graph_locus_from_annotation_span(&annotation.inner, self.controller.graph())
+        {
+            highlight_match_range(&mut self.controller, &locus, style);
+        }
+        Ok(())
     }
 
     /// Navigate to a `GraphLocus`.
@@ -820,59 +829,6 @@ impl PyGraphController {
             }
         }
         annotations
-    }
-
-    /// Navigate the camera to the first annotation span whose name matches
-    /// `annotation_name` across all loaded track panels.
-    ///
-    /// Returns the `GraphPos` the camera moved to.  Raises `KeyError` if no
-    /// annotation with that name is found in any track.
-    pub fn go_to_annotation_by_name(&mut self, annotation_name: &str) -> PyResult<PyGraphPos> {
-        let span = self
-            .track_annotations
-            .iter()
-            .flat_map(|t| &t.annotations)
-            .find(|span| span.name == annotation_name)
-            .cloned()
-            .or_else(|| {
-                self.inline_annotations
-                    .iter()
-                    .flat_map(|(_, spans, _)| spans)
-                    .find(|(span, _)| span.name == annotation_name)
-                    .map(|(span, _)| span.clone())
-            })
-            .ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!(
-                    "no annotation named {annotation_name:?} found"
-                ))
-            })?;
-        let segment = span.segments.first().cloned().ok_or_else(|| {
-            PyRuntimeError::new_err(format!("annotation {annotation_name:?} has no segments"))
-        })?;
-
-        let node = self
-            .controller
-            .graph()
-            .nodes()
-            .find(|n| n.node_id == segment.node_id)
-            .ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "annotation {annotation_name:?} references a node not present in the current graph"
-                ))
-            })?;
-
-        let node_len = node.length();
-        let frac_x = if node_len > 1 {
-            (segment.start as f64) / (node_len - 1) as f64
-        } else {
-            0.0
-        };
-        self.controller.set_detail_level(VisualDetail::Full);
-        center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
-        self.controller.queue_snap_left();
-        self.controller.hide_cursor();
-
-        Ok(PyGraphPos::new(node, segment.start as usize))
     }
 
     /// Return a JSON list of track-panel annotation names currently loaded.
