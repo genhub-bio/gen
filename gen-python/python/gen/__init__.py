@@ -13,6 +13,7 @@ except PackageNotFoundError:
 # Directly from Rust
 from .gen import (
     Annotation,
+    AnnotationRecord,
     BlockGroup,
     HashId,
     Block,
@@ -30,6 +31,7 @@ except ImportError:
 
 __all__ = [
     "Annotation",
+    "AnnotationRecord",
     "Block",
     "BlockGroup",
     "GenGraphWidget",

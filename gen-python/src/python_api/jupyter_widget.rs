@@ -245,6 +245,34 @@ fn locus_from_span_and_pos_map(
 /// Internal graph controller for the Jupyter notebook widget.
 ///
 /// Not intended for direct use from Python — users should call
+/// A single annotation entry returned by `list_annotations()`.
+///
+/// Carries enough metadata to filter in Python and pass directly to `go_to()`.
+#[pyclass(name = "AnnotationRecord")]
+pub struct PyAnnotationRecord {
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub track: Option<String>, // None = inline
+    pub(crate) locus: Option<GraphLocus>,
+    pub(crate) inner: AnnotationSpan,
+}
+
+#[pymethods]
+impl PyAnnotationRecord {
+    #[getter]
+    fn locus(&self) -> Option<PyGraphLocus> {
+        self.locus.clone().map(PyGraphLocus::from_locus)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AnnotationRecord(name={:?}, track={:?})",
+            self.name, self.track,
+        )
+    }
+}
+
 /// `repo.plot(bg)` or `bg.plot()` which return a `GenGraphWidget`.
 ///
 /// # Thread safety
@@ -332,14 +360,14 @@ impl PyGraphController {
             return;
         };
         let slice = &locus.slices[0];
-        let node_len = slice.node.length();
+        let node_len = slice.block.length();
         let frac_x = if node_len > 1 {
             slice.start as f64 / (node_len - 1) as f64
         } else {
             0.0
         };
         self.controller.set_detail_level(VisualDetail::Full);
-        center_on_node_offset(&mut self.controller, slice.node, (frac_x, 0.5));
+        center_on_node_offset(&mut self.controller, slice.block, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
     }
@@ -772,10 +800,42 @@ impl PyGraphController {
         self.navigate_to_span(&annotation.inner);
     }
 
+    /// Navigate to an `AnnotationRecord` returned by `list_annotations()`.
+    pub fn go_to_annotation_record(&mut self, record: &PyAnnotationRecord) {
+        self.navigate_to_span(&record.inner);
+    }
+
     /// Navigate to a `GraphLocus`.
     pub fn go_to_locus(&mut self, locus: &PyGraphLocus) {
         let span = annotation_span_from_graph_locus(&locus.inner, "");
         self.navigate_to_span(&span);
+    }
+
+    /// Return all annotations (track and inline) as a flat list of records.
+    pub fn list_annotations(&self) -> Vec<PyAnnotationRecord> {
+        let mut records = Vec::new();
+        let graph = self.controller.graph();
+        for track in &self.track_annotations {
+            for span in &track.annotations {
+                records.push(PyAnnotationRecord {
+                    name: span.name.clone(),
+                    track: Some(track.name.clone()),
+                    locus: graph_locus_from_annotation_span(span, graph),
+                    inner: span.clone(),
+                });
+            }
+        }
+        for (_, spans, _) in &self.inline_annotations {
+            for (span, _) in spans {
+                records.push(PyAnnotationRecord {
+                    name: span.name.clone(),
+                    track: None,
+                    locus: graph_locus_from_annotation_span(span, graph),
+                    inner: span.clone(),
+                });
+            }
+        }
+        records
     }
 
     /// Navigate the camera to the first annotation span whose name matches
@@ -784,18 +844,27 @@ impl PyGraphController {
     /// Returns the `GraphPos` the camera moved to.  Raises `KeyError` if no
     /// annotation with that name is found in any track.
     pub fn go_to_annotation_by_name(&mut self, annotation_name: &str) -> PyResult<PyGraphPos> {
-        let segment = self
+        let span = self
             .track_annotations
             .iter()
             .flat_map(|t| &t.annotations)
             .find(|span| span.name == annotation_name)
-            .and_then(|span| span.segments.first())
             .cloned()
+            .or_else(|| {
+                self.inline_annotations
+                    .iter()
+                    .flat_map(|(_, spans, _)| spans)
+                    .find(|(span, _)| span.name == annotation_name)
+                    .map(|(span, _)| span.clone())
+            })
             .ok_or_else(|| {
                 pyo3::exceptions::PyKeyError::new_err(format!(
-                    "no annotation named {annotation_name:?} found in loaded tracks"
+                    "no annotation named {annotation_name:?} found"
                 ))
             })?;
+        let segment = span.segments.first().cloned().ok_or_else(|| {
+            PyRuntimeError::new_err(format!("annotation {annotation_name:?} has no segments"))
+        })?;
 
         let node = self
             .controller

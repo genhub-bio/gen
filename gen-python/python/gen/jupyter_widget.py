@@ -194,7 +194,8 @@ class GenGraphWidget(anywidget.AnyWidget):
         ----------
         target:
             A ``GraphPos`` (from ``locus.start()`` / ``locus.end()``),
-            or an ``Annotation`` object.
+            an ``Annotation`` object, or an ``AnnotationRecord`` from
+            ``widget.list_annotations()``.
 
         Example
         -------
@@ -203,14 +204,16 @@ class GenGraphWidget(anywidget.AnyWidget):
             matches = repo.search(bg, "ACGT...")
             widget.go_to(matches[0].start())
 
-            ann = repo.list_annotations(bg)[0]
-            widget.go_to(ann)
+            records = widget.list_annotations()
+            widget.go_to(records[0])
         """
         if self._frozen:
             return
-        from gen import Annotation  # noqa: PLC0415
+        from gen import Annotation, AnnotationRecord  # noqa: PLC0415
 
-        if isinstance(target, Annotation):
+        if isinstance(target, AnnotationRecord):
+            self._controller.go_to_annotation_record(target)
+        elif isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target)
         else:
             self._controller.go_to_pos(target)
@@ -395,7 +398,7 @@ class GenGraphWidget(anywidget.AnyWidget):
         """Return list of loaded track-panel annotation names."""
         return json.loads(self._controller.get_track_names())
 
-    def go_to_annotation_by_name(self, name: str):
+    def _go_to_annotation_by_name(self, name: str):
         """Navigate to the first track annotation whose name matches ``name``.
 
         Returns the ``GraphPos`` the camera moved to.  Raises ``KeyError`` if
@@ -454,6 +457,22 @@ class GenGraphWidget(anywidget.AnyWidget):
     def inline_annotations(self) -> list:
         """Return list of inline annotation names currently displayed."""
         return json.loads(self._controller.get_inline_annotation_names())
+
+    def list_annotations(self) -> list:
+        """Return all loaded annotations (track and inline) as ``AnnotationRecord`` objects.
+
+        Each record has ``.name`` and ``.track`` (the track name, or ``None``
+        for inline annotations), and can be passed directly to ``widget.go_to()``.
+
+        Example
+        -------
+        ::
+
+            records = widget.list_annotations()
+            mcs = next(r for r in records if r.name == "MCS")
+            widget.go_to(mcs)
+        """
+        return self._controller.list_annotations()
 
     def remove_annotation(self, name: str) -> None:
         """Remove all inline annotations with the given name.
