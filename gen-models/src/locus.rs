@@ -1,21 +1,25 @@
 //! Nameless addresses in graph space.
 //!
-//! Two coordinate systems for the same underlying position:
+//! A specific location on the genome can be specified by a region on a path
+//! (addressing in linear space), for example "chr1:123-456". If there is no
+//! path defined that traverses the location you need to address in graph
+//! space. There are two kinds of graphs to consider in our datamodel:
+//!   - Graphs with Nodes as defined in the database and edges with start/end
+//!     coordinates.
+//!   - Graphs with Blocks aka GraphNodes that are carved out Nodes and which
+//!     most closely resemble the pangenomics literature.
 //!
-//! - **Block space** (`GraphLocus`): a sequence of `BlockSlice`s, each one a
-//!   `GraphNode` with local start/end byte offsets.  This is what sequence
-//!   search returns — natural when you're navigating the rendered graph or
-//!   computing visual positions.
+//! The search algorithm, for example, is a lot easier to understand on Blocks
+//! rather than Nodes. It's output can be used to address graph space and in
+//! the form of a list of BlockSlices: segments from blocks, in the block's
+//! coordinate reference frame (left side = 0). But to store graph changes in
+//! the additive model in the database we must convert back to the Node format.
 
 use gen_core::{HashId, Strand};
 use gen_graph::GraphNode;
 use serde::{Deserialize, Serialize};
 
-use crate::{db::GraphConnection, node::Node};
-
-// ---------------------------------------------------------------------------
-// Block space
-// ---------------------------------------------------------------------------
+use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
 
 /// A slice of a single graph block: the block itself plus local start/end byte
 /// offsets within that block's sequence.  Middle blocks in a multi-block locus
@@ -71,29 +75,4 @@ impl GraphLocus {
             out
         }
     }
-}
-
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&base| match base.to_ascii_uppercase() {
-            b'A' => b'T',
-            b'T' => b'A',
-            b'C' => b'G',
-            b'G' => b'C',
-            b'U' => b'A',
-            b'N' => b'N',
-            b'R' => b'Y',
-            b'Y' => b'R',
-            b'S' => b'S',
-            b'W' => b'W',
-            b'K' => b'M',
-            b'M' => b'K',
-            b'B' => b'V',
-            b'V' => b'B',
-            b'D' => b'H',
-            b'H' => b'D',
-            _ => base,
-        })
-        .collect()
 }
