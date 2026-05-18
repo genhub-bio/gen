@@ -380,7 +380,7 @@ mod tests {
             accessions: vec![Accession {
                 id: HashId::pad_str(1),
                 name: "test_accession".to_string(),
-                path_id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
                 parent_accession_id: None,
             }],
             accession_edges: vec![AccessionEdge {

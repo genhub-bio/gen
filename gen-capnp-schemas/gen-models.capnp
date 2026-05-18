@@ -105,7 +105,7 @@ struct PathEdge {
 struct Accession {
   id @0 :List(UInt8);
   name @1 :Text;
-  pathId @2 :List(UInt8);
+  blockGroupId @2 :List(UInt8);
   parentAccessionId :union {
     none @3 :Void;
     some @4 :List(UInt8);

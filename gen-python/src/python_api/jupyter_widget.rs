@@ -9,7 +9,7 @@ use r#gen::{
     get_connection,
     graphs::graph_search::GraphLocus,
     views::{
-        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+        annotation_groups::load_annotation_group_entries,
         annotation_track::{AnnotationSpan, AnnotationTrack},
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
@@ -277,13 +277,10 @@ impl PyGraphController {
         let current_block_group = BlockGroup::get_by_id(conn, &block_group_id)
             .map_err(|_| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
         let ranges = self.all_node_ranges();
-        let entry = AnnotationGroupEntry {
-            id: format!("{}::{}", current_block_group.sample_name, group),
-            name: group.to_string(),
-            sample_name: current_block_group.sample_name.clone(),
-            source_block_group_id: current_block_group.id,
-            origin: AnnotationGroupOrigin::CurrentSample,
-        };
+        let entry = load_annotation_group_entries(conn, &current_block_group)
+            .into_iter()
+            .find(|entry| entry.name == group)
+            .ok_or_else(|| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
             current_block_group: &current_block_group,
