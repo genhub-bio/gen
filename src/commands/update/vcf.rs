@@ -41,6 +41,12 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let operation_conn = context.operations().conn();
     let conn = context.graph().conn();
 
+    if cmd.sample.is_none() && cmd.parent_samples.is_empty() {
+        return Err(anyhow::anyhow!(
+            "one of --sample or --reference must be provided"
+        ));
+    }
+
     conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;
 
@@ -48,14 +54,6 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
-
-    if cmd.sample.is_none() && cmd.parent_samples.is_empty() {
-        conn.execute("ROLLBACK TRANSACTION;", [])?;
-        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
-        return Err(anyhow::anyhow!(
-            "one of --sample or --reference must be provided"
-        ));
-    }
 
     match update_with_vcf(
         context,
