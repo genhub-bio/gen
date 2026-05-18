@@ -19,7 +19,7 @@ impl PyRepository {
         region: String,
         name: Option<String>,
         backbone: Option<String>,
-        breakpoints: Option<String>,
+        breakpoints: Option<Vec<i64>>,
         chunk_size: Option<i64>,
     ) -> PyResult<()> {
         if self.in_transaction {

@@ -55,6 +55,7 @@ struct Collection {
 
 struct Sample {
   name @0 :Text;
+  isReference @1 :Bool;
 }
 
 struct SampleLineage {

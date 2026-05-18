@@ -271,16 +271,16 @@ impl PyGraphController {
         conn: &GraphConnection,
         group: &str,
     ) -> Result<AnnotationTrack, AnnotationError> {
-        let block_group_id = self
-            .block_group_id
-            .expect("block group id should be set for track loading");
-        let current_block_group =
-            BlockGroup::get_by_id(conn, &block_group_id).expect("current block group should exist");
+        let block_group_id = self.block_group_id.ok_or(AnnotationError::DatabaseError(
+            rusqlite::Error::QueryReturnedNoRows,
+        ))?;
+        let current_block_group = BlockGroup::get_by_id(conn, &block_group_id)
+            .map_err(|_| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
+        let ranges = self.all_node_ranges();
         let entry = load_annotation_group_entries(conn, &current_block_group)
             .into_iter()
             .find(|entry| entry.name == group)
             .ok_or_else(|| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
-        let ranges = self.all_node_ranges();
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
             current_block_group: &current_block_group,

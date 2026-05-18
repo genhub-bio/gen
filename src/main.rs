@@ -842,6 +842,16 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             breakpoints,
             chunk_size,
         }) => {
+            let parsed_breakpoints = breakpoints
+                .map(|s| {
+                    s.split(',')
+                        .map(|bp| {
+                            bp.parse::<i64>()
+                                .map_err(|_| format!("Invalid breakpoint: {bp}"))
+                        })
+                        .collect::<Result<Vec<i64>, _>>()
+                })
+                .transpose()?;
             match derive_chunks_operation(
                 &db_context,
                 name,
@@ -849,7 +859,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 new_sample,
                 region,
                 backbone,
-                breakpoints,
+                parsed_breakpoints,
                 chunk_size,
             ) {
                 Ok(_) => Ok(()),

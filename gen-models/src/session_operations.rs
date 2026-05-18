@@ -340,6 +340,7 @@ mod tests {
             }],
             samples: vec![Sample {
                 name: "test_sample".to_string(),
+                is_reference: false,
             }],
             sequences: vec![
                 NewSequence::new()

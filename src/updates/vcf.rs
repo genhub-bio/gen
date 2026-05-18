@@ -1402,7 +1402,14 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child").unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         SampleLineage::create(conn, "reference", "child").unwrap();
 
         update_with_vcf(
@@ -1511,7 +1518,14 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child").unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         update_with_vcf(
             &context,

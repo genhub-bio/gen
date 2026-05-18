@@ -139,7 +139,13 @@ mod tests {
         let _ = Collection::create(conn, "/test");
 
         for sample in ["grand", "parent", "child"] {
-            let _ = Sample::get_or_create(conn, sample);
+            let _ = Sample::get_or_create(
+                conn,
+                gen_models::sample::NewSample {
+                    name: sample,
+                    ..Default::default()
+                },
+            );
         }
         SampleLineage::create(conn, "grand", "parent").unwrap();
         SampleLineage::create(conn, "parent", "child").unwrap();

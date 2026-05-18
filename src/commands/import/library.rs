@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::{errors::OperationError, sample::Sample};
+use gen_models::{
+    errors::OperationError,
+    sample::{NewSample, Sample},
+};
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -24,8 +27,11 @@ pub struct Command {
     #[arg(short, long)]
     name: Option<String>,
     /// A sample name to associate the library with
-    #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
-    sample: String,
+    #[arg(short, long, conflicts_with = "reference")]
+    sample: Option<String>,
+    /// Create or use a reference sample with this name
+    #[arg(long, conflicts_with = "sample")]
+    reference: Option<String>,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -42,6 +48,19 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
+    let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
+        cmd.sample.as_deref(),
+        cmd.reference.as_deref(),
+    )?;
+    if is_reference {
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: sample_name,
+                is_reference: true,
+            },
+        )?;
+    }
     let parts_list = parse_library(&cmd.parts.clone().unwrap(), &cmd.library.clone().unwrap())?;
 
     let parts_path = cmd.parts.unwrap();
@@ -50,7 +69,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     match import_library(
         context,
         name,
-        cmd.sample.as_str(),
+        sample_name,
         &cmd.library_name,
         parts_list,
         Some(&parts_path),

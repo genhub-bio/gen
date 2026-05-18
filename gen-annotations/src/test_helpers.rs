@@ -22,7 +22,14 @@ pub fn get_connection() -> GraphConnection {
 
 pub fn setup_test_data(conn: &GraphConnection) {
     let collection = Collection::create(conn, "test").unwrap();
-    Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
+    Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: Sample::DEFAULT_NAME,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let seq1 = Sequence::new()
         .sequence_type("DNA")
         .sequence("ATCGATCGATCGATCGA")
@@ -126,7 +133,14 @@ pub fn setup_test_data(conn: &GraphConnection) {
     )
     .unwrap();
 
-    Sample::get_or_create(conn, "foo").unwrap();
+    Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: "foo",
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let _ =
         Sample::get_or_create_child(conn, "test", "foo", vec![Sample::DEFAULT_NAME.to_string()]);
 

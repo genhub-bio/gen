@@ -300,7 +300,14 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
-        Sample::create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::create(
+            conn,
+            gen_models::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                is_reference: false,
+            },
+        )
+        .unwrap();
         let operation = update_with_genbank(
             &context,
             BufReader::new(file),

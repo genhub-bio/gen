@@ -315,7 +315,13 @@ mod tests {
         track_database(conn, op_conn).unwrap();
         let collection = "test";
         let sample_name = "test-sample";
-        let _sample = Sample::get_or_create(conn, sample_name);
+        let _sample = Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: sample_name,
+                ..Default::default()
+            },
+        );
         let block_group = BlockGroup::create(
             conn,
             NewBlockGroup {
