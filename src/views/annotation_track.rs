@@ -802,7 +802,7 @@ mod tests {
         let node = make_node("n1", 100, 200);
         let locus = GraphLocus {
             slices: vec![BlockSlice {
-                node,
+                block: node,
                 start: 5,
                 end: 15,
             }],
@@ -824,7 +824,7 @@ mod tests {
         let graph = make_graph(&[node]);
         let locus = GraphLocus {
             slices: vec![BlockSlice {
-                node,
+                block: node,
                 start: 5,
                 end: 15,
             }],
@@ -833,7 +833,7 @@ mod tests {
         let span = annotation_span_from_graph_locus(&locus, "");
         let recovered = graph_locus_from_annotation_span(&span, &graph).unwrap();
         assert_eq!(recovered.slices.len(), 1);
-        assert_eq!(recovered.slices[0].node, node);
+        assert_eq!(recovered.slices[0].block, node);
         assert_eq!(recovered.slices[0].start, 5);
         assert_eq!(recovered.slices[0].end, 15);
         assert_eq!(recovered.strand, Strand::Forward);
@@ -856,7 +856,7 @@ mod tests {
         let graph = make_graph(&[]); // node not in graph
         let locus = GraphLocus {
             slices: vec![BlockSlice {
-                node,
+                block: node,
                 start: 0,
                 end: 10,
             }],
