@@ -10,8 +10,8 @@ use r#gen::{
     views::{
         annotation_groups::load_annotation_group_entries,
         annotation_track::{
-            AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
-            graphlocus_to_annotation_span,
+            AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
+            graph_locus_from_annotation_span,
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
@@ -227,7 +227,11 @@ fn locus_from_span_and_pos_map(
             let node = *node_by_id.get(&seg.node_id)?;
             let start = (seg.start - node.sequence_start).max(0) as usize;
             let end = (seg.end - node.sequence_start).max(0) as usize;
-            Some(BlockSlice { node, start, end })
+            Some(BlockSlice {
+                block: node,
+                start,
+                end,
+            })
         })
         .collect();
     let strand = span
@@ -542,7 +546,7 @@ impl PyGraphController {
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
         highlight_match_range(&mut self.controller, &locus.inner, style);
-        let span = graphlocus_to_annotation_span(&locus.inner, "");
+        let span = annotation_span_from_graph_locus(&locus.inner, "");
         self.inline_annotations
             .push((String::new(), vec![(span, String::new())], style));
         Ok(())
