@@ -43,9 +43,9 @@ impl BlockSlice {
     }
 }
 
-/// A walk through graph space expressed as an ordered list of node slices.
+/// A region in graph space expressed as an ordered list of block slices.
+/// The strand field specifies the 5'-3' orientation for double stranded DNA.
 ///
-/// Returned by sequence search.  Natural for visual navigation and rendering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphLocus {
     pub slices: Vec<BlockSlice>,
