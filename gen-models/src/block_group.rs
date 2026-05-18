@@ -745,11 +745,16 @@ impl BlockGroup {
     pub fn insert_changes<T: IntervalTreeSource + Clone + Eq + Hash>(
         conn: &GraphConnection,
         changes: &[BlockGroupChange<T>],
+        tree_map: Option<&mut HashMap<T, IntervalTree<i64, NodeIntervalBlock>>>,
     ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
         let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
-        let mut tree_map = HashMap::new();
+        let mut local_tree_map = HashMap::new();
+        let tree_map = match tree_map {
+            Some(tree_map) => tree_map,
+            None => &mut local_tree_map,
+        };
         for change in changes {
             if !tree_map.contains_key(&change.intervaltree_source) {
                 tree_map.insert(

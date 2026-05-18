@@ -605,6 +605,8 @@ pub fn update_with_vcf(
     ));
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    let mut path_tree_cache = HashMap::new();
+    let mut block_group_tree_cache = HashMap::new();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(1000) {
             if in_place {
@@ -625,9 +627,14 @@ pub fn update_with_vcf(
                         preserve_edge: change.preserve_edge,
                     })
                     .collect::<Vec<_>>();
-                BlockGroup::insert_changes(conn, &in_place_changes).unwrap();
+                BlockGroup::insert_changes(
+                    conn,
+                    &in_place_changes,
+                    Some(&mut block_group_tree_cache),
+                )
+                .unwrap();
             } else {
-                BlockGroup::insert_changes(conn, chunk).unwrap();
+                BlockGroup::insert_changes(conn, chunk, Some(&mut path_tree_cache)).unwrap();
             }
             bar.inc(chunk.len() as u64);
         }
