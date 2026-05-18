@@ -245,41 +245,6 @@ fn locus_from_span_and_pos_map(
 /// Internal graph controller for the Jupyter notebook widget.
 ///
 /// Not intended for direct use from Python — users should call
-/// A single annotation entry returned by `list_annotations()`.
-///
-/// Carries enough metadata to filter in Python and pass directly to `go_to()`.
-#[pyclass(name = "AnnotationRecord")]
-pub struct PyAnnotationRecord {
-    #[pyo3(get)]
-    pub name: String,
-    #[pyo3(get)]
-    pub track: Option<String>, // None = inline
-    pub(crate) locus: Option<GraphLocus>,
-    pub(crate) inner: AnnotationSpan,
-}
-
-#[pymethods]
-impl PyAnnotationRecord {
-    #[getter]
-    fn locus(&self) -> Option<PyGraphLocus> {
-        self.locus.clone().map(PyGraphLocus::from_locus)
-    }
-
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let locus = match &self.locus {
-            Some(l) => {
-                let bound = Py::new(py, PyGraphLocus::from_locus(l.clone()))?;
-                bound.bind(py).repr()?.to_string_lossy().into_owned()
-            }
-            None => "None".to_string(),
-        };
-        Ok(format!(
-            "AnnotationRecord(name={:?}, track={:?}, locus={})",
-            self.name, self.track, locus,
-        ))
-    }
-}
-
 /// `repo.plot(bg)` or `bg.plot()` which return a `GenGraphWidget`.
 ///
 /// # Thread safety
@@ -362,6 +327,24 @@ impl PyGraphController {
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }
 
+    pub fn auto_load_annotation_groups(&mut self, conn: &GraphConnection) {
+        let Some(bg_id) = self.block_group_id else {
+            return;
+        };
+        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id) else {
+            return;
+        };
+        let entries = load_annotation_group_entries(conn, &current_block_group);
+        let mut seen_names = HashSet::new();
+        for entry in &entries {
+            if seen_names.insert(entry.name.clone()) {
+                if let Ok(track) = self.load_group_as_track(conn, &entry.name) {
+                    self.track_annotations.push(track);
+                }
+            }
+        }
+    }
+
     fn navigate_to_span(&mut self, span: &AnnotationSpan) {
         let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
             return;
@@ -377,6 +360,38 @@ impl PyGraphController {
         center_on_node_offset(&mut self.controller, slice.block, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
+    }
+
+    fn resolve_color(&mut self, color: Option<&str>) -> PyResult<Color> {
+        match color {
+            None => Ok(self.controller.next_accent_color()),
+            Some(s) => match s {
+                "red" => Ok(Color::Red),
+                "green" => Ok(Color::Green),
+                "yellow" => Ok(Color::Yellow),
+                "blue" => Ok(Color::Blue),
+                "magenta" => Ok(Color::Magenta),
+                "cyan" => Ok(Color::Cyan),
+                "white" => Ok(Color::White),
+                hex if hex.starts_with('#') => parse_hex_color(hex),
+                other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown color {other:?}"
+                ))),
+            },
+        }
+    }
+
+    fn highlight_span(&mut self, span: &AnnotationSpan, color: Option<&str>) -> PyResult<()> {
+        let c = self.resolve_color(color)?;
+        let style = PathStyle::new(c)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        if let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) {
+            highlight_match_range(&mut self.controller, &locus, style);
+        }
+        self.inline_annotations
+            .push((String::new(), vec![(span.clone(), String::new())], style));
+        Ok(())
     }
 }
 
@@ -398,6 +413,7 @@ impl PyGraphController {
         let graph = BlockGroup::get_graph(conn, &bg_id);
         let mut ctrl = Self::new(db_path, graph);
         ctrl.block_group_id = Some(bg_id);
+        ctrl.auto_load_annotation_groups(conn);
         Ok(ctrl)
     }
 
@@ -566,6 +582,7 @@ impl PyGraphController {
             0.5
         };
         center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
+        self.controller.queue_snap_left();
         self.controller.hide_cursor();
     }
 
@@ -575,33 +592,8 @@ impl PyGraphController {
     /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
     /// next unused theme accent colour (slots 0x08–0x0F) is chosen automatically.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
-        use ratatui::style::Color;
-        let c = match color {
-            None => self.controller.next_accent_color(),
-            Some(s) => match s {
-                "red" => Color::Red,
-                "green" => Color::Green,
-                "yellow" => Color::Yellow,
-                "blue" => Color::Blue,
-                "magenta" => Color::Magenta,
-                "cyan" => Color::Cyan,
-                "white" => Color::White,
-                hex if hex.starts_with('#') => parse_hex_color(hex)?,
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown color {other:?}"
-                    )));
-                }
-            },
-        };
-        let style = PathStyle::new(c)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        highlight_match_range(&mut self.controller, &locus.inner, style);
         let span = annotation_span_from_graph_locus(&locus.inner, "");
-        self.inline_annotations
-            .push((String::new(), vec![(span, String::new())], style));
-        Ok(())
+        self.highlight_span(&span, color)
     }
 
     /// Remove all highlights from the graph.
@@ -634,26 +626,7 @@ impl PyGraphController {
             )
         })?;
 
-        use ratatui::style::Color;
-        let highlight_color = match color {
-            None => self.controller.next_accent_color(),
-            Some(s) => match s {
-                "red" => Color::Red,
-                "green" => Color::Green,
-                "yellow" => Color::Yellow,
-                "blue" => Color::Blue,
-                "magenta" => Color::Magenta,
-                "cyan" => Color::Cyan,
-                "white" => Color::White,
-                hex if hex.starts_with('#') => parse_hex_color(hex)?,
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown color {other:?}"
-                    )));
-                }
-            },
-        };
-
+        let highlight_color = self.resolve_color(color)?;
         let conn = self.open_conn()?;
 
         let path = BlockGroup::get_current_path(&conn, &block_group_id);
@@ -807,9 +780,13 @@ impl PyGraphController {
         self.navigate_to_span(&annotation.inner);
     }
 
-    /// Navigate to an `AnnotationRecord` returned by `list_annotations()`.
-    pub fn go_to_annotation_record(&mut self, record: &PyAnnotationRecord) {
-        self.navigate_to_span(&record.inner);
+    /// Highlight an `Annotation` object.
+    pub fn highlight_annotation_obj(
+        &mut self,
+        annotation: &PyAnnotation,
+        color: Option<&str>,
+    ) -> PyResult<()> {
+        self.highlight_span(&annotation.inner, color)
     }
 
     /// Navigate to a `GraphLocus`.
@@ -818,31 +795,31 @@ impl PyGraphController {
         self.navigate_to_span(&span);
     }
 
-    /// Return all annotations (track and inline) as a flat list of records.
-    pub fn list_annotations(&self) -> Vec<PyAnnotationRecord> {
-        let mut records = Vec::new();
+    /// Return all annotations (track and inline) as a flat list of `Annotation` objects.
+    pub fn list_annotations(&self) -> Vec<PyAnnotation> {
+        let mut annotations = Vec::new();
         let graph = self.controller.graph();
         for track in &self.track_annotations {
             for span in &track.annotations {
-                records.push(PyAnnotationRecord {
-                    name: span.name.clone(),
-                    track: Some(track.name.clone()),
-                    locus: graph_locus_from_annotation_span(span, graph),
-                    inner: span.clone(),
-                });
+                if let Some(locus) = graph_locus_from_annotation_span(span, graph) {
+                    annotations.push(PyAnnotation {
+                        inner: span.clone(),
+                        locus,
+                    });
+                }
             }
         }
         for (_, spans, _) in &self.inline_annotations {
             for (span, _) in spans {
-                records.push(PyAnnotationRecord {
-                    name: span.name.clone(),
-                    track: None,
-                    locus: graph_locus_from_annotation_span(span, graph),
-                    inner: span.clone(),
-                });
+                if let Some(locus) = graph_locus_from_annotation_span(span, graph) {
+                    annotations.push(PyAnnotation {
+                        inner: span.clone(),
+                        locus,
+                    });
+                }
             }
         }
-        records
+        annotations
     }
 
     /// Navigate the camera to the first annotation span whose name matches

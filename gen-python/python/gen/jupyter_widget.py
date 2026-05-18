@@ -193,9 +193,8 @@ class GenGraphWidget(anywidget.AnyWidget):
         Parameters
         ----------
         target:
-            A ``GraphPos`` (from ``locus.start()`` / ``locus.end()``),
-            an ``Annotation`` object, or an ``AnnotationRecord`` from
-            ``widget.list_annotations()``.
+            A ``GraphPos`` (from ``locus.start()`` / ``locus.end()``) or
+            an ``Annotation`` object (e.g. from ``widget.list_annotations()``).
 
         Example
         -------
@@ -209,23 +208,22 @@ class GenGraphWidget(anywidget.AnyWidget):
         """
         if self._frozen:
             return
-        from gen import Annotation, AnnotationRecord  # noqa: PLC0415
+        from gen import Annotation  # noqa: PLC0415
 
-        if isinstance(target, AnnotationRecord):
-            self._controller.go_to_annotation_record(target)
-        elif isinstance(target, Annotation):
+        if isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target)
         else:
             self._controller.go_to_pos(target)
         self._render()
 
-    def show(self, locus, color: str | None = None) -> None:
-        """Navigate to and highlight a graph locus in one call.
+    def show(self, target, color: str | None = None) -> None:
+        """Navigate to and highlight a graph locus or annotation in one call.
 
         Parameters
         ----------
-        locus:
-            A ``GraphLocus`` returned by ``repo.search()``.
+        target:
+            A ``GraphLocus`` returned by ``repo.search()``, or an ``Annotation``
+            object (e.g. from ``widget.list_annotations()``).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -238,11 +236,20 @@ class GenGraphWidget(anywidget.AnyWidget):
 
             matches = repo.search(bg, "ACGT...")
             widget.show(matches[0])
+
+            records = widget.list_annotations()
+            widget.show(records[0])
         """
         if self._frozen:
             return
-        self._controller.go_to_pos(locus.start())
-        self._controller.highlight_match(locus, color)
+        from gen import Annotation  # noqa: PLC0415
+
+        if isinstance(target, Annotation):
+            self._controller.go_to_annotation_obj(target)
+            self._controller.highlight_match(target.locus, color)
+        else:
+            self._controller.go_to_pos(target.start())
+            self._controller.highlight_match(target, color)
         self._render()
 
     def highlight_match(self, locus, color: str | None = None) -> None:
@@ -459,10 +466,7 @@ class GenGraphWidget(anywidget.AnyWidget):
         return json.loads(self._controller.get_inline_annotation_names())
 
     def list_annotations(self) -> list:
-        """Return all loaded annotations (track and inline) as ``AnnotationRecord`` objects.
-
-        Each record has ``.name`` and ``.track`` (the track name, or ``None``
-        for inline annotations), and can be passed directly to ``widget.go_to()``.
+        """Return all loaded annotations (track and inline) as ``Annotation`` objects.
 
         Example
         -------

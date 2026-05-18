@@ -14,7 +14,7 @@ use crate::python_api::{
     block_group::PyBlockGroup,
     graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
     hash_id::PyHashId,
-    jupyter_widget::{PyAnnotationRecord, PyGraphController},
+    jupyter_widget::PyGraphController,
     repository::PyRepository,
     sequence_part::PySequencePart,
 };
@@ -33,7 +33,6 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAnnotation>()?;
     m.add_class::<PySequencePart>()?;
     m.add_class::<PyGraphController>()?;
-    m.add_class::<PyAnnotationRecord>()?;
 
     Ok(())
 }
