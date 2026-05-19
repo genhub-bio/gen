@@ -3,7 +3,6 @@ use r#gen::{
     views::annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
 };
 use gen_core::Strand;
-use gen_graph::GraphNode;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
@@ -84,11 +83,6 @@ pub struct PyGraphLocus {
 impl PyGraphLocus {
     pub fn from_locus(l: GraphLocus) -> Self {
         Self { inner: l }
-    }
-
-    /// Return the raw node sequence for highlight operations.
-    pub fn locus_nodes(&self) -> Vec<GraphNode> {
-        self.inner.slices.iter().map(|s| s.block).collect()
     }
 }
 
@@ -236,13 +230,17 @@ pub struct PyAnnotation {
 impl PyAnnotation {
     #[new]
     fn new(locus: PyRef<PyGraphLocus>, name: &str) -> Self {
-        let span = annotation_span_from_graph_locus(&locus.inner, name);
         PyAnnotation {
-            inner: span,
+            inner: annotation_span_from_graph_locus(&locus.inner, name),
             locus: locus.inner.clone(),
         }
     }
 
+    /// The graph-space locus covered by this annotation.
+    ///
+    /// Provides ``.blocks`` (list of ``Block`` objects with
+    /// ``node_id``, ``sequence_start``, ``sequence_end``),
+    /// ``.start()`` / ``.end()`` (``GraphPos``), and ``.strand``.
     #[getter]
     fn locus(&self) -> PyGraphLocus {
         PyGraphLocus::from_locus(self.locus.clone())

@@ -9,14 +9,11 @@ use r#gen::{
     get_connection,
     views::{
         annotation_groups::load_annotation_group_entries,
-        annotation_track::{
-            AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
-            graph_locus_from_annotation_span,
-        },
+        annotation_track::{AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span},
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, go_to_node_at_byte, highlight_match_range,
-            locus_label_bounds, viewport_pos_map,
+            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_match_range, locus_label_bounds,
+            viewport_pos_map,
         },
         inline_label_placement::draw_label_near_pos,
     },
@@ -33,6 +30,7 @@ use gen_tui::{
     LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
     layout::VisualDetail, plotter::PathStyle, theme::current_theme,
 };
+use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use pyo3::{
     exceptions::PyRuntimeError,
     prelude::*,
@@ -350,10 +348,7 @@ impl PyGraphController {
             return;
         };
         let slice = &locus.slices[0];
-        self.controller.set_detail_level(VisualDetail::Full);
-        go_to_node_at_byte(&mut self.controller, slice.block, slice.start);
-        self.controller.queue_snap_left();
-        self.controller.hide_cursor();
+        self.go_to_pos(&PyGraphPos::new(slice.block, slice.start));
     }
 
     fn resolve_color(&mut self, color: Option<&str>) -> PyResult<Color> {
@@ -373,19 +368,6 @@ impl PyGraphController {
                 ))),
             },
         }
-    }
-
-    fn highlight_span(&mut self, span: &AnnotationSpan, color: Option<&str>) -> PyResult<()> {
-        let c = self.resolve_color(color)?;
-        let style = PathStyle::new(c)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        if let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) {
-            highlight_match_range(&mut self.controller, &locus, style);
-        }
-        self.inline_annotations
-            .push((String::new(), vec![(span.clone(), String::new())], style));
-        Ok(())
     }
 }
 
@@ -471,7 +453,6 @@ impl PyGraphController {
                     ratatui::style::Color::Reset => theme[0x06],
                     c => c,
                 };
-                // Anonymous highlights (from highlight_match) have an empty label and are skipped here.
                 for (span, label) in spans_with_labels.iter().filter(|(_, l)| !l.is_empty()) {
                     let locus = locus_from_span_and_pos_map(span, &pos_map);
                     let Some((left_pos, right_pos)) =
@@ -560,8 +541,34 @@ impl PyGraphController {
     }
 
     fn go_to_pos(&mut self, pos: &PyGraphPos) {
+        let block = pos.inner.block;
         self.controller.set_detail_level(VisualDetail::Full);
-        go_to_node_at_byte(&mut self.controller, pos.inner.block, pos.inner.offset);
+
+        // Find the partition this block is on, load it and anchor it
+        let Ok((partition_idx, _)) = self
+            .controller
+            .partition_controller
+            .partition_table
+            .find_node(&block)
+        else {
+            return;
+        };
+        let _ = self.controller.ensure_partition_loaded(partition_idx);
+        let _ = self.controller.set_anchor_partition(partition_idx);
+
+        // Go to node works with an index, not a raw GraphNode
+        let domain_idx = NodeIndex::new(NodeIndexable::to_index(self.controller.graph(), block));
+
+        // The cursor is positioned using normalized coordinates between 0 and 1,
+        // relative to the area in which the node (block) is represented in the plot.
+        let block_len = block.length();
+        let frac_x = if block_len > 1 {
+            pos.inner.offset as f64 / (block_len - 1) as f64
+        } else {
+            0.0
+        };
+
+        self.controller.go_to_node(domain_idx, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
     }
@@ -572,8 +579,12 @@ impl PyGraphController {
     /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
     /// next unused theme accent colour (slots 0x08–0x0F) is chosen automatically.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
-        let span = annotation_span_from_graph_locus(&locus.inner, "");
-        self.highlight_span(&span, color)
+        let c = self.resolve_color(color)?;
+        let style = PathStyle::new(c)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        highlight_match_range(&mut self.controller, &locus.inner, style);
+        Ok(())
     }
 
     /// Remove all highlights from the graph.
@@ -767,14 +778,18 @@ impl PyGraphController {
         annotation: &PyAnnotation,
         color: Option<&str>,
     ) -> PyResult<()> {
-        let nameless = annotation_span_from_graph_locus(&annotation.locus, "");
-        self.highlight_span(&nameless, color)
+        let c = self.resolve_color(color)?;
+        let style = PathStyle::new(c)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        highlight_match_range(&mut self.controller, &annotation.locus, style);
+        Ok(())
     }
 
     /// Navigate to a `GraphLocus`.
     pub fn go_to_locus(&mut self, locus: &PyGraphLocus) {
-        let span = annotation_span_from_graph_locus(&locus.inner, "");
-        self.navigate_to_span(&span);
+        let slice = &locus.inner.slices[0];
+        self.go_to_pos(&PyGraphPos::new(slice.block, slice.start));
     }
 
     /// Return all annotations (track and inline) as a flat list of `Annotation` objects.
@@ -783,22 +798,22 @@ impl PyGraphController {
         let graph = self.controller.graph();
         for track in &self.track_annotations {
             for span in &track.annotations {
-                if let Some(locus) = graph_locus_from_annotation_span(span, graph) {
-                    annotations.push(PyAnnotation {
-                        inner: span.clone(),
-                        locus,
-                    });
-                }
+                let locus = graph_locus_from_annotation_span(span, graph)
+                    .expect("annotation references nodes not in graph");
+                annotations.push(PyAnnotation {
+                    inner: span.clone(),
+                    locus,
+                });
             }
         }
         for (_, spans, _) in &self.inline_annotations {
             for (span, _) in spans {
-                if let Some(locus) = graph_locus_from_annotation_span(span, graph) {
-                    annotations.push(PyAnnotation {
-                        inner: span.clone(),
-                        locus,
-                    });
-                }
+                let locus = graph_locus_from_annotation_span(span, graph)
+                    .expect("annotation references nodes not in graph");
+                annotations.push(PyAnnotation {
+                    inner: span.clone(),
+                    locus,
+                });
             }
         }
         annotations
