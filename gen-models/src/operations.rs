@@ -161,10 +161,16 @@ impl Operation {
         operation_hash: &HashId,
         file_addition_id: &HashId,
         filename: &str,
+        file_path: &str,
     ) -> SQLResult<()> {
-        let query = "INSERT INTO operation_files (operation_hash, file_addition_id, filename) VALUES (?1, ?2, ?3)";
+        let query = "INSERT INTO operation_files (operation_hash, file_addition_id, filename, file_path) VALUES (?1, ?2, ?3, ?4)";
         let mut stmt = conn.prepare(query).unwrap();
-        stmt.execute(params![operation_hash, file_addition_id, filename])?;
+        stmt.execute(params![
+            operation_hash,
+            file_addition_id,
+            filename,
+            file_path
+        ])?;
         Ok(())
     }
 
@@ -382,15 +388,19 @@ pub struct OperationFileInfo {
 }
 
 impl OperationFileInfo {
-    fn from_parts(file_addition: FileAddition, filename: String) -> Self {
+    fn from_parts(file_addition: FileAddition, filename: String, file_path: String) -> Self {
         Self {
             id: file_addition.id,
-            file_path: filename.clone(),
+            file_path,
             filename,
             asset_uri: file_addition.asset_uri,
             file_type: file_addition.file_type,
             checksum: file_addition.checksum,
         }
+    }
+
+    pub fn hashed_filename(&self) -> String {
+        LocalAssetUri::asset_filename(&self.checksum, self.file_type)
     }
 }
 
@@ -425,12 +435,13 @@ impl OperationFile {
         conn: &OperationsConnection,
         operation_hash: &HashId,
     ) -> Result<Vec<OperationFileInfo>, FileAdditionError> {
-        let query = "select fa.*, of.filename from file_additions fa join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
+        let query = "select fa.*, of.filename, of.file_path from file_additions fa join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
         let mut stmt = conn.prepare(query)?;
         stmt.query_map(params![operation_hash], |row| {
             Ok(OperationFileInfo::from_parts(
                 FileAddition::process_row(row),
                 row.get(4)?,
+                row.get(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()
@@ -441,7 +452,7 @@ impl OperationFile {
         conn: &OperationsConnection,
         operations: &[HashId],
     ) -> Result<HashMap<HashId, Vec<OperationFileInfo>>, FileAdditionError> {
-        let query = "select fa.*, of.filename, of.operation_hash from file_additions fa join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash in rarray(?1)";
+        let query = "select fa.*, of.filename, of.file_path, of.operation_hash from file_additions fa join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash in rarray(?1)";
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map(
             params![Rc::new(
@@ -452,8 +463,12 @@ impl OperationFile {
             )],
             |row| {
                 Ok((
-                    OperationFileInfo::from_parts(FileAddition::process_row(row), row.get(4)?),
-                    row.get::<_, HashId>(5)?,
+                    OperationFileInfo::from_parts(
+                        FileAddition::process_row(row),
+                        row.get(4)?,
+                        row.get(5)?,
+                    ),
+                    row.get::<_, HashId>(6)?,
                 ))
             },
         )?;
@@ -488,22 +503,37 @@ pub fn add_files_operation(
             let file_type = FileTypes::infer_from_path(path);
             let file_addition =
                 FileAddition::get_or_create(workspace, operation_conn, path, file_type, None)?;
-            Ok::<(FileAddition, String), FileAdditionError>((
+            let operation_file_path = if LocalAssetUri::is_local_path_or_file_uri(path) {
+                LocalAssetUri::operation_file_path(
+                    workspace,
+                    path,
+                    &file_addition.checksum,
+                    file_type,
+                )?
+            } else {
+                path.clone()
+            };
+            Ok::<(FileAddition, String, String), FileAdditionError>((
                 file_addition,
                 OperationFile::new(path.clone()).filename,
+                operation_file_path,
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     let unique_file_additions = file_additions
         .into_iter()
-        .unique_by(|(file_addition, filename)| (file_addition.id, filename.clone()))
+        .unique_by(|(file_addition, filename, file_path)| {
+            (file_addition.id, filename.clone(), file_path.clone())
+        })
         .collect::<Vec<_>>();
 
     let operation_hash = HashId(calculate_hash(
         &unique_file_additions
             .iter()
-            .map(|(file_addition, filename)| format!("{}:{filename}", file_addition.id))
+            .map(|(file_addition, filename, file_path)| {
+                format!("{}:{filename}:{file_path}", file_addition.id)
+            })
             .sorted()
             .join(":"),
     ));
@@ -520,8 +550,14 @@ pub fn add_files_operation(
         Err(err) => return Err(err.into()),
     };
 
-    for (file_addition, filename) in &unique_file_additions {
-        Operation::add_file(operation_conn, &operation.hash, &file_addition.id, filename)?;
+    for (file_addition, filename, file_path) in &unique_file_additions {
+        Operation::add_file(
+            operation_conn,
+            &operation.hash,
+            &file_addition.id,
+            filename,
+            file_path,
+        )?;
     }
 
     Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
@@ -548,7 +584,7 @@ pub fn add_files_operation(
 
     for file_addition in unique_file_additions
         .into_iter()
-        .map(|(file_addition, _filename)| file_addition)
+        .map(|(file_addition, _filename, _file_path)| file_addition)
         .unique_by(|file_addition| file_addition.id)
     {
         file_addition.store_file(workspace)?;
@@ -2674,12 +2710,6 @@ mod tests {
         let file1_path = repo_root.join("test_file.txt");
         fs::write(&file1_path, b"Test file content").unwrap();
         let file1_path_str = file1_path.to_string_lossy().to_string();
-        let relative1 = file1_path
-            .strip_prefix(&repo_root)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-
         let fa1 = FileAddition::get_or_create(
             context.workspace(),
             op_conn,
@@ -2689,13 +2719,20 @@ mod tests {
         )
         .expect("Failed to create FileAddition");
 
-        assert_eq!(fa1.asset_uri, LocalAssetUri::asset_uri(&relative1));
-        assert_eq!(fa1.file_path(), relative1);
-
         let checksum = calculate_file_checksum(&file1_path_str).unwrap();
+        let expected_asset_path = format!(
+            ".gen/assets/{checksum}.{}",
+            FileTypes::suffix(FileTypes::Fasta)
+        );
+        assert_eq!(
+            fa1.asset_uri,
+            LocalAssetUri::asset_uri(&expected_asset_path)
+        );
+        assert_eq!(fa1.file_path(), expected_asset_path);
+
         let relative1_id = LocalAssetUri::generate_file_addition_id(
             &checksum,
-            &LocalAssetUri::asset_uri(&relative1),
+            &LocalAssetUri::asset_uri(&expected_asset_path),
         );
 
         assert_eq!(fa1.id, relative1_id);
@@ -2734,7 +2771,7 @@ mod tests {
         )
         .expect("Failed to create different FileAddition");
 
-        assert_ne!(fa1.id, fa3.id);
+        assert_eq!(fa1.id, fa3.id);
 
         fs::write(&file1_path, b"new content").unwrap();
         let fa1_new = FileAddition::get_or_create(
@@ -2854,17 +2891,17 @@ mod tests {
         .unwrap();
 
         let operation_1_files =
-            FileAddition::get_files_for_operation(operation_conn, &operation_1.hash);
+            OperationFile::get_files_for_operation(operation_conn, &operation_1.hash).unwrap();
         let operation_2_files =
-            FileAddition::get_files_for_operation(operation_conn, &operation_2.hash);
+            OperationFile::get_files_for_operation(operation_conn, &operation_2.hash).unwrap();
 
         let shared_file_1 = operation_1_files
             .iter()
-            .find(|file| file.file_path() == "shared.txt")
+            .find(|file| file.file_path == "shared.txt")
             .unwrap();
         let shared_file_2 = operation_2_files
             .iter()
-            .find(|file| file.file_path() == "shared.txt")
+            .find(|file| file.file_path == "shared.txt")
             .unwrap();
 
         assert_eq!(shared_file_1.id, shared_file_2.id);
@@ -2881,7 +2918,7 @@ mod tests {
             asset_names.contains(
                 &operation_2_files
                     .iter()
-                    .find(|file| file.file_path() == "unique.txt")
+                    .find(|file| file.file_path == "unique.txt")
                     .unwrap()
                     .clone()
                     .hashed_filename()
@@ -2973,11 +3010,12 @@ mod tests {
             .ok_or_else(|| "missing second operation files".to_string())?;
 
         assert_eq!(alpha[0].filename, "alpha.fa");
-        assert_eq!(alpha[0].file_path, "alpha.fa");
+        assert!(alpha[0].file_path.ends_with(".fa"));
         assert_eq!(beta[0].filename, "beta.fa");
-        assert_eq!(beta[0].file_path, "beta.fa");
+        assert!(beta[0].file_path.ends_with(".fa"));
         assert!(alpha[0].asset_uri.ends_with(".fa"));
         assert!(beta[0].asset_uri.ends_with(".fa"));
+        assert_eq!(alpha[0].file_path, beta[0].file_path);
         assert_eq!(alpha[0].id, beta[0].id);
         assert_eq!(alpha[0].checksum, beta[0].checksum);
         Ok(())

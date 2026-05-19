@@ -650,6 +650,7 @@ fn apply_operations_to_remote(
                         &operation.hash,
                         &remote_file_addition.id,
                         &file_addition.filename,
+                        &file_addition.file_path,
                     )?;
                 }
                 for annotation_file in &manifest_op.annotation_file_additions {
@@ -1107,6 +1108,7 @@ fn ingest_manifest_operation(
                     &operation.hash,
                     &local_file_addition.id,
                     &file_addition.filename,
+                    &file_addition.file_path,
                 )?;
             }
             for annotation_file in &manifest_operation.annotation_file_additions {
