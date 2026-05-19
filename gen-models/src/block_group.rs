@@ -1425,7 +1425,7 @@ mod tests {
 
     use capnp::message::TypedBuilder;
     use chrono::Utc;
-    use gen_core::NO_CHROMOSOME_INDEX;
+    use gen_core::{NO_CHROMOSOME_INDEX, region::RegionResolutionError};
 
     use super::*;
     use crate::{
@@ -1436,6 +1436,33 @@ mod tests {
         sequence::Sequence,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
     };
+
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_block_group_by_name_case_insensitively() {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, _path) = setup_block_group(conn);
+
+            let region = Region::parse("CHR1").unwrap();
+            let resolved = BlockGroup::resolve(&region, conn, "test", "test").unwrap();
+            assert_eq!(resolved.id, block_group_id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_block_group() {
+            let conn = &get_connection(None).unwrap();
+            let (_block_group_id, _path) = setup_block_group(conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = BlockGroup::resolve(&region, conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+    }
 
     fn get_single_bg_id(
         conn: &GraphConnection,

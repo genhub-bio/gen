@@ -917,12 +917,14 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use capnp::message::TypedBuilder;
     use chrono::Utc;
+    use gen_core::region::RegionResolutionError;
 
     use super::*;
     use crate::{
         block_group::{BlockGroup, NewBlockGroup},
-        block_group_edge::BlockGroupEdgeData,
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
+        edge::Edge,
         sample::{NewSample, Sample},
         test_helpers::get_connection,
     };
@@ -946,6 +948,55 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_path_by_name_case_insensitively() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let block_group = create_test_block_group(conn);
+            let edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let path = Path::create(conn, "chr1", &block_group.id, &[edge.id]).unwrap();
+
+            let region = Region::parse("CHR1").unwrap();
+            let resolved = Path::resolve(&region, conn, "test collection", "test-sample").unwrap();
+            assert_eq!(resolved.id, path.id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_path() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let _ = create_test_block_group(conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
     }
 
     #[test]

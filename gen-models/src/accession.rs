@@ -626,13 +626,43 @@ impl Query for AccessionPath {
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
-    use gen_core::HashId;
+    use gen_core::{HashId, region::RegionResolutionError};
 
     use super::*;
     use crate::{
         block_group::{BlockGroup, PathCache},
         test_helpers::{get_connection, interval_tree_verify, setup_block_group},
     };
+
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_accession_by_name_case_insensitively() {
+            let conn = &get_connection(None).unwrap();
+            let (_bg, path) = setup_block_group(conn);
+            let mut path_cache = PathCache::new(conn);
+            let accession =
+                BlockGroup::add_accession(conn, &path, "mreB", 5, 15, &mut path_cache).unwrap();
+
+            let region = Region::parse("MREB").unwrap();
+            let resolved = Accession::resolve(&region, conn, "test", "test").unwrap();
+            assert_eq!(resolved.id, accession.id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_accession() {
+            let conn = &get_connection(None).unwrap();
+            let (_bg, _path) = setup_block_group(conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = Accession::resolve(&region, conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+    }
 
     #[test]
     fn test_accession_capnp_serialization() {

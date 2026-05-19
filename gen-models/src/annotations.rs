@@ -1038,7 +1038,7 @@ impl AnnotationFile {
 mod tests {
     use std::fs;
 
-    use gen_core::{HashId, Strand, path::PathBlock, range::Range};
+    use gen_core::{HashId, Strand, path::PathBlock, range::Range, region::RegionResolutionError};
 
     use super::*;
     use crate::{
@@ -1050,21 +1050,36 @@ mod tests {
         test_helpers::{get_connection, setup_block_group, setup_gen},
     };
 
-    fn block(
-        node_id: &str,
-        sequence_start: i64,
-        sequence_end: i64,
-        path_start: i64,
-        strand: Strand,
-    ) -> PathBlock {
-        PathBlock {
-            node_id: HashId::convert_str(node_id),
-            block_sequence: String::new(),
-            sequence_start,
-            sequence_end,
-            path_start,
-            path_end: path_start + (sequence_end - sequence_start),
-            strand,
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_annotation_by_name_case_insensitively() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let accession =
+                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+
+            let region = Region::parse("MREB").unwrap();
+            let resolved = Annotation::resolve(&region, &conn, "test", "test").unwrap();
+            assert_eq!(resolved.id, annotation.id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_annotation() {
+            let conn = get_connection(None).unwrap();
+            let (_block_group_id, _path) = setup_block_group(&conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = Annotation::resolve(&region, &conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
         }
     }
 
@@ -1215,7 +1230,15 @@ mod tests {
                 range: Range { start: 10, end: 20 },
                 strand: Strand::Forward,
             }],
-            &[block("node", 0, 30, 100, Strand::Reverse)],
+            &[PathBlock {
+                node_id: HashId::convert_str("node"),
+                block_sequence: String::new(),
+                sequence_start: 0,
+                sequence_end: 30,
+                path_start: 100,
+                path_end: 130,
+                strand: Strand::Reverse,
+            }],
             false,
         );
 
