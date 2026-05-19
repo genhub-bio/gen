@@ -492,6 +492,42 @@ impl LocalAssetUri {
         Self::stored_relative_path(workspace, &source_path, checksum, file_type)
     }
 
+    pub fn is_asset_relative_path(
+        workspace: &Workspace,
+        relative_path: &str,
+    ) -> Result<bool, FileAdditionError> {
+        let repo_root = workspace.repo_root()?;
+        let asset_dir = workspace.asset_dir()?;
+        let asset_relative_dir =
+            asset_dir
+                .strip_prefix(&repo_root)
+                .map_err(|_| FileAdditionError::PathOutsideRepo {
+                    path: asset_dir.clone(),
+                    repo_root: repo_root.clone(),
+                })?;
+
+        let candidate = if relative_path.is_empty() {
+            PathBuf::new()
+        } else {
+            Self::sanitize_relative_path(Path::new(relative_path))?
+        };
+
+        Ok(candidate.starts_with(asset_relative_dir))
+    }
+
+    pub fn repo_relative_destination_path(
+        workspace: &Workspace,
+        relative_path: &str,
+    ) -> Result<PathBuf, FileAdditionError> {
+        let sanitized = if relative_path.is_empty() {
+            PathBuf::new()
+        } else {
+            Self::sanitize_relative_path(Path::new(relative_path))?
+        };
+
+        Ok(workspace.repo_root()?.join(sanitized))
+    }
+
     fn file_path(&self) -> &str {
         self.asset_uri
             .strip_prefix(Self::SCHEME)
