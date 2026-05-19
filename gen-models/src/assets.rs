@@ -1130,6 +1130,21 @@ mod tests {
         assert!(matches!(err, FileAdditionError::PathOutsideRepo { .. }));
     }
 
+    #[test]
+    fn test_new_for_workspace_rejects_non_local_uri() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+
+        let err = LocalAssetUri::new_for_workspace(workspace, "https://example.com/reference.fa")
+            .err()
+            .expect("expected non-local uri to be rejected");
+        assert!(matches!(err, FileAdditionError::FileReadError(_)));
+        assert!(
+            err.to_string()
+                .contains("unsupported non-local uri: https://example.com/reference.fa")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_resolve_source_path_rejects_symlink_escape() {
