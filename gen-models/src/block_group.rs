@@ -201,7 +201,7 @@ impl IntervalTreeSource for Accession {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        Ok(self.intervaltree(conn))
+        self.intervaltree(conn).map_err(Into::into)
     }
 }
 
@@ -210,7 +210,7 @@ impl IntervalTreeSource for AccessionAnnotation {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        Ok(self.intervaltree(conn))
+        self.intervaltree(conn).map_err(Into::into)
     }
 }
 

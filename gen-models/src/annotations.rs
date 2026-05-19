@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::Accession,
+    accession::{Accession, AccessionError},
     block_group::{BlockGroup, PathCache},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, GraphConnection, OperationsConnection},
@@ -258,6 +258,8 @@ pub enum AnnotationError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Annotation group error: {0}")]
     AnnotationGroupError(#[from] AnnotationGroupError),
+    #[error("Accession error: {0}")]
+    AccessionError(#[from] AccessionError),
     #[error("Annotation extra serialization error: {0}")]
     SerializationError(String),
 }
@@ -374,15 +376,16 @@ impl Annotation {
         Ok(Annotation::query(conn, query, params![group]))
     }
 
-    pub fn intervaltree(&self, conn: &GraphConnection) -> IntervalTree<i64, NodeIntervalBlock> {
-        Accession::get_by_id(conn, &self.accession_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "Missing accession {} for annotation {}",
-                    self.accession_id, self.id
-                )
-            })
-            .intervaltree(conn)
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AnnotationError> {
+        let accession = Accession::get(
+            conn,
+            "select * from accessions where id = ?1",
+            params![self.accession_id],
+        )?;
+        accession.intervaltree(conn).map_err(Into::into)
     }
 }
 

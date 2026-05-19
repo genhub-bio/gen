@@ -1017,6 +1017,12 @@ pub fn apply_changeset(
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
                 ChangesetError::SqliteError(inner)
             }
+            AnnotationError::AccessionError(crate::accession::AccessionError::DatabaseError(
+                inner,
+            )) => ChangesetError::SqliteError(inner),
+            AnnotationError::AccessionError(err) => {
+                ChangesetError::SerializationError(err.to_string())
+            }
             AnnotationError::SerializationError(message) => {
                 ChangesetError::SerializationError(message)
             }
@@ -1033,6 +1039,12 @@ pub fn apply_changeset(
             AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
                 ChangesetError::SqliteError(inner)
+            }
+            AnnotationError::AccessionError(crate::accession::AccessionError::DatabaseError(
+                inner,
+            )) => ChangesetError::SqliteError(inner),
+            AnnotationError::AccessionError(err) => {
+                ChangesetError::SerializationError(err.to_string())
             }
             AnnotationError::SerializationError(message) => {
                 ChangesetError::SerializationError(message)
@@ -1063,6 +1075,12 @@ pub fn revert_changeset(
             AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
                 ChangesetError::SqliteError(inner)
+            }
+            AnnotationError::AccessionError(crate::accession::AccessionError::DatabaseError(
+                inner,
+            )) => ChangesetError::SqliteError(inner),
+            AnnotationError::AccessionError(err) => {
+                ChangesetError::SerializationError(err.to_string())
             }
             AnnotationError::SerializationError(message) => {
                 ChangesetError::SerializationError(message)

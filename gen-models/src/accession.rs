@@ -31,6 +31,8 @@ pub enum AccessionError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
+    #[error("Accession {0} has no edges in accession_paths")]
+    MissingPath(HashId),
 }
 
 impl<'a> Capnp<'a> for Accession {
@@ -347,13 +349,14 @@ impl Accession {
         AccessionEdge::query(conn, query, params![accession_id])
     }
 
-    pub fn intervaltree(&self, conn: &GraphConnection) -> IntervalTree<i64, NodeIntervalBlock> {
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AccessionError> {
         let edges = Self::get_edges_by_id(conn, &self.id);
-        assert!(
-            !edges.is_empty(),
-            "Accession {} has no edges in accession_paths",
-            self.id
-        );
+        if edges.is_empty() {
+            return Err(AccessionError::MissingPath(self.id));
+        }
 
         let mut offset = 0;
         let mut blocks = vec![NodeIntervalBlock {
@@ -387,10 +390,10 @@ impl Accession {
             strand: Strand::Forward,
         });
 
-        blocks
+        Ok(blocks
             .into_iter()
             .map(|block| (block.start..block.end, block))
-            .collect()
+            .collect())
     }
 }
 
@@ -696,7 +699,7 @@ mod tests {
         let accession =
             BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
 
-        let tree = accession.intervaltree(conn);
+        let tree = accession.intervaltree(conn).unwrap();
         interval_tree_verify(
             &tree,
             0,
