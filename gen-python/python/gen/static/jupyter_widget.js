@@ -305,8 +305,18 @@ function render({ model, el }) {
   zoomOutBtn.textContent = "\u2212";
   zoomOutBtn.setAttribute("style", sharedBtnStyle);
   zoomOutBtn.title = "Zoom out (-)";
+  const freezeBtn = document.createElement("button");
+  freezeBtn.innerHTML = `
+<svg xmlns="http://w3.org" viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+  <rect x="5" y="10" width="14" height="11" rx="2" />
+  <path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+</svg>
+`;
+  freezeBtn.setAttribute("style", sharedBtnStyle);
+  freezeBtn.title = "Freeze as static image";
   btnContainer.appendChild(zoomInBtn);
   btnContainer.appendChild(zoomOutBtn);
+  btnContainer.appendChild(freezeBtn);
   wrapper.appendChild(canvas);
   wrapper.appendChild(btnContainer);
   el.appendChild(wrapper);
@@ -318,8 +328,7 @@ function render({ model, el }) {
   }
   repaint(model.get("frame"));
   model.on("change:frame", () => repaint(model.get("frame")));
-  model.on("msg:custom", (msg) => {
-    if (msg.type !== "freeze") return;
+  function doFreeze() {
     frozen = true;
     btnContainer.style.display = "none";
     canvas.style.cursor = "default";
@@ -332,11 +341,16 @@ function render({ model, el }) {
     img.style.cssText = "display:block;cursor:default;font-family:monospace";
     el.replaceChild(img, wrapper);
     model.send({ type: "snapshot", data: dataUrl });
+  }
+  model.on("msg:custom", (msg) => {
+    if (msg.type === "freeze") doFreeze();
   });
   zoomInBtn.addEventListener("mousedown", (e) => e.preventDefault());
   zoomOutBtn.addEventListener("mousedown", (e) => e.preventDefault());
+  freezeBtn.addEventListener("mousedown", (e) => e.preventDefault());
   zoomInBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "in" }));
   zoomOutBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "out" }));
+  freezeBtn.addEventListener("click", () => doFreeze());
   attachInteraction(canvas, model, grid, () => nodeCells, () => frozen);
 }
 var index_default = { render };

@@ -39,6 +39,7 @@ pub struct GraphConfig {
 
 /// The controller is designed to be initialized outside the event loop for
 /// graph loading and layout computation, then used by widgets during rendering.
+#[derive(Clone)]
 pub struct GraphController<G, S>
 where
     G: GraphBase,

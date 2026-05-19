@@ -22,6 +22,7 @@ pub mod label {
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
 /// based on genomic sequence length.
+#[derive(Clone)]
 pub struct GenGraphNodeSizer;
 
 impl NodeSizer<GenGraph> for GenGraphNodeSizer {

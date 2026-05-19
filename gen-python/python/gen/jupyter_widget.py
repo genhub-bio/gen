@@ -25,6 +25,9 @@ DEFAULT_ROWS = 12
 
 _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
 
+# All live widget instances, so that module-level helpers can operate on them.
+_instances: list = []
+
 
 class GenGraphWidget(anywidget.AnyWidget):
     """Jupyter widget that displays a Gen graph using the native Rust renderer.
@@ -63,6 +66,7 @@ class GenGraphWidget(anywidget.AnyWidget):
             ``repo.plot(bg)`` or ``bg.plot()``.
         """
         super().__init__(**kwargs)
+        _instances.append(self)
         self._controller = controller
         self._frozen = False
         self._static_png: str = ""
@@ -80,27 +84,26 @@ class GenGraphWidget(anywidget.AnyWidget):
     # ── Display ───────────────────────────────────────────────────────────────
 
     def _ipython_display_(self, **kwargs):
-        """Display the widget and store a handle so freeze() can replace it."""
-        from IPython.display import display, HTML
+        """Clone the controller and display an independent widget in this cell.
 
-        if self._frozen and self._static_png:
-            display(
-                HTML(
-                    f'<img src="{self._static_png}" style="display:block;font-family:monospace" />'
-                )
-            )
-            return
-        # Build the mime bundle manually and pass raw=True to avoid recursion
-        # (display(self, ...) would re-enter this method).
+        Each cell gets its own copy of the graph and computed layouts so that
+        programmatic changes to the original widget (in another cell) do not
+        affect previously displayed outputs.  Mouse interaction and canvas
+        buttons work on the per-cell clone.
+        """
+        from IPython.display import display
+
+        cloned_ctrl = self._controller.clone_controller()
+        snapshot = GenGraphWidget(cloned_ctrl, cols=self.cols, rows=self.rows)
         data = {
-            "text/plain": repr(self),
+            "text/plain": repr(snapshot),
             "application/vnd.jupyter.widget-view+json": {
                 "version_major": 2,
                 "version_minor": 0,
-                "model_id": self._model_id,
+                "model_id": snapshot._model_id,
             },
         }
-        self._display_handle = display(data, raw=True, display_id=True)
+        snapshot._display_handle = display(data, raw=True, display_id=True)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -482,3 +485,14 @@ class GenGraphWidget(anywidget.AnyWidget):
             return
         self._controller.clear_all_inline_annotations()
         self._render()
+
+
+def freeze_plots() -> None:
+    """Freeze every live ``GenGraphWidget`` in the notebook as a static PNG.
+
+    Sends a ``freeze`` message to each widget's frontend; the interactive
+    canvas is replaced with a static ``<img>`` once the browser responds
+    with the snapshot.
+    """
+    for widget in _instances:
+        widget.freeze()

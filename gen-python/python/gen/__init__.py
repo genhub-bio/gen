@@ -24,9 +24,10 @@ from .gen import (
 
 # Jupyter widget — only available with `pip install gen[jupyter]`
 try:
-    from .jupyter_widget import GenGraphWidget
+    from .jupyter_widget import GenGraphWidget, freeze_plots
 except ImportError:
     GenGraphWidget = None
+    freeze_plots = None
 
 __all__ = [
     "Annotation",
@@ -38,4 +39,5 @@ __all__ = [
     "HashId",
     "Repository",
     "SequencePart",
+    "freeze_plots",
 ]

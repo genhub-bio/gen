@@ -256,6 +256,7 @@ fn locus_from_span_and_pos_map(
 /// `!Send`, so we store only the DB path and open a fresh connection per operation
 /// instead of holding a live handle.
 #[pyclass]
+#[derive(Clone)]
 pub struct PyGraphController {
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
@@ -397,6 +398,11 @@ impl PyGraphController {
 
 #[pymethods]
 impl PyGraphController {
+    /// Deep-clone this controller (graph topology + computed layouts + view state).
+    fn clone_controller(&self) -> Self {
+        self.clone()
+    }
+
     /// Create a `GraphController` from a `Repository` and a `PyBlockGroup`.
     #[classmethod]
     fn from_block_group(
