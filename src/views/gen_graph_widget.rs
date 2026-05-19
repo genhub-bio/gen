@@ -250,6 +250,25 @@ pub fn center_on_node_offset<S: NodeSizer<GenGraph>>(
     controller.go_to_node(domain_idx, offset);
 }
 
+/// Navigate to an exact byte offset within a node, snapping the camera left.
+///
+/// `byte_offset` is an absolute position within the node's sequence.  The
+/// fraction required by the cursor is computed here so callers work in natural
+/// coordinates.  Always call `queue_snap_left` after this.
+pub fn go_to_node_at_byte<S: NodeSizer<GenGraph>>(
+    controller: &mut GraphController<GenGraph, S>,
+    node: GraphNode,
+    byte_offset: u64,
+) {
+    let node_len = node.length();
+    let frac_x = if node_len > 1 {
+        byte_offset as f64 / (node_len - 1) as f64
+    } else {
+        0.0
+    };
+    center_on_node_offset(controller, node, (frac_x, 0.5));
+}
+
 /// Build a GraphNode → (WorldPos, node_size) lookup from the current viewport graph.
 pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
     controller: &GraphController<GenGraph, S>,

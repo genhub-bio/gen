@@ -15,7 +15,7 @@ use r#gen::{
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
+            GenGraphNodeRenderer, GenGraphNodeSizer, go_to_node_at_byte, highlight_match_range,
             locus_label_bounds, viewport_pos_map,
         },
         inline_label_placement::draw_label_near_pos,
@@ -326,6 +326,17 @@ impl PyGraphController {
         })?;
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }
+
+    fn navigate_to_span(&mut self, span: &AnnotationSpan) {
+        let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
+            return;
+        };
+        let slice = &locus.slices[0];
+        self.controller.set_detail_level(VisualDetail::Full);
+        go_to_node_at_byte(&mut self.controller, slice.block, slice.start);
+        self.controller.queue_snap_left();
+        self.controller.hide_cursor();
+    }
 }
 
 #[pymethods]
@@ -497,23 +508,10 @@ impl PyGraphController {
         self.controller.sync_cursor_to_closest_node();
     }
 
-    /// Center the view on the position described by `pos`.
-    ///
-    /// Forces full detail level and makes the cursor visible so the user can
-    /// see the exact position within the node.  The fractional x-offset is
-    /// computed from `pos.offset / node.length()` so the camera lands on the
-    /// exact byte; y is always centered (0.5).
-    /// This is the Rust-side counterpart to `GenGraphWidget.go_to()`.
     fn go_to_pos(&mut self, pos: &PyGraphPos) {
         self.controller.set_detail_level(VisualDetail::Full);
-        let node = pos.inner.block;
-        let node_len = node.length();
-        let frac_x = if node_len > 1 {
-            pos.inner.offset as f64 / (node_len - 1) as f64
-        } else {
-            0.5
-        };
-        center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
+        go_to_node_at_byte(&mut self.controller, pos.inner.block, pos.inner.offset);
+        self.controller.queue_snap_left();
         self.controller.hide_cursor();
     }
 
@@ -750,51 +748,42 @@ impl PyGraphController {
         Ok(())
     }
 
-    /// Navigate the camera to the first annotation span whose name matches
-    /// `annotation_name` across all loaded track panels.
-    ///
-    /// Returns `True` if a match was found, `False` otherwise.
-    ///
-    /// TODO: when multiple spans share the same name (across tracks or within
-    /// one track), expose a way to cycle through them.  That will require
-    /// surfacing the rank/index from `GraphController`, keeping a per-widget
-    /// match index in Python state, and wiring up next/previous helpers.
-    pub fn go_to_annotation(&mut self, annotation_name: &str) -> PyResult<PyGraphPos> {
-        let segment = self
-            .track_annotations
-            .iter()
-            .flat_map(|t| &t.annotations)
-            .find(|span| span.name == annotation_name)
-            .and_then(|span| span.segments.first())
-            .cloned()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!(
-                    "no annotation named {annotation_name:?} found in loaded tracks"
-                ))
-            })?;
+    /// Navigate to an `Annotation` object.
+    pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation) {
+        self.navigate_to_span(&annotation.inner);
+    }
 
-        let node = self
-            .controller
-            .graph()
-            .nodes()
-            .find(|n| n.node_id == segment.node_id)
-            .ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "annotation {annotation_name:?} references a node not present in the current graph"
-                ))
-            })?;
+    /// Navigate to a `GraphLocus`.
+    pub fn go_to_locus(&mut self, locus: &PyGraphLocus) {
+        let span = annotation_span_from_graph_locus(&locus.inner, "");
+        self.navigate_to_span(&span);
+    }
 
-        let node_len = node.length();
-        let frac_x = if node_len > 1 {
-            (segment.start as f64) / (node_len - 1) as f64
-        } else {
-            0.0
-        };
-        self.controller.set_detail_level(VisualDetail::Full);
-        center_on_node_offset(&mut self.controller, node, (frac_x, 0.5));
-        self.controller.hide_cursor();
-
-        Ok(PyGraphPos::new(node, segment.start as usize))
+    /// Return all annotations (track and inline) as a flat list of `Annotation` objects.
+    pub fn list_annotations(&self) -> Vec<PyAnnotation> {
+        let mut annotations = Vec::new();
+        let graph = self.controller.graph();
+        for track in &self.track_annotations {
+            for span in &track.annotations {
+                if let Some(locus) = graph_locus_from_annotation_span(span, graph) {
+                    annotations.push(PyAnnotation {
+                        inner: span.clone(),
+                        locus,
+                    });
+                }
+            }
+        }
+        for (_, spans, _) in &self.inline_annotations {
+            for (span, _) in spans {
+                if let Some(locus) = graph_locus_from_annotation_span(span, graph) {
+                    annotations.push(PyAnnotation {
+                        inner: span.clone(),
+                        locus,
+                    });
+                }
+            }
+        }
+        annotations
     }
 
     /// Return a JSON list of track-panel annotation names currently loaded.
