@@ -58,7 +58,9 @@ pub fn get_path(
         }
         Ok(path.unwrap())
     } else {
-        Ok(resolved_region.path)
+        Ok(resolved_region
+            .path
+            .unwrap_or_else(|| BlockGroup::get_current_path(conn, &block_group_id)))
     }
 }
 

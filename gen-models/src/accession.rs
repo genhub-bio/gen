@@ -350,10 +350,7 @@ impl Accession {
         AccessionEdge::query(conn, query, params![accession_id])
     }
 
-    pub fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AccessionError> {
+    pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
         let edges = Self::get_edges_by_id(conn, &self.id);
         if edges.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
@@ -391,7 +388,20 @@ impl Accession {
             strand: Strand::Forward,
         });
 
-        Ok(blocks
+        Ok(blocks)
+    }
+
+    pub fn length(&self, conn: &GraphConnection) -> Result<i64, AccessionError> {
+        let blocks = self.blocks(conn)?;
+        Ok(blocks.last().unwrap().start)
+    }
+
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AccessionError> {
+        Ok(self
+            .blocks(conn)?
             .into_iter()
             .map(|block| (block.start..block.end, block))
             .collect())
@@ -811,5 +821,16 @@ mod tests {
                 strand: Strand::Forward,
             }],
         );
+    }
+
+    #[test]
+    fn test_length() {
+        let conn = &get_connection(None).unwrap();
+        let (_bg, path) = setup_block_group(conn);
+        let mut path_cache = PathCache::new(conn);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+
+        assert_eq!(accession.length(conn).unwrap(), 30);
     }
 }

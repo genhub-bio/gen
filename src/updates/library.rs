@@ -105,7 +105,7 @@ pub fn update_with_library(
             ..Default::default()
         },
     );
-    let parent_path = resolved_region.path.clone();
+    let parent_path = resolved_region.path.clone().unwrap();
     let parent_path_length = parent_path.length(conn)?;
 
     let mut chunk_ranges = vec![];
