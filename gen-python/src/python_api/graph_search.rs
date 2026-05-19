@@ -54,6 +54,22 @@ impl PyGraphPos {
             self.inner.offset
         )
     }
+
+    fn __hash__(&self) -> isize {
+        let n = self.inner.block;
+        let mut hash: isize = 0;
+        for &b in &n.node_id.0 {
+            hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+        }
+        hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(n.sequence_start as isize);
+        hash = hash.wrapping_mul(31).wrapping_add(n.sequence_end as isize);
+        hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(self.inner.offset as isize);
+        hash
+    }
 }
 
 /// A linear sequence of nodes in graph space, anchored by byte offsets.
@@ -122,28 +138,84 @@ impl PyGraphLocus {
     }
 
     fn __repr__(&self) -> String {
-        let first = &self.inner.slices[0];
-        let last = self.inner.slices.last().unwrap();
-        let sh = format!("{}", first.block.node_id);
-        let eh = format!("{}", last.block.node_id);
         let strand = match self.inner.strand {
             Strand::Forward => "+",
             Strand::Reverse => "-",
             _ => ".",
         };
-        format!(
-            "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks, strand={})",
-            &sh[..8],
-            first.block.sequence_start,
-            first.block.sequence_end,
-            first.start,
-            &eh[..8],
-            last.block.sequence_start,
-            last.block.sequence_end,
-            last.end,
-            self.inner.slices.len(),
-            strand,
-        )
+        let segs: Vec<String> = self
+            .inner
+            .slices
+            .iter()
+            .map(|s| {
+                let h = format!("{}", s.block.node_id);
+                format!(
+                    "{}:{}-{}:{}-{}",
+                    &h[..8.min(h.len())],
+                    s.block.sequence_start,
+                    s.block.sequence_end,
+                    s.start,
+                    s.end
+                )
+            })
+            .collect();
+        format!("GraphLocus([{}], strand={})", segs.join(", "), strand)
+    }
+
+    fn __str__(&self) -> String {
+        let segs: Vec<String> = self
+            .inner
+            .slices
+            .iter()
+            .map(|s| {
+                let h = format!("{}", s.block.node_id);
+                let block_len = (s.block.sequence_end - s.block.sequence_start) as usize;
+                let full_width = s.start == 0 && s.end == block_len;
+                if full_width {
+                    format!(
+                        "{}:{}-{}:",
+                        &h[..8.min(h.len())],
+                        s.block.sequence_start,
+                        s.block.sequence_end,
+                    )
+                } else {
+                    format!(
+                        "{}:{}-{}:{}-{}",
+                        &h[..8.min(h.len())],
+                        s.block.sequence_start,
+                        s.block.sequence_end,
+                        s.start,
+                        s.end
+                    )
+                }
+            })
+            .collect();
+        let list = format!("[{}]", segs.join(", "));
+        match self.inner.strand {
+            Strand::Reverse => format!("rc({})", list),
+            _ => list,
+        }
+    }
+
+    fn __hash__(&self) -> isize {
+        let mut hash: isize = 0;
+        for s in &self.inner.slices {
+            for &b in &s.block.node_id.0 {
+                hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+            }
+            hash = hash
+                .wrapping_mul(31)
+                .wrapping_add(s.block.sequence_start as isize);
+            hash = hash
+                .wrapping_mul(31)
+                .wrapping_add(s.block.sequence_end as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(s.start as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(s.end as isize);
+        }
+        hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(self.inner.strand as isize);
+        hash
     }
 }
 
@@ -187,5 +259,21 @@ impl PyAnnotation {
             self.inner.name,
             self.inner.segments.len()
         )
+    }
+
+    fn __hash__(&self) -> isize {
+        let mut hash: isize = 0;
+        for &b in &self.inner.id.0 {
+            hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+        }
+        for seg in &self.inner.segments {
+            for &b in &seg.node_id.0 {
+                hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+            }
+            hash = hash.wrapping_mul(31).wrapping_add(seg.start as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(seg.end as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(seg.strand as isize);
+        }
+        hash
     }
 }
