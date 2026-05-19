@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
 use gen_core::{
-    HashId, Strand, calculate_hash,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
+use intervaltree::IntervalTree;
 use itertools::Itertools;
 use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
@@ -17,11 +18,11 @@ use crate::{
     traits::*,
 };
 
-#[derive(Deserialize, Serialize, Debug, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq)]
 pub struct Accession {
     pub id: HashId,
     pub name: String,
-    pub path_id: HashId,
+    pub block_group_id: HashId,
     pub parent_accession_id: Option<HashId>,
 }
 
@@ -31,6 +32,8 @@ pub enum AccessionError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
+    #[error("Accession {0} has no edges in accession_paths")]
+    MissingPath(HashId),
 }
 
 impl<'a> Capnp<'a> for Accession {
@@ -40,7 +43,7 @@ impl<'a> Capnp<'a> for Accession {
     fn write_capnp(&self, builder: &mut Self::Builder) {
         builder.set_id(&self.id.0).unwrap();
         builder.set_name(&self.name);
-        builder.set_path_id(&self.path_id.0).unwrap();
+        builder.set_block_group_id(&self.block_group_id.0).unwrap();
         match &self.parent_accession_id {
             None => {
                 builder.reborrow().get_parent_accession_id().set_none(());
@@ -64,8 +67,8 @@ impl<'a> Capnp<'a> for Accession {
             .try_into()
             .unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
-        let path_id = reader
-            .get_path_id()
+        let block_group_id = reader
+            .get_block_group_id()
             .unwrap()
             .as_slice()
             .unwrap()
@@ -82,7 +85,7 @@ impl<'a> Capnp<'a> for Accession {
         Accession {
             id,
             name,
-            path_id,
+            block_group_id,
             parent_accession_id,
         }
     }
@@ -275,37 +278,41 @@ impl From<&AugmentedEdgeData> for AccessionEdgeData {
 }
 
 impl Accession {
-    fn id_hash(path_id: &HashId, parent_accession_id: Option<&HashId>, name: &str) -> HashId {
+    fn id_hash(
+        block_group_id: &HashId,
+        parent_accession_id: Option<&HashId>,
+        name: &str,
+    ) -> HashId {
         HashId(calculate_hash(&format!(
-            "{path_id}:{parent_accession_id:?}:{name}"
+            "{block_group_id}:{parent_accession_id:?}:{name}"
         )))
     }
 
     pub fn create(
         conn: &GraphConnection,
         name: &str,
-        path_id: &HashId,
+        block_group_id: &HashId,
         parent_accession_id: Option<&HashId>,
     ) -> Result<Accession, AccessionError> {
-        let query = "INSERT INTO accessions (id, name, path_id, parent_accession_id) VALUES (?1, ?2, ?3, ?4);";
+        let query = "INSERT INTO accessions (id, name, block_group_id, parent_accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = match conn.prepare(query) {
             Ok(s) => s,
             Err(e) => return Err(AccessionError::DatabaseError(e)),
         };
 
-        let hash = Accession::id_hash(path_id, parent_accession_id, name);
-        match stmt.execute((hash, name, path_id, parent_accession_id)) {
+        let hash = Accession::id_hash(block_group_id, parent_accession_id, name);
+        match stmt.execute((hash, name, block_group_id, parent_accession_id)) {
             Ok(_) => Ok(Accession {
                 id: hash,
                 name: name.to_string(),
-                path_id: *path_id,
+                block_group_id: *block_group_id,
                 parent_accession_id: parent_accession_id.copied(),
             }),
             Err(rusqlite::Error::SqliteFailure(err, _details))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
                 Err(AccessionError::Duplicate(format!(
-                    "An accession with the same name, path_id, and parent_accession_id already exists. name: {name}, path_id: {path_id}, parent_accession_id: {parent_accession_id:?}"
+                    "An accession with the same name, block_group_id, and parent_accession_id already exists. name: {name}, block_group_id: {block_group_id}, parent_accession_id: {parent_accession_id:?}"
                 )))
             }
             Err(e) => Err(AccessionError::DatabaseError(e)),
@@ -315,17 +322,17 @@ impl Accession {
     pub fn get_or_create(
         conn: &GraphConnection,
         name: &str,
-        path_id: &HashId,
+        block_group_id: &HashId,
         parent_accession_id: Option<&HashId>,
     ) -> Result<Accession, AccessionError> {
-        match Accession::create(conn, name, path_id, parent_accession_id) {
+        match Accession::create(conn, name, block_group_id, parent_accession_id) {
             Ok(accession) => Ok(accession),
             Err(AccessionError::Duplicate(_)) => {
-                let hash = Accession::id_hash(path_id, parent_accession_id, name);
+                let hash = Accession::id_hash(block_group_id, parent_accession_id, name);
                 Ok(Accession {
                     id: hash,
                     name: name.to_string(),
-                    path_id: *path_id,
+                    block_group_id: *block_group_id,
                     parent_accession_id: parent_accession_id.copied(),
                 })
             }
@@ -341,6 +348,53 @@ impl Accession {
             where ap.accession_id = ?1 \
             order by ap.index_in_path;";
         AccessionEdge::query(conn, query, params![accession_id])
+    }
+
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AccessionError> {
+        let edges = Self::get_edges_by_id(conn, &self.id);
+        if edges.is_empty() {
+            return Err(AccessionError::MissingPath(self.id));
+        }
+
+        let mut offset = 0;
+        let mut blocks = vec![NodeIntervalBlock {
+            node_id: PATH_START_NODE_ID,
+            start: i64::MIN + 1,
+            end: 0,
+            sequence_start: 0,
+            sequence_end: 0,
+            strand: Strand::Forward,
+        }];
+
+        for (into, out_of) in edges.iter().tuple_windows() {
+            let block_len = out_of.source_coordinate - into.target_coordinate;
+            blocks.push(NodeIntervalBlock {
+                node_id: into.target_node_id,
+                start: offset,
+                end: offset + block_len,
+                sequence_start: into.target_coordinate,
+                sequence_end: out_of.source_coordinate,
+                strand: into.target_strand,
+            });
+            offset += block_len;
+        }
+
+        blocks.push(NodeIntervalBlock {
+            node_id: PATH_END_NODE_ID,
+            start: offset,
+            end: i64::MAX - 1,
+            sequence_start: 0,
+            sequence_end: 0,
+            strand: Strand::Forward,
+        });
+
+        Ok(blocks
+            .into_iter()
+            .map(|block| (block.start..block.end, block))
+            .collect())
     }
 }
 
@@ -358,8 +412,7 @@ impl RegionResolver for Accession {
             conn,
             "SELECT a.* \
              FROM accessions a \
-             JOIN paths p ON a.path_id = p.id \
-             JOIN block_groups bg ON p.block_group_id = bg.id \
+             JOIN block_groups bg ON a.block_group_id = bg.id \
              WHERE bg.collection_name = ?1 \
                AND bg.sample_name = ?2 \
                AND lower(a.name) = lower(?3)",
@@ -386,7 +439,7 @@ impl Query for Accession {
         Accession {
             id: row.get(0).unwrap(),
             name: row.get(1).unwrap(),
-            path_id: row.get(2).unwrap(),
+            block_group_id: row.get(2).unwrap(),
             parent_accession_id: row.get(3).unwrap(),
         }
     }
@@ -573,9 +626,13 @@ impl Query for AccessionPath {
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
+    use gen_core::HashId;
 
     use super::*;
-    use crate::test_helpers::{get_connection, setup_block_group};
+    use crate::{
+        block_group::{BlockGroup, PathCache},
+        test_helpers::{get_connection, interval_tree_verify, setup_block_group},
+    };
 
     #[test]
     fn test_accession_capnp_serialization() {
@@ -584,7 +641,7 @@ mod tests {
                 .try_into()
                 .unwrap(),
             name: "test_accession".to_string(),
-            path_id: "0000000000000000000000000000000000000000000000000000000000000150"
+            block_group_id: "0000000000000000000000000000000000000000000000000000000000000150"
                 .try_into()
                 .unwrap(),
             parent_accession_id: Some(
@@ -609,7 +666,7 @@ mod tests {
                 .try_into()
                 .unwrap(),
             name: "test_accession_2".to_string(),
-            path_id: "0000000000000000000000000000000000000000000000000000000000000151"
+            block_group_id: "0000000000000000000000000000000000000000000000000000000000000151"
                 .try_into()
                 .unwrap(),
             parent_accession_id: None,
@@ -649,9 +706,9 @@ mod tests {
     #[test]
     fn test_accession_create_query() {
         let conn = &get_connection(None).unwrap();
-        let (_bg, path) = setup_block_group(conn);
-        let accession = Accession::create(conn, "test", &path.id, None).unwrap();
-        let _accession_2 = Accession::create(conn, "test2", &path.id, None).unwrap();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let accession = Accession::create(conn, "test", &block_group_id, None).unwrap();
+        let _accession_2 = Accession::create(conn, "test2", &block_group_id, None).unwrap();
         assert_eq!(
             Accession::query(
                 conn,
@@ -661,9 +718,68 @@ mod tests {
             vec![Accession {
                 id: accession.id,
                 name: "test".to_string(),
-                path_id: path.id,
+                block_group_id,
                 parent_accession_id: None,
             }]
+        );
+    }
+
+    #[test]
+    fn test_intervaltree() {
+        let conn = &get_connection(None).unwrap();
+        let (_bg, path) = setup_block_group(conn);
+        let mut path_cache = PathCache::new(conn);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+
+        let tree = accession.intervaltree(conn).unwrap();
+        interval_tree_verify(
+            &tree,
+            0,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-a-node"),
+                start: 0,
+                end: 5,
+                sequence_start: 5,
+                sequence_end: 10,
+                strand: Strand::Forward,
+            }],
+        );
+        interval_tree_verify(
+            &tree,
+            5,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-t-node"),
+                start: 5,
+                end: 15,
+                sequence_start: 0,
+                sequence_end: 10,
+                strand: Strand::Forward,
+            }],
+        );
+        interval_tree_verify(
+            &tree,
+            15,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-c-node"),
+                start: 15,
+                end: 25,
+                sequence_start: 0,
+                sequence_end: 10,
+                strand: Strand::Forward,
+            }],
+        );
+        interval_tree_verify(
+            &tree,
+            25,
+            &[NodeIntervalBlock {
+                node_id: HashId::convert_str("test-g-node"),
+                start: 25,
+                end: 30,
+                sequence_start: 0,
+                sequence_end: 5,
+                strand: Strand::Forward,
+            }],
         );
     }
 }

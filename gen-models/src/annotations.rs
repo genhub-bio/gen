@@ -1,4 +1,5 @@
 use std::{
+    cmp::{max, min},
     collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
@@ -6,16 +7,20 @@ use std::{
 
 use anyhow::anyhow;
 use gen_core::{
-    HashId, calculate_hash,
+    HashId, NodeIntervalBlock, Strand, calculate_hash,
     config::Workspace,
+    path::PathBlock,
+    range::{OrderedMerge, Range, merge_ordered_items},
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
+use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    accession::{Accession, AccessionError},
     block_group::{BlockGroup, PathCache},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, GraphConnection, OperationsConnection},
@@ -169,6 +174,130 @@ pub struct BedExtra {
     pub other_fields: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotationSegment {
+    pub node_id: HashId,
+    pub range: Range,
+    pub strand: Strand,
+}
+
+impl OrderedMerge for AnnotationSegment {
+    fn should_merge_with(&self, next: &Self) -> bool {
+        self.node_id == next.node_id
+            && self.strand == next.strand
+            && next.range.start >= self.range.start
+            && next.range.start <= self.range.end
+    }
+
+    fn merge_with(&mut self, next: &Self) {
+        self.range.end = max(self.range.end, next.range.end);
+    }
+}
+
+pub fn accession_edges_to_segments(
+    edges: &[crate::accession::AccessionEdge],
+) -> Vec<AnnotationSegment> {
+    let mut segments = Vec::new();
+    let mut current_node = None;
+    let mut current_start = None;
+    let mut current_strand = None;
+
+    for edge in edges {
+        if edge.source_coordinate < 0 {
+            current_node = Some(edge.target_node_id);
+            current_start = Some(edge.target_coordinate);
+            current_strand = Some(edge.target_strand);
+            continue;
+        }
+
+        if let (Some(node_id), Some(start), Some(strand)) =
+            (current_node, current_start, current_strand)
+        {
+            let (segment_start, segment_end) = if start <= edge.source_coordinate {
+                (start, edge.source_coordinate)
+            } else {
+                (edge.source_coordinate, start)
+            };
+            if segment_end > segment_start {
+                segments.push(AnnotationSegment {
+                    node_id,
+                    range: Range {
+                        start: segment_start,
+                        end: segment_end,
+                    },
+                    strand,
+                });
+            }
+        }
+
+        if edge.target_coordinate < 0 {
+            break;
+        }
+
+        current_node = Some(edge.target_node_id);
+        current_start = Some(edge.target_coordinate);
+        current_strand = Some(edge.target_strand);
+    }
+
+    segments
+}
+
+pub fn project_annotation_segments(
+    accession_segments: &[AnnotationSegment],
+    path_blocks: &[PathBlock],
+    preserve_part_boundaries: bool,
+) -> Vec<AnnotationSegment> {
+    let projected = accession_segments
+        .iter()
+        .flat_map(|segment| {
+            merge_ordered_items(
+                path_blocks
+                    .iter()
+                    .filter_map(|block| {
+                        if block.node_id != segment.node_id {
+                            return None;
+                        }
+                        let overlap_start = max(segment.range.start, block.sequence_start);
+                        let overlap_end = min(segment.range.end, block.sequence_end);
+                        if overlap_end <= overlap_start {
+                            return None;
+                        }
+
+                        let (start, end) = if block.strand == Strand::Reverse {
+                            (
+                                block.path_start + (block.sequence_end - overlap_end),
+                                block.path_start + (block.sequence_end - overlap_start),
+                            )
+                        } else {
+                            (
+                                block.path_start + (overlap_start - block.sequence_start),
+                                block.path_start + (overlap_end - block.sequence_start),
+                            )
+                        };
+                        let strand = if block.strand == Strand::Reverse {
+                            segment.strand.complement()
+                        } else {
+                            segment.strand
+                        };
+
+                        Some(AnnotationSegment {
+                            node_id: block.node_id,
+                            range: Range { start, end },
+                            strand,
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if preserve_part_boundaries {
+        projected
+    } else {
+        merge_ordered_items(projected)
+    }
+}
+
 fn serialize_annotation_extra(extra: Option<&AnnotationExtra>) -> Result<String, AnnotationError> {
     serde_json::to_string(extra.unwrap_or(&AnnotationExtra::default()))
         .map_err(|err| AnnotationError::SerializationError(err.to_string()))
@@ -259,6 +388,8 @@ pub enum AnnotationError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Annotation group error: {0}")]
     AnnotationGroupError(#[from] AnnotationGroupError),
+    #[error("Accession error: {0}")]
+    AccessionError(#[from] AccessionError),
     #[error("Annotation extra serialization error: {0}")]
     SerializationError(String),
 }
@@ -374,6 +505,18 @@ impl Annotation {
         let query = "select * from annotations where annotation_group = ?1";
         Ok(Annotation::query(conn, query, params![group]))
     }
+
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AnnotationError> {
+        let accession = Accession::get(
+            conn,
+            "select * from accessions where id = ?1",
+            params![self.accession_id],
+        )?;
+        accession.intervaltree(conn).map_err(Into::into)
+    }
 }
 
 impl RegionResolver for Annotation {
@@ -391,8 +534,7 @@ impl RegionResolver for Annotation {
             "SELECT a.* \
              FROM annotations a \
              JOIN accessions acc ON a.accession_id = acc.id \
-             JOIN paths p ON acc.path_id = p.id \
-             JOIN block_groups bg ON p.block_group_id = bg.id \
+             JOIN block_groups bg ON acc.block_group_id = bg.id \
              WHERE bg.collection_name = ?1 \
                AND bg.sample_name = ?2 \
                AND lower(a.name) = lower(?3)",
@@ -896,7 +1038,7 @@ impl AnnotationFile {
 mod tests {
     use std::fs;
 
-    use gen_core::HashId;
+    use gen_core::{HashId, Strand, path::PathBlock, range::Range};
 
     use super::*;
     use crate::{
@@ -908,13 +1050,45 @@ mod tests {
         test_helpers::{get_connection, setup_block_group, setup_gen},
     };
 
+    fn block(
+        node_id: &str,
+        sequence_start: i64,
+        sequence_end: i64,
+        path_start: i64,
+        strand: Strand,
+    ) -> PathBlock {
+        PathBlock {
+            node_id: HashId::convert_str(node_id),
+            block_sequence: String::new(),
+            sequence_start,
+            sequence_end,
+            path_start,
+            path_end: path_start + (sequence_end - sequence_start),
+            strand,
+        }
+    }
+
     #[test]
     fn create_annotation_with_samples() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
 
-        let _ = Sample::create(&conn, "sample-1").unwrap();
-        let _ = Sample::create(&conn, "sample-2").unwrap();
+        let _ = Sample::create(
+            &conn,
+            crate::sample::NewSample {
+                name: "sample-1",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+        let _ = Sample::create(
+            &conn,
+            crate::sample::NewSample {
+                name: "sample-2",
+                is_reference: false,
+            },
+        )
+        .unwrap();
 
         let mut cache = PathCache::new(&conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
@@ -1004,6 +1178,58 @@ mod tests {
         );
         assert_eq!(reparsed.gff, None);
         assert_eq!(reparsed.bed, None);
+    }
+
+    #[test]
+    fn merges_overlapping_annotation_segments() {
+        let node_id = HashId::convert_str("node");
+        let merged = merge_ordered_items(vec![
+            AnnotationSegment {
+                node_id,
+                range: Range { start: 2, end: 5 },
+                strand: Strand::Forward,
+            },
+            AnnotationSegment {
+                node_id,
+                range: Range { start: 4, end: 8 },
+                strand: Strand::Forward,
+            },
+        ]);
+
+        assert_eq!(
+            merged,
+            vec![AnnotationSegment {
+                node_id,
+                range: Range { start: 2, end: 8 },
+                strand: Strand::Forward,
+            }]
+        );
+    }
+
+    #[test]
+    fn project_annotation_segments_complements_reverse_blocks() {
+        let node_id = HashId::convert_str("node");
+        let projected = project_annotation_segments(
+            &[AnnotationSegment {
+                node_id,
+                range: Range { start: 10, end: 20 },
+                strand: Strand::Forward,
+            }],
+            &[block("node", 0, 30, 100, Strand::Reverse)],
+            false,
+        );
+
+        assert_eq!(
+            projected,
+            vec![AnnotationSegment {
+                node_id,
+                range: Range {
+                    start: 110,
+                    end: 120,
+                },
+                strand: Strand::Reverse,
+            }]
+        );
     }
 
     #[test]

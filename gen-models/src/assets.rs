@@ -636,7 +636,15 @@ impl LocalAssetUri {
     }
 
     fn canonicalize_or_normalize(path: &Path) -> PathBuf {
-        fs::canonicalize(path).unwrap_or_else(|_| Self::normalize_path(path))
+        let normalized_path = fs::canonicalize(path).unwrap_or_else(|_| Self::normalize_path(path));
+        // Unfortunately, the path we get back from Mac OS X sometimes starts
+        // with /private even if the input path doesn't, which causes problems
+        // for our path comparisons. Strip it out if it's there.
+        let cleaned_path = normalized_path
+            .as_path()
+            .strip_prefix("/private")
+            .unwrap_or(&normalized_path);
+        Path::new("/").join(cleaned_path)
     }
 
     fn normalize_path(path: &Path) -> PathBuf {
@@ -1061,7 +1069,15 @@ mod tests {
                 &temp_dir.path().join("target/../target/file.txt"),
             );
 
-            assert_eq!(canonicalized, fs::canonicalize(&file_path).unwrap());
+            // Unfortunately, the path we get back from Mac OS X sometimes starts
+            // with /private even if the input path doesn't, which causes problems
+            // for our path comparisons. Strip it out if it's there.
+            let expected_canonical = fs::canonicalize(&file_path).unwrap();
+            let cleaned_path = expected_canonical
+                .strip_prefix("/private")
+                .unwrap_or(&expected_canonical);
+            let expected_path = Path::new("/").join(cleaned_path);
+            assert_eq!(canonicalized, expected_path);
         }
     }
 

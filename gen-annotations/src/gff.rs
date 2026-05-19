@@ -146,7 +146,14 @@ mod tests {
 
     fn create_block_group(conn: &GraphConnection) {
         let collection = Collection::create(conn, "test").unwrap();
-        Sample::get_or_create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let sequence = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let reference_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -222,7 +229,14 @@ mod tests {
     }
 
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
-        Sample::get_or_create(conn, "child sample").unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "child sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let _ = Sample::get_or_create_child(
             conn,
             "test",
@@ -240,7 +254,6 @@ mod tests {
         .expect("should create child block group")[0]
             .id;
         let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
-        let tree = sample_path.intervaltree(conn).unwrap();
         let replacement_sequence = "AA";
 
         let replacement = Sequence::new()
@@ -260,7 +273,7 @@ mod tests {
         .unwrap();
         let change = PathChange {
             block_group_id: sample_bg_id,
-            path: sample_path.clone(),
+            intervaltree_source: sample_path.clone(),
             path_accession: None,
             start: 15,
             end: 25,
@@ -278,8 +291,7 @@ mod tests {
             preserve_edge: true,
         };
 
-        BlockGroup::insert_change(conn, &change, &tree)
-            .expect("should apply AA update to child sample");
+        BlockGroup::insert_change(conn, &change).expect("should apply AA update to child sample");
 
         let edge_to_insert = Edge::query(
             conn,

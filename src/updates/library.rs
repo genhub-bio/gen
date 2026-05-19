@@ -7,20 +7,18 @@ use gen_models::{
     errors::{BlockGroupError, PathError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
+    region::{GenRegionError, Region, resolve_path},
     sample::Sample,
 };
 use thiserror::Error;
 
-use crate::{
-    graphs::{
-        BlockGroupChunk,
-        combinatorial_library::{
-            CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
-            create_library,
-        },
-        operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
+use crate::graphs::{
+    BlockGroupChunk,
+    combinatorial_library::{
+        CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
+        create_library,
     },
-    region::{GenRegionError, Region, resolve_path},
+    operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
 };
 
 #[derive(Error, Debug)]
@@ -38,14 +36,10 @@ pub enum UpdateWithLibraryError {
     #[error("Failed to create library")]
     LibraryCreation(CombinatorialLibraryCreationError),
     #[error("Failed to resolve region")]
-    Region(crate::region::GenRegionError),
-    #[error(
-        "Missing coordinates for region '{0}'. Provide them in the region name or pass both start and end."
-    )]
+    Region(GenRegionError),
+    #[error("Missing coordinates for region '{0}'. Use region syntax like 'name:start-end'.")]
     MissingCoordinates(String),
-    #[error(
-        "Unsupported region type for library update: {0}. Only paths and block groups are supported."
-    )]
+    #[error("Unsupported region type for library update: {0}")]
     UnsupportedRegionType(String),
 }
 
@@ -67,8 +61,8 @@ impl From<CombinatorialLibraryCreationError> for UpdateWithLibraryError {
     }
 }
 
-impl From<crate::region::GenRegionError> for UpdateWithLibraryError {
-    fn from(err: crate::region::GenRegionError) -> Self {
+impl From<GenRegionError> for UpdateWithLibraryError {
+    fn from(err: GenRegionError) -> Self {
         UpdateWithLibraryError::Region(err)
     }
 }
@@ -86,7 +80,7 @@ pub fn update_with_library(
 ) -> Result<(), UpdateWithLibraryError> {
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
-    let parsed_region = Region::parse(region_name).map_err(crate::region::GenRegionError::from)?;
+    let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
         match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
             Ok(region) => region,
@@ -104,7 +98,13 @@ pub fn update_with_library(
             ));
         };
 
-    let _new_sample = Sample::create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
     let parent_path = resolved_region.path.clone();
     let parent_path_length = parent_path.length(conn)?;
 
@@ -193,7 +193,13 @@ pub fn update_with_library(
         block_group_chunks.push(pathless_end_chunk);
     }
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
 
     // Create (re-create) the reference sequence/path out of the derived chunks,
     // in the child block group

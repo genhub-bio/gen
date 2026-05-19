@@ -3,93 +3,71 @@ use std::{
     error::Error,
     fs::File,
     io::{BufRead, BufReader, Cursor},
-    path::{Path, PathBuf},
+    path::{Path as FsPath, PathBuf},
 };
 
 use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
-use gen_core::{HashId, Strand, Workspace, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, Workspace};
 use gen_models::{
-    accession::{Accession, AccessionEdge},
-    annotations::{Annotation, AnnotationError},
+    accession::Accession,
+    annotations::{
+        Annotation, AnnotationError,
+        accession_edges_to_segments as model_accession_edges_to_segments,
+    },
+    block_group::BlockGroup,
     db::GraphConnection,
     file_types::FileTypes,
     operations::FileAddition,
     reference_alias::ReferenceAlias,
+    traits::Query,
 };
 use noodles::{bed, core::Region, gff, tabix};
 
 use crate::views::{
     annotation_files::AnnotationFileEntry,
+    annotation_groups::AnnotationGroupEntry,
     annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
 };
 
-fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
-    let mut segments = Vec::new();
-    let mut current_node: Option<HashId> = None;
-    let mut current_start: Option<i64> = None;
-    let mut current_strand: Option<Strand> = None;
+fn accession_edges_to_segments(
+    edges: &[gen_models::accession::AccessionEdge],
+) -> Vec<AnnotationSegment> {
+    model_accession_edges_to_segments(edges)
+        .into_iter()
+        .map(|segment| AnnotationSegment {
+            node_id: segment.node_id,
+            start: segment.range.start,
+            end: segment.range.end,
+            strand: segment.strand,
+        })
+        .collect()
+}
 
-    for edge in edges {
-        if is_start_node(edge.source_node_id) {
-            current_node = Some(edge.target_node_id);
-            current_start = Some(edge.target_coordinate);
-            current_strand = Some(edge.target_strand);
-            continue;
-        }
-
-        if is_end_node(edge.target_node_id) {
-            if let (Some(node_id), Some(start), Some(strand)) =
-                (current_node, current_start, current_strand)
-            {
-                let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                    (start, edge.source_coordinate)
-                } else {
-                    (edge.source_coordinate, start)
-                };
-                segments.push(AnnotationSegment {
-                    node_id,
-                    start: segment_start,
-                    end: segment_end,
-                    strand,
-                });
-            }
-            break;
-        }
-
-        if let (Some(node_id), Some(start), Some(strand)) =
-            (current_node, current_start, current_strand)
-        {
-            let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                (start, edge.source_coordinate)
-            } else {
-                (edge.source_coordinate, start)
-            };
-            segments.push(AnnotationSegment {
-                node_id,
-                start: segment_start,
-                end: segment_end,
-                strand,
-            });
-        }
-
-        current_node = Some(edge.target_node_id);
-        current_start = Some(edge.target_coordinate);
-        current_strand = Some(edge.target_strand);
-    }
-
-    segments
+pub struct AnnotationGroupTrackRequest<'a> {
+    pub conn: &'a GraphConnection,
+    pub current_block_group: &'a BlockGroup,
+    pub entry: &'a AnnotationGroupEntry,
+    pub visible_ranges_by_node: &'a HashMap<HashId, Vec<(i64, i64)>>,
 }
 
 pub fn load_annotations_for_group(
+    request: &AnnotationGroupTrackRequest<'_>,
+) -> Result<Vec<AnnotationSpan>, AnnotationError> {
+    let _ = request.current_block_group;
+    load_group_annotations(request.conn, request.entry, request.visible_ranges_by_node)
+}
+
+fn load_group_annotations(
     conn: &GraphConnection,
-    group: &str,
+    entry: &AnnotationGroupEntry,
     visible_ranges_by_node: &HashMap<HashId, Vec<(i64, i64)>>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
-    let annotations = Annotation::query_by_group(conn, group)?;
+    let annotations = Annotation::query_by_group(conn, &entry.name)?;
 
     Ok(annotations
         .into_iter()
         .filter_map(|annotation| {
+            let _ = Accession::get_by_id(conn, &annotation.accession_id)?;
             let edges = Accession::get_edges_by_id(conn, &annotation.accession_id);
             let segments = accession_edges_to_segments(&edges)
                 .into_iter()
@@ -322,7 +300,7 @@ fn resolve_annotation_file_path(
     None
 }
 
-fn tabix_index_path(file_path: &Path) -> PathBuf {
+fn tabix_index_path(file_path: &FsPath) -> PathBuf {
     let mut index_path = file_path.to_path_buf();
     index_path.set_extension(format!(
         "{}.tbi",
@@ -340,7 +318,7 @@ fn tabix_index_path(file_path: &Path) -> PathBuf {
 fn resolve_annotation_index_file_path(
     workspace: &Workspace,
     entry: &AnnotationFileEntry,
-    file_path: &Path,
+    file_path: &FsPath,
 ) -> Option<PathBuf> {
     if let Some(index_file_addition) = entry.index_file_addition.as_ref() {
         return resolve_annotation_file_path(workspace, index_file_addition);
@@ -354,8 +332,8 @@ fn resolve_annotation_index_file_path(
 }
 
 fn load_tabix_region_bytes(
-    file_path: &Path,
-    index_path: Option<&Path>,
+    file_path: &FsPath,
+    index_path: Option<&FsPath>,
     reference_name: &str,
     window: (i64, i64),
 ) -> Result<Vec<u8>, Box<dyn Error>> {

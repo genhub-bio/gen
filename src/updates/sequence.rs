@@ -7,16 +7,14 @@ use gen_models::{
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
+    region::{GenRegionError, Region, resolve_path},
     sample::Sample,
     sequence::Sequence,
     traits::*,
 };
 use rusqlite::{self, params};
 
-use crate::{
-    errors::SequenceUpdateError,
-    region::{GenRegionError, Region, resolve_path},
-};
+use crate::errors::SequenceUpdateError;
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_sequence(
@@ -30,7 +28,7 @@ pub fn update_with_sequence(
 ) -> Result<Operation, SequenceUpdateError> {
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
-    let parsed_region = Region::parse(region_name).map_err(crate::region::GenRegionError::from)?;
+    let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
         match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
             Ok(region) => region,
@@ -48,7 +46,13 @@ pub fn update_with_sequence(
             ));
         };
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
     let mut target_block_groups = vec![];
@@ -67,12 +71,11 @@ pub fn update_with_sequence(
     }
 
     if target_block_groups.is_empty() {
-        return Err(crate::region::GenRegionError::NotFound(region_name.to_string()).into());
+        return Err(GenRegionError::NotFound(region_name.to_string()).into());
     }
 
     for target_block_group in &target_block_groups {
         let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-        let interval_tree = path.intervaltree(conn)?;
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
@@ -87,7 +90,7 @@ pub fn update_with_sequence(
 
             let path_change = PathChange {
                 block_group_id: target_block_group.id,
-                path: path.clone(),
+                intervaltree_source: path.clone(),
                 path_accession: None,
                 start: start_coordinate,
                 end: end_coordinate,
@@ -97,7 +100,7 @@ pub fn update_with_sequence(
                 preserve_edge: true,
             };
 
-            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
+            BlockGroup::insert_change(conn, &path_change).unwrap();
             node_id
         } else {
             let seq = Sequence::new()
@@ -128,7 +131,7 @@ pub fn update_with_sequence(
 
             let path_change = PathChange {
                 block_group_id: target_block_group.id,
-                path: path.clone(),
+                intervaltree_source: path.clone(),
                 path_accession: None,
                 start: start_coordinate,
                 end: end_coordinate,
@@ -138,7 +141,7 @@ pub fn update_with_sequence(
                 preserve_edge: true,
             };
 
-            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
+            BlockGroup::insert_change(conn, &path_change).unwrap();
             node_id
         };
 

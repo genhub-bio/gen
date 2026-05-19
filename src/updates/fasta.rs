@@ -8,6 +8,7 @@ use gen_models::{
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
+    region::{GenRegionError, Region, resolve_path},
     sample::Sample,
     sequence::Sequence,
     traits::*,
@@ -15,10 +16,7 @@ use gen_models::{
 use noodles::fasta;
 use rusqlite::{self, types::Value as SQLValue};
 
-use crate::{
-    fasta::FastaError,
-    region::{GenRegionError, Region, resolve_path},
-};
+use crate::fasta::FastaError;
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_fasta(
@@ -32,7 +30,7 @@ pub fn update_with_fasta(
 ) -> Result<Operation, FastaError> {
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
-    let parsed_region = Region::parse(region_name).map_err(crate::region::GenRegionError::from)?;
+    let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
         match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
             Ok(region) => region,
@@ -50,7 +48,13 @@ pub fn update_with_fasta(
 
     let mut fasta_reader = fasta::io::reader::Builder.build_from_path(fasta_file_path)?;
 
-    let _new_sample = Sample::get_or_create(conn, new_sample_name);
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
     let mut target_block_groups = vec![];
@@ -69,13 +73,12 @@ pub fn update_with_fasta(
     }
 
     if target_block_groups.is_empty() {
-        return Err(crate::region::GenRegionError::NotFound(region_name.to_string()).into());
+        return Err(GenRegionError::NotFound(region_name.to_string()).into());
     }
 
     struct TargetBlockGroupState {
         block_group_id: HashId,
         path: gen_models::path::Path,
-        interval_tree: intervaltree::IntervalTree<i64, gen_core::NodeIntervalBlock>,
         first_node: Option<HashId>,
     }
 
@@ -83,11 +86,9 @@ pub fn update_with_fasta(
         .iter()
         .map(|target_block_group| -> Result<_, FastaError> {
             let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-            let interval_tree = path.intervaltree(conn)?;
             Ok(TargetBlockGroupState {
                 block_group_id: target_block_group.id,
                 path,
-                interval_tree,
                 first_node: None,
             })
         })
@@ -114,7 +115,7 @@ pub fn update_with_fasta(
 
                 let path_change = PathChange {
                     block_group_id: state.block_group_id,
-                    path: state.path.clone(),
+                    intervaltree_source: state.path.clone(),
                     path_accession: None,
                     start: start_coordinate,
                     end: end_coordinate,
@@ -124,7 +125,7 @@ pub fn update_with_fasta(
                     preserve_edge: true,
                 };
 
-                BlockGroup::insert_change(conn, &path_change, &state.interval_tree).unwrap();
+                BlockGroup::insert_change(conn, &path_change).unwrap();
                 if index == 0 {
                     state.first_node = Some(node_id);
                 } else if state.first_node.is_some() {
@@ -159,7 +160,7 @@ pub fn update_with_fasta(
 
                 let path_change = PathChange {
                     block_group_id: state.block_group_id,
-                    path: state.path.clone(),
+                    intervaltree_source: state.path.clone(),
                     path_accession: None,
                     start: start_coordinate,
                     end: end_coordinate,
@@ -169,7 +170,7 @@ pub fn update_with_fasta(
                     preserve_edge: true,
                 };
 
-                BlockGroup::insert_change(conn, &path_change, &state.interval_tree).unwrap();
+                BlockGroup::insert_change(conn, &path_change).unwrap();
                 if index == 0 {
                     state.first_node = Some(node_id);
                 } else if state.first_node.is_some() {

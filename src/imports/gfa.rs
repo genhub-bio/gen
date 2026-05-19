@@ -67,7 +67,13 @@ pub fn import_gfa(
         Err(CollectionError::Duplicate(_)) => {}
         Err(e) => return Err(GFAImportError::CollectionError(e)),
     }
-    match Sample::get_or_create(conn, sample_name) {
+    match Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: sample_name,
+            ..Default::default()
+        },
+    ) {
         Ok(_) => {}
         Err(e) => {
             return Err(GFAImportError::SampleError(e));

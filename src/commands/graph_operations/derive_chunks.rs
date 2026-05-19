@@ -19,8 +19,6 @@ use crate::{
 pub enum DeriveChunksOperationError {
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
-    #[error("Invalid breakpoint: {0}")]
-    InvalidBreakpoint(String),
     #[error("No chunking method provided: {0}")]
     NoChunkingMethod(String),
     #[error("No chunk coordinates provided: {0}")]
@@ -42,7 +40,7 @@ pub fn derive_chunks_operation(
     new_sample: String,
     region: String,
     backbone: Option<String>,
-    breakpoints: Option<String>,
+    breakpoints: Option<Vec<i64>>,
     chunk_size: Option<i64>,
 ) -> Result<(), Error> {
     let operation_conn = db_context.operations().conn();
@@ -71,39 +69,30 @@ pub fn derive_chunks_operation(
     .length(graph_conn)?;
 
     let chunk_points = if let Some(breakpoints) = breakpoints {
-        let mut result = vec![];
-        for breakpoint in breakpoints.split(",") {
-            match breakpoint.parse::<i64>() {
-                Ok(parsed_value) => result.push(parsed_value),
-                Err(_) => {
-                    return Err(DeriveChunksOperationError::InvalidBreakpoint(format!(
-                        "Invalid breakpoint: {breakpoint}"
-                    ))
-                    .into());
-                }
-            }
+        if breakpoints.is_empty() {
+            return Err(DeriveChunksOperationError::NoChunkCoordinates(
+                "No chunk coordinates provided.".to_string(),
+            )
+            .into());
         }
-
-        result.into_iter().sorted().collect::<Vec<i64>>()
+        breakpoints.into_iter().sorted().collect::<Vec<i64>>()
     } else if let Some(chunk_size) = chunk_size {
-        let chunk_count = path_length / chunk_size;
-        (0..chunk_count)
-            .map(|i| i * chunk_size)
-            .collect::<Vec<i64>>()
+        if chunk_size >= path_length {
+            vec![]
+        } else {
+            let chunk_count = path_length / chunk_size;
+            (1..=chunk_count)
+                .map(|i| i * chunk_size)
+                .filter(|&p| p < path_length)
+                .collect::<Vec<i64>>()
+        }
     } else {
         return Err(DeriveChunksOperationError::NoChunkingMethod(
             "No chunking method specified.".to_string(),
         )
         .into());
     };
-
-    if chunk_points.is_empty() {
-        return Err(DeriveChunksOperationError::NoChunkCoordinates(
-            "No chunk coordinates provided.".to_string(),
-        )
-        .into());
-    }
-    if chunk_points[chunk_points.len() - 1] > path_length {
+    if chunk_points.last().is_some_and(|&p| p > path_length) {
         return Err(DeriveChunksOperationError::PathLengthExceeded(
             "At least one chunk coordinate exceeds path length.".to_string(),
         )
@@ -165,4 +154,134 @@ pub fn derive_chunks_operation(
     println!("Derive chunks succeeded.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample};
+
+    use super::*;
+    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen, track_database};
+
+    fn setup_with_fasta(fasta: &str) -> DbContext {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+        Collection::create(conn, "test").unwrap();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fasta);
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        context
+    }
+
+    fn chunk_sequences(context: &DbContext, sample: &str) -> Vec<String> {
+        let conn = context.graph().conn();
+        let mut chunks = Sample::get_block_groups(conn, "test", sample);
+        chunks.sort_by_key(|bg| bg.name.clone());
+        chunks
+            .iter()
+            .map(|bg| {
+                BlockGroup::get_current_path(conn, &bg.id)
+                    .sequence(conn)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_breakpoints_errors() {
+        let context = setup_with_fasta("fixtures/simple.fa");
+        let result = derive_chunks_operation(
+            &context,
+            Some("test".into()),
+            Sample::DEFAULT_NAME.into(),
+            "chunks".into(),
+            "m123".into(),
+            None,
+            Some(vec![]),
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("No chunk coordinates provided"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn chunk_size_with_remainder() {
+        // simple.fa: m123 = 34 bp.  chunk_size=10 → 3 full chunks + 1 remainder of 4.
+        // Regression: the previous (0..chunk_count) range produced a 0..0 first chunk,
+        // causing an empty interval-tree query and an index-out-of-bounds panic.
+        let context = setup_with_fasta("fixtures/simple.fa");
+        derive_chunks_operation(
+            &context,
+            Some("test".into()),
+            Sample::DEFAULT_NAME.into(),
+            "chunks".into(),
+            "m123".into(),
+            None,
+            None,
+            Some(10),
+        )
+        .unwrap();
+
+        let seqs = chunk_sequences(&context, "chunks");
+        assert_eq!(seqs.len(), 4, "expected 3 full chunks + 1 remainder");
+        assert!(seqs.iter().all(|s| !s.is_empty()), "no chunk may be empty");
+        assert_eq!(seqs.concat(), "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
+    }
+
+    #[test]
+    fn chunk_size_divides_evenly() {
+        // chunk_size=17 divides 34 bp exactly → 2 chunks, no empty trailing range.
+        let context = setup_with_fasta("fixtures/simple.fa");
+        derive_chunks_operation(
+            &context,
+            Some("test".into()),
+            Sample::DEFAULT_NAME.into(),
+            "chunks".into(),
+            "m123".into(),
+            None,
+            None,
+            Some(17),
+        )
+        .unwrap();
+
+        let seqs = chunk_sequences(&context, "chunks");
+        assert_eq!(seqs.len(), 2);
+        assert!(seqs.iter().all(|s| !s.is_empty()), "no chunk may be empty");
+        assert_eq!(seqs.concat(), "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
+    }
+
+    #[test]
+    fn chunk_size_larger_than_sequence() {
+        // chunk_size >= path length → single chunk covering the whole sequence.
+        let context = setup_with_fasta("fixtures/simple.fa");
+        derive_chunks_operation(
+            &context,
+            Some("test".into()),
+            Sample::DEFAULT_NAME.into(),
+            "chunks".into(),
+            "m123".into(),
+            None,
+            None,
+            Some(100),
+        )
+        .unwrap();
+
+        let seqs = chunk_sequences(&context, "chunks");
+        assert_eq!(seqs.len(), 1);
+        assert_eq!(seqs[0], "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
+    }
 }

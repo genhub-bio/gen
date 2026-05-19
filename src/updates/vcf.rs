@@ -6,7 +6,9 @@ use std::{
 
 use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupData, PathCache, PathChange},
+    block_group::{
+        BlockGroup, BlockGroupChange, BlockGroupData, BlockGroupTreeSource, PathCache, PathChange,
+    },
     db::{DbContext, GraphConnection},
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
     file_types::FileTypes,
@@ -162,7 +164,7 @@ fn prepare_change(
     };
     PathChange {
         block_group_id: *sample_bg_id,
-        path: sample_path.clone(),
+        intervaltree_source: sample_path.clone(),
         path_accession: ids,
         start: ref_start,
         end: ref_end,
@@ -603,9 +605,37 @@ pub fn update_with_vcf(
     ));
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    let mut path_tree_cache = HashMap::new();
+    let mut block_group_tree_cache = HashMap::new();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(1000) {
-            BlockGroup::insert_changes(conn, chunk, &mut path_cache, in_place).unwrap();
+            if in_place {
+                let in_place_changes = chunk
+                    .iter()
+                    .map(|change| BlockGroupChange {
+                        block_group_id: change.block_group_id,
+                        intervaltree_source: BlockGroupTreeSource {
+                            block_group_id: change.block_group_id,
+                            remove_ambiguous_positions: true,
+                        },
+                        path_accession: change.path_accession.clone(),
+                        start: change.start,
+                        end: change.end,
+                        block: change.block.clone(),
+                        chromosome_index: change.chromosome_index,
+                        phased: change.phased,
+                        preserve_edge: change.preserve_edge,
+                    })
+                    .collect::<Vec<_>>();
+                BlockGroup::insert_changes(
+                    conn,
+                    &in_place_changes,
+                    Some(&mut block_group_tree_cache),
+                )
+                .unwrap();
+            } else {
+                BlockGroup::insert_changes(conn, chunk, Some(&mut path_tree_cache)).unwrap();
+            }
             bar.inc(chunk.len() as u64);
         }
         summary
@@ -1372,7 +1402,14 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child").unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         SampleLineage::create(conn, "reference", "child").unwrap();
 
         update_with_vcf(
@@ -1481,7 +1518,14 @@ mod tests {
         )
         .unwrap();
 
-        Sample::get_or_create(conn, "child").unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         update_with_vcf(
             &context,

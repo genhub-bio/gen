@@ -1106,7 +1106,7 @@ fn derive_chunks(
     new_sample: String,
     region: String,
     backbone: Nullable<String>,
-    breakpoints: Nullable<String>,
+    breakpoints: Vec<i32>,
     chunk_size: Nullable<i64>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
@@ -1122,7 +1122,11 @@ fn derive_chunks(
         new_sample,
         region,
         nullable_string_to_option(backbone),
-        nullable_string_to_option(breakpoints),
+        if breakpoints.is_empty() {
+            None
+        } else {
+            Some(breakpoints.into_iter().map(i64::from).collect())
+        },
         match chunk_size {
             Nullable::NotNull(value) => Some(value),
             Nullable::Null => None,

@@ -22,7 +22,6 @@ pub mod imports;
 pub mod operation_management;
 pub mod patch;
 mod progress_bar;
-pub mod region;
 #[cfg(any(test, debug_assertions))]
 pub mod test_helpers;
 pub mod theme;

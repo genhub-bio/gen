@@ -1,16 +1,18 @@
-use gen_annotations::projection::{accession_edges_to_segments, project_annotation_segments};
 pub use gen_core::region::Region;
 use gen_core::region::{RegionParseError, RegionResolutionError, RegionResolver};
-use gen_models::{
+use thiserror::Error;
+
+use crate::{
     accession::{Accession, AccessionError},
-    annotations::{Annotation, AnnotationError},
+    annotations::{
+        Annotation, AnnotationError, accession_edges_to_segments, project_annotation_segments,
+    },
     block_group::BlockGroup,
     db::GraphConnection,
     errors::PathError,
     path::Path,
     traits::Query,
 };
-use thiserror::Error;
 
 #[derive(Debug)]
 pub struct ResolvedGenRegion {
@@ -37,7 +39,7 @@ pub enum GenRegionError {
     #[error(transparent)]
     Parse(#[from] RegionParseError),
     #[error("Block group error: {0}")]
-    BlockGroup(#[from] gen_models::block_group::BlockGroupError),
+    BlockGroup(#[from] crate::block_group::BlockGroupError),
     #[error("Path error: {0}")]
     Path(#[from] PathError),
     #[error("Accession error: {0}")]
@@ -48,12 +50,6 @@ pub enum GenRegionError {
     NotFound(String),
     #[error("Region is ambiguous: {0}")]
     Ambiguous(String),
-    #[error("Invalid region range for {region}: start {start} is greater than end {end}")]
-    InvalidRange {
-        region: String,
-        start: i64,
-        end: i64,
-    },
     #[error(
         "Region {region} resolves to coordinates ({start}, {end}) outside path bounds (0-{path_length})"
     )]
@@ -286,11 +282,11 @@ fn target_from_accession(
     kind: RegionTargetKind,
     accession: Accession,
 ) -> Result<RegionTarget, GenRegionError> {
-    let path = Path::get_by_id(conn, &accession.path_id);
-    let block_group = BlockGroup::get_by_id(conn, &path.block_group_id)?;
+    let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id)?;
     if block_group.collection_name != collection_name || block_group.sample_name != sample_name {
         return Err(GenRegionError::NotFound(region.name.clone()));
     }
+    let path = BlockGroup::get_current_path(conn, &block_group.id);
 
     let (anchor_start, anchor_end) = accession_bounds(conn, &path, &accession)?;
     Ok(RegionTarget {
@@ -349,195 +345,5 @@ fn accession_bounds(
     match (start, end) {
         (Some(start), Some(end)) if start <= end => Ok((start, end)),
         _ => Err(GenRegionError::Unmappable(accession.name.clone())),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use gen_models::{annotations::add_annotation, db::DbContext, sample::Sample};
-
-    use super::*;
-    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen, track_database};
-
-    fn setup_context() -> DbContext {
-        let context = setup_gen();
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
-
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        import_fasta(
-            &context,
-            &fasta_path.to_str().unwrap().to_string(),
-            "test",
-            Sample::DEFAULT_NAME,
-            false,
-        )
-        .unwrap();
-
-        add_annotation(
-            &context,
-            "test",
-            "mreB",
-            Some("genes"),
-            Sample::DEFAULT_NAME,
-            "m123:5-15",
-        )
-        .unwrap();
-
-        context
-    }
-
-    #[test]
-    fn parses_region_name_only() {
-        assert_eq!(
-            Region::parse("m123").unwrap(),
-            Region {
-                name: "m123".to_string(),
-                start: None,
-                end: None,
-            }
-        );
-    }
-
-    #[test]
-    fn parses_region_with_start_only() {
-        assert_eq!(
-            Region::parse("m123:34").unwrap(),
-            Region {
-                name: "m123".to_string(),
-                start: Some(34),
-                end: None,
-            }
-        );
-    }
-
-    #[test]
-    fn parses_region_with_negative_range() {
-        assert_eq!(
-            Region::parse("mreB:-35--10").unwrap(),
-            Region {
-                name: "mreB".to_string(),
-                start: Some(-35),
-                end: Some(-10),
-            }
-        );
-    }
-
-    #[test]
-    fn resolves_annotation_relative_coordinates() {
-        let context = setup_context();
-        let region = Region::parse("mreB:-2-3").unwrap();
-        let resolved = resolve(
-            &region,
-            context.graph().conn(),
-            "test",
-            Sample::DEFAULT_NAME,
-        )
-        .unwrap();
-
-        assert_eq!(resolved.block_group.name, "m123");
-        assert_eq!(resolved.start, 3);
-        assert_eq!(resolved.end, 8);
-    }
-
-    #[test]
-    fn resolves_annotation_without_explicit_coordinates() {
-        let context = setup_context();
-        let region = Region::parse("mreB").unwrap();
-        let resolved = resolve(
-            &region,
-            context.graph().conn(),
-            "test",
-            Sample::DEFAULT_NAME,
-        )
-        .unwrap();
-
-        assert_eq!(resolved.block_group.name, "m123");
-        assert_eq!(resolved.start, 5);
-        assert_eq!(resolved.end, 15);
-    }
-
-    #[test]
-    fn resolves_annotation_case_insensitively() {
-        let context = setup_context();
-        let region = Region::parse("MREB").unwrap();
-        let resolved = resolve(
-            &region,
-            context.graph().conn(),
-            "test",
-            Sample::DEFAULT_NAME,
-        )
-        .unwrap();
-
-        assert_eq!(resolved.block_group.name, "m123");
-        assert_eq!(resolved.start, 5);
-        assert_eq!(resolved.end, 15);
-    }
-
-    #[test]
-    fn resolves_typed_path() {
-        let context = setup_context();
-        let region = Region::parse("m123").unwrap();
-        let resolved = resolve_path(
-            &region,
-            context.graph().conn(),
-            "test",
-            Sample::DEFAULT_NAME,
-        )
-        .unwrap();
-
-        assert_eq!(resolved.kind, ResolvedRegionKind::Path);
-        assert_eq!(resolved.path.name, "m123");
-    }
-
-    #[test]
-    fn resolves_typed_block_group() {
-        let context = setup_context();
-        let region = Region::parse("m123").unwrap();
-        let resolved = resolve_block_group(
-            &region,
-            context.graph().conn(),
-            "test",
-            Sample::DEFAULT_NAME,
-        )
-        .unwrap();
-
-        assert_eq!(resolved.kind, ResolvedRegionKind::BlockGroup);
-        assert_eq!(resolved.block_group.name, "m123");
-    }
-
-    #[test]
-    fn resolves_typed_annotation() {
-        let context = setup_context();
-        let region = Region::parse("mreB").unwrap();
-        let resolved = resolve_annotation(
-            &region,
-            context.graph().conn(),
-            "test",
-            Sample::DEFAULT_NAME,
-        )
-        .unwrap();
-
-        assert_eq!(resolved.kind, ResolvedRegionKind::Annotation);
-        assert_eq!(resolved.start, 5);
-        assert_eq!(resolved.end, 15);
-    }
-
-    #[test]
-    fn typed_resolver_does_not_cross_kinds() {
-        let context = setup_context();
-        let region = Region::parse("mreB").unwrap();
-        let err = resolve_path(
-            &region,
-            context.graph().conn(),
-            "test",
-            Sample::DEFAULT_NAME,
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, GenRegionError::NotFound(name) if name == "mreB"));
     }
 }

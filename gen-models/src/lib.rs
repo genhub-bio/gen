@@ -23,6 +23,7 @@ pub mod operations;
 pub mod path;
 pub mod path_edge;
 pub mod reference_alias;
+pub mod region;
 pub mod sample;
 pub mod sample_lineage;
 pub mod sequence;

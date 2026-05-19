@@ -345,7 +345,14 @@ mod tests {
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
 
-        Sample::create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::create(
+            conn,
+            gen_models::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                is_reference: false,
+            },
+        )
+        .unwrap();
         let block_group = BlockGroup::create(
             conn,
             gen_models::block_group::NewBlockGroup {
@@ -734,7 +741,7 @@ mod tests {
         };
         let change = PathChange {
             block_group_id,
-            path: path.clone(),
+            intervaltree_source: path.clone(),
             path_accession: None,
             start: 7,
             end: 15,
@@ -743,8 +750,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let tree = path.intervaltree(conn).unwrap();
-        BlockGroup::insert_change(conn, &change, &tree).unwrap();
+        BlockGroup::insert_change(conn, &change).unwrap();
 
         let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
         let mut node_ids = HashSet::new();

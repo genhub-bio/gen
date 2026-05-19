@@ -1,12 +1,13 @@
 use std::io::Error as IOError;
 
-use gen_models::errors::{
-    BlockGroupError, CollectionError, EdgeError, FileAdditionError, NodeError, OperationError,
-    PathError, QueryError, SampleError, SequenceError,
+use gen_models::{
+    errors::{
+        BlockGroupError, CollectionError, EdgeError, FileAdditionError, NodeError, OperationError,
+        PathError, QueryError, SampleError, SequenceError,
+    },
+    region::GenRegionError,
 };
 use thiserror::Error;
-
-use crate::region::GenRegionError;
 
 #[derive(Debug, Error)]
 pub enum FastaError {
@@ -34,13 +35,9 @@ pub enum FastaError {
     SequenceError(#[from] SequenceError),
     #[error("Region Error: {0}")]
     RegionError(#[from] GenRegionError),
-    #[error(
-        "Missing coordinates for region '{0}'. Provide them in the region name or pass both start and end."
-    )]
+    #[error("Missing coordinates for region '{0}'. Use region syntax like 'name:start-end'.")]
     MissingCoordinates(String),
-    #[error(
-        "Unsupported region type for FASTA update: {0}. Only paths and block groups are supported."
-    )]
+    #[error("Unsupported region type for FASTA update: {0}")]
     UnsupportedRegionType(String),
     #[error("Resolved path '{path_name}' was not found in target block group '{block_group_name}'")]
     MissingResolvedPath {

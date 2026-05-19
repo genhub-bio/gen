@@ -181,7 +181,7 @@ where
                             )?;
                             PathChange {
                                 block_group_id: block_group.id,
-                                path: path.clone(),
+                                intervaltree_source: path.clone(),
                                 path_accession: None,
                                 start,
                                 end,
@@ -201,7 +201,7 @@ where
                         }
                         EditType::Deletion => PathChange {
                             block_group_id: block_group.id,
-                            path: path.clone(),
+                            intervaltree_source: path.clone(),
                             path_accession: None,
                             start,
                             end,
@@ -219,8 +219,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    let tree = path.intervaltree(conn)?;
-                    BlockGroup::insert_change(conn, &change, &tree).unwrap();
+                    BlockGroup::insert_change(conn, &change).unwrap();
                 }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
@@ -301,7 +300,14 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
-        Sample::create(conn, Sample::DEFAULT_NAME).unwrap();
+        Sample::create(
+            conn,
+            gen_models::sample::NewSample {
+                name: Sample::DEFAULT_NAME,
+                is_reference: false,
+            },
+        )
+        .unwrap();
         let operation = update_with_genbank(
             &context,
             BufReader::new(file),

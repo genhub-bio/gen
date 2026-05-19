@@ -29,7 +29,7 @@ use crate::{
     operations::Operation,
     path::Path,
     path_edge::PathEdge,
-    sample::Sample,
+    sample::{NewSample, Sample},
     sample_lineage::SampleLineage,
     sequence::{NewSequence, Sequence},
     session_operations::DependencyModels,
@@ -597,7 +597,10 @@ pub fn process_changesetiter(
                 }
                 "samples" => {
                     let name = parse_string(item, pk_column);
-                    created_samples.push(Sample { name: name.clone() });
+                    created_samples.push(Sample {
+                        name: name.clone(),
+                        is_reference: parse_number(item, 1) != 0,
+                    });
                     created_samples_set.insert(name);
                 }
                 "sample_lineage" => {
@@ -657,19 +660,19 @@ pub fn process_changesetiter(
                 }
                 "accessions" => {
                     let accession_id = HashId(parse_blob(item, pk_column));
-                    let path_id = HashId(parse_blob(item, 2));
+                    let block_group_id = HashId(parse_blob(item, 2));
                     let parent_accession_id = parse_maybe_hashid(item, 3);
 
                     created_accessions.push(Accession {
                         id: accession_id,
                         name: parse_string(item, 1),
-                        path_id,
+                        block_group_id,
                         parent_accession_id,
                     });
 
                     created_accessions_set.insert(accession_id);
-                    if !created_paths_set.contains(&path_id) {
-                        previous_paths.insert(path_id);
+                    if !created_block_groups_set.contains(&block_group_id) {
+                        previous_block_groups.insert(block_group_id);
                     }
                     if let Some(id) = parent_accession_id
                         && !created_accessions_set.contains(&id)
@@ -838,7 +841,13 @@ pub fn apply_changeset(
     }
 
     for sample in dependencies.samples.iter() {
-        Sample::get_or_create(conn, &sample.name)?;
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: &sample.name,
+                is_reference: sample.is_reference,
+            },
+        )?;
     }
 
     for sequence in dependencies.sequences.iter() {
@@ -893,7 +902,7 @@ pub fn apply_changeset(
         Accession::get_or_create(
             conn,
             &accession.name,
-            &accession.path_id,
+            &accession.block_group_id,
             accession.parent_accession_id.as_ref(),
         )?;
     }
@@ -902,7 +911,13 @@ pub fn apply_changeset(
         Collection::create(conn, &collection.name)?;
     }
     for sample in &changeset.samples {
-        Sample::get_or_create(conn, &sample.name)?;
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: &sample.name,
+                is_reference: sample.is_reference,
+            },
+        )?;
     }
     for sample_lineage in &changeset.sample_lineages {
         SampleLineage::create(
@@ -971,7 +986,7 @@ pub fn apply_changeset(
         Accession::get_or_create(
             conn,
             &accession.name,
-            &accession.path_id,
+            &accession.block_group_id,
             accession.parent_accession_id.as_ref(),
         )?;
         let edges = changeset
@@ -1002,6 +1017,12 @@ pub fn apply_changeset(
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
                 ChangesetError::SqliteError(inner)
             }
+            AnnotationError::AccessionError(crate::accession::AccessionError::DatabaseError(
+                inner,
+            )) => ChangesetError::SqliteError(inner),
+            AnnotationError::AccessionError(err) => {
+                ChangesetError::SerializationError(err.to_string())
+            }
             AnnotationError::SerializationError(message) => {
                 ChangesetError::SerializationError(message)
             }
@@ -1018,6 +1039,12 @@ pub fn apply_changeset(
             AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
                 ChangesetError::SqliteError(inner)
+            }
+            AnnotationError::AccessionError(crate::accession::AccessionError::DatabaseError(
+                inner,
+            )) => ChangesetError::SqliteError(inner),
+            AnnotationError::AccessionError(err) => {
+                ChangesetError::SerializationError(err.to_string())
             }
             AnnotationError::SerializationError(message) => {
                 ChangesetError::SerializationError(message)
@@ -1048,6 +1075,12 @@ pub fn revert_changeset(
             AnnotationError::DatabaseError(inner) => ChangesetError::SqliteError(inner),
             AnnotationError::AnnotationGroupError(AnnotationGroupError::DatabaseError(inner)) => {
                 ChangesetError::SqliteError(inner)
+            }
+            AnnotationError::AccessionError(crate::accession::AccessionError::DatabaseError(
+                inner,
+            )) => ChangesetError::SqliteError(inner),
+            AnnotationError::AccessionError(err) => {
+                ChangesetError::SerializationError(err.to_string())
             }
             AnnotationError::SerializationError(message) => {
                 ChangesetError::SerializationError(message)
@@ -1270,6 +1303,7 @@ mod tests {
     use crate::{
         file_types::FileTypes,
         operations::{OperationFile, OperationInfo},
+        sample::{NewSample, Sample},
         session_operations::{end_operation, start_operation},
         test_helpers::{setup_block_group, setup_gen},
         traits::Query,
@@ -1286,6 +1320,7 @@ mod tests {
             }],
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
+                is_reference: false,
             }],
             sample_lineages: vec![SampleLineage {
                 parent_sample_name: "parent_sample".to_string(),
@@ -1349,7 +1384,7 @@ mod tests {
             accessions: vec![Accession {
                 id: HashId::pad_str(1),
                 name: "test_accession".to_string(),
-                path_id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
                 parent_accession_id: None,
             }],
             accession_edges: vec![AccessionEdge {
@@ -1452,6 +1487,7 @@ mod tests {
             }],
             samples: vec![crate::sample::Sample {
                 name: "test_sample".to_string(),
+                is_reference: false,
             }],
             sample_lineages: vec![SampleLineage {
                 parent_sample_name: "parent_sample".to_string(),
@@ -1515,7 +1551,7 @@ mod tests {
             accessions: vec![Accession {
                 id: HashId::pad_str(1),
                 name: "test_accession".to_string(),
-                path_id: HashId::pad_str(1),
+                block_group_id: HashId::pad_str(1),
                 parent_accession_id: None,
             }],
             accession_edges: vec![AccessionEdge {
@@ -1570,7 +1606,14 @@ mod tests {
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
-        let _ = Sample::create(conn, "sample-1").unwrap();
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "sample-1",
+                is_reference: false,
+            },
+        )
+        .unwrap();
         let (block_group_id, path) = setup_block_group(conn);
         let mut cache = PathCache::new(conn);
         let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
@@ -1626,10 +1669,24 @@ mod tests {
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
-        let _ = Sample::create(conn, "parent").unwrap();
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "parent",
+                is_reference: false,
+            },
+        )
+        .unwrap();
 
         let mut session = start_operation(conn);
-        let _ = Sample::create(conn, "child").unwrap();
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "child",
+                is_reference: false,
+            },
+        )
+        .unwrap();
         SampleLineage::create(conn, "parent", "child").unwrap();
 
         let operation = end_operation(
@@ -1765,7 +1822,14 @@ mod tests {
 
             let mut session = start_operation(conn);
             // make a blockgroup with an edge from our parent blockgroup
-            let _ = Sample::create(conn, "new").unwrap();
+            let _ = Sample::create(
+                conn,
+                NewSample {
+                    name: "new",
+                    is_reference: false,
+                },
+            )
+            .unwrap();
             let new_bg = BlockGroup::create(
                 conn,
                 NewBlockGroup {

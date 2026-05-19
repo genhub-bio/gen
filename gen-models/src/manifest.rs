@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     annotations::{AnnotationFile, AnnotationFileInfo},
     db::OperationsConnection,
+    errors::FileAdditionError,
     gen_models_capnp::{
         manifest, manifest_annotation_file_addition, manifest_diff, manifest_operation,
         manifest_operation_file_addition,
     },
-    operations::{FileAddition, Operation, OperationSummary},
+    operations::{FileAddition, Operation, OperationFile, OperationSummary},
     traits::Query,
 };
 
@@ -22,6 +23,9 @@ pub struct ManifestOperationFileAddition {
 pub enum ManifestOperationFileAdditionError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+
+    #[error(transparent)]
+    FileAdditionError(#[from] FileAdditionError),
 }
 
 impl<'a> Capnp<'a> for ManifestOperationFileAddition {
@@ -47,16 +51,20 @@ impl ManifestOperationFileAddition {
         conn: &OperationsConnection,
         operation_hash: &HashId,
     ) -> Result<Vec<Self>, ManifestOperationFileAdditionError> {
-        let query = "select fa.*, of.filename from file_additions fa left join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
-        let mut stmt = conn.prepare(query)?;
-        stmt.query_map(rusqlite::params![operation_hash], |row| {
-            Ok(Self {
-                file_addition: FileAddition::process_row(row),
-                filename: row.get(4)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ManifestOperationFileAdditionError::from)
+        Ok(
+            OperationFile::get_files_for_operation(conn, operation_hash)?
+                .into_iter()
+                .map(|file| Self {
+                    file_addition: FileAddition {
+                        id: file.id,
+                        asset_uri: file.asset_uri,
+                        file_type: file.file_type,
+                        checksum: file.checksum,
+                    },
+                    filename: file.filename,
+                })
+                .collect(),
+        )
     }
 }
 
