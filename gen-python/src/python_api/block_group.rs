@@ -151,6 +151,7 @@ impl PyBlockGroup {
         let graph = BlockGroup::get_graph(graph_conn, &bg_id);
         let mut ctrl = PyGraphController::new(db_path, graph);
         ctrl.block_group_id = Some(bg_id);
+        ctrl.auto_load_annotation_groups(graph_conn);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

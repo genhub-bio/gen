@@ -320,6 +320,24 @@ impl PyGraphController {
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }
 
+    pub(crate) fn auto_load_annotation_groups(&mut self, conn: &GraphConnection) {
+        let Some(bg_id) = self.block_group_id else {
+            return;
+        };
+        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id) else {
+            return;
+        };
+        let entries = load_annotation_group_entries(conn, &current_block_group);
+        let mut seen_names = HashSet::new();
+        for entry in &entries {
+            if seen_names.insert(entry.name.clone()) {
+                if let Ok(track) = self.load_group_as_track(conn, &entry.name) {
+                    self.track_annotations.push(track);
+                }
+            }
+        }
+    }
+
     fn navigate_to_span(&mut self, span: &AnnotationSpan) {
         let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
             return;
@@ -350,6 +368,7 @@ impl PyGraphController {
         let graph = BlockGroup::get_graph(conn, &bg_id);
         let mut ctrl = Self::new(db_path, graph);
         ctrl.block_group_id = Some(bg_id);
+        ctrl.auto_load_annotation_groups(conn);
         Ok(ctrl)
     }
 
