@@ -32,6 +32,16 @@ impl PyGraphNode {
         ))
     }
 
+    fn __str__(&self) -> PyResult<String> {
+        let h = format!("{}", self.node_id);
+        Ok(format!(
+            "{}:{}-{}",
+            &h[..8.min(h.len())],
+            self.sequence_start,
+            self.sequence_end
+        ))
+    }
+
     fn __hash__(&self) -> PyResult<isize> {
         // Combine all fields for a consistent hash value
         let mut hash: isize = 0;
