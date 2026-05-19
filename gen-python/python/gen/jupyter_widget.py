@@ -187,13 +187,15 @@ class GenGraphWidget(anywidget.AnyWidget):
         self._frozen = True
         self.send({"type": "freeze"})
 
-    def go_to(self, pos) -> None:
-        """Instantly move the camera to a graph position.
+    def go_to(self, target) -> None:
+        """Instantly move the camera to a graph position, locus, or annotation.
 
         Parameters
         ----------
-        pos:
-            A ``GraphPos`` obtained from ``locus.start()`` or ``locus.end()``.
+        target:
+            A ``GraphPos`` (from ``locus.start()`` / ``locus.end()``),
+            a ``GraphLocus`` (from ``repo.search()``), or
+            an ``Annotation`` object (e.g. from ``widget.list_annotations()``).
 
         Example
         -------
@@ -201,10 +203,21 @@ class GenGraphWidget(anywidget.AnyWidget):
 
             matches = repo.search(bg, "ACGT...")
             widget.go_to(matches[0].start())
+            widget.go_to(matches[0])
+
+            records = widget.list_annotations()
+            widget.go_to(records[0])
         """
         if self._frozen:
             return
-        self._controller.go_to_pos(pos)
+        from gen import Annotation, GraphLocus  # noqa: PLC0415
+
+        if isinstance(target, Annotation):
+            self._controller.go_to_annotation_obj(target)
+        elif isinstance(target, GraphLocus):
+            self._controller.go_to_locus(target)
+        else:
+            self._controller.go_to_pos(target)
         self._render()
 
     def show(self, locus, color: str | None = None) -> None:
@@ -386,29 +399,18 @@ class GenGraphWidget(anywidget.AnyWidget):
         """Return list of loaded track-panel annotation names."""
         return json.loads(self._controller.get_track_names())
 
-    def go_to_annotation(self, name: str):
-        """Navigate to the first annotation span matching ``name`` across all loaded tracks.
+    def list_annotations(self) -> list:
+        """Return all loaded annotations (track and inline) as ``Annotation`` objects.
 
-        Returns the ``GraphPos`` the camera moved to.  Raises ``KeyError`` if
-        no annotation with that name is loaded.
+        Example
+        -------
+        ::
 
-        Parameters
-        ----------
-        name : str
-            Annotation name to search for (e.g. ``"STL1"``).
-
-        Note
-        ----
-        When multiple spans share the same name the camera jumps to the first
-        one found.  Cycling through multiple matches (next/previous) is not yet
-        implemented — that will require surfacing match rank from the graph
-        controller and maintaining index state here.
+            records = widget.list_annotations()
+            mcs = next(r for r in records if r.name == "MCS")
+            widget.go_to(mcs)
         """
-        if self._frozen:
-            return
-        pos = self._controller.go_to_annotation(name)
-        self._render()
-        return pos
+        return self._controller.list_annotations()
 
     def remove_annotation_track(self, name: str) -> None:
         """Remove an annotation track panel by name."""

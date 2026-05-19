@@ -1,10 +1,7 @@
 use r#gen::{
     graphs::graph_search::GraphPos,
-    views::annotation_track::{
-        AnnotationSegment, AnnotationSpan, annotation_span_from_graph_locus,
-    },
+    views::annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
 };
-use gen_core::HashId;
 use gen_graph::GraphNode;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
@@ -135,31 +132,23 @@ impl PyGraphLocus {
 #[derive(Clone)]
 pub struct PyAnnotation {
     pub inner: AnnotationSpan,
+    pub(crate) locus: GraphLocus,
 }
 
 #[pymethods]
 impl PyAnnotation {
     #[new]
-    fn new(locus_or_loci: &Bound<'_, PyAny>, name: &str) -> PyResult<Self> {
-        if let Ok(single) = locus_or_loci.extract::<PyRef<PyGraphLocus>>() {
-            let span = annotation_span_from_graph_locus(&single.inner, name);
-            Ok(PyAnnotation { inner: span })
-        } else if let Ok(list) = locus_or_loci.extract::<Vec<PyRef<PyGraphLocus>>>() {
-            let segments: Vec<AnnotationSegment> = list
-                .iter()
-                .flat_map(|l| annotation_span_from_graph_locus(&l.inner, name).segments)
-                .collect();
-            let span = AnnotationSpan {
-                id: HashId::convert_str(name),
-                name: name.to_string(),
-                segments,
-            };
-            Ok(PyAnnotation { inner: span })
-        } else {
-            Err(pyo3::exceptions::PyTypeError::new_err(
-                "first argument must be a GraphLocus or list[GraphLocus]",
-            ))
+    fn new(locus: PyRef<PyGraphLocus>, name: &str) -> Self {
+        let span = annotation_span_from_graph_locus(&locus.inner, name);
+        PyAnnotation {
+            inner: span,
+            locus: locus.inner.clone(),
         }
+    }
+
+    #[getter]
+    fn locus(&self) -> PyGraphLocus {
+        PyGraphLocus::from_locus(self.locus.clone())
     }
 
     #[getter]
