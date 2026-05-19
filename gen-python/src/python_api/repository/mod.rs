@@ -254,6 +254,7 @@ impl PyRepository {
         let graph = BlockGroup::get_graph(graph_conn, &block_group.id);
         let mut ctrl = PyGraphController::new(db_path, graph);
         ctrl.block_group_id = Some(block_group.id);
+        ctrl.auto_load_annotation_groups(graph_conn);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
