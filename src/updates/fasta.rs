@@ -65,7 +65,6 @@ pub fn update_with_fasta(
     struct TargetBlockGroupState {
         block_group_id: HashId,
         path: gen_models::path::Path,
-        interval_tree: intervaltree::IntervalTree<i64, gen_core::NodeIntervalBlock>,
         first_node: Option<HashId>,
     }
 
@@ -73,11 +72,9 @@ pub fn update_with_fasta(
         .iter()
         .map(|target_block_group| -> Result<_, FastaError> {
             let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-            let interval_tree = path.intervaltree(conn)?;
             Ok(TargetBlockGroupState {
                 block_group_id: target_block_group.id,
                 path,
-                interval_tree,
                 first_node: None,
             })
         })
@@ -104,7 +101,7 @@ pub fn update_with_fasta(
 
                 let path_change = PathChange {
                     block_group_id: state.block_group_id,
-                    path: state.path.clone(),
+                    intervaltree_source: state.path.clone(),
                     path_accession: None,
                     start: start_coordinate,
                     end: end_coordinate,
@@ -114,7 +111,7 @@ pub fn update_with_fasta(
                     preserve_edge: true,
                 };
 
-                BlockGroup::insert_change(conn, &path_change, &state.interval_tree).unwrap();
+                BlockGroup::insert_change(conn, &path_change).unwrap();
                 if index == 0 {
                     state.first_node = Some(node_id);
                 } else if state.first_node.is_some() {
@@ -149,7 +146,7 @@ pub fn update_with_fasta(
 
                 let path_change = PathChange {
                     block_group_id: state.block_group_id,
-                    path: state.path.clone(),
+                    intervaltree_source: state.path.clone(),
                     path_accession: None,
                     start: start_coordinate,
                     end: end_coordinate,
@@ -159,7 +156,7 @@ pub fn update_with_fasta(
                     preserve_edge: true,
                 };
 
-                BlockGroup::insert_change(conn, &path_change, &state.interval_tree).unwrap();
+                BlockGroup::insert_change(conn, &path_change).unwrap();
                 if index == 0 {
                     state.first_node = Some(node_id);
                 } else if state.first_node.is_some() {

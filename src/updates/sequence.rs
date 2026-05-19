@@ -60,7 +60,6 @@ pub fn update_with_sequence(
 
     for target_block_group in &target_block_groups {
         let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-        let interval_tree = path.intervaltree(conn)?;
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
@@ -75,7 +74,7 @@ pub fn update_with_sequence(
 
             let path_change = PathChange {
                 block_group_id: target_block_group.id,
-                path: path.clone(),
+                intervaltree_source: path.clone(),
                 path_accession: None,
                 start: start_coordinate,
                 end: end_coordinate,
@@ -85,7 +84,7 @@ pub fn update_with_sequence(
                 preserve_edge: true,
             };
 
-            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
+            BlockGroup::insert_change(conn, &path_change).unwrap();
             node_id
         } else {
             let seq = Sequence::new()
@@ -116,7 +115,7 @@ pub fn update_with_sequence(
 
             let path_change = PathChange {
                 block_group_id: target_block_group.id,
-                path: path.clone(),
+                intervaltree_source: path.clone(),
                 path_accession: None,
                 start: start_coordinate,
                 end: end_coordinate,
@@ -126,7 +125,7 @@ pub fn update_with_sequence(
                 preserve_edge: true,
             };
 
-            BlockGroup::insert_change(conn, &path_change, &interval_tree).unwrap();
+            BlockGroup::insert_change(conn, &path_change).unwrap();
             node_id
         };
 
