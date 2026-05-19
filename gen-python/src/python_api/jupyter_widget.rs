@@ -348,6 +348,38 @@ impl PyGraphController {
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
     }
+
+    fn resolve_color(&mut self, color: Option<&str>) -> PyResult<Color> {
+        match color {
+            None => Ok(self.controller.next_accent_color()),
+            Some(s) => match s {
+                "red" => Ok(Color::Red),
+                "green" => Ok(Color::Green),
+                "yellow" => Ok(Color::Yellow),
+                "blue" => Ok(Color::Blue),
+                "magenta" => Ok(Color::Magenta),
+                "cyan" => Ok(Color::Cyan),
+                "white" => Ok(Color::White),
+                hex if hex.starts_with('#') => parse_hex_color(hex),
+                other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown color {other:?}"
+                ))),
+            },
+        }
+    }
+
+    fn highlight_span(&mut self, span: &AnnotationSpan, color: Option<&str>) -> PyResult<()> {
+        let c = self.resolve_color(color)?;
+        let style = PathStyle::new(c)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        if let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) {
+            highlight_match_range(&mut self.controller, &locus, style);
+        }
+        self.inline_annotations
+            .push((String::new(), vec![(span.clone(), String::new())], style));
+        Ok(())
+    }
 }
 
 #[pymethods]
@@ -533,33 +565,8 @@ impl PyGraphController {
     /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
     /// next unused theme accent colour (slots 0x08–0x0F) is chosen automatically.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
-        use ratatui::style::Color;
-        let c = match color {
-            None => self.controller.next_accent_color(),
-            Some(s) => match s {
-                "red" => Color::Red,
-                "green" => Color::Green,
-                "yellow" => Color::Yellow,
-                "blue" => Color::Blue,
-                "magenta" => Color::Magenta,
-                "cyan" => Color::Cyan,
-                "white" => Color::White,
-                hex if hex.starts_with('#') => parse_hex_color(hex)?,
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown color {other:?}"
-                    )));
-                }
-            },
-        };
-        let style = PathStyle::new(c)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        highlight_match_range(&mut self.controller, &locus.inner, style);
         let span = annotation_span_from_graph_locus(&locus.inner, "");
-        self.inline_annotations
-            .push((String::new(), vec![(span, String::new())], style));
-        Ok(())
+        self.highlight_span(&span, color)
     }
 
     /// Remove all highlights from the graph.
@@ -592,26 +599,7 @@ impl PyGraphController {
             )
         })?;
 
-        use ratatui::style::Color;
-        let highlight_color = match color {
-            None => self.controller.next_accent_color(),
-            Some(s) => match s {
-                "red" => Color::Red,
-                "green" => Color::Green,
-                "yellow" => Color::Yellow,
-                "blue" => Color::Blue,
-                "magenta" => Color::Magenta,
-                "cyan" => Color::Cyan,
-                "white" => Color::White,
-                hex if hex.starts_with('#') => parse_hex_color(hex)?,
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown color {other:?}"
-                    )));
-                }
-            },
-        };
-
+        let highlight_color = self.resolve_color(color)?;
         let conn = self.open_conn()?;
 
         let path = BlockGroup::get_current_path(&conn, &block_group_id);
@@ -763,6 +751,17 @@ impl PyGraphController {
     /// Navigate to an `Annotation` object.
     pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation) {
         self.navigate_to_span(&annotation.inner);
+    }
+
+    /// Highlight an `Annotation` on the graph as a nameless inline annotation,
+    /// so the locus is coloured without duplicating the track label.
+    pub fn highlight_annotation_obj(
+        &mut self,
+        annotation: &PyAnnotation,
+        color: Option<&str>,
+    ) -> PyResult<()> {
+        let nameless = annotation_span_from_graph_locus(&annotation.locus, "");
+        self.highlight_span(&nameless, color)
     }
 
     /// Navigate to a `GraphLocus`.
