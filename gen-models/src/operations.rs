@@ -371,6 +371,29 @@ pub struct OperationFile {
     pub checksum_override: Option<HashId>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct OperationFileInfo {
+    pub id: HashId,
+    pub filename: String,
+    pub file_path: String,
+    pub asset_uri: String,
+    pub file_type: FileTypes,
+    pub checksum: HashId,
+}
+
+impl OperationFileInfo {
+    fn from_parts(file_addition: FileAddition, filename: String) -> Self {
+        Self {
+            id: file_addition.id,
+            file_path: filename.clone(),
+            filename,
+            asset_uri: file_addition.asset_uri,
+            file_type: file_addition.file_type,
+            checksum: file_addition.checksum,
+        }
+    }
+}
+
 impl OperationFile {
     pub fn new(file_path: impl Into<String>) -> Self {
         let file_path = file_path.into();
@@ -396,6 +419,53 @@ impl OperationFile {
     pub fn set_checksum_override(mut self, checksum: HashId) -> Self {
         self.checksum_override = Some(checksum);
         self
+    }
+
+    pub fn get_files_for_operation(
+        conn: &OperationsConnection,
+        operation_hash: &HashId,
+    ) -> Vec<OperationFileInfo> {
+        let query = "select fa.*, of.filename from file_additions fa join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash = ?1";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map(params![operation_hash], |row| {
+                Ok(OperationFileInfo::from_parts(
+                    FileAddition::process_row(row),
+                    row.get(4)?,
+                ))
+            })
+            .unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+    pub fn query_by_operations(
+        conn: &OperationsConnection,
+        operations: &[HashId],
+    ) -> Result<HashMap<HashId, Vec<OperationFileInfo>>, FileAdditionError> {
+        let query = "select fa.*, of.filename, of.operation_hash from file_additions fa join operation_files of on (fa.id = of.file_addition_id) where of.operation_hash in rarray(?1)";
+        let mut stmt = conn.prepare(query).unwrap();
+        let rows = stmt
+            .query_map(
+                params![Rc::new(
+                    operations
+                        .iter()
+                        .map(|h| Value::from(*h))
+                        .collect::<Vec<Value>>()
+                )],
+                |row| {
+                    Ok((
+                        OperationFileInfo::from_parts(FileAddition::process_row(row), row.get(4)?),
+                        row.get::<_, HashId>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        rows.into_iter()
+            .try_fold(HashMap::new(), |mut acc: HashMap<_, Vec<_>>, row| {
+                let (item, hash) = row?;
+                acc.entry(hash).or_default().push(item);
+                Ok(acc)
+            })
     }
 }
 
@@ -2848,20 +2918,61 @@ mod tests {
         )
         .unwrap();
 
-        let mut stmt = operation_conn
-            .prepare(
-                "select filename from operation_files where operation_hash = ?1 order by filename",
-            )
-            .unwrap();
-        let filenames = stmt
-            .query_map([operation.hash], |row| row.get::<_, String>(0))
-            .unwrap()
-            .map(|row| row.unwrap())
-            .collect::<Vec<_>>();
+        let mut operation_files =
+            OperationFile::get_files_for_operation(operation_conn, &operation.hash);
+        operation_files.sort_by(|a, b| a.filename.cmp(&b.filename));
 
         assert_eq!(
-            filenames,
-            vec!["alpha.fa".to_string(), "beta.fa".to_string()]
+            operation_files
+                .iter()
+                .map(|file| file.filename.clone())
+                .collect::<Vec<_>>(),
+            vec!["alpha.fa".to_string(), "beta.fa".to_string()],
         );
+        assert_eq!(operation_files[0].id, operation_files[1].id);
+        assert_eq!(operation_files[0].checksum, operation_files[1].checksum);
+    }
+
+    #[test]
+    fn test_operation_file_query_by_operations_includes_filename_and_asset_metadata() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
+
+        let db_uuid = metadata::get_db_uuid(graph_conn);
+        GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
+        Branch::get_or_create(operation_conn, "main").unwrap();
+        OperationState::set_branch(operation_conn, "main");
+
+        let outside_dir = tempfile::tempdir().unwrap();
+        let alpha_path = outside_dir.path().join("alpha.fa");
+        let beta_path = outside_dir.path().join("beta.fa");
+        fs::write(&alpha_path, "shared contents").unwrap();
+        fs::write(&beta_path, "shared contents").unwrap();
+
+        let operation_1 =
+            add_files_operation(&context, &[alpha_path.to_string_lossy().to_string()], None)
+                .unwrap();
+        let operation_2 =
+            add_files_operation(&context, &[beta_path.to_string_lossy().to_string()], None)
+                .unwrap();
+
+        let files_by_operation = OperationFile::query_by_operations(
+            operation_conn,
+            &[operation_1.hash, operation_2.hash],
+        )
+        .unwrap();
+
+        let alpha = files_by_operation.get(&operation_1.hash).unwrap();
+        let beta = files_by_operation.get(&operation_2.hash).unwrap();
+
+        assert_eq!(alpha[0].filename, "alpha.fa");
+        assert_eq!(alpha[0].file_path, "alpha.fa");
+        assert_eq!(beta[0].filename, "beta.fa");
+        assert_eq!(beta[0].file_path, "beta.fa");
+        assert!(alpha[0].asset_uri.ends_with(".fa"));
+        assert!(beta[0].asset_uri.ends_with(".fa"));
+        assert_eq!(alpha[0].id, beta[0].id);
+        assert_eq!(alpha[0].checksum, beta[0].checksum);
     }
 }
