@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     annotations::{AnnotationFile, AnnotationFileInfo},
     db::OperationsConnection,
+    errors::FileAdditionError,
     gen_models_capnp::{
         manifest, manifest_annotation_file_addition, manifest_diff, manifest_operation,
         manifest_operation_file_addition,
@@ -22,6 +23,9 @@ pub struct ManifestOperationFileAddition {
 pub enum ManifestOperationFileAdditionError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+
+    #[error(transparent)]
+    FileAdditionError(#[from] FileAdditionError),
 }
 
 impl<'a> Capnp<'a> for ManifestOperationFileAddition {
@@ -47,18 +51,20 @@ impl ManifestOperationFileAddition {
         conn: &OperationsConnection,
         operation_hash: &HashId,
     ) -> Result<Vec<Self>, ManifestOperationFileAdditionError> {
-        Ok(OperationFile::get_files_for_operation(conn, operation_hash)
-            .into_iter()
-            .map(|file| Self {
-                file_addition: FileAddition {
-                    id: file.id,
-                    asset_uri: file.asset_uri,
-                    file_type: file.file_type,
-                    checksum: file.checksum,
-                },
-                filename: file.filename,
-            })
-            .collect())
+        Ok(
+            OperationFile::get_files_for_operation(conn, operation_hash)?
+                .into_iter()
+                .map(|file| Self {
+                    file_addition: FileAddition {
+                        id: file.id,
+                        asset_uri: file.asset_uri,
+                        file_type: file.file_type,
+                        checksum: file.checksum,
+                    },
+                    filename: file.filename,
+                })
+                .collect(),
+        )
     }
 }
 
