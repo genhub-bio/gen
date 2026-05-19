@@ -220,13 +220,14 @@ class GenGraphWidget(anywidget.AnyWidget):
             self._controller.go_to_pos(target)
         self._render()
 
-    def show(self, locus, color: str | None = None) -> None:
-        """Navigate to and highlight a graph locus in one call.
+    def show(self, target, color: str | None = None) -> None:
+        """Navigate to and highlight a graph locus or annotation in one call.
 
         Parameters
         ----------
-        locus:
-            A ``GraphLocus`` returned by ``repo.search()``.
+        target:
+            A ``GraphLocus`` returned by ``repo.search()``, or an ``Annotation``
+            object (e.g. from ``widget.list_annotations()``).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -239,11 +240,20 @@ class GenGraphWidget(anywidget.AnyWidget):
 
             matches = repo.search(bg, "ACGT...")
             widget.show(matches[0])
+
+            records = widget.list_annotations()
+            widget.show(records[0])
         """
         if self._frozen:
             return
-        self._controller.go_to_pos(locus.start())
-        self._controller.highlight_match(locus, color)
+        from gen import Annotation  # noqa: PLC0415
+
+        if isinstance(target, Annotation):
+            self._controller.go_to_annotation_obj(target)
+            self._controller.highlight_annotation_obj(target, color)
+        else:
+            self._controller.go_to_pos(target.start())
+            self._controller.highlight_match(target, color)
         self._render()
 
     def highlight_match(self, locus, color: str | None = None) -> None:
@@ -399,19 +409,6 @@ class GenGraphWidget(anywidget.AnyWidget):
         """Return list of loaded track-panel annotation names."""
         return json.loads(self._controller.get_track_names())
 
-    def list_annotations(self) -> list:
-        """Return all loaded annotations (track and inline) as ``Annotation`` objects.
-
-        Example
-        -------
-        ::
-
-            records = widget.list_annotations()
-            mcs = next(r for r in records if r.name == "MCS")
-            widget.go_to(mcs)
-        """
-        return self._controller.list_annotations()
-
     def remove_annotation_track(self, name: str) -> None:
         """Remove an annotation track panel by name."""
         if self._frozen:
@@ -454,6 +451,19 @@ class GenGraphWidget(anywidget.AnyWidget):
     def inline_annotations(self) -> list:
         """Return list of inline annotation names currently displayed."""
         return json.loads(self._controller.get_inline_annotation_names())
+
+    def list_annotations(self) -> list:
+        """Return all loaded annotations (track and inline) as ``Annotation`` objects.
+
+        Example
+        -------
+        ::
+
+            records = widget.list_annotations()
+            mcs = next(r for r in records if r.name == "MCS")
+            widget.go_to(mcs)
+        """
+        return self._controller.list_annotations()
 
     def remove_annotation(self, name: str) -> None:
         """Remove all inline annotations with the given name.
