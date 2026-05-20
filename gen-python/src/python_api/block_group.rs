@@ -79,7 +79,7 @@ impl PyBlockGroup {
 
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "BlockGroup({}, {}, {}, {})",
+            "BlockGroup({}, collection={:?}, sample={:?}, name={:?})",
             self.id, self.collection_name, self.sample_name, self.name
         ))
     }

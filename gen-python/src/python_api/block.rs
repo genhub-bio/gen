@@ -32,20 +32,18 @@ impl PyBlock {
     }
 
     fn __repr__(&self) -> PyResult<String> {
+        let h = format!("{}", self.node_id);
+        let hash8 = &h[..8.min(h.len())];
         Ok(format!(
-            "Block({}, {}, {})",
-            self.node_id, self.sequence_start, self.sequence_end
+            "Block({}[{}:{}])",
+            hash8, self.sequence_start, self.sequence_end
         ))
     }
 
     fn __str__(&self) -> PyResult<String> {
         let h = format!("{}", self.node_id);
-        Ok(format!(
-            "{}:{}-{}",
-            &h[..8.min(h.len())],
-            self.sequence_start,
-            self.sequence_end
-        ))
+        let hash8 = &h[..8.min(h.len())];
+        Ok(format!("{}[{}:{}]", hash8, self.sequence_start, self.sequence_end))
     }
 
     fn __hash__(&self) -> PyResult<isize> {

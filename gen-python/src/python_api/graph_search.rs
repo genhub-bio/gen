@@ -44,13 +44,11 @@ impl PyGraphPos {
 
     fn __repr__(&self) -> String {
         let n = self.inner.block;
-        let hash = format!("{}", n.node_id);
+        let h = format!("{}", n.node_id);
+        let hash8 = &h[..8.min(h.len())];
         format!(
-            "GraphPos({}[{}..{}] +{})",
-            &hash[..8],
-            n.sequence_start,
-            n.sequence_end,
-            self.inner.offset
+            "GraphPos({}[{}:{}][{}])",
+            hash8, n.sequence_start, n.sequence_end, self.inner.offset
         )
     }
 
@@ -143,17 +141,20 @@ impl PyGraphLocus {
             .iter()
             .map(|s| {
                 let h = format!("{}", s.block.node_id);
-                format!(
-                    "{}:{}-{}:{}-{}",
-                    &h[..8.min(h.len())],
-                    s.block.sequence_start,
-                    s.block.sequence_end,
-                    s.start,
-                    s.end
-                )
+                let hash8 = &h[..8.min(h.len())];
+                let block_len = (s.block.sequence_end - s.block.sequence_start) as usize;
+                let full_width = s.start == 0 && s.end == block_len;
+                if full_width {
+                    format!("{}[{}:{}][:]", hash8, s.block.sequence_start, s.block.sequence_end)
+                } else {
+                    format!(
+                        "{}[{}:{}][{}:{}]",
+                        hash8, s.block.sequence_start, s.block.sequence_end, s.start, s.end
+                    )
+                }
             })
             .collect();
-        format!("GraphLocus([{}], strand={})", segs.join(", "), strand)
+        format!("GraphLocus([{}], strand='{}')", segs.join(", "), strand)
     }
 
     fn __str__(&self) -> String {
@@ -163,28 +164,20 @@ impl PyGraphLocus {
             .iter()
             .map(|s| {
                 let h = format!("{}", s.block.node_id);
+                let hash8 = &h[..8.min(h.len())];
                 let block_len = (s.block.sequence_end - s.block.sequence_start) as usize;
                 let full_width = s.start == 0 && s.end == block_len;
                 if full_width {
-                    format!(
-                        "{}:{}-{}:",
-                        &h[..8.min(h.len())],
-                        s.block.sequence_start,
-                        s.block.sequence_end,
-                    )
+                    format!("{}[{}:{}][:]", hash8, s.block.sequence_start, s.block.sequence_end)
                 } else {
                     format!(
-                        "{}:{}-{}:{}-{}",
-                        &h[..8.min(h.len())],
-                        s.block.sequence_start,
-                        s.block.sequence_end,
-                        s.start,
-                        s.end
+                        "{}[{}:{}][{}:{}]",
+                        hash8, s.block.sequence_start, s.block.sequence_end, s.start, s.end
                     )
                 }
             })
             .collect();
-        let list = format!("[{}]", segs.join(", "));
+        let list = segs.join(", ");
         match self.inner.strand {
             Strand::Reverse => format!("rc({})", list),
             _ => list,
