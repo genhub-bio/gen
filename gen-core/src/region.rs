@@ -50,6 +50,26 @@ pub trait RegionResolver: Sized {
 }
 
 impl Region {
+    /// Parse a region string.
+    ///
+    /// Supported forms:
+    /// - `name`
+    /// - `name:position`
+    /// - `name:start-end`
+    /// - `name:start..`
+    /// - `name:..end`
+    /// - `name:..`
+    ///
+    /// Examples:
+    /// - `chr1`
+    /// - `chr1:100`
+    /// - `chr1:100-200`
+    /// - `chr1:100..`
+    /// - `chr1:..200`
+    /// - `mreB:-35--10`
+    ///
+    /// A single position like `chr1:100` is parsed as an exact point with
+    /// `start == end == 100`. Open-ended ranges must use `..`.
     pub fn parse(region_string: &str) -> Result<Self, RegionParseError> {
         let (name, coordinates) = match region_string.split_once(':') {
             Some((name, coordinates)) => (name.trim(), Some(coordinates.trim())),

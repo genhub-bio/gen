@@ -245,7 +245,14 @@ fn resolve_target(
         (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
     };
 
-    if start < 0 || end > target.feature_length {
+    let out_of_bounds = match target.kind {
+        RegionTargetKind::Path | RegionTargetKind::BlockGroup => {
+            start < 0 || end > target.feature_length
+        }
+        RegionTargetKind::Annotation | RegionTargetKind::Accession => end > target.feature_length,
+    };
+
+    if out_of_bounds {
         return Err(GenRegionError::OutOfBounds {
             region: region.to_string(),
             start,
@@ -310,7 +317,16 @@ impl ResolvedGenRegion {
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => (start_offset, end_offset),
         };
 
-        if start < 0 || end > self.feature_length {
+        let out_of_bounds = match self.kind {
+            ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
+                start < 0 || end > self.feature_length
+            }
+            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {
+                end > self.feature_length
+            }
+        };
+
+        if out_of_bounds {
             return Err(GenRegionError::OutOfBounds {
                 region: self
                     .path
@@ -487,15 +503,8 @@ mod tests {
 
             let negative =
                 resolve_accession(&Region::parse("mreB:-5-5").unwrap(), &conn, "test", "test")
-                    .unwrap_err();
-            assert!(matches!(
-                negative,
-                GenRegionError::OutOfBounds {
-                    start: -5,
-                    end: 5,
-                    ..
-                }
-            ));
+                    .unwrap();
+            assert_eq!((negative.start, negative.end), (-5, 5));
 
             let wrap =
                 resolve_accession(&Region::parse("mreB:15-5").unwrap(), &conn, "test", "test")
@@ -551,15 +560,8 @@ mod tests {
                 "test",
                 "test",
             )
-            .unwrap_err();
-            assert!(matches!(
-                negative,
-                GenRegionError::OutOfBounds {
-                    start: -5,
-                    end: 5,
-                    ..
-                }
-            ));
+            .unwrap();
+            assert_eq!((negative.start, negative.end), (-5, 5));
 
             let wrap = resolve_annotation(
                 &Region::parse("gene-mreB:15-5").unwrap(),
