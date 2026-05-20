@@ -6,14 +6,14 @@ use std::{
     path::{Path as FsPath, PathBuf},
 };
 
-use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
+use gen_annotations::{
+    projection::accession_edges_to_segments as projection_accession_edges_to_segments,
+    translate::{bed::translate_bed, gff::translate_gff},
+};
 use gen_core::{HashId, Strand, Workspace};
 use gen_models::{
-    accession::Accession,
-    annotations::{
-        Annotation, AnnotationError,
-        accession_edges_to_segments as model_accession_edges_to_segments,
-    },
+    accession::{Accession, AccessionEdge},
+    annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
     file_types::FileTypes,
@@ -29,10 +29,8 @@ use crate::views::{
     annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
 };
 
-fn accession_edges_to_segments(
-    edges: &[gen_models::accession::AccessionEdge],
-) -> Vec<AnnotationSegment> {
-    model_accession_edges_to_segments(edges)
+fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
+    projection_accession_edges_to_segments(edges)
         .into_iter()
         .map(|segment| AnnotationSegment {
             node_id: segment.node_id,

@@ -10,14 +10,14 @@ use std::{
 };
 
 use gb_io::{self, seq::Location};
+use gen_annotations::projection::{
+    AnnotationSegment, accession_edges_to_segments, project_annotation_segments,
+};
 use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
     accession::Accession,
-    annotations::{
-        Annotation, AnnotationSegment, GenBankLocationOperator, accession_edges_to_segments,
-        project_annotation_segments,
-    },
+    annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
     errors::{AnnotationError, PathError, SequenceError},

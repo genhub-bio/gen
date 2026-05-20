@@ -6,13 +6,14 @@ use std::{
 };
 
 use gb_io::reader;
+use gen_annotations::projection::AnnotationSegment;
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     range::{Range, merge_ordered_items},
 };
 use gen_models::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
-    annotations::{Annotation, AnnotationSegment},
+    annotations::Annotation,
     block_group::{BlockGroup, NewBlockGroup, PathChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -705,10 +706,9 @@ where
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
+    use gen_annotations::projection::accession_edges_to_segments;
     use gen_models::{
-        annotations::{
-            Annotation, AnnotationGroup, GenBankLocationOperator, accession_edges_to_segments,
-        },
+        annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
         operations::OperationFile,
         traits::Query,
