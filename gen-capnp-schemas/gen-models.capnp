@@ -230,6 +230,7 @@ struct ManifestOperation {
 struct ManifestOperationFileAddition {
   fileAddition @0 :FileAddition;
   filename @1 :Text;
+  filePath @2 :Text;
 }
 
 struct ManifestAnnotationFileAddition {

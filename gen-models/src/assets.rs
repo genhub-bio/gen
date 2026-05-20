@@ -393,12 +393,7 @@ impl AssetUri for LocalAssetUri {
         checksum: &HashId,
         file_type: FileTypes,
     ) -> Result<String, FileAdditionError> {
-        let relative_file_path = Self::stored_relative_path(
-            workspace,
-            &self.resolved_source_file_path(workspace)?,
-            checksum,
-            file_type,
-        )?;
+        let relative_file_path = Self::asset_relative_path(workspace, checksum, file_type)?;
         Ok(Self::asset_uri(&relative_file_path))
     }
 
@@ -460,6 +455,14 @@ impl LocalAssetUri {
         asset_uri.starts_with(Self::SCHEME)
     }
 
+    pub fn has_uri_scheme(path_or_uri: &str) -> bool {
+        path_or_uri.contains("://")
+    }
+
+    pub fn is_local_path_or_file_uri(path_or_uri: &str) -> bool {
+        Self::is_file_uri(path_or_uri) || !Self::has_uri_scheme(path_or_uri)
+    }
+
     pub fn asset_uri(path: &str) -> String {
         let path = path.strip_prefix('/').unwrap_or(path);
         if Self::is_file_uri(path) {
@@ -473,6 +476,59 @@ impl LocalAssetUri {
         asset_uri
             .strip_prefix(Self::SCHEME)
             .map(ToString::to_string)
+    }
+
+    pub fn operation_file_path(
+        workspace: &Workspace,
+        path_or_uri: &str,
+        checksum: &HashId,
+        file_type: FileTypes,
+    ) -> Result<String, FileAdditionError> {
+        let source_path = if Self::is_file_uri(path_or_uri) {
+            Self::resolve_source_path(workspace, path_or_uri)?
+        } else {
+            Self::resolve_input_source_path(workspace, path_or_uri)?
+        };
+        Self::stored_relative_path(workspace, &source_path, checksum, file_type)
+    }
+
+    /// Checks whether a relative path is in the .gen/assets directory of a workspace.
+    pub fn is_asset_relative_path(
+        workspace: &Workspace,
+        relative_path: &str,
+    ) -> Result<bool, FileAdditionError> {
+        let repo_root = workspace.repo_root()?;
+        let asset_dir = workspace.asset_dir()?;
+        let asset_relative_dir =
+            asset_dir
+                .strip_prefix(&repo_root)
+                .map_err(|_| FileAdditionError::PathOutsideRepo {
+                    path: asset_dir.clone(),
+                    repo_root: repo_root.clone(),
+                })?;
+
+        let candidate = if relative_path.is_empty() {
+            PathBuf::new()
+        } else {
+            Self::sanitize_relative_path(Path::new(relative_path))?
+        };
+
+        Ok(candidate.starts_with(asset_relative_dir))
+    }
+
+    /// Given a workspace and a relative path, try to safely give a destination path to copy
+    /// the asset into
+    pub fn repo_relative_destination_path(
+        workspace: &Workspace,
+        relative_path: &str,
+    ) -> Result<PathBuf, FileAdditionError> {
+        let sanitized = if relative_path.is_empty() {
+            PathBuf::new()
+        } else {
+            Self::sanitize_relative_path(Path::new(relative_path))?
+        };
+
+        Ok(workspace.repo_root()?.join(sanitized))
     }
 
     fn file_path(&self) -> &str {
@@ -513,9 +569,17 @@ impl LocalAssetUri {
 
     fn resolve_input_source_path(
         workspace: &Workspace,
-        path_or_uri: &str,
+        file_path_or_uri: &str,
     ) -> Result<PathBuf, FileAdditionError> {
-        let file_path = Self::path_from_uri(path_or_uri).unwrap_or_else(|| path_or_uri.to_string());
+        if !Self::is_local_path_or_file_uri(file_path_or_uri) {
+            return Err(FileAdditionError::FileReadError(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported non-local uri: {file_path_or_uri}"),
+            )));
+        }
+
+        let file_path =
+            Self::path_from_uri(file_path_or_uri).unwrap_or_else(|| file_path_or_uri.to_string());
         if file_path.is_empty() {
             return Ok(PathBuf::new());
         }
@@ -1104,6 +1168,21 @@ mod tests {
         )
         .expect_err("expected absolute asset uri to be rejected");
         assert!(matches!(err, FileAdditionError::PathOutsideRepo { .. }));
+    }
+
+    #[test]
+    fn test_new_for_workspace_rejects_non_local_uri() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+
+        let err = LocalAssetUri::new_for_workspace(workspace, "https://example.com/reference.fa")
+            .err()
+            .expect("expected non-local uri to be rejected");
+        assert!(matches!(err, FileAdditionError::FileReadError(_)));
+        assert!(
+            err.to_string()
+                .contains("unsupported non-local uri: https://example.com/reference.fa")
+        );
     }
 
     #[cfg(unix)]

@@ -17,6 +17,7 @@ use crate::{
 pub struct ManifestOperationFileAddition {
     pub file_addition: FileAddition,
     pub filename: String,
+    pub file_path: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,12 +37,14 @@ impl<'a> Capnp<'a> for ManifestOperationFileAddition {
         let mut file_addition_builder = builder.reborrow().init_file_addition();
         self.file_addition.write_capnp(&mut file_addition_builder);
         builder.set_filename(&self.filename);
+        builder.set_file_path(&self.file_path);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
         Self {
             file_addition: FileAddition::read_capnp(reader.get_file_addition().unwrap()),
             filename: reader.get_filename().unwrap().to_string().unwrap(),
+            file_path: reader.get_file_path().unwrap().to_string().unwrap(),
         }
     }
 }
@@ -62,6 +65,7 @@ impl ManifestOperationFileAddition {
                         checksum: file.checksum,
                     },
                     filename: file.filename,
+                    file_path: file.file_path,
                 })
                 .collect(),
         )
@@ -496,6 +500,7 @@ mod tests {
                     checksum: HashId([2u8; 32]),
                 },
                 filename: "file.fa".to_string(),
+                file_path: "fixtures/file.fa".to_string(),
             }],
             annotation_file_additions: vec![ManifestAnnotationFileAddition {
                 file_addition: FileAddition {

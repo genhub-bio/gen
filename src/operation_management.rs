@@ -14,6 +14,7 @@ use gen_core::{
 };
 use gen_models::{
     annotations::{AnnotationFile, AnnotationFileError},
+    assets::LocalAssetUri,
     changesets::{apply_changeset, revert_changeset},
     db::{DbContext, OperationsConnection},
     errors::{BranchError, ChangesetError, FileAdditionError, OperationError, RemoteError},
@@ -30,6 +31,7 @@ use gen_models::{
     session_operations::{end_operation, start_operation},
     traits::*,
 };
+use log::info;
 use petgraph::Direction;
 use reqwest::blocking::{Client, multipart};
 use rusqlite::{self, Error as SQLError};
@@ -512,7 +514,6 @@ fn connect_file_remote(
 
     Ok((Workspace::new(remote_path), remote_op_conn))
 }
-
 fn apply_operations_to_remote(
     local_context: &DbContext,
     remote_op_conn: &OperationsConnection,
@@ -567,6 +568,40 @@ fn apply_operations_to_remote(
                         dst_path.to_string_lossy().to_string(),
                     )
                 })?;
+
+                // This is materializing the file in the directory. If file_addition file_path
+                // will always be the asset_dir path, while file_addition.file_path can be like
+                // fastas/hg19.fa. So if we are not in the asset_dir, we copy it out
+                if file_addition.file_path != file_addition.file_addition.file_path()
+                    && LocalAssetUri::is_asset_relative_path(
+                        remote_workspace,
+                        file_addition.file_addition.file_path(),
+                    )?
+                {
+                    let user_dst_path = LocalAssetUri::repo_relative_destination_path(
+                        remote_workspace,
+                        &file_addition.file_path,
+                    )
+                    .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
+                    if user_dst_path.exists() {
+                        info!(
+                            "Skipping copy for existing file {}",
+                            user_dst_path.to_string_lossy()
+                        );
+                    } else {
+                        if let Some(parent) = user_dst_path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+
+                        fs::copy(&dst_path, &user_dst_path).map_err(|_| {
+                            RemoteOperationError::FileTransferError(
+                                file_addition.file_path.clone(),
+                                dst_path.to_string_lossy().to_string(),
+                                user_dst_path.to_string_lossy().to_string(),
+                            )
+                        })?;
+                    }
+                }
             }
         }
 
@@ -650,6 +685,7 @@ fn apply_operations_to_remote(
                         &operation.hash,
                         &remote_file_addition.id,
                         &file_addition.filename,
+                        &file_addition.file_path,
                     )?;
                 }
                 for annotation_file in &manifest_op.annotation_file_additions {
@@ -1107,6 +1143,7 @@ fn ingest_manifest_operation(
                     &operation.hash,
                     &local_file_addition.id,
                     &file_addition.filename,
+                    &file_addition.file_path,
                 )?;
             }
             for annotation_file in &manifest_operation.annotation_file_additions {
@@ -1221,6 +1258,36 @@ fn copy_operation_from_remote_fs(
                     dst_path.to_string_lossy().to_string(),
                 )
             })?;
+
+            if file_addition.file_path != file_addition.file_addition.file_path()
+                && LocalAssetUri::is_asset_relative_path(
+                    local_workspace,
+                    file_addition.file_addition.file_path(),
+                )?
+            {
+                let user_dst_path = LocalAssetUri::repo_relative_destination_path(
+                    local_workspace,
+                    &file_addition.file_path,
+                )
+                .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
+                if user_dst_path.exists() {
+                    info!(
+                        "Skipping copy for existing file {}",
+                        user_dst_path.to_string_lossy()
+                    );
+                } else {
+                    if let Some(parent) = user_dst_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::copy(&dst_path, &user_dst_path).map_err(|_| {
+                        RemoteOperationError::FileTransferError(
+                            file_addition.file_path.clone(),
+                            dst_path.to_string_lossy().to_string(),
+                            user_dst_path.to_string_lossy().to_string(),
+                        )
+                    })?;
+                }
+            }
         }
     }
     for annotation_file in &manifest_operation.annotation_file_additions {
@@ -2335,6 +2402,7 @@ mod tests {
     mod apply_operations_to_remote {
         use gen_models::{
             collection::Collection,
+            manifest::ManifestOperationFileAddition,
             operations::{OperationFile, OperationInfo},
             session_operations::{end_operation, start_operation},
         };
@@ -2424,6 +2492,55 @@ mod tests {
                 assert!(remote_operation.is_some());
                 assert_eq!(remote_operation.unwrap().hash, operation.hash);
             }
+        }
+
+        #[test]
+        fn test_apply_operations_to_remote_rejects_absolute_file_path() {
+            let local_context = setup_gen();
+            let local_conn = local_context.graph().conn();
+            let local_op_conn = local_context.operations().conn();
+            track_database(local_conn, local_op_conn).unwrap();
+            let local_root = local_context.repo_root().unwrap();
+
+            Collection::create(local_conn, "test_collection").unwrap();
+            let mut session = start_operation(local_conn);
+            Collection::create(local_conn, "test_collection_0").unwrap();
+
+            let file_path = "test_file_0.fa".to_string();
+            fs::write(local_root.join(&file_path), "test file content").unwrap();
+            end_operation(
+                &local_context,
+                &mut session,
+                &OperationInfo {
+                    files: vec![OperationFile::new(file_path).set_file_type(FileTypes::Fasta)],
+                    description: "Test operation 0".to_string(),
+                },
+                "Test operation 0",
+                None,
+            )
+            .unwrap();
+
+            let local_main = Branch::get_by_name(local_op_conn, "main").unwrap();
+            let remote_context = setup_gen();
+            let remote_op_conn = remote_context.operations().conn();
+            let remote_workspace = remote_context.workspace();
+
+            let mut local_manifest = ManifestGenerator::new(local_op_conn)
+                .generate_manifest("main", local_main.current_operation_hash.as_ref())
+                .unwrap();
+            local_manifest.operations[0].file_additions[0] = ManifestOperationFileAddition {
+                file_path: "/etc/passwd".to_string(),
+                ..local_manifest.operations[0].file_additions[0].clone()
+            };
+
+            let result = apply_operations_to_remote(
+                &local_context,
+                remote_op_conn,
+                &local_manifest.operations,
+                remote_workspace,
+            );
+
+            assert!(matches!(result, Err(RemoteOperationError::IOError(_))));
         }
     }
 
@@ -2634,6 +2751,51 @@ mod tests {
 
             let result = push_to_file_remote(&context, &remote_url, "main");
             assert!(matches!(result, Err(RemoteOperationError::NoOperations)));
+        }
+
+        #[test]
+        fn test_copy_operation_from_remote_fs_rejects_absolute_file_path() {
+            let local_context = setup_gen();
+            let local_workspace = local_context.workspace();
+            let conn = local_context.graph().conn();
+            let op_conn = local_context.operations().conn();
+            track_database(conn, op_conn).unwrap();
+
+            let remote_context = setup_gen_on_disk();
+            let remote_conn = remote_context.graph().conn();
+            let remote_op_conn = remote_context.operations().conn();
+            track_database(remote_conn, remote_op_conn).unwrap();
+
+            let remote_operation = create_operation(
+                &remote_context,
+                "remote_file.fa",
+                FileTypes::Fasta,
+                "remote operation",
+                HashId::random_str(),
+            );
+
+            let branch = Branch::get_by_name(remote_op_conn, "main").unwrap();
+            let mut remote_manifest = ManifestGenerator::new(remote_op_conn)
+                .generate_manifest("main", branch.current_operation_hash.as_ref())
+                .unwrap();
+            let manifest_operation = remote_manifest
+                .operations
+                .iter_mut()
+                .find(|op| op.operation.hash == remote_operation.hash)
+                .unwrap();
+            manifest_operation.file_additions[0] =
+                gen_models::manifest::ManifestOperationFileAddition {
+                    file_path: "/etc/passwd".to_string(),
+                    ..manifest_operation.file_additions[0].clone()
+                };
+
+            let result = copy_operation_from_remote_fs(
+                manifest_operation,
+                local_workspace,
+                remote_context.workspace(),
+            );
+
+            assert!(matches!(result, Err(RemoteOperationError::IOError(_))));
         }
     }
 }
