@@ -492,6 +492,7 @@ impl LocalAssetUri {
         Self::stored_relative_path(workspace, &source_path, checksum, file_type)
     }
 
+    /// Checks whether a relative path is in the .gen/assets directory of a workspace.
     pub fn is_asset_relative_path(
         workspace: &Workspace,
         relative_path: &str,
@@ -515,6 +516,8 @@ impl LocalAssetUri {
         Ok(candidate.starts_with(asset_relative_dir))
     }
 
+    /// Given a workspace and a relative path, try to safely give a destination path to copy
+    /// the asset into
     pub fn repo_relative_destination_path(
         workspace: &Workspace,
         relative_path: &str,
@@ -566,16 +569,17 @@ impl LocalAssetUri {
 
     fn resolve_input_source_path(
         workspace: &Workspace,
-        path_or_uri: &str,
+        file_path_or_uri: &str,
     ) -> Result<PathBuf, FileAdditionError> {
-        if !Self::is_local_path_or_file_uri(path_or_uri) {
+        if !Self::is_local_path_or_file_uri(file_path_or_uri) {
             return Err(FileAdditionError::FileReadError(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unsupported non-local uri: {path_or_uri}"),
+                format!("unsupported non-local uri: {file_path_or_uri}"),
             )));
         }
 
-        let file_path = Self::path_from_uri(path_or_uri).unwrap_or_else(|| path_or_uri.to_string());
+        let file_path =
+            Self::path_from_uri(file_path_or_uri).unwrap_or_else(|| file_path_or_uri.to_string());
         if file_path.is_empty() {
             return Ok(PathBuf::new());
         }
