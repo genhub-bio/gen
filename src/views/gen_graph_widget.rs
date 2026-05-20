@@ -14,7 +14,7 @@ use gen_tui::{
     plotter::{NodeRenderer, NodeSizer, PathStyle},
     theme::current_theme,
 };
-use petgraph::{graph::NodeIndex, visit::NodeIndexable};
+use petgraph::visit::NodeIndexable;
 use ratatui::style::Style;
 
 /// Labels for special start/end nodes
@@ -295,68 +295,8 @@ pub fn create_gen_graph_controller(
     controller
 }
 
-/// Position the cursor on a specific graph node at a given fractional offset.
-///
-/// The caller must supply the full `GraphNode` key (node_id + sequence_start +
-/// sequence_end), because multiple graph nodes can share the same underlying
-/// `node_id` when they represent different sub-ranges of the same sequence.
-/// The offset `(0.5, 0.5)` centers on the middle of the node.
-///
-/// Camera positioning is handled by the cursor-anchored rebuild system: the
-/// caller is responsible for setting the cursor's viewport position to the
-/// desired screen location before the next render (e.g. screen center to
-/// center on the node), then showing the cursor so camera-following engages.
-///
-/// # Arguments
-/// * `controller` — the graph controller to position
-/// * `node`       — the exact `GraphNode` key to center on
-/// * `offset`     — fractional `(x, y)` position within the node (0.0–1.0)
-pub fn center_on_node_offset<S: NodeSizer<GenGraph>>(
-    controller: &mut GraphController<GenGraph, S>,
-    node: GraphNode,
-    offset: (f64, f64),
-) {
-    // Find which partition owns this node.
-    let (partition_idx, _) = match controller
-        .partition_controller
-        .partition_table
-        .find_node(&node)
-    {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    // Ensure the partition is loaded and set it as the anchor.
-    let _ = controller.ensure_partition_loaded(partition_idx);
-    let _ = controller.set_anchor_partition(partition_idx);
-
-    // Resolve the domain NodeIndex from the node key.
-    let domain_idx = NodeIndex::new(NodeIndexable::to_index(controller.graph(), node));
-
-    // Delegate to the controller's go_to method, which sets the cursor,
-    // switches to fine mode, shows it, and queues the one-shot centering.
-    controller.go_to_node(domain_idx, offset);
-}
-
 /// Navigate to an exact byte offset within a node, snapping the camera left.
 ///
-/// `byte_offset` is an absolute position within the node's sequence.  The
-/// fraction required by the cursor is computed here so callers work in natural
-/// coordinates.  Always call `queue_snap_left` after this.
-pub fn go_to_node_at_byte<S: NodeSizer<GenGraph>>(
-    controller: &mut GraphController<GenGraph, S>,
-    node: GraphNode,
-    byte_offset: u64,
-) {
-    let node_len = node.length();
-    let frac_x = if node_len > 1 {
-        byte_offset as f64 / (node_len - 1) as f64
-    } else {
-        0.0
-    };
-    center_on_node_offset(controller, node, (frac_x, 0.5));
-}
-
 /// Build a GraphNode → (WorldPos, node_size) lookup from the current viewport graph.
 pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
     controller: &GraphController<GenGraph, S>,

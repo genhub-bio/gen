@@ -1559,6 +1559,7 @@ dependencies = [
  "gen-models",
  "gen-tui",
  "log",
+ "petgraph",
  "postcard",
  "pyo3",
  "pyo3-build-config",
