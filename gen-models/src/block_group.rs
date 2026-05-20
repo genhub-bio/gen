@@ -1462,6 +1462,21 @@ mod tests {
                 RegionResolutionError::NotFound(name) if name == "missing"
             ));
         }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_matching_block_groups() {
+            let conn = &get_connection(None).unwrap();
+            let (_block_group_id, _path) = setup_block_group(conn);
+            let _ = create_bg(conn, "test", "test", "CHR1");
+
+            let region = Region::parse("chr1").unwrap();
+            let err = BlockGroup::resolve(&region, conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name)
+                    if name == "multiple block groups named chr1"
+            ));
+        }
     }
 
     fn get_single_bg_id(

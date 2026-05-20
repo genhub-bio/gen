@@ -916,11 +916,14 @@ mod tests {
     use super::*;
     use crate::{
         block_group::{BlockGroup, PathCache},
+        block_group_edge::BlockGroupEdgeData,
         errors::OperationError,
         files::GenDatabase,
         metadata,
+        path::Path,
+        path_edge::PathEdge,
         sample::Sample,
-        test_helpers::{get_connection, setup_block_group, setup_gen},
+        test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
     };
 
     mod region_resolver {
@@ -952,6 +955,47 @@ mod tests {
             assert!(matches!(
                 err,
                 RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_matching_annotations() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let accession =
+                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let _ = Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+
+            let other_block_group = create_bg(&conn, "test", "test", "other");
+            let edge_ids = PathEdge::edges_for_path(&conn, &path.id)
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            let block_group_edges = edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: other_block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>();
+            crate::block_group_edge::BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+            let other_path =
+                Path::create(&conn, "other-path", &other_block_group.id, &edge_ids).unwrap();
+            let other_accession =
+                BlockGroup::add_accession(&conn, &other_path, "ann-accession-2", 0, 5, &mut cache)
+                    .unwrap();
+            let _ = Annotation::get_or_create(&conn, "MREB", "genes", &other_accession.id, None)
+                .unwrap();
+
+            let region = Region::parse("mreB").unwrap();
+            let err = Annotation::resolve(&region, &conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name) if name == "multiple annotations named mreB"
             ));
         }
     }

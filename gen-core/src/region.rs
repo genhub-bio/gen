@@ -66,31 +66,54 @@ impl Region {
                     return Err(RegionParseError::InvalidSyntax);
                 }
 
-                let bytes = coordinates.as_bytes();
-                let separator = bytes
-                    .iter()
-                    .enumerate()
-                    .skip(1)
-                    .find_map(|(index, byte)| (*byte == b'-').then_some(index));
-
-                match separator {
-                    Some(index) => {
-                        let start = coordinates[..index]
-                            .parse::<i64>()
-                            .map_err(RegionParseError::InvalidCoordinate)?;
-                        let end = coordinates[(index + 1)..]
-                            .parse::<i64>()
-                            .map_err(RegionParseError::InvalidCoordinate)?;
-                        (Some(start), Some(end))
-                    }
-                    None => (
+                if let Some((start, end)) = coordinates.split_once("..") {
+                    let start = if start.is_empty() {
+                        None
+                    } else {
                         Some(
-                            coordinates
+                            start
                                 .parse::<i64>()
                                 .map_err(RegionParseError::InvalidCoordinate)?,
-                        ),
-                        None,
-                    ),
+                        )
+                    };
+                    let end = if end.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            end.parse::<i64>()
+                                .map_err(RegionParseError::InvalidCoordinate)?,
+                        )
+                    };
+                    if start.is_none() && end.is_none() {
+                        (None, None)
+                    } else {
+                        (start, end)
+                    }
+                } else {
+                    let bytes = coordinates.as_bytes();
+                    let separator = bytes
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                        .find_map(|(index, byte)| (*byte == b'-').then_some(index));
+
+                    match separator {
+                        Some(index) => {
+                            let start = coordinates[..index]
+                                .parse::<i64>()
+                                .map_err(RegionParseError::InvalidCoordinate)?;
+                            let end = coordinates[(index + 1)..]
+                                .parse::<i64>()
+                                .map_err(RegionParseError::InvalidCoordinate)?;
+                            (Some(start), Some(end))
+                        }
+                        None => {
+                            let position = coordinates
+                                .parse::<i64>()
+                                .map_err(RegionParseError::InvalidCoordinate)?;
+                            (Some(position), Some(position))
+                        }
+                    }
                 }
             }
             None => (None, None),
@@ -114,9 +137,10 @@ impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.start, self.end) {
             (None, None) => write!(f, "{}", self.name),
-            (Some(start), None) => write!(f, "{}:{start}", self.name),
+            (Some(start), Some(end)) if start == end => write!(f, "{}:{start}", self.name),
+            (Some(start), None) => write!(f, "{}:{start}..", self.name),
+            (None, Some(end)) => write!(f, "{}:..{end}", self.name),
             (Some(start), Some(end)) => write!(f, "{}:{start}-{end}", self.name),
-            (None, Some(end)) => write!(f, "{}:-{end}", self.name),
         }
     }
 }
@@ -159,6 +183,45 @@ mod tests {
             Ok(Region {
                 name: "chr1".to_string(),
                 start: Some(100),
+                end: Some(100),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_to_end_syntax() {
+        let region = Region::parse("chr1:100..");
+        assert_eq!(
+            region,
+            Ok(Region {
+                name: "chr1".to_string(),
+                start: Some(100),
+                end: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_to_start_syntax() {
+        let region = Region::parse("chr1:..100");
+        assert_eq!(
+            region,
+            Ok(Region {
+                name: "chr1".to_string(),
+                start: None,
+                end: Some(100),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_entire_region_with_open_syntax() {
+        let region = Region::parse("chr1:..");
+        assert_eq!(
+            region,
+            Ok(Region {
+                name: "chr1".to_string(),
+                start: None,
                 end: None,
             })
         );

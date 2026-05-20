@@ -361,11 +361,15 @@ mod tests {
         fn path_range_finding() {
             let (conn, _block_group, path, _accession, _annotation) = setup_targets();
 
-            let start_only =
+            let point =
                 resolve_path(&Region::parse("chr1:5").unwrap(), &conn, "test", "test").unwrap();
-            assert_eq!(start_only.kind, ResolvedRegionKind::Path);
-            assert_eq!(start_only.path.as_ref().unwrap().id, path.id);
-            assert_eq!((start_only.start, start_only.end), (5, 40));
+            assert_eq!(point.kind, ResolvedRegionKind::Path);
+            assert_eq!(point.path.as_ref().unwrap().id, path.id);
+            assert_eq!((point.start, point.end), (5, 5));
+
+            let to_end =
+                resolve_path(&Region::parse("chr1:5..").unwrap(), &conn, "test", "test").unwrap();
+            assert_eq!((to_end.start, to_end.end), (5, 40));
 
             let just_end = resolve_path(
                 &Region {
@@ -404,12 +408,17 @@ mod tests {
         fn block_group_range_finding() {
             let (conn, block_group, _path, _accession, _annotation) = setup_targets();
 
-            let start_only =
+            let point =
                 resolve_block_group(&Region::parse("chr1:5").unwrap(), &conn, "test", "test")
                     .unwrap();
-            assert_eq!(start_only.kind, ResolvedRegionKind::BlockGroup);
-            assert_eq!(start_only.block_group.id, block_group.id);
-            assert_eq!((start_only.start, start_only.end), (5, 40));
+            assert_eq!(point.kind, ResolvedRegionKind::BlockGroup);
+            assert_eq!(point.block_group.id, block_group.id);
+            assert_eq!((point.start, point.end), (5, 5));
+
+            let to_end =
+                resolve_block_group(&Region::parse("chr1:5..").unwrap(), &conn, "test", "test")
+                    .unwrap();
+            assert_eq!((to_end.start, to_end.end), (5, 40));
 
             let just_end = resolve_block_group(
                 &Region {
@@ -449,12 +458,16 @@ mod tests {
         fn accession_range_finding() {
             let (conn, _block_group, _path, accession, _annotation) = setup_targets();
 
-            let start_only =
-                resolve_accession(&Region::parse("mreB:5").unwrap(), &conn, "test", "test")
+            let point = resolve_accession(&Region::parse("mreB:5").unwrap(), &conn, "test", "test")
+                .unwrap();
+            assert_eq!(point.kind, ResolvedRegionKind::Accession);
+            assert_eq!(point.accession.as_ref().unwrap().id, accession.id);
+            assert_eq!((point.start, point.end), (5, 5));
+
+            let to_end =
+                resolve_accession(&Region::parse("mreB:5..").unwrap(), &conn, "test", "test")
                     .unwrap();
-            assert_eq!(start_only.kind, ResolvedRegionKind::Accession);
-            assert_eq!(start_only.accession.as_ref().unwrap().id, accession.id);
-            assert_eq!((start_only.start, start_only.end), (5, 20));
+            assert_eq!((to_end.start, to_end.end), (5, 20));
 
             let just_end = resolve_accession(
                 &Region {
@@ -494,17 +507,27 @@ mod tests {
         fn annotation_range_finding() {
             let (conn, _block_group, _path, accession, annotation) = setup_targets();
 
-            let start_only = resolve_annotation(
+            let point = resolve_annotation(
                 &Region::parse("gene-mreB:5").unwrap(),
                 &conn,
                 "test",
                 "test",
             )
             .unwrap();
-            assert_eq!(start_only.kind, ResolvedRegionKind::Annotation);
-            assert_eq!(start_only.accession.as_ref().unwrap().id, accession.id);
-            assert_eq!(start_only.start, 5);
-            assert_eq!(start_only.end, 20);
+            assert_eq!(point.kind, ResolvedRegionKind::Annotation);
+            assert_eq!(point.accession.as_ref().unwrap().id, accession.id);
+            assert_eq!(point.start, 5);
+            assert_eq!(point.end, 5);
+
+            let to_end = resolve_annotation(
+                &Region::parse("gene-mreB:5..").unwrap(),
+                &conn,
+                "test",
+                "test",
+            )
+            .unwrap();
+            assert_eq!(to_end.start, 5);
+            assert_eq!(to_end.end, 20);
 
             let just_end = resolve_annotation(
                 &Region {

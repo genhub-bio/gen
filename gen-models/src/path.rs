@@ -926,7 +926,7 @@ mod tests {
         collection::Collection,
         edge::Edge,
         sample::{NewSample, Sample},
-        test_helpers::get_connection,
+        test_helpers::{create_bg, get_connection},
     };
 
     fn create_test_block_group(conn: &GraphConnection) -> BlockGroup {
@@ -995,6 +995,63 @@ mod tests {
             assert!(matches!(
                 err,
                 RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_matching_paths() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let block_group = create_test_block_group(conn);
+            let edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let _ = Path::create(conn, "chr1", &block_group.id, &[edge.id]).unwrap();
+
+            let other_block_group =
+                create_bg(conn, "test collection", "test-sample", "other block group");
+            let other_edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: other_block_group.id,
+                    edge_id: other_edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let _ = Path::create(conn, "CHR1", &other_block_group.id, &[other_edge.id]).unwrap();
+
+            let region = Region::parse("chr1").unwrap();
+            let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name) if name == "multiple paths named chr1"
             ));
         }
     }
