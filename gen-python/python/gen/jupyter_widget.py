@@ -317,70 +317,58 @@ class GenGraphWidget(anywidget.AnyWidget):
 
     # ── Annotation API ────────────────────────────────────────────────────
 
-    def add_annotation_track(self, annotations, name: str) -> None:
-        """Add a list of named annotations as a track panel below the graph.
-
-        Parameters
-        ----------
-        annotations : list[Annotation]
-            Annotations built with ``Annotation(locus, name)``.
-        name : str
-            Label shown on the track panel.
-        """
-        if self._frozen:
-            return
-        self._controller.add_track_annotations(annotations, name)
-        self._render()
-
-    def add_annotation_track_group(self, group: str) -> None:
-        """Add an annotation group from the database as a track panel below the graph.
-
-        Parameters
-        ----------
-        group : str
-            Annotation group name stored in the repository.
-        """
-        if self._frozen:
-            return
-        self._controller.add_track_group(group)
-        self._render()
-
-    def add_annotation_track_file(
+    def add_annotation_track(
         self,
-        file: str,
+        annotations=None,
+        *,
+        file: str | None = None,
+        group: str | None = None,
         name: str | None = None,
         from_sample: str | None = None,
         filter=None,
     ) -> None:
-        """Add a GFF3 or BED file as a track panel below the graph.
+        """Add an annotation track panel below the graph.
 
-        Both standard files (chromosome/contig names as reference) and
-        pre-translated files (node hash-IDs as reference) are accepted.
-        Standard files are translated automatically.
+        Exactly one of *annotations*, *file*, or *group* must be supplied.
 
         Parameters
         ----------
-        file : str
-            Path to a GFF3 or BED annotation file.
+        annotations : list[Annotation], optional
+            Annotations built with ``Annotation(locus, name)``.  *name* is
+            required when using this form.
+        file : str, optional
+            Path to a GFF3 or BED annotation file.  Both standard files
+            (chromosome/contig names as reference) and pre-translated files
+            (node hash-IDs as reference) are accepted; standard files are
+            translated automatically.  *name* defaults to the file path.
+        group : str, optional
+            Annotation group name stored in the repository.
         name : str, optional
-            Label shown on the track panel.  Defaults to the file path.
+            Track panel label.  Required when *annotations* is supplied.
         from_sample : str, optional
-            The sample whose path defines the coordinate space used by the
-            annotation file — i.e. the sample the GFF/BED was produced from.
-            Defaults to ``"reference"``, which is correct for annotation files
-            derived from the reference sequence.  Pass a different sample name
-            if the file uses coordinates from a non-reference sample
-            (e.g. ``from_sample="BRQ"``).
+            Sample whose coordinate space the file uses (file tracks only).
+            Defaults to ``"reference"``.
         filter : callable, optional
-            Function ``(row: str) -> bool`` called for each non-header line.
-            Return ``True`` to keep the row, ``False`` to drop it.  When
-            ``None`` (default) all rows are passed through.
+            ``(row: str) -> bool`` predicate applied to each non-header line
+            (file tracks only).
         """
         if self._frozen:
             return
-        if filter is not None:
-            file = self._apply_row_filter(file, filter)
-        self._controller.add_track_file(file, name, from_sample)
+        given = sum(x is not None for x in (annotations, file, group))
+        if given != 1:
+            raise ValueError(
+                "exactly one of annotations, file, or group must be supplied"
+            )
+        if annotations is not None:
+            if name is None:
+                raise ValueError("name is required when annotations is supplied")
+            self._controller.add_track_annotations(annotations, name)
+        elif file is not None:
+            if filter is not None:
+                file = self._apply_row_filter(file, filter)
+            self._controller.add_track_file(file, name, from_sample)
+        else:
+            self._controller.add_track_group(group)
         self._render()
 
     @staticmethod
