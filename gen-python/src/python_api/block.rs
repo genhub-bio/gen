@@ -38,7 +38,7 @@ impl PyGraphNode {
         let h = format!("{}", self.node_id);
         let hash8 = &h[..8.min(h.len())];
         Ok(format!(
-            "{}[{}:{}]",
+            "{}:{}-{}",
             hash8, self.sequence_start, self.sequence_end
         ))
     }
