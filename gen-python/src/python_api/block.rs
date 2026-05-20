@@ -26,19 +26,20 @@ impl PyGraphNode {
 #[pymethods]
 impl PyGraphNode {
     fn __repr__(&self) -> PyResult<String> {
+        let h = format!("{}", self.node_id);
+        let hash8 = &h[..8.min(h.len())];
         Ok(format!(
-            "Node({}, {}, {})",
-            self.node_id, self.sequence_start, self.sequence_end
+            "Node({}[{}:{}])",
+            hash8, self.sequence_start, self.sequence_end
         ))
     }
 
     fn __str__(&self) -> PyResult<String> {
         let h = format!("{}", self.node_id);
+        let hash8 = &h[..8.min(h.len())];
         Ok(format!(
-            "{}:{}-{}",
-            &h[..8.min(h.len())],
-            self.sequence_start,
-            self.sequence_end
+            "{}[{}:{}]",
+            hash8, self.sequence_start, self.sequence_end
         ))
     }
 
