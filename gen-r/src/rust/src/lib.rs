@@ -22,10 +22,11 @@ use r#gen::{
         graph_search::{GenGraphMatcher, GraphLocus, SeedIndex, SequenceKind},
     },
     views::{
+        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
         annotation_track::AnnotationTrack,
         annotations::{
-            load_annotations_for_group, parse_translated_bed, parse_translated_bed_file,
-            parse_translated_gff, parse_translated_gff_file,
+            AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
+            parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
         },
         gen_graph_widget::{
             GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
@@ -426,8 +427,23 @@ fn load_tracks_from_specs(
     for spec in specs {
         match spec {
             TrackSpec::Group { name } => {
-                if let Ok(spans) = load_annotations_for_group(conn, &name, &node_ranges) {
-                    tracks.push(AnnotationTrack::new(name, spans));
+                if let Some(bg) = BlockGroup::get_by_id(conn, block_group_id).ok() {
+                    let entry = AnnotationGroupEntry {
+                        id: name.clone(),
+                        name: name.clone(),
+                        sample_name: bg.sample_name.clone(),
+                        source_block_group_id: *block_group_id,
+                        origin: AnnotationGroupOrigin::CurrentSample,
+                    };
+                    let request = AnnotationGroupTrackRequest {
+                        conn,
+                        current_block_group: &bg,
+                        entry: &entry,
+                        visible_ranges_by_node: &node_ranges,
+                    };
+                    if let Ok(spans) = load_annotations_for_group(&request) {
+                        tracks.push(AnnotationTrack::new(name, spans));
+                    }
                 }
             }
             TrackSpec::File { path, name, sample } => {
@@ -1916,7 +1932,7 @@ fn repo_bg_chunks(
     sample_name: String,
     bg_name: String,
     new_sample: String,
-    breakpoints: Nullable<String>,
+    breakpoints: Vec<i32>,
     chunk_size: Nullable<i64>,
     backbone: Nullable<String>,
 ) -> std::result::Result<List, Error> {
@@ -1930,7 +1946,11 @@ fn repo_bg_chunks(
         new_sample.clone(),
         bg_name.clone(),
         nullable_string_to_option(backbone),
-        nullable_string_to_option(breakpoints),
+        if breakpoints.is_empty() {
+            None
+        } else {
+            Some(breakpoints.into_iter().map(i64::from).collect())
+        },
         match chunk_size {
             Nullable::NotNull(v) => Some(v),
             Nullable::Null => None,
