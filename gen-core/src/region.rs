@@ -85,7 +85,8 @@ impl Region {
                 if coordinates.is_empty() {
                     return Err(RegionParseError::InvalidSyntax);
                 }
-
+                // we first look for a .. which is interpretted as everything in front of, between, or after. These are all valid:
+                // `5..`, `1..5`, `5..`, `..`.
                 if let Some((start, end)) = coordinates.split_once("..") {
                     let start = if start.is_empty() {
                         None
@@ -110,6 +111,9 @@ impl Region {
                         (start, end)
                     }
                 } else {
+                    // if there is no range separator, we look for a dash. Because we support negative indices, we cannot
+                    // just split on a dash. We look past the first dash to find it. If no dash is present, we assume the user
+                    // entered something like `chr1:5` meaning position 5
                     let bytes = coordinates.as_bytes();
                     let separator = bytes
                         .iter()
