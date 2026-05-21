@@ -7,6 +7,7 @@ use gen_models::{
     errors::{BlockGroupError, PathError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
+    region::{GenRegionError, Region, resolve_path},
     sample::Sample,
 };
 use thiserror::Error;
@@ -34,6 +35,12 @@ pub enum UpdateWithLibraryError {
     FileParse(CombinatorialLibraryParseError),
     #[error("Failed to create library")]
     LibraryCreation(CombinatorialLibraryCreationError),
+    #[error("Failed to resolve region")]
+    Region(GenRegionError),
+    #[error("Missing coordinates for region '{0}'. Use region syntax like 'name:start-end'.")]
+    MissingCoordinates(String),
+    #[error("Unsupported region type for library update: {0}")]
+    UnsupportedRegionType(String),
 }
 
 impl From<CombinatorialLibraryParseError> for UpdateWithLibraryError {
@@ -54,6 +61,12 @@ impl From<CombinatorialLibraryCreationError> for UpdateWithLibraryError {
     }
 }
 
+impl From<GenRegionError> for UpdateWithLibraryError {
+    fn from(err: GenRegionError) -> Self {
+        UpdateWithLibraryError::Region(err)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_library(
     context: &DbContext,
@@ -61,25 +74,38 @@ pub fn update_with_library(
     parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
-    start_coordinate: i64,
-    end_coordinate: i64,
     parts_list: Vec<Vec<SequencePart>>,
     library_file_path: Option<&str>,
     parts_file_path: Option<&str>,
 ) -> Result<(), UpdateWithLibraryError> {
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
+    let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
+    let resolved_region =
+        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
+            Ok(region) => region,
+            Err(GenRegionError::NotFound(_)) => {
+                return Err(GenRegionError::NotFound(region_name.to_string()).into());
+            }
+            Err(err) => return Err(err.into()),
+        };
+    let (start_coordinate, end_coordinate) =
+        if parsed_region.start.is_some() || parsed_region.end.is_some() {
+            (resolved_region.start, resolved_region.end)
+        } else {
+            return Err(UpdateWithLibraryError::MissingCoordinates(
+                region_name.to_string(),
+            ));
+        };
 
-    let _new_sample = Sample::create(
+    let _new_sample = Sample::get_or_create(
         conn,
         gen_models::sample::NewSample {
             name: new_sample_name,
-            is_reference: false,
+            ..Default::default()
         },
     );
-
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
-    let parent_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
+    let parent_path = resolved_region.path.clone().unwrap();
     let parent_path_length = parent_path.length(conn)?;
 
     let mut chunk_ranges = vec![];
@@ -115,7 +141,7 @@ pub fn update_with_library(
         collection_name,
         parent_sample_name,
         new_sample_name,
-        region_name,
+        &resolved_region.block_group.name,
         None,
         chunk_ranges,
         Some(child_block_group.id),
@@ -262,9 +288,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             "new sample",
-            "m123",
-            7,
-            20,
+            "m123:7-20",
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -324,9 +348,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             "new sample",
-            "m123",
-            7,
-            20,
+            "m123:7-20",
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -386,9 +408,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             "new sample",
-            "m123",
-            7,
-            20,
+            "m123:7-20",
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -447,9 +467,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             "new sample",
-            "m123",
-            0,
-            34, // Full sequence replacement
+            "m123:0-34", // Full sequence replacement
             parts_list,
             Some(parts_path),
             Some(library_path),
@@ -503,9 +521,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             "new sample",
-            "m123",
-            0,
-            34, // Full sequence replacement
+            "m123:0-34", // Full sequence replacement
             parts_list,
             Some(parts_path),
             Some(library_path),

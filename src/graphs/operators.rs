@@ -10,6 +10,7 @@ use gen_models::{
     errors::{BlockGroupError, OperationError, PathError},
     path::Path,
     path_edge::PathEdge,
+    region::{Region, resolve},
     sample::Sample,
     traits::Query,
 };
@@ -42,7 +43,11 @@ pub fn get_path(
     region_name: &str,
     backbone: Option<&str>,
 ) -> Result<Path, GraphOperationError> {
-    let block_group_id = get_block_group_id(conn, collection_name, sample_name, region_name)?;
+    let resolved_region = Region::parse(region_name)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
+    let resolved_region = resolve(&resolved_region, conn, collection_name, sample_name)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
+    let block_group_id = resolved_region.block_group.id;
 
     if let Some(backbone) = backbone {
         let path = BlockGroup::get_path_by_name(conn, &block_group_id, backbone);
@@ -53,7 +58,9 @@ pub fn get_path(
         }
         Ok(path.unwrap())
     } else {
-        Ok(BlockGroup::get_current_path(conn, &block_group_id))
+        Ok(resolved_region
+            .path
+            .unwrap_or_else(|| BlockGroup::get_current_path(conn, &block_group_id)))
     }
 }
 
@@ -280,17 +287,11 @@ fn get_block_group_id(
     parent_sample_name: &str,
     region_name: &str,
 ) -> Result<HashId, GraphOperationError> {
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
-
-    for block_group in &block_groups {
-        if block_group.name == region_name {
-            return Ok(block_group.id);
-        }
-    }
-
-    Err(GraphOperationError::RegionNotFound(format!(
-        "No region found with name: {region_name}"
-    )))
+    let resolved_region = Region::parse(region_name)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))?;
+    resolve(&resolved_region, conn, collection_name, parent_sample_name)
+        .map(|resolved| resolved.block_group.id)
+        .map_err(|err| GraphOperationError::RegionNotFound(err.to_string()))
 }
 
 /// Given a sample and one or more region (block group) names, creates a new graph where all the end nodes of one block
@@ -617,9 +618,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             "test1",
-            "m123",
-            3,
-            5,
+            "m123:3-5",
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -630,9 +629,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            "m123",
-            15,
-            20,
+            "m123:15-20",
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -735,9 +732,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             "test1",
-            "m123",
-            3,
-            5,
+            "m123:3-5",
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -748,9 +743,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            "m123",
-            15,
-            20,
+            "m123:15-20",
             fasta_update_path.to_str().unwrap(),
             false,
         )

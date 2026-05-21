@@ -6,8 +6,11 @@ use std::{
     path::{Path as FsPath, PathBuf},
 };
 
-use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
-use gen_core::{HashId, Strand, Workspace, is_end_node, is_start_node};
+use gen_annotations::{
+    projection::accession_edges_to_segments as projection_accession_edges_to_segments,
+    translate::{bed::translate_bed, gff::translate_gff},
+};
+use gen_core::{HashId, Strand, Workspace};
 use gen_models::{
     accession::{Accession, AccessionEdge},
     annotations::{Annotation, AnnotationError},
@@ -27,60 +30,15 @@ use crate::views::{
 };
 
 fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
-    let mut segments = Vec::new();
-    let mut current_node: Option<HashId> = None;
-    let mut current_start: Option<i64> = None;
-    let mut current_strand: Option<Strand> = None;
-
-    for edge in edges {
-        if is_start_node(edge.source_node_id) {
-            current_node = Some(edge.target_node_id);
-            current_start = Some(edge.target_coordinate);
-            current_strand = Some(edge.target_strand);
-            continue;
-        }
-
-        if is_end_node(edge.target_node_id) {
-            if let (Some(node_id), Some(start), Some(strand)) =
-                (current_node, current_start, current_strand)
-            {
-                let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                    (start, edge.source_coordinate)
-                } else {
-                    (edge.source_coordinate, start)
-                };
-                segments.push(AnnotationSegment {
-                    node_id,
-                    start: segment_start,
-                    end: segment_end,
-                    strand,
-                });
-            }
-            break;
-        }
-
-        if let (Some(node_id), Some(start), Some(strand)) =
-            (current_node, current_start, current_strand)
-        {
-            let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                (start, edge.source_coordinate)
-            } else {
-                (edge.source_coordinate, start)
-            };
-            segments.push(AnnotationSegment {
-                node_id,
-                start: segment_start,
-                end: segment_end,
-                strand,
-            });
-        }
-
-        current_node = Some(edge.target_node_id);
-        current_start = Some(edge.target_coordinate);
-        current_strand = Some(edge.target_strand);
-    }
-
-    segments
+    projection_accession_edges_to_segments(edges)
+        .into_iter()
+        .map(|segment| AnnotationSegment {
+            node_id: segment.node_id,
+            start: segment.range.start,
+            end: segment.range.end,
+            strand: segment.strand,
+        })
+        .collect()
 }
 
 pub struct AnnotationGroupTrackRequest<'a> {

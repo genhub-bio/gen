@@ -7,7 +7,9 @@ use std::{
 use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
     PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
-    calculate_hash, is_end_node, is_start_node, is_terminal, traits::Capnp,
+    calculate_hash, is_end_node, is_start_node, is_terminal,
+    region::{Region, RegionResolutionError, RegionResolver},
+    traits::Capnp,
 };
 use gen_graph::{
     GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
@@ -192,7 +194,7 @@ impl IntervalTreeSource for Path {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        self.intervaltree(conn).map_err(Into::into)
+        Path::intervaltree(self, conn).map_err(Into::into)
     }
 }
 
@@ -201,7 +203,7 @@ impl IntervalTreeSource for Accession {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        self.intervaltree(conn).map_err(Into::into)
+        Accession::intervaltree(self, conn).map_err(Into::into)
     }
 }
 
@@ -210,7 +212,7 @@ impl IntervalTreeSource for AccessionAnnotation {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        self.intervaltree(conn).map_err(Into::into)
+        AccessionAnnotation::intervaltree(self, conn).map_err(Into::into)
     }
 }
 
@@ -1368,6 +1370,36 @@ impl BlockGroup {
     }
 }
 
+impl RegionResolver for BlockGroup {
+    type Connection = GraphConnection;
+    type Error = BlockGroupError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = BlockGroup::query(
+            conn,
+            "SELECT * FROM block_groups \
+             WHERE collection_name = ?1 \
+               AND sample_name = ?2 \
+               AND lower(name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple block groups named {}",
+                region.name
+            ))),
+        }
+    }
+}
+
 impl Query for BlockGroup {
     type Model = BlockGroup;
 
@@ -1393,7 +1425,7 @@ mod tests {
 
     use capnp::message::TypedBuilder;
     use chrono::Utc;
-    use gen_core::NO_CHROMOSOME_INDEX;
+    use gen_core::{NO_CHROMOSOME_INDEX, region::RegionResolutionError};
 
     use super::*;
     use crate::{
@@ -1404,6 +1436,48 @@ mod tests {
         sequence::Sequence,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
     };
+
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_block_group_by_name_case_insensitively() {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, _path) = setup_block_group(conn);
+
+            let region = Region::parse("CHR1").unwrap();
+            let resolved = BlockGroup::resolve(&region, conn, "test", "test").unwrap();
+            assert_eq!(resolved.id, block_group_id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_block_group() {
+            let conn = &get_connection(None).unwrap();
+            let (_block_group_id, _path) = setup_block_group(conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = BlockGroup::resolve(&region, conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_matching_block_groups() {
+            let conn = &get_connection(None).unwrap();
+            let (_block_group_id, _path) = setup_block_group(conn);
+            let _ = create_bg(conn, "test", "test", "CHR1");
+
+            let region = Region::parse("chr1").unwrap();
+            let err = BlockGroup::resolve(&region, conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name)
+                    if name == "multiple block groups named chr1"
+            ));
+        }
+    }
 
     fn get_single_bg_id(
         conn: &GraphConnection,

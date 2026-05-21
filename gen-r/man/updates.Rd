@@ -16,9 +16,7 @@ update_with_fasta(
   name = NULL,
   sample,
   new_sample,
-  region_name,
-  start,
-  end
+  region_name
 )
 
 update_with_gfa(
@@ -67,8 +65,6 @@ update_with_library_files(
   sample,
   new_sample,
   path_name,
-  start,
-  end,
   library,
   parts
 )
@@ -80,8 +76,6 @@ update_with_library(
   sample = NULL,
   new_sample_name,
   path_name,
-  start,
-  end,
   parts_list
 )
 
@@ -93,8 +87,6 @@ update_with_sequence(
   sample,
   new_sample,
   region_name,
-  start,
-  end,
   no_reference_path_update = FALSE
 )
 }
@@ -112,10 +104,6 @@ update_with_sequence(
   \item{new_sample}{New sample name created by the update.}
 
   \item{region_name}{Target region or path name for sequence-based updates.}
-
-  \item{start}{Start coordinate for the update interval.}
-
-  \item{end}{End coordinate for the update interval.}
 
   \item{csv}{Auxiliary CSV mapping file used by \code{update_with_gaf()}.}
 
@@ -161,9 +149,7 @@ update_with_sequence(
   name = "demo",
   sample = "reference",
   new_sample = "edited",
-  region_name = "chr1",
-  start = 10,
-  end = 13
+  region_name = "chr1:10-13"
 )
 }
 }

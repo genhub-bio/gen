@@ -6,7 +6,10 @@ use std::{
 
 use anyhow::anyhow;
 use gen_core::{
-    HashId, NodeIntervalBlock, calculate_hash, config::Workspace, region::Region, traits::Capnp,
+    HashId, NodeIntervalBlock, calculate_hash,
+    config::Workspace,
+    region::{Region, RegionResolutionError, RegionResolver},
+    traits::Capnp,
 };
 use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value};
@@ -389,6 +392,39 @@ impl Annotation {
     }
 }
 
+impl RegionResolver for Annotation {
+    type Connection = GraphConnection;
+    type Error = AnnotationError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = Annotation::query(
+            conn,
+            "SELECT a.* \
+             FROM annotations a \
+             JOIN accessions acc ON a.accession_id = acc.id \
+             JOIN block_groups bg ON acc.block_group_id = bg.id \
+             WHERE bg.collection_name = ?1 \
+               AND bg.sample_name = ?2 \
+               AND lower(a.name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple annotations named {}",
+                region.name
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AnnotationGroupSample {
     pub annotation_group: String,
@@ -549,8 +585,7 @@ pub fn add_annotation(
     let graph_conn = context.graph().conn();
     let operation_conn = context.operations().conn();
     let parsed_region = Region::parse(region)?;
-    let start = parsed_region.start;
-    let end = parsed_region.end;
+    let (start, end) = parsed_region.require_coordinates()?;
 
     let block_groups = Sample::get_block_groups(graph_conn, collection, sample);
     let block_group = block_groups
@@ -559,7 +594,7 @@ pub fn add_annotation(
         .ok_or_else(|| anyhow!("Graph {} not found for sample {sample}", parsed_region.name))?;
     let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
     let path_length = path.length(graph_conn)?;
-    if start < 0 || end < 0 || start > end || end > path_length {
+    if start < 0 || end < 0 || start > path_length || end > path_length {
         return Err(anyhow!("Region {region} is outside the path bounds (0-{path_length})").into());
     }
 
@@ -876,17 +911,94 @@ impl AnnotationFile {
 mod tests {
     use std::fs;
 
-    use gen_core::HashId;
+    use gen_core::{HashId, region::RegionResolutionError};
 
     use super::*;
     use crate::{
         block_group::{BlockGroup, PathCache},
+        block_group_edge::BlockGroupEdgeData,
         errors::OperationError,
         files::GenDatabase,
         metadata,
+        path::Path,
+        path_edge::PathEdge,
         sample::Sample,
-        test_helpers::{get_connection, setup_block_group, setup_gen},
+        test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
     };
+
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_annotation_by_name_case_insensitively() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let accession =
+                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+
+            let region = Region::parse("MREB").unwrap();
+            let resolved = Annotation::resolve(&region, &conn, "test", "test").unwrap();
+            assert_eq!(resolved.id, annotation.id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_annotation() {
+            let conn = get_connection(None).unwrap();
+            let (_block_group_id, _path) = setup_block_group(&conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = Annotation::resolve(&region, &conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_matching_annotations() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let accession =
+                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let _ = Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+
+            let other_block_group = create_bg(&conn, "test", "test", "other");
+            let edge_ids = PathEdge::edges_for_path(&conn, &path.id)
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            let block_group_edges = edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: other_block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>();
+            crate::block_group_edge::BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+            let other_path =
+                Path::create(&conn, "other-path", &other_block_group.id, &edge_ids).unwrap();
+            let other_accession =
+                BlockGroup::add_accession(&conn, &other_path, "ann-accession-2", 0, 5, &mut cache)
+                    .unwrap();
+            let _ = Annotation::get_or_create(&conn, "MREB", "genes", &other_accession.id, None)
+                .unwrap();
+
+            let region = Region::parse("mreB").unwrap();
+            let err = Annotation::resolve(&region, &conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name) if name == "multiple annotations named mreB"
+            ));
+        }
+    }
 
     #[test]
     fn create_annotation_with_samples() {

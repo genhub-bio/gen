@@ -5,6 +5,7 @@ use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     calculate_hash, is_end_node, is_start_node,
     range::{Range, RangeMapping},
+    region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
@@ -864,6 +865,38 @@ impl Path {
     }
 }
 
+impl RegionResolver for Path {
+    type Connection = GraphConnection;
+    type Error = PathError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = Path::query(
+            conn,
+            "SELECT paths.* \
+             FROM paths \
+             JOIN block_groups ON paths.block_group_id = block_groups.id \
+             WHERE block_groups.collection_name = ?1 \
+               AND block_groups.sample_name = ?2 \
+               AND lower(paths.name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple paths named {}",
+                region.name
+            ))),
+        }
+    }
+}
+
 impl Query for Path {
     type Model = Path;
 
@@ -884,14 +917,16 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use capnp::message::TypedBuilder;
     use chrono::Utc;
+    use gen_core::region::RegionResolutionError;
 
     use super::*;
     use crate::{
         block_group::{BlockGroup, NewBlockGroup},
-        block_group_edge::BlockGroupEdgeData,
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
+        edge::Edge,
         sample::{NewSample, Sample},
-        test_helpers::get_connection,
+        test_helpers::{create_bg, get_connection},
     };
 
     fn create_test_block_group(conn: &GraphConnection) -> BlockGroup {
@@ -913,6 +948,112 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_path_by_name_case_insensitively() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let block_group = create_test_block_group(conn);
+            let edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let path = Path::create(conn, "chr1", &block_group.id, &[edge.id]).unwrap();
+
+            let region = Region::parse("CHR1").unwrap();
+            let resolved = Path::resolve(&region, conn, "test collection", "test-sample").unwrap();
+            assert_eq!(resolved.id, path.id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_path() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let _ = create_test_block_group(conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_matching_paths() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let block_group = create_test_block_group(conn);
+            let edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let _ = Path::create(conn, "chr1", &block_group.id, &[edge.id]).unwrap();
+
+            let other_block_group =
+                create_bg(conn, "test collection", "test-sample", "other block group");
+            let other_edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: other_block_group.id,
+                    edge_id: other_edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let _ = Path::create(conn, "CHR1", &other_block_group.id, &[other_edge.id]).unwrap();
+
+            let region = Region::parse("chr1").unwrap();
+            let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name) if name == "multiple paths named chr1"
+            ));
+        }
     }
 
     #[test]

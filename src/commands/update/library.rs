@@ -23,12 +23,6 @@ pub struct Command {
     /// The name of the path to add the library to
     #[arg(short, long)]
     path_name: String,
-    /// The start coordinate for the region to add the library to
-    #[arg(long)]
-    start: i64,
-    /// The end coordinate for the region to add the library to
-    #[arg(short, long)]
-    end: i64,
     /// A CSV with combinatorial library information
     #[arg(short, long)]
     library: String,
@@ -60,8 +54,6 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.sample.as_str(),
         &cmd.new_sample,
         &cmd.path_name,
-        cmd.start,
-        cmd.end,
         parts_list,
         Some(&cmd.parts),
         Some(&cmd.library),

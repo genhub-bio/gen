@@ -770,7 +770,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     let parsed_region = Region::parse(&region);
                     match parsed_region {
                         Ok(parsed_region) => {
-                            (parsed_region.name, parsed_region.start, parsed_region.end)
+                            let (start, end) = parsed_region.require_coordinates()?;
+                            (parsed_region.name, start, end)
                         }
                         Err(parse_error) => {
                             return Err(Box::new(parse_error));

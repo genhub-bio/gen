@@ -24,8 +24,8 @@ import_library <- function(workspace_path = NULL, db_path = NULL, library_name, 
   .Call(wrap__import_library, workspace_path, db_path, library_name, parts_list, name, sample)
 }
 
-update_with_fasta <- function(workspace_path = NULL, db_path = NULL, filename, name = NULL, sample, new_sample, region_name, start, end) {
-  .Call(wrap__update_with_fasta, workspace_path, db_path, filename, name, sample, new_sample, region_name, start, end)
+update_with_fasta <- function(workspace_path = NULL, db_path = NULL, filename, name = NULL, sample, new_sample, region_name) {
+  .Call(wrap__update_with_fasta, workspace_path, db_path, filename, name, sample, new_sample, region_name)
 }
 
 update_with_gfa <- function(workspace_path = NULL, db_path = NULL, filename, name = NULL, sample, new_sample) {
@@ -44,16 +44,16 @@ update_with_genbank <- function(workspace_path = NULL, db_path = NULL, filename,
   .Call(wrap__update_with_genbank, workspace_path, db_path, filename, name, sample, create_missing)
 }
 
-update_with_library_files <- function(workspace_path = NULL, db_path = NULL, name = NULL, sample, new_sample, path_name, start, end, library, parts) {
-  .Call(wrap__update_with_library_files, workspace_path, db_path, name, sample, new_sample, path_name, start, end, library, parts)
+update_with_library_files <- function(workspace_path = NULL, db_path = NULL, name = NULL, sample, new_sample, path_name, library, parts) {
+  .Call(wrap__update_with_library_files, workspace_path, db_path, name, sample, new_sample, path_name, library, parts)
 }
 
-update_with_library <- function(workspace_path = NULL, db_path = NULL, name = NULL, sample = NULL, new_sample_name, path_name, start, end, parts_list) {
-  .Call(wrap__update_with_library, workspace_path, db_path, name, sample, new_sample_name, path_name, start, end, parts_list)
+update_with_library <- function(workspace_path = NULL, db_path = NULL, name = NULL, sample = NULL, new_sample_name, path_name, parts_list) {
+  .Call(wrap__update_with_library, workspace_path, db_path, name, sample, new_sample_name, path_name, parts_list)
 }
 
-update_with_sequence <- function(workspace_path = NULL, db_path = NULL, sequence, name = NULL, sample, new_sample, region_name, start, end, no_reference_path_update = FALSE) {
-  .Call(wrap__update_with_sequence, workspace_path, db_path, sequence, name, sample, new_sample, region_name, start, end, no_reference_path_update)
+update_with_sequence <- function(workspace_path = NULL, db_path = NULL, sequence, name = NULL, sample, new_sample, region_name, no_reference_path_update = FALSE) {
+  .Call(wrap__update_with_sequence, workspace_path, db_path, sequence, name, sample, new_sample, region_name, no_reference_path_update)
 }
 
 export_fasta <- function(workspace_path = NULL, db_path = NULL, filename, name = NULL, sample = NULL) {

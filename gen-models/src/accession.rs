@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
+    region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
@@ -349,10 +350,7 @@ impl Accession {
         AccessionEdge::query(conn, query, params![accession_id])
     }
 
-    pub fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AccessionError> {
+    pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
         let edges = Self::get_edges_by_id(conn, &self.id);
         if edges.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
@@ -390,10 +388,55 @@ impl Accession {
             strand: Strand::Forward,
         });
 
-        Ok(blocks
+        Ok(blocks)
+    }
+
+    pub fn length(&self, conn: &GraphConnection) -> Result<i64, AccessionError> {
+        let blocks = self.blocks(conn)?;
+        Ok(blocks.last().unwrap().start)
+    }
+
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AccessionError> {
+        Ok(self
+            .blocks(conn)?
             .into_iter()
             .map(|block| (block.start..block.end, block))
             .collect())
+    }
+}
+
+impl RegionResolver for Accession {
+    type Connection = GraphConnection;
+    type Error = AccessionError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = Accession::query(
+            conn,
+            "SELECT a.* \
+             FROM accessions a \
+             JOIN block_groups bg ON a.block_group_id = bg.id \
+             WHERE bg.collection_name = ?1 \
+               AND bg.sample_name = ?2 \
+               AND lower(a.name) = lower(?3)",
+            params![collection_name, sample_name, region.name],
+        );
+
+        match matches.len() {
+            0 => Err(RegionResolutionError::NotFound(region.name.clone())),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(RegionResolutionError::Ambiguous(format!(
+                "multiple accessions named {}",
+                region.name
+            ))),
+        }
     }
 }
 
@@ -593,13 +636,81 @@ impl Query for AccessionPath {
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
-    use gen_core::HashId;
+    use gen_core::{HashId, region::RegionResolutionError};
 
     use super::*;
     use crate::{
         block_group::{BlockGroup, PathCache},
-        test_helpers::{get_connection, interval_tree_verify, setup_block_group},
+        block_group_edge::BlockGroupEdgeData,
+        path::Path,
+        path_edge::PathEdge,
+        test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
     };
+
+    mod region_resolver {
+        use super::*;
+
+        #[test]
+        fn resolves_accession_by_name_case_insensitively() {
+            let conn = &get_connection(None).unwrap();
+            let (_bg, path) = setup_block_group(conn);
+            let mut path_cache = PathCache::new(conn);
+            let accession =
+                BlockGroup::add_accession(conn, &path, "mreB", 5, 15, &mut path_cache).unwrap();
+
+            let region = Region::parse("MREB").unwrap();
+            let resolved = Accession::resolve(&region, conn, "test", "test").unwrap();
+            assert_eq!(resolved.id, accession.id);
+        }
+
+        #[test]
+        fn returns_not_found_for_missing_accession() {
+            let conn = &get_connection(None).unwrap();
+            let (_bg, _path) = setup_block_group(conn);
+
+            let region = Region::parse("missing").unwrap();
+            let err = Accession::resolve(&region, conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::NotFound(name) if name == "missing"
+            ));
+        }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_matching_accessions() {
+            let conn = &get_connection(None).unwrap();
+            let (_bg, path) = setup_block_group(conn);
+            let mut path_cache = PathCache::new(conn);
+            let _ = BlockGroup::add_accession(conn, &path, "mreB", 5, 15, &mut path_cache).unwrap();
+
+            let other_block_group = create_bg(conn, "test", "test", "other");
+            let edge_ids = PathEdge::edges_for_path(conn, &path.id)
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            let block_group_edges = edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: other_block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>();
+            crate::block_group_edge::BlockGroupEdge::bulk_create(conn, &block_group_edges);
+            let other_path =
+                Path::create(conn, "other-path", &other_block_group.id, &edge_ids).unwrap();
+            let _ = BlockGroup::add_accession(conn, &other_path, "MREB", 5, 15, &mut path_cache)
+                .unwrap();
+
+            let region = Region::parse("mreB").unwrap();
+            let err = Accession::resolve(&region, conn, "test", "test").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name) if name == "multiple accessions named mreB"
+            ));
+        }
+    }
 
     #[test]
     fn test_accession_capnp_serialization() {
@@ -748,5 +859,16 @@ mod tests {
                 strand: Strand::Forward,
             }],
         );
+    }
+
+    #[test]
+    fn test_length() {
+        let conn = &get_connection(None).unwrap();
+        let (_bg, path) = setup_block_group(conn);
+        let mut path_cache = PathCache::new(conn);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+
+        assert_eq!(accession.length(conn).unwrap(), 30);
     }
 }

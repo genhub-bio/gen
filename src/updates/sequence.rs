@@ -7,6 +7,7 @@ use gen_models::{
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
+    region::{GenRegionError, Region, resolve_path},
     sample::Sample,
     sequence::Sequence,
     traits::*,
@@ -22,13 +23,28 @@ pub fn update_with_sequence(
     parent_sample_name: &str,
     new_sample_name: &str,
     region_name: &str,
-    start_coordinate: i64,
-    end_coordinate: i64,
     sequence: &str,
     disable_reference_path_update: bool,
 ) -> Result<Operation, SequenceUpdateError> {
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
+    let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
+    let resolved_region =
+        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
+            Ok(region) => region,
+            Err(GenRegionError::NotFound(_)) => {
+                return Err(GenRegionError::NotFound(region_name.to_string()).into());
+            }
+            Err(err) => return Err(err.into()),
+        };
+    let (start_coordinate, end_coordinate) =
+        if parsed_region.start.is_some() || parsed_region.end.is_some() {
+            (resolved_region.start, resolved_region.end)
+        } else {
+            return Err(SequenceUpdateError::MissingCoordinates(
+                region_name.to_string(),
+            ));
+        };
 
     let _new_sample = Sample::get_or_create(
         conn,
@@ -49,13 +65,13 @@ pub fn update_with_sequence(
             vec![parent_sample_name.to_string()],
         )?;
 
-        if block_group.name == region_name {
+        if block_group.name == resolved_region.block_group.name {
             target_block_groups = new_block_groups;
         }
     }
 
     if target_block_groups.is_empty() {
-        panic!("No region found with name: {region_name}");
+        return Err(GenRegionError::NotFound(region_name.to_string()).into());
     }
 
     for target_block_group in &target_block_groups {
@@ -214,9 +230,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -262,9 +276,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -273,9 +285,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "other sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             true,
         );
@@ -323,9 +333,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -335,9 +343,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            4,
-            6,
+            "m123:4-6",
             "TTTTTTTT",
             false,
         );
@@ -387,9 +393,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -399,9 +403,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            1,
-            6,
+            "m123:1-6",
             "TTTTTTTT",
             false,
         );
@@ -457,9 +459,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -469,9 +469,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            1,
-            12,
+            "m123:1-12",
             "TTTTTTTT",
             false,
         );
@@ -521,9 +519,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -533,9 +529,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            6,
-            12,
+            "m123:6-12",
             "TTTTTTTT",
             false,
         );
@@ -585,9 +579,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "AAAAAAAA",
             false,
         );
@@ -597,9 +589,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123",
-            4,
-            6,
+            "m123:4-6",
             "AAAAAAAA",
             false,
         );
@@ -648,9 +638,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             "",
             false,
         );

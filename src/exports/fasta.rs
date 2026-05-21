@@ -133,9 +133,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             "child sample",
-            "m123",
-            2,
-            5,
+            "m123:2-5",
             fasta_update_path.to_str().unwrap(),
             false,
         );

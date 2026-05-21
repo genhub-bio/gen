@@ -1,7 +1,8 @@
 use std::io::Error as IOError;
 
-use gen_models::errors::{
-    BlockGroupError, NodeError, OperationError, PathError, QueryError, SequenceError,
+use gen_models::{
+    errors::{BlockGroupError, NodeError, OperationError, PathError, QueryError, SequenceError},
+    region::GenRegionError,
 };
 use thiserror::Error;
 
@@ -36,4 +37,15 @@ pub enum SequenceUpdateError {
     EmptyPath(String),
     #[error("No path block found for path id {path_id} at coordinate {coordinate}")]
     MissingPathBlock { path_id: String, coordinate: i64 },
+    #[error("Region Error: {0}")]
+    RegionError(#[from] GenRegionError),
+    #[error("Missing coordinates for region '{0}'. Use region syntax like 'name:start-end'.")]
+    MissingCoordinates(String),
+    #[error("Unsupported region type for sequence update: {0}")]
+    UnsupportedRegionType(String),
+    #[error("Resolved path '{path_name}' was not found in target block group '{block_group_name}'")]
+    MissingResolvedPath {
+        path_name: String,
+        block_group_name: String,
+    },
 }

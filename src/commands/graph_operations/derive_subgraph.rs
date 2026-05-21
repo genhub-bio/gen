@@ -56,8 +56,7 @@ pub fn derive_subgraph_operation(
         )));
     };
 
-    let start_coordinate = parsed_region.start;
-    let end_coordinate = parsed_region.end;
+    let (start_coordinate, end_coordinate) = parsed_region.require_coordinates()?;
 
     if let Err(err) = derive_chunks(
         db_context,
