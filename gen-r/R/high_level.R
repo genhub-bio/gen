@@ -308,20 +308,20 @@ methods::setMethod("show", "gen_plot", function(object) print(object))
 #'   \code{NULL} the current working directory is used.
 #' @return A \code{gen_repository} environment with the following methods:
 #'   \describe{
-#'     \item{\code{import_fasta(filename, name, sample, shallow)}}{Import a FASTA file as a new block group.}
-#'     \item{\code{import_gfa(filename, name, sample)}}{Import a GFA file.}
-#'     \item{\code{import_genbank(filename, name, sample)}}{Import a GenBank file (plain or gzipped).}
-#'     \item{\code{import_library(library_name, parts_list, name, sample)}}{Import a combinatorial sequence library.}
-#'     \item{\code{import_library_files(library_name, parts, library, name, sample)}}{Import a library from parts/library CSV files.}
+#'     \item{\code{import_fasta(filename, sample, shallow, name=NULL)}}{Import a FASTA file as a new block group.}
+#'     \item{\code{import_gfa(filename, sample, name=NULL)}}{Import a GFA file.}
+#'     \item{\code{import_genbank(filename, sample, name=NULL)}}{Import a GenBank file (plain or gzipped).}
+#'     \item{\code{import_library(library_name, parts_list, sample=NULL, name=NULL)}}{Import a combinatorial sequence library.}
+#'     \item{\code{import_library_files(library_name, parts, library, sample, name=NULL)}}{Import a library from parts/library CSV files.}
 #'     \item{\code{export_fasta(block_group, filename)}}{Export a block group to FASTA.}
 #'     \item{\code{export_gfa(block_group, filename, node_max)}}{Export a block group to GFA.}
 #'     \item{\code{export_genbank(block_group, filename)}}{Export a block group to GenBank.}
-#'     \item{\code{update_with_fasta(filename, sample, new_sample, region_name, ...)}}{Apply a FASTA update to an existing block group.}
-#'     \item{\code{update_with_gfa(filename, sample, new_sample, name)}}{Apply a GFA update.}
-#'     \item{\code{update_with_vcf(filename, name, genotype, sample)}}{Apply a VCF update.}
-#'     \item{\code{update_with_genbank(filename, sample, name, create_missing)}}{Apply a GenBank update.}
-#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, ...)}}{Apply a raw sequence update.}
-#'     \item{\code{update_with_library(name, sample, new_sample_name, path_name, ...)}}{Apply a library update.}
+#'     \item{\code{update_with_fasta(filename, sample, new_sample, region_name, start, end, name=NULL)}}{Apply a FASTA update to an existing block group.}
+#'     \item{\code{update_with_gfa(filename, sample, new_sample, name=NULL)}}{Apply a GFA update.}
+#'     \item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples, in_place, name=NULL)}}{Apply a VCF update.}
+#'     \item{\code{update_with_genbank(filename, sample, create_missing, name=NULL)}}{Apply a GenBank update.}
+#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, start, end, no_reference_path_update, name=NULL)}}{Apply a raw sequence update.}
+#'     \item{\code{update_with_library(sample=NULL, new_sample_name, path_name, start, end, parts_list, name=NULL)}}{Apply a library update.}
 #'     \item{\code{get_block_groups()}}{Return a list of all block groups.}
 #'     \item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
 #'     \item{\code{get_block_groups_by_collection(collection_name)}}{Return block groups in a collection.}

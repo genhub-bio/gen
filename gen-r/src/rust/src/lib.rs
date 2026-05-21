@@ -771,9 +771,9 @@ fn import_fasta(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
     shallow: bool,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -813,8 +813,8 @@ fn import_gfa(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -848,8 +848,8 @@ fn import_genbank(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -894,8 +894,8 @@ fn import_library_files(
     library_name: String,
     parts: String,
     library: String,
-    name: Nullable<String>,
     sample: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let parts_list = parse_library(&parts, &library)
         .map_err(|err| Error::Other(format!("Problem parsing library files: {err}")))?;
@@ -941,8 +941,8 @@ fn import_library(
     db_path: Nullable<String>,
     library_name: String,
     parts_list: Robj,
-    name: Nullable<String>,
     sample: Nullable<String>,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
     let (context, _, _) = open_db_context(
@@ -988,10 +988,10 @@ fn update_with_fasta(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
     new_sample: String,
     region_name: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1032,9 +1032,9 @@ fn update_with_gfa(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
     new_sample: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1070,9 +1070,9 @@ fn update_with_gaf(
     db_path: Nullable<String>,
     filename: String,
     csv: String,
-    name: Nullable<String>,
     sample: String,
     parent_sample: Nullable<String>,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1108,11 +1108,11 @@ fn update_with_vcf(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     genotype: Nullable<String>,
     sample: Nullable<String>,
     parent_samples: Vec<String>,
     in_place: bool,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1157,9 +1157,9 @@ fn update_with_genbank(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
     create_missing: bool,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1199,12 +1199,12 @@ fn update_with_genbank(
 fn update_with_library_files(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
-    name: Nullable<String>,
     sample: String,
     new_sample: String,
     path_name: String,
     library: String,
     parts: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let parts_list = parse_library(&parts, &library)
         .map_err(|err| Error::Other(format!("Couldn't parse library files: {err}")))?;
@@ -1243,11 +1243,11 @@ fn update_with_library_files(
 fn update_with_library(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
-    name: Nullable<String>,
     sample: Nullable<String>,
     new_sample_name: String,
     path_name: String,
     parts_list: Robj,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
     let (context, _, _) = open_db_context(
@@ -1288,11 +1288,11 @@ fn update_with_sequence(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     sequence: String,
-    name: Nullable<String>,
     sample: String,
     new_sample: String,
     region_name: String,
     no_reference_path_update: bool,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1329,8 +1329,8 @@ fn export_fasta(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: Nullable<String>,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1360,9 +1360,9 @@ fn export_gfa(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
     node_max: Nullable<i64>,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1396,8 +1396,8 @@ fn export_genbank(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
     filename: String,
-    name: Nullable<String>,
     sample: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1430,13 +1430,13 @@ fn export_genbank(
 fn derive_chunks(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
-    name: Nullable<String>,
     sample: String,
     new_sample: String,
     region: String,
     backbone: Nullable<String>,
     breakpoints: Vec<i32>,
     chunk_size: Nullable<i64>,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1470,11 +1470,11 @@ fn derive_chunks(
 fn derive_subgraph(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
-    name: Nullable<String>,
     sample: String,
     new_sample: String,
     region: String,
     backbone: Nullable<String>,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1499,11 +1499,11 @@ fn derive_subgraph(
 fn make_stitch(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
-    name: Nullable<String>,
     sample: String,
     new_sample: String,
     regions: String,
     new_region: String,
+    name: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
