@@ -7,7 +7,11 @@ use std::{
 
 use gen_core::{NodeIntervalBlock, range::Range};
 use gen_models::{
-    block_group::BlockGroup, db::GraphConnection, errors::PathError, path::Path, sample::Sample,
+    block_group::{BlockGroup, BlockGroupError},
+    db::GraphConnection,
+    errors::PathError,
+    path::Path,
+    sample::Sample,
 };
 use itertools::Itertools;
 use thiserror::Error;
@@ -20,6 +24,8 @@ pub enum GfaDiffError {
     Io(#[from] std::io::Error),
     #[error("Path error while generating GFA diff: {0}")]
     Path(#[from] PathError),
+    #[error("Block group error while generating GFA diff: {0}")]
+    BlockGroup(#[from] BlockGroupError),
 }
 
 pub fn gfa_sample_diff(
@@ -56,12 +62,12 @@ pub fn gfa_sample_diff(
 
     let source_paths_by_name = source_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
-        .collect::<HashMap<String, Path>>();
+        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
     let target_paths_by_name = target_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
-        .collect::<HashMap<String, Path>>();
+        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
 
     let mut segments = HashSet::new();
     let mut links = HashSet::new();
@@ -381,7 +387,8 @@ mod tests {
             })
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
-        let original_child_path = BlockGroup::get_current_path(conn, &child_block_group.id);
+        let original_child_path =
+            BlockGroup::get_current_path(conn, &child_block_group.id).unwrap();
         let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge4, &edge5);
 
         let temp_dir = tempdir().unwrap();
@@ -466,7 +473,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
-            BlockGroup::get_current_path(conn, &grandchild_block_group.id);
+            BlockGroup::get_current_path(conn, &grandchild_block_group.id).unwrap();
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 10, 14, &edge6, &edge7);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
@@ -1198,7 +1205,8 @@ mod tests {
             })
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
-        let original_child_path = BlockGroup::get_current_path(conn, &child_block_group.id);
+        let original_child_path =
+            BlockGroup::get_current_path(conn, &child_block_group.id).unwrap();
         let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge3, &edge4);
 
         let temp_dir = tempdir().unwrap();
@@ -1283,7 +1291,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
-            BlockGroup::get_current_path(conn, &grandchild_block_group.id);
+            BlockGroup::get_current_path(conn, &grandchild_block_group.id).unwrap();
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 4, 10, &edge5, &edge6);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");

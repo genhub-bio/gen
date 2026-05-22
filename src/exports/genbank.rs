@@ -18,7 +18,7 @@ use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, GenBankLocationOperator},
-    block_group::BlockGroup,
+    block_group::{BlockGroup, BlockGroupError},
     db::GraphConnection,
     errors::{AnnotationError, BlockGroupError, PathError, SequenceError},
     node::Node,
@@ -276,7 +276,7 @@ pub fn export_genbank(
     let mut writer = gb_io::writer::SeqWriter::new(writer);
 
     for block_group in block_groups.iter() {
-        let path = BlockGroup::get_current_path(conn, &block_group.id);
+        let path = BlockGroup::get_current_path(conn, &block_group.id)?;
         let path_blocks = path
             .blocks(conn)?
             .into_iter()

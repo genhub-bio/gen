@@ -33,6 +33,16 @@ pub trait Query {
         objs
     }
 
+    fn try_query(conn: &Connection, query: &str, params: impl Params) -> Result<Vec<Self::Model>> {
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map(params, |row| Ok(Self::process_row(row)))?;
+        let mut objs = vec![];
+        for row in rows {
+            objs.push(row?);
+        }
+        Ok(objs)
+    }
+
     fn get(conn: &Connection, query: &str, params: impl Params) -> Result<Self::Model> {
         let mut stmt = conn.prepare(query).unwrap();
         stmt.query_row(params, |row| Ok(Self::process_row(row)))

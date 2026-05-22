@@ -152,7 +152,7 @@ pub fn resolve_block_group(
         Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
-    let path = BlockGroup::get_current_path(conn, &block_group.id);
+    let path = BlockGroup::get_current_path(conn, &block_group.id)?;
     let path_length = path.length(conn)?;
     resolve_target(
         region,

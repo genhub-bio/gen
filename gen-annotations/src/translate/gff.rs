@@ -69,7 +69,7 @@ where
             let projection = match paths.entry(bg.id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let path = BlockGroup::get_current_path(conn, &bg.id);
+                    let path = BlockGroup::get_current_path(conn, &bg.id)?;
                     let graph = BlockGroup::get_graph(conn, &bg.id)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;

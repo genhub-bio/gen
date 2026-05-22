@@ -50,7 +50,7 @@ pub fn get_path(
     let block_group_id = resolved_region.block_group.id;
 
     if let Some(backbone) = backbone {
-        let path = BlockGroup::get_path_by_name(conn, &block_group_id, backbone);
+        let path = BlockGroup::get_path_by_name(conn, &block_group_id, backbone)?;
         if path.is_none() {
             return Err(GraphOperationError::PathNotFound(format!(
                 "No path found with name {backbone}"
@@ -58,9 +58,10 @@ pub fn get_path(
         }
         Ok(path.unwrap())
     } else {
-        Ok(resolved_region
-            .path
-            .unwrap_or_else(|| BlockGroup::get_current_path(conn, &block_group_id)))
+        match resolved_region.path {
+            Some(path) => Ok(path),
+            None => Ok(BlockGroup::get_current_path(conn, &block_group_id)?),
+        }
     }
 }
 
@@ -585,7 +586,7 @@ mod tests {
             HashSet::from_iter(vec!["TTTTTCCCCC".to_string(), "TAAAAAAAAC".to_string(),])
         );
 
-        let new_path = BlockGroup::get_current_path(conn, &block_group2.id);
+        let new_path = BlockGroup::get_current_path(conn, &block_group2.id).unwrap();
         assert_eq!(new_path.sequence(conn).unwrap(), "TAAAAAAAAC");
     }
 
@@ -686,7 +687,7 @@ mod tests {
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
         );
 
-        let path2 = BlockGroup::get_current_path(conn, &block_group2.id);
+        let path2 = BlockGroup::get_current_path(conn, &block_group2.id).unwrap();
         assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
@@ -699,7 +700,7 @@ mod tests {
             ])
         );
 
-        let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
+        let path3 = BlockGroup::get_current_path(conn, &block_group3.id).unwrap();
         assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
     }
 
@@ -800,7 +801,7 @@ mod tests {
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
         );
 
-        let path2 = BlockGroup::get_current_path(conn, &block_group2.id);
+        let path2 = BlockGroup::get_current_path(conn, &block_group2.id).unwrap();
         assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
@@ -813,7 +814,7 @@ mod tests {
             ])
         );
 
-        let path3 = BlockGroup::get_current_path(conn, &block_group3.id);
+        let path3 = BlockGroup::get_current_path(conn, &block_group3.id).unwrap();
         assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
 
         // Stitch the two main chunks back together in same order
@@ -844,7 +845,7 @@ mod tests {
             ])
         );
 
-        let path4 = BlockGroup::get_current_path(conn, &block_group4.id);
+        let path4 = BlockGroup::get_current_path(conn, &block_group4.id).unwrap();
         // path2 + path3 concatenated
         assert_eq!(path4.sequence(conn).unwrap(), "TCAATCGATCGATCAAGGAACACA");
 
@@ -876,7 +877,7 @@ mod tests {
             ])
         );
 
-        let path5 = BlockGroup::get_current_path(conn, &block_group5.id);
+        let path5 = BlockGroup::get_current_path(conn, &block_group5.id).unwrap();
         // path3 + path2 concatenated
         assert_eq!(path5.sequence(conn).unwrap(), "ATCGATCAAGGAACACATCAATCG");
     }

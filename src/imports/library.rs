@@ -176,7 +176,7 @@ mod tests {
         let actual_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(actual_sequences, expected_sequences);
 
-        let current_path = BlockGroup::get_current_path(conn, &block_group.id);
+        let current_path = BlockGroup::get_current_path(conn, &block_group.id).unwrap();
         assert_eq!(
             current_path.sequence(conn).unwrap(),
             "TCTAGAGAAAGAGGGGACAAACTAGATGCGTAAAGGAGAAGAACTTTAA"

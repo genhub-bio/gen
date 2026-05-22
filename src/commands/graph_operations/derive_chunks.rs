@@ -191,6 +191,7 @@ mod tests {
             .iter()
             .map(|bg| {
                 BlockGroup::get_current_path(conn, &bg.id)
+                    .unwrap()
                     .sequence(conn)
                     .unwrap()
             })
