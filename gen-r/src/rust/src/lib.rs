@@ -825,6 +825,119 @@ fn import_fasta(
 }
 
 #[extendr]
+fn import_sequences(
+    workspace_path: Nullable<String>,
+    db_path: Nullable<String>,
+    names: Vec<String>,
+    sequences: Vec<String>,
+    sample: String,
+    name: Nullable<String>,
+) -> std::result::Result<String, Error> {
+    if names.len() != sequences.len() {
+        return Err(Error::Other(
+            "names and sequences must have the same length".to_string(),
+        ));
+    }
+    let (context, _, _) = open_db_context(
+        nullable_string_to_option(workspace_path),
+        nullable_string_to_option(db_path),
+    )
+    .map_err(Error::Other)?;
+    let collection_name =
+        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
+            .map_err(Error::Other)?;
+
+    begin_transactions(&context).map_err(Error::Other)?;
+
+    let entries: Vec<(String, String)> = names.into_iter().zip(sequences).collect();
+
+    match r#gen::imports::sequences::import_sequences(&context, &entries, &collection_name, &sample)
+    {
+        Ok(_) => {
+            end_transactions(&context).map_err(Error::Other)?;
+            Ok("Sequences imported.".to_string())
+        }
+        Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+            rollback_transactions(&context);
+            Err(Error::Other("Sequence contents already exist.".to_string()))
+        }
+        Err(err) => {
+            rollback_transactions(&context);
+            Err(Error::Other(format!("Import failed: {err}")))
+        }
+    }
+}
+
+#[extendr]
+fn import_genomic_regions(
+    workspace_path: Nullable<String>,
+    db_path: Nullable<String>,
+    seq_names: Vec<String>,
+    seq_sequences: Vec<String>,
+    region_names: Vec<String>,
+    region_seq_names: Vec<String>,
+    region_starts: Vec<f64>,
+    region_ends: Vec<f64>,
+    sample: String,
+    name: Nullable<String>,
+) -> std::result::Result<String, Error> {
+    if seq_names.len() != seq_sequences.len() {
+        return Err(Error::Other(
+            "seq_names and seq_sequences must have the same length".to_string(),
+        ));
+    }
+    let n = region_names.len();
+    if region_seq_names.len() != n || region_starts.len() != n || region_ends.len() != n {
+        return Err(Error::Other(
+            "region_names, region_seq_names, region_starts, and region_ends must all have the same length".to_string(),
+        ));
+    }
+    let (context, _, _) = open_db_context(
+        nullable_string_to_option(workspace_path),
+        nullable_string_to_option(db_path),
+    )
+    .map_err(Error::Other)?;
+    let collection_name =
+        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
+            .map_err(Error::Other)?;
+
+    begin_transactions(&context).map_err(Error::Other)?;
+
+    let reference_sequences: Vec<(String, String)> =
+        seq_names.into_iter().zip(seq_sequences).collect();
+    let regions: Vec<(String, String, i64, i64)> = region_names
+        .into_iter()
+        .zip(region_seq_names)
+        .zip(region_starts)
+        .zip(region_ends)
+        .map(|(((rn, rsn), rs), re)| (rn, rsn, rs as i64, re as i64))
+        .collect();
+
+    match r#gen::imports::sequences::import_genomic_regions(
+        &context,
+        &reference_sequences,
+        &regions,
+        &collection_name,
+        &sample,
+    ) {
+        Ok(_) => {
+            end_transactions(&context).map_err(Error::Other)?;
+            Ok("Genomic regions imported.".to_string())
+        }
+        Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+            rollback_transactions(&context);
+            Err(Error::Other(
+                "Genomic region contents already exist.".to_string(),
+            ))
+        }
+        Err(err) => {
+            rollback_transactions(&context);
+            Err(Error::Other(format!("Import failed: {err}")))
+        }
+    }
+}
+
+#[extendr]
 fn import_gfa(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
@@ -2034,6 +2147,8 @@ extendr_module! {
     fn get_gen_dir;
     fn db_context;
     fn import_fasta;
+    fn import_sequences;
+    fn import_genomic_regions;
     fn import_gfa;
     fn import_genbank;
     fn import_library_files;

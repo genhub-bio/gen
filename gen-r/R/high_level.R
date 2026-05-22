@@ -298,6 +298,193 @@ print.gen_plot <- function(x, ...) {
 methods::setOldClass("gen_plot")
 methods::setMethod("show", "gen_plot", function(object) print(object))
 
+#' Import sequences from a Bioconductor XStringSet or named character vector
+#'
+#' Accepts a \code{DNAStringSet}, \code{AAStringSet}, or any named character
+#' vector.  Each named entry becomes one block group.  No intermediate FASTA
+#' file is written to disk.
+#'
+#' @param sequences A named character vector, \code{DNAStringSet},
+#'   \code{AAStringSet}, or any \code{XStringSet}.  Names become block group
+#'   names and must all be non-empty.
+#' @param sample Character. Sample name (default \code{"sample"}).
+#' @param collection_name Character or \code{NULL}. Collection name; if
+#'   \code{NULL} the workspace default is used.
+#' @param repo A \code{gen_repository} from \code{Repository()}, or \code{NULL}
+#'   to use the current working directory.
+#' @return Invisible \code{NULL}.
+#'
+#' @examples
+#' \dontrun{
+#' library(Biostrings)
+#' seqs <- DNAStringSet(c(chr1 = "ACGTACGT", chr2 = "TTGCTTGC"))
+#' import_bioconductor(seqs, sample = "hg38")
+#'
+#' # Named character vector works without Biostrings
+#' import_bioconductor(c(plasmid = "ATCGATCG"), sample = "ecoli")
+#' }
+#' @export
+import_bioconductor <- function(sequences, sample = "sample", collection_name = NULL, repo = NULL) {
+  if (!is.character(sequences)) {
+    if (!requireNamespace("Biostrings", quietly = TRUE)) {
+      stop(
+        "Biostrings is required to use XStringSet objects. ",
+        "Install it with: BiocManager::install(\"Biostrings\"). ",
+        "Alternatively, pass a named character vector.",
+        call. = FALSE
+      )
+    }
+    sequences <- as.character(sequences)
+  }
+  nms <- names(sequences)
+  if (is.null(nms) || any(is.na(nms)) || any(nms == "")) {
+    stop("All sequences must have non-empty names.", call. = FALSE)
+  }
+  workspace_path <- if (is.null(repo)) NULL else dirname(repo$gen_dir)
+  db_path        <- if (is.null(repo)) NULL else repo$db_path
+  import_sequences(
+    workspace_path  = workspace_path,
+    db_path         = db_path,
+    names           = nms,
+    sequences       = unname(sequences),
+    sample          = sample,
+    collection_name = collection_name
+  )
+  invisible(NULL)
+}
+
+#' Import genomic regions from a Bioconductor GRanges or data frame
+#'
+#' Each reference sequence is stored once as a node (identified by sequence
+#' hash), so overlapping or repeated imports of the same chromosome do not
+#' duplicate stored sequence data.  Each region then becomes a BlockGroup
+#' whose edges slice into that shared node at \code{[start, end)}.
+#'
+#' Coordinates follow Bioconductor convention on input (1-based, closed
+#' \code{[start, end]}) and are converted internally to 0-based half-open
+#' \code{[start, end)} for storage.
+#'
+#' Because all regions from the same chromosome reference the same underlying
+#' node, the node hash is shared rather than duplicated — making it clear that
+#' the sequence overlap is intentional and reducing storage costs when importing
+#' many regions at once.
+#'
+#' @param regions A \code{GRanges} object (requires the \pkg{GenomicRanges}
+#'   package) or a \code{data.frame} with columns \code{seqname},
+#'   \code{start} (1-based inclusive), \code{end} (1-based inclusive), and
+#'   \code{name}.
+#' @param sequences A named character vector or \code{DNAStringSet} whose
+#'   names match the \code{seqnames}/\code{seqname} values in \code{regions}.
+#'   Must cover every sequence referenced by at least one region.
+#' @param sample Character. Sample name (default \code{"sample"}).
+#' @param collection_name Character or \code{NULL}. Collection name; if
+#'   \code{NULL} the workspace default is used.
+#' @param repo A \code{gen_repository} from \code{Repository()}, or \code{NULL}
+#'   to use the current working directory.
+#' @return Invisible \code{NULL}.
+#'
+#' @examples
+#' \dontrun{
+#' library(GenomicRanges)
+#' library(Biostrings)
+#'
+#' # Full chromosome sequences
+#' genome <- DNAStringSet(c(
+#'   chr1 = "ACGTACGTACGTACGT",
+#'   chr2 = "TTGCTTGCTTGCTTGC"
+#' ))
+#'
+#' # Regions of interest — names become block group names
+#' gr <- GRanges(
+#'   seqnames = c("chr1", "chr1", "chr2"),
+#'   ranges   = IRanges(start = c(1, 9, 5), end = c(8, 16, 12)),
+#'   names    = c("gene_a", "gene_b", "gene_c")
+#' )
+#' names(gr) <- c("gene_a", "gene_b", "gene_c")
+#'
+#' import_granges(gr, genome, sample = "hg38")
+#'
+#' # data.frame alternative (no GenomicRanges required)
+#' regions_df <- data.frame(
+#'   seqname = c("chr1", "chr1"),
+#'   start   = c(1L, 9L),
+#'   end     = c(8L, 16L),
+#'   name    = c("gene_a", "gene_b")
+#' )
+#' import_granges(regions_df, genome, sample = "hg38")
+#' }
+#' @export
+import_granges <- function(regions, sequences, sample = "sample", collection_name = NULL, repo = NULL) {
+  if (!is.character(sequences)) {
+    if (!requireNamespace("Biostrings", quietly = TRUE)) {
+      stop(
+        "Biostrings is required to use XStringSet objects. ",
+        "Install it with: BiocManager::install(\"Biostrings\"). ",
+        "Alternatively, pass a named character vector.",
+        call. = FALSE
+      )
+    }
+    sequences <- as.character(sequences)
+  }
+  seq_names <- names(sequences)
+  if (is.null(seq_names) || any(is.na(seq_names)) || any(seq_names == "")) {
+    stop("All sequences must have non-empty names.", call. = FALSE)
+  }
+
+  if (inherits(regions, "GRanges")) {
+    if (!requireNamespace("GenomicRanges", quietly = TRUE)) {
+      stop(
+        "GenomicRanges is required to use GRanges objects. ",
+        "Install it with: BiocManager::install(\"GenomicRanges\").",
+        call. = FALSE
+      )
+    }
+    region_seqnames <- as.character(GenomicRanges::seqnames(regions))
+    # GRanges is 1-based closed [start, end]; convert to 0-based half-open [start, end)
+    region_starts  <- as.integer(GenomicRanges::start(regions)) - 1L
+    region_ends    <- as.integer(GenomicRanges::end(regions))
+    region_names   <- names(regions)
+    if (is.null(region_names)) {
+      region_names <- paste0(region_seqnames, ":", region_starts, "-", region_ends)
+    }
+  } else if (is.data.frame(regions)) {
+    if (!all(c("seqname", "start", "end", "name") %in% names(regions))) {
+      stop("data.frame regions must have columns: seqname, start, end, name", call. = FALSE)
+    }
+    region_seqnames <- as.character(regions$seqname)
+    region_starts   <- as.integer(regions$start) - 1L
+    region_ends     <- as.integer(regions$end)
+    region_names    <- as.character(regions$name)
+  } else {
+    stop("regions must be a GRanges or data.frame", call. = FALSE)
+  }
+
+  missing_seqs <- setdiff(region_seqnames, seq_names)
+  if (length(missing_seqs) > 0L) {
+    stop(
+      "Regions reference sequences not found in `sequences`: ",
+      paste(missing_seqs, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  workspace_path <- if (is.null(repo)) NULL else dirname(repo$gen_dir)
+  db_path        <- if (is.null(repo)) NULL else repo$db_path
+  import_genomic_regions(
+    workspace_path   = workspace_path,
+    db_path          = db_path,
+    seq_names        = seq_names,
+    seq_sequences    = unname(sequences),
+    region_names     = region_names,
+    region_seq_names = region_seqnames,
+    region_starts    = region_starts,
+    region_ends      = region_ends,
+    sample           = sample,
+    collection_name  = collection_name
+  )
+  invisible(NULL)
+}
+
 #' Open a Gen repository
 #'
 #' The main entry point for working with a Gen sequence graph database.
@@ -308,28 +495,31 @@ methods::setMethod("show", "gen_plot", function(object) print(object))
 #'   \code{NULL} the current working directory is used.
 #' @return A \code{gen_repository} environment with the following methods:
 #'   \describe{
-#'     \item{\code{import_fasta(filename, sample, shallow, collection_name=NULL)}}{Import a FASTA file as a new block group.}
-#'     \item{\code{import_gfa(filename, sample, collection_name=NULL)}}{Import a GFA file.}
-#'     \item{\code{import_genbank(filename, sample, collection_name=NULL)}}{Import a GenBank file (plain or gzipped).}
+#'     \item{\code{import_fasta(filename, sample="sample", shallow=FALSE, collection_name=NULL)}}{Import a FASTA file as a new block group.}
+#'     \item{\code{import_gfa(filename, sample="sample", collection_name=NULL)}}{Import a GFA file.}
+#'     \item{\code{import_genbank(filename, sample="sample", collection_name=NULL)}}{Import a GenBank file (plain or gzipped).}
 #'     \item{\code{import_library(library_name, parts_list, sample=NULL, collection_name=NULL)}}{Import a combinatorial sequence library.}
-#'     \item{\code{import_library_files(library_name, parts, library, sample, collection_name=NULL)}}{Import a library from parts/library CSV files.}
-#'     \item{\code{export_fasta(block_group, filename)}}{Export a block group to FASTA.}
-#'     \item{\code{export_gfa(block_group, filename, node_max)}}{Export a block group to GFA.}
-#'     \item{\code{export_genbank(block_group, filename)}}{Export a block group to GenBank.}
+#'     \item{\code{import_library_files(library_name, parts, library, sample="sample", collection_name=NULL)}}{Import a library from parts/library CSV files.}
+#'     \item{\code{export_fasta(filename, sample=NULL, collection_name=NULL)}}{Export sequences to FASTA.}
+#'     \item{\code{export_gfa(filename, sample, node_max=NULL, collection_name=NULL)}}{Export to GFA.}
+#'     \item{\code{export_genbank(filename, sample, collection_name=NULL)}}{Export to GenBank.}
 #'     \item{\code{update_with_fasta(filename, sample, new_sample, region_name, start, end, collection_name=NULL)}}{Apply a FASTA update to an existing block group.}
 #'     \item{\code{update_with_gfa(filename, sample, new_sample, collection_name=NULL)}}{Apply a GFA update.}
-#'     \item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples, in_place, collection_name=NULL)}}{Apply a VCF update.}
-#'     \item{\code{update_with_genbank(filename, sample, create_missing, collection_name=NULL)}}{Apply a GenBank update.}
-#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, start, end, no_reference_path_update, collection_name=NULL)}}{Apply a raw sequence update.}
+#'     \item{\code{update_with_gaf(filename, csv, sample, parent_sample=NULL, collection_name=NULL)}}{Apply a GAF update.}
+#'     \item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples=character(), in_place=FALSE, collection_name=NULL)}}{Apply a VCF update.}
+#'     \item{\code{update_with_genbank(filename, sample, create_missing=FALSE, collection_name=NULL)}}{Apply a GenBank update.}
+#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, start, end, no_reference_path_update=FALSE, collection_name=NULL)}}{Apply a raw sequence update.}
 #'     \item{\code{update_with_library(sample=NULL, new_sample_name, path_name, start, end, parts_list, collection_name=NULL)}}{Apply a library update.}
+#'     \item{\code{update_with_library_files(sample, new_sample, path_name, start, end, library, parts, collection_name=NULL)}}{Apply a library-files update.}
 #'     \item{\code{get_block_groups()}}{Return a list of all block groups.}
 #'     \item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
 #'     \item{\code{get_block_groups_by_collection(collection_name)}}{Return block groups in a collection.}
 #'     \item{\code{get_block_sequence(node_key)}}{Return the sequence string for a \code{NodeKey}.}
 #'     \item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
 #'     \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate block groups end-to-end into a new block group.}
-#'     \item{\code{derive_subgraph(new_sample, start, end, backbone)}}{Derive a subgraph block group.}
-#'     \item{\code{derive_chunks(new_sample, breakpoints, chunk_size, backbone)}}{Split a block group into chunks.}
+#'     \item{\code{make_stitch(sample, new_sample, regions, new_region, collection_name=NULL)}}{Stitch named regions into a new block group by name.}
+#'     \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection_name=NULL)}}{Derive a subgraph block group.}
+#'     \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection_name=NULL)}}{Split a block group into chunks.}
 #'     \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
 #'     \item{\code{search(query, bgs, sequence_kind)}}{Search for exact sequence occurrences across block groups.}
 #'     \item{\code{clear_index(bgs)}}{Remove cached search index files.}
@@ -432,6 +622,101 @@ Repository <- function(path = NULL) {
   repo$clear_index <- function(bgs = NULL) {
     ids <- if (is.null(bgs)) character() else sapply(bgs, function(bg) bg$id$hash_id)
     repo_clear_index(repo$gen_dir, ids)
+  }
+
+  repo$import_fasta <- function(filename, sample = "sample", shallow = FALSE, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    import_fasta(workspace_path, repo$db_path, filename, sample, shallow, collection_name)
+  }
+
+  repo$import_gfa <- function(filename, sample = "sample", collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    import_gfa(workspace_path, repo$db_path, filename, sample, collection_name)
+  }
+
+  repo$import_genbank <- function(filename, sample = "sample", collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    import_genbank(workspace_path, repo$db_path, filename, sample, collection_name)
+  }
+
+  repo$import_library <- function(library_name, parts_list, sample = NULL, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    import_library(workspace_path, repo$db_path, library_name, parts_list, sample, collection_name)
+  }
+
+  repo$import_library_files <- function(library_name, parts, library, sample = "sample", collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    import_library_files(workspace_path, repo$db_path, library_name, parts, library, sample, collection_name)
+  }
+
+  repo$update_with_fasta <- function(filename, sample, new_sample, region_name, start, end, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_fasta(workspace_path, repo$db_path, filename, sample, new_sample, region_name, as.integer(start), as.integer(end), collection_name)
+  }
+
+  repo$update_with_gfa <- function(filename, sample, new_sample, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_gfa(workspace_path, repo$db_path, filename, sample, new_sample, collection_name)
+  }
+
+  repo$update_with_gaf <- function(filename, csv, sample, parent_sample = NULL, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_gaf(workspace_path, repo$db_path, filename, csv, sample, parent_sample, collection_name)
+  }
+
+  repo$update_with_vcf <- function(filename, genotype = NULL, sample = NULL, parent_samples = character(), in_place = FALSE, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_vcf(workspace_path, repo$db_path, filename, genotype, sample, parent_samples, in_place, collection_name)
+  }
+
+  repo$update_with_genbank <- function(filename, sample, create_missing = FALSE, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_genbank(workspace_path, repo$db_path, filename, sample, create_missing, collection_name)
+  }
+
+  repo$update_with_sequence <- function(sequence, sample, new_sample, region_name, start, end, no_reference_path_update = FALSE, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_sequence(workspace_path, repo$db_path, sequence, sample, new_sample, region_name, as.integer(start), as.integer(end), no_reference_path_update, collection_name)
+  }
+
+  repo$update_with_library <- function(sample = NULL, new_sample_name, path_name, start, end, parts_list, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_library(workspace_path, repo$db_path, sample, new_sample_name, path_name, as.integer(start), as.integer(end), parts_list, collection_name)
+  }
+
+  repo$update_with_library_files <- function(sample, new_sample, path_name, start, end, library, parts, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    update_with_library_files(workspace_path, repo$db_path, sample, new_sample, path_name, as.integer(start), as.integer(end), library, parts, collection_name)
+  }
+
+  repo$export_fasta <- function(filename, sample = NULL, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    export_fasta(workspace_path, repo$db_path, filename, sample, collection_name)
+  }
+
+  repo$export_gfa <- function(filename, sample, node_max = NULL, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    export_gfa(workspace_path, repo$db_path, filename, sample, node_max, collection_name)
+  }
+
+  repo$export_genbank <- function(filename, sample, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    export_genbank(workspace_path, repo$db_path, filename, sample, collection_name)
+  }
+
+  repo$derive_subgraph <- function(sample, new_sample, region, backbone = NULL, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    derive_subgraph(workspace_path, repo$db_path, sample, new_sample, region, backbone, collection_name)
+  }
+
+  repo$derive_chunks <- function(sample, new_sample, region, backbone = NULL, breakpoints = NULL, chunk_size = NULL, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    derive_chunks(workspace_path, repo$db_path, sample, new_sample, region, backbone, breakpoints, chunk_size, collection_name)
+  }
+
+  repo$make_stitch <- function(sample, new_sample, regions, new_region, collection_name = NULL) {
+    workspace_path <- dirname(repo$gen_dir)
+    make_stitch(workspace_path, repo$db_path, sample, new_sample, regions, new_region, collection_name)
   }
 
   class(repo) <- "gen_repository"
