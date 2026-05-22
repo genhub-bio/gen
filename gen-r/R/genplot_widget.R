@@ -6,8 +6,6 @@
   anyhtmlwidget::AnyHtmlWidget$new(
     .esm = esm,
     .mode = "static",
-    frame = jsonlite::fromJSON(frame_json, simplifyDataFrame = FALSE),
-    action = list(),
-    snapshot = ""
+    frame = jsonlite::fromJSON(frame_json, simplifyDataFrame = FALSE)
   )
 }

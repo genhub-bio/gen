@@ -31,17 +31,15 @@ function render({ model, el }: RenderContext): void {
   el.appendChild(wrapper);
 
   const ctx = canvas.getContext("2d")!;
-  let nodeCells = new Set<string>();
-  let frozen = false;
 
-  function repaint(frame: Frame): void {
-    nodeCells = paintFrame(ctx, canvas, grid, frame);
-  }
-
-  repaint(model.get("frame"));
-  model.on("change:frame", () => repaint(model.get("frame")));
+  paintFrame(ctx, canvas, grid, model.get("frame"));
 
   if (INTERACTIVE) {
+    let nodeCells = new Set<string>();
+    let frozen = false;
+
+    model.on("change:frame", () => { nodeCells = paintFrame(ctx, canvas, grid, model.get("frame")); });
+
     const sharedBtnStyle = [
       "width: 24px",
       "height: 24px",

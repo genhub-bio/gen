@@ -134,11 +134,8 @@ function render({ model, el }) {
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   let canvas = document.createElement("canvas");
   canvas.style.cssText = "display: block; cursor: default; border: 2px solid #45475a;", wrapper.appendChild(canvas), el.appendChild(wrapper);
-  let ctx = canvas.getContext("2d"), nodeCells = /* @__PURE__ */ new Set(), frozen = !1;
-  function repaint(frame) {
-    nodeCells = paintFrame(ctx, canvas, grid, frame);
-  }
-  repaint(model.get("frame")), model.on("change:frame", () => repaint(model.get("frame")));
+  let ctx = canvas.getContext("2d");
+  paintFrame(ctx, canvas, grid, model.get("frame"));
 }
 var index_default = { render };
 export {

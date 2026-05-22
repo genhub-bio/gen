@@ -66,7 +66,7 @@ simple_parts_list <- function() {
 import_simple_reference <- function(collection = "test-collection", sample = "sample-a") {
   import_fasta(
     filename = fixture_path("simple.fa"),
-    name = collection,
+    collection_name = collection,
     sample = sample,
     shallow = FALSE
   )
@@ -108,13 +108,13 @@ test_that("FASTA import and export bindings work", {
     output_fasta <- file.path(workspace, "output.fa")
     import_msg <- import_fasta(
       filename = fixture_path("simple.fa"),
-      name = "fasta-collection",
+      collection_name = "fasta-collection",
       sample = "sample-a",
       shallow = FALSE
     )
     exported_path <- export_fasta(
       filename = output_fasta,
-      name = "fasta-collection",
+      collection_name = "fasta-collection",
       sample = "sample-a"
     )
 
@@ -134,7 +134,7 @@ test_that("GFA and GenBank import/export bindings work", {
     expect_match(
       import_gfa(
         filename = fixture_path("simple.gfa"),
-        name = "gfa-collection",
+        collection_name = "gfa-collection",
         sample = "sample-a"
       ),
       "imported",
@@ -143,7 +143,7 @@ test_that("GFA and GenBank import/export bindings work", {
     expect_binding_result(try(
       export_gfa(
         filename = gfa_out,
-        name = "gfa-collection",
+        collection_name = "gfa-collection",
         sample = "sample-a"
       ),
       silent = TRUE
@@ -151,14 +151,14 @@ test_that("GFA and GenBank import/export bindings work", {
 
     genbank_import <- try(import_genbank(
         filename = fixture_path("geneious_genbank", "insertion.gb"),
-        name = "genbank-collection",
+        collection_name = "genbank-collection",
         sample = "sample-a"
       ), silent = TRUE)
     expect_binding_result(genbank_import)
 
     genbank_export <- try(export_genbank(
         filename = gb_out,
-        name = "genbank-collection",
+        collection_name = "genbank-collection",
         sample = "sample-a"
       ), silent = TRUE)
     expect_binding_result(genbank_export)
@@ -173,14 +173,14 @@ test_that("library import bindings work from files and in-memory parts", {
         library_name = "library-from-files",
         parts = fixture_path("affix_parts.fa"),
         library = fixture_path("affix_layout.csv"),
-        name = "library-files-collection",
+        collection_name = "library-files-collection",
         sample = "sample-a"
       ), silent = TRUE))
 
     expect_binding_result(try(import_library(
         library_name = "library-from-memory",
         parts_list = simple_parts_list(),
-        name = "library-memory-collection",
+        collection_name = "library-memory-collection",
         sample = "sample-a"
       ), silent = TRUE))
 
@@ -197,7 +197,7 @@ test_that("sequence update bindings work", {
 
     expect_binding_result(try(update_with_fasta(
         filename = fixture_path("aa.fa"),
-        name = "update-collection",
+        collection_name = "update-collection",
         sample = "sample-a",
         new_sample = "from-fasta",
         region_name = "m123:3-5"
@@ -213,7 +213,7 @@ test_that("sequence update bindings work", {
 
     expect_binding_result(try(update_with_sequence(
         sequence = "AAAAAAAA",
-        name = "update-collection",
+        collection_name = "update-collection",
         sample = "sample-a",
         new_sample = "from-sequence",
         region_name = "m123:2-5"
@@ -236,27 +236,27 @@ test_that("graph-derived update bindings work", {
 
     expect_binding_result(try(update_with_gfa(
         filename = fixture_path("path-diff.gfa"),
-        name = "graph-update-collection",
+        collection_name = "graph-update-collection",
         sample = "sample-a",
         new_sample = "from-gfa"
       ), silent = TRUE))
 
     expect_binding_result(try(update_with_vcf(
         filename = fixture_path("simple.vcf"),
-        name = "graph-update-collection",
+        collection_name = "graph-update-collection",
         parent_samples = "sample-a"
       ), silent = TRUE))
 
     expect_binding_result(try(import_gfa(
         filename = fixture_path("chr22_het.gfa"),
-        name = "gaf-collection",
+        collection_name = "gaf-collection",
         sample = ""
       ), silent = TRUE))
 
     expect_binding_result(try(update_with_gaf(
         filename = fixture_path("chr22_het.gaf"),
         csv = fixture_path("chr22_insert.csv"),
-        name = "gaf-collection",
+        collection_name = "gaf-collection",
         sample = "child"
       ), silent = TRUE))
   })
@@ -268,13 +268,13 @@ test_that("GenBank and library update bindings work", {
 
     expect_binding_result(try(import_genbank(
         filename = fixture_path("geneious_genbank", "insertion.gb"),
-        name = "genbank-collection",
+        collection_name = "genbank-collection",
         sample = "sample-a"
       ), silent = TRUE))
 
     expect_binding_result(try(update_with_genbank(
         filename = fixture_path("geneious_genbank", "multiple_insertions_deletions.gb"),
-        name = "genbank-collection",
+        collection_name = "genbank-collection",
         sample = "sample-a",
         create_missing = TRUE
       ), silent = TRUE))
@@ -282,7 +282,7 @@ test_that("GenBank and library update bindings work", {
     import_simple_reference("library-update-collection", "sample-a")
 
     expect_binding_result(try(update_with_library_files(
-        name = "library-update-collection",
+        collection_name = "library-update-collection",
         sample = "sample-a",
         new_sample = "library-files-child",
         path_name = "m123:7-20",
@@ -291,7 +291,7 @@ test_that("GenBank and library update bindings work", {
       ), silent = TRUE))
 
     expect_binding_result(try(update_with_library(
-        name = "library-update-collection",
+        collection_name = "library-update-collection",
         sample = "sample-a",
         new_sample_name = "library-memory-child",
         path_name = "m123:7-20",
@@ -315,7 +315,7 @@ test_that("graph operation bindings work", {
 
     chunk_result <- try(
       derive_chunks(
-        name = "ops-collection",
+        collection_name = "ops-collection",
         sample = "sample-a",
         new_sample = "chunked",
         region = "m123",
@@ -333,14 +333,14 @@ test_that("graph operation bindings work", {
     }
 
     expect_binding_result(try(derive_subgraph(
-        name = "ops-collection",
+        collection_name = "ops-collection",
         sample = "sample-a",
         new_sample = "subgraph",
         region = "m123:3-12"
       ), silent = TRUE))
 
     expect_binding_result(try(make_stitch(
-        name = "ops-collection",
+        collection_name = "ops-collection",
         sample = "chunked",
         new_sample = "stitched",
         regions = "m123.1,m123.2",
