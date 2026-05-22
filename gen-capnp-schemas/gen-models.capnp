@@ -218,9 +218,13 @@ struct DatabaseChangeset {
 
 struct ManifestOperation {
   operation @0 :Operation;
-  fileAdditions @1 :List(ManifestOperationFileAddition);
+  # Legacy operation file additions without operation-specific filename/filePath
+  # metadata. Keep this field shape stable for compatibility with older
+  # manifest writers.
+  fileAdditions @1 :List(FileAddition);
   annotationFileAdditions @4 :List(FileAddition);
   annotationFileDetails @5 :List(ManifestAnnotationFileAddition);
+  operationFileAdditions @6 :List(ManifestOperationFileAddition);
   operationSummary :union {
     none @2 :Void;
     some @3 :OperationSummary;
