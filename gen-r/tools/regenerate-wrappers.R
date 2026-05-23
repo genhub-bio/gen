@@ -13,9 +13,6 @@
 #   - Rust toolchain (cargo)
 #   - R package dependencies (jsonlite, anyhtmlwidget, methods)
 
-# NOTE: The auto-generated file will use the exact Rust parameter names from
-# lib.rs (e.g., `name` rather than `collection_name`).  If you want different
-# R-side naming, patch the R file after regeneration.
 
 stopifnot(nzchar(Sys.which("cargo")))
 stopifnot(require("rprojroot", quietly = TRUE))

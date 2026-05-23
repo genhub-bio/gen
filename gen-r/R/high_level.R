@@ -113,7 +113,7 @@ DbContext <- function(workspace_path = NULL, db_path = NULL) {
 .as_block_group <- function(x, gen_dir = NULL) {
   bg <- new.env(parent = emptyenv())
   bg$id <- HashId(x$id)
-  bg$collection_name <- x$collection_name
+  bg$collection <- x$collection
   bg$sample_name <- x$sample_name
   bg$name <- x$name
   bg$db_path <- x$db_path %||% NULL
@@ -128,17 +128,17 @@ DbContext <- function(workspace_path = NULL, db_path = NULL) {
 
   bg$export_fasta <- function(filename) {
     if (is.null(bg$db_path)) stop("export_fasta() requires a db_path", call. = FALSE)
-    repo_bg_export_fasta(bg$db_path, bg$collection_name, bg$sample_name, filename)
+    repo_bg_export_fasta(bg$db_path, bg$collection, bg$sample_name, filename)
   }
 
   bg$export_gfa <- function(filename, node_max = NULL) {
     if (is.null(bg$db_path)) stop("export_gfa() requires a db_path", call. = FALSE)
-    repo_bg_export_gfa(bg$db_path, bg$collection_name, bg$sample_name, filename, node_max)
+    repo_bg_export_gfa(bg$db_path, bg$collection, bg$sample_name, filename, node_max)
   }
 
   bg$export_genbank <- function(filename) {
     if (is.null(bg$db_path)) stop("export_genbank() requires a db_path", call. = FALSE)
-    repo_bg_export_genbank(bg$db_path, bg$collection_name, bg$sample_name, filename)
+    repo_bg_export_genbank(bg$db_path, bg$collection, bg$sample_name, filename)
   }
 
   bg$build_index <- function(sequence_kind = "dna", k = 16L) {
@@ -164,7 +164,7 @@ DbContext <- function(workspace_path = NULL, db_path = NULL) {
       stop("subgraph() requires a Repository context", call. = FALSE)
     workspace_path <- dirname(bg$gen_dir)
     result <- repo_bg_subgraph(
-      workspace_path, bg$db_path, bg$collection_name, bg$sample_name,
+      workspace_path, bg$db_path, bg$collection, bg$sample_name,
       bg$name, new_sample, as.integer(start), as.integer(end), backbone
     )
     .as_block_group(result, gen_dir = bg$gen_dir)
@@ -175,7 +175,7 @@ DbContext <- function(workspace_path = NULL, db_path = NULL) {
       stop("chunks() requires a Repository context", call. = FALSE)
     workspace_path <- dirname(bg$gen_dir)
     results <- repo_bg_chunks(
-      workspace_path, bg$db_path, bg$collection_name, bg$sample_name,
+      workspace_path, bg$db_path, bg$collection, bg$sample_name,
       bg$name, new_sample, breakpoints,
       if (is.null(chunk_size)) NULL else as.integer(chunk_size),
       backbone
@@ -343,7 +343,7 @@ methods::setMethod("show", "gen_plot", function(object) print(object))
 #'   \code{AAStringSet}, or any \code{XStringSet}.  Names become block group
 #'   names and must all be non-empty.
 #' @param sample Character. Sample name (default \code{"sample"}).
-#' @param collection_name Character or \code{NULL}. Collection name; if
+#' @param collection Character or \code{NULL}. Collection name; if
 #'   \code{NULL} the workspace default is used.
 #' @param repo A \code{gen_repository} from \code{Repository()}, or \code{NULL}
 #'   to use the current working directory.
@@ -359,7 +359,7 @@ methods::setMethod("show", "gen_plot", function(object) print(object))
 #' import_bioconductor(c(plasmid = "ATCGATCG"), sample = "ecoli")
 #' }
 #' @export
-import_bioconductor <- function(sequences, sample = "sample", collection_name = NULL, repo = NULL) {
+import_bioconductor <- function(sequences, sample = "sample", collection = NULL, repo = NULL) {
   if (!is.character(sequences)) {
     if (!requireNamespace("Biostrings", quietly = TRUE)) {
       stop(
@@ -383,7 +383,7 @@ import_bioconductor <- function(sequences, sample = "sample", collection_name = 
     names           = nms,
     sequences       = unname(sequences),
     sample          = sample,
-    collection_name = collection_name
+    collection = collection
   )
   invisible(NULL)
 }
@@ -412,7 +412,7 @@ import_bioconductor <- function(sequences, sample = "sample", collection_name = 
 #'   names match the \code{seqnames}/\code{seqname} values in \code{regions}.
 #'   Must cover every sequence referenced by at least one region.
 #' @param sample Character. Sample name (default \code{"sample"}).
-#' @param collection_name Character or \code{NULL}. Collection name; if
+#' @param collection Character or \code{NULL}. Collection name; if
 #'   \code{NULL} the workspace default is used.
 #' @param repo A \code{gen_repository} from \code{Repository()}, or \code{NULL}
 #'   to use the current working directory.
@@ -449,7 +449,7 @@ import_bioconductor <- function(sequences, sample = "sample", collection_name = 
 #' import_granges(regions_df, genome, sample = "hg38")
 #' }
 #' @export
-import_granges <- function(regions, sequences, sample = "sample", collection_name = NULL, repo = NULL) {
+import_granges <- function(regions, sequences, sample = "sample", collection = NULL, repo = NULL) {
   if (!is.character(sequences)) {
     if (!requireNamespace("Biostrings", quietly = TRUE)) {
       stop(
@@ -512,10 +512,10 @@ import_granges <- function(regions, sequences, sample = "sample", collection_nam
     seq_sequences    = unname(sequences),
     region_names     = region_names,
     region_seq_names = region_seqnames,
-    region_starts    = region_starts,
-    region_ends      = region_ends,
+    region_starts    = as.double(region_starts),
+    region_ends      = as.double(region_ends),
     sample           = sample,
-    collection_name  = collection_name
+    collection  = collection
   )
   invisible(NULL)
 }
@@ -530,31 +530,31 @@ import_granges <- function(regions, sequences, sample = "sample", collection_nam
 #'   \code{NULL} the current working directory is used.
 #' @return A \code{gen_repository} environment with the following methods:
 #'   \describe{
-#'     \item{\code{import_fasta(filename, sample="sample", shallow=FALSE, collection_name=NULL)}}{Import a FASTA file as a new block group.}
-#'     \item{\code{import_gfa(filename, sample="sample", collection_name=NULL)}}{Import a GFA file.}
-#'     \item{\code{import_genbank(filename, sample="sample", collection_name=NULL)}}{Import a GenBank file (plain or gzipped).}
-#'     \item{\code{import_library(library_name, parts_list, sample=NULL, collection_name=NULL)}}{Import a combinatorial sequence library.}
-#'     \item{\code{import_library_files(library_name, parts, library, sample="sample", collection_name=NULL)}}{Import a library from parts/library CSV files.}
-#'     \item{\code{export_fasta(filename, sample=NULL, collection_name=NULL)}}{Export sequences to FASTA.}
-#'     \item{\code{export_gfa(filename, sample, node_max=NULL, collection_name=NULL)}}{Export to GFA.}
-#'     \item{\code{export_genbank(filename, sample, collection_name=NULL)}}{Export to GenBank.}
-#'     \item{\code{update_with_fasta(filename, sample, new_sample, region_name, start, end, collection_name=NULL)}}{Apply a FASTA update to an existing block group.}
-#'     \item{\code{update_with_gfa(filename, sample, new_sample, collection_name=NULL)}}{Apply a GFA update.}
-#'     \item{\code{update_with_gaf(filename, csv, sample, parent_sample=NULL, collection_name=NULL)}}{Apply a GAF update.}
-#'     \item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples=character(), in_place=FALSE, collection_name=NULL)}}{Apply a VCF update.}
-#'     \item{\code{update_with_genbank(filename, sample, create_missing=FALSE, collection_name=NULL)}}{Apply a GenBank update.}
-#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, start, end, no_reference_path_update=FALSE, collection_name=NULL)}}{Apply a raw sequence update.}
-#'     \item{\code{update_with_library(sample=NULL, new_sample_name, path_name, start, end, parts_list, collection_name=NULL)}}{Apply a library update.}
-#'     \item{\code{update_with_library_files(sample, new_sample, path_name, start, end, library, parts, collection_name=NULL)}}{Apply a library-files update.}
+#'     \item{\code{import_fasta(filename, sample="sample", shallow=FALSE, collection=NULL)}}{Import a FASTA file as a new block group.}
+#'     \item{\code{import_gfa(filename, sample="sample", collection=NULL)}}{Import a GFA file.}
+#'     \item{\code{import_genbank(filename, sample="sample", collection=NULL)}}{Import a GenBank file (plain or gzipped).}
+#'     \item{\code{import_library(library_name, parts_list, sample=NULL, collection=NULL)}}{Import a combinatorial sequence library.}
+#'     \item{\code{import_library_files(library_name, parts, library, sample="sample", collection=NULL)}}{Import a library from parts/library CSV files.}
+#'     \item{\code{export_fasta(filename, sample=NULL, collection=NULL)}}{Export sequences to FASTA.}
+#'     \item{\code{export_gfa(filename, sample, node_max=NULL, collection=NULL)}}{Export to GFA.}
+#'     \item{\code{export_genbank(filename, sample, collection=NULL)}}{Export to GenBank.}
+#'     \item{\code{update_with_fasta(filename, sample, new_sample, region_name, start, end, collection=NULL)}}{Apply a FASTA update to an existing block group.}
+#'     \item{\code{update_with_gfa(filename, sample, new_sample, collection=NULL)}}{Apply a GFA update.}
+#'     \item{\code{update_with_gaf(filename, csv, sample, parent_sample=NULL, collection=NULL)}}{Apply a GAF update.}
+#'     \item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples=character(), in_place=FALSE, collection=NULL)}}{Apply a VCF update.}
+#'     \item{\code{update_with_genbank(filename, sample, create_missing=FALSE, collection=NULL)}}{Apply a GenBank update.}
+#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, start, end, no_reference_path_update=FALSE, collection=NULL)}}{Apply a raw sequence update.}
+#'     \item{\code{update_with_library(sample=NULL, new_sample_name, path_name, start, end, parts_list, collection=NULL)}}{Apply a library update.}
+#'     \item{\code{update_with_library_files(sample, new_sample, path_name, start, end, library, parts, collection=NULL)}}{Apply a library-files update.}
 #'     \item{\code{get_block_groups()}}{Return a list of all block groups.}
 #'     \item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
-#'     \item{\code{get_block_groups_by_collection(collection_name)}}{Return block groups in a collection.}
+#'     \item{\code{get_block_groups_by_collection(collection)}}{Return block groups in a collection.}
 #'     \item{\code{get_block_sequence(block)}}{Return the sequence string for a \code{Block}.}
 #'     \item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
 #'     \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate block groups end-to-end into a new block group.}
-#'     \item{\code{make_stitch(sample, new_sample, regions, new_region, collection_name=NULL)}}{Stitch named regions into a new block group by name.}
-#'     \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection_name=NULL)}}{Derive a subgraph block group.}
-#'     \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection_name=NULL)}}{Split a block group into chunks.}
+#'     \item{\code{make_stitch(sample, new_sample, regions, new_region, collection=NULL)}}{Stitch named regions into a new block group by name.}
+#'     \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection=NULL)}}{Derive a subgraph block group.}
+#'     \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection=NULL)}}{Split a block group into chunks.}
 #'     \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
 #'     \item{\code{search(query, bgs, sequence_kind)}}{Search for exact sequence occurrences across block groups.}
 #'     \item{\code{clear_index(bgs)}}{Remove cached search index files.}
@@ -584,9 +584,9 @@ Repository <- function(path = NULL) {
     lapply(repo_get_block_groups(repo$db_path), .as_block_group, gen_dir = repo$gen_dir)
   }
 
-  repo$get_block_groups_by_collection <- function(collection_name) {
+  repo$get_block_groups_by_collection <- function(collection) {
     lapply(
-      repo_get_block_groups_by_collection(repo$db_path, collection_name),
+      repo_get_block_groups_by_collection(repo$db_path, collection),
       .as_block_group,
       gen_dir = repo$gen_dir
     )
@@ -619,12 +619,12 @@ Repository <- function(path = NULL) {
 
   repo$stitch <- function(bgs, new_sample, new_region) {
     if (length(bgs) == 0L) stop("stitch() requires at least one block group", call. = FALSE)
-    collection_name <- bgs[[1L]]$collection_name
+    collection <- bgs[[1L]]$collection
     sample_name <- bgs[[1L]]$sample_name
     for (bg in bgs[-1L]) {
-      if (bg$collection_name != collection_name)
+      if (bg$collection != collection)
         stop(sprintf("All block groups must be in the same collection ('%s' vs '%s')",
-                     collection_name, bg$collection_name), call. = FALSE)
+                     collection, bg$collection), call. = FALSE)
       if (bg$sample_name != sample_name)
         stop(sprintf("All block groups must be in the same sample ('%s' vs '%s')",
                      sample_name, bg$sample_name), call. = FALSE)
@@ -632,7 +632,7 @@ Repository <- function(path = NULL) {
     regions <- paste(sapply(bgs, function(bg) bg$name), collapse = ",")
     workspace_path <- dirname(repo$gen_dir)
     result <- repo_stitch(
-      workspace_path, repo$db_path, collection_name, sample_name,
+      workspace_path, repo$db_path, collection, sample_name,
       new_sample, new_region, regions
     )
     .as_block_group(result, gen_dir = repo$gen_dir)
@@ -659,101 +659,101 @@ Repository <- function(path = NULL) {
     repo_clear_index(repo$gen_dir, ids)
   }
 
-  repo$import_fasta <- function(filename, sample = "sample", shallow = FALSE, collection_name = NULL) {
+  repo$import_fasta <- function(filename, sample = "sample", shallow = FALSE, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    import_fasta(workspace_path, repo$db_path, filename, sample, shallow, collection_name)
+    import_fasta(workspace_path, repo$db_path, filename, sample, shallow, collection)
   }
 
-  repo$import_gfa <- function(filename, sample = "sample", collection_name = NULL) {
+  repo$import_gfa <- function(filename, sample = "sample", collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    import_gfa(workspace_path, repo$db_path, filename, sample, collection_name)
+    import_gfa(workspace_path, repo$db_path, filename, sample, collection)
   }
 
-  repo$import_genbank <- function(filename, sample = "sample", collection_name = NULL) {
+  repo$import_genbank <- function(filename, sample = "sample", collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    import_genbank(workspace_path, repo$db_path, filename, sample, collection_name)
+    import_genbank(workspace_path, repo$db_path, filename, sample, collection)
   }
 
-  repo$import_library <- function(library_name, parts_list, seq_containers = list(), sample = NULL, collection_name = NULL) {
+  repo$import_library <- function(library_name, parts_list, seq_containers = list(), sample = NULL, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
     parts_list <- resolve_granges_columns(parts_list, seq_containers)
-    import_library(workspace_path, repo$db_path, library_name, parts_list, sample, collection_name)
+    import_library(workspace_path, repo$db_path, library_name, parts_list, sample, collection)
   }
 
-  repo$import_library_files <- function(library_name, parts, library, sample = "sample", collection_name = NULL) {
+  repo$import_library_files <- function(library_name, parts, library, sample = "sample", collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    import_library_files(workspace_path, repo$db_path, library_name, parts, library, sample, collection_name)
+    import_library_files(workspace_path, repo$db_path, library_name, parts, library, sample, collection)
   }
 
-  repo$update_with_fasta <- function(filename, sample, new_sample, region_name, start, end, collection_name = NULL) {
+  repo$update_with_fasta <- function(filename, sample, new_sample, region_name, start, end, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    update_with_fasta(workspace_path, repo$db_path, filename, sample, new_sample, region_name, as.integer(start), as.integer(end), collection_name)
+    update_with_fasta(workspace_path, repo$db_path, filename, sample, new_sample, region_name, as.integer(start), as.integer(end), collection)
   }
 
-  repo$update_with_gfa <- function(filename, sample, new_sample, collection_name = NULL) {
+  repo$update_with_gfa <- function(filename, sample, new_sample, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    update_with_gfa(workspace_path, repo$db_path, filename, sample, new_sample, collection_name)
+    update_with_gfa(workspace_path, repo$db_path, filename, sample, new_sample, collection)
   }
 
-  repo$update_with_gaf <- function(filename, csv, sample, parent_sample = NULL, collection_name = NULL) {
+  repo$update_with_gaf <- function(filename, csv, sample, parent_sample = NULL, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    update_with_gaf(workspace_path, repo$db_path, filename, csv, sample, parent_sample, collection_name)
+    update_with_gaf(workspace_path, repo$db_path, filename, csv, sample, parent_sample, collection)
   }
 
-  repo$update_with_vcf <- function(filename, genotype = NULL, sample = NULL, parent_samples = character(), in_place = FALSE, collection_name = NULL) {
+  repo$update_with_vcf <- function(filename, genotype = NULL, sample = NULL, parent_samples = character(), in_place = FALSE, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    update_with_vcf(workspace_path, repo$db_path, filename, genotype, sample, parent_samples, in_place, collection_name)
+    update_with_vcf(workspace_path, repo$db_path, filename, genotype, sample, parent_samples, in_place, collection)
   }
 
-  repo$update_with_genbank <- function(filename, sample, create_missing = FALSE, collection_name = NULL) {
+  repo$update_with_genbank <- function(filename, sample, create_missing = FALSE, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    update_with_genbank(workspace_path, repo$db_path, filename, sample, create_missing, collection_name)
+    update_with_genbank(workspace_path, repo$db_path, filename, sample, create_missing, collection)
   }
 
-  repo$update_with_sequence <- function(sequence, sample, new_sample, region_name, start, end, no_reference_path_update = FALSE, collection_name = NULL) {
+  repo$update_with_sequence <- function(sequence, sample, new_sample, region_name, start, end, no_reference_path_update = FALSE, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    update_with_sequence(workspace_path, repo$db_path, sequence, sample, new_sample, region_name, as.integer(start), as.integer(end), no_reference_path_update, collection_name)
+    update_with_sequence(workspace_path, repo$db_path, sequence, sample, new_sample, region_name, as.integer(start), as.integer(end), no_reference_path_update, collection)
   }
 
-  repo$update_with_library <- function(sample = NULL, new_sample_name, path_name, start, end, parts_list, seq_containers = list(), collection_name = NULL) {
+  repo$update_with_library <- function(sample = NULL, new_sample_name, path_name, start, end, parts_list, seq_containers = list(), collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
     parts_list <- resolve_granges_columns(parts_list, seq_containers)
-    update_with_library(workspace_path, repo$db_path, sample, new_sample_name, path_name, as.integer(start), as.integer(end), parts_list, collection_name)
+    update_with_library(workspace_path, repo$db_path, sample, new_sample_name, path_name, as.integer(start), as.integer(end), parts_list, collection)
   }
 
-  repo$update_with_library_files <- function(sample, new_sample, path_name, start, end, library, parts, collection_name = NULL) {
+  repo$update_with_library_files <- function(sample, new_sample, path_name, start, end, library, parts, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    update_with_library_files(workspace_path, repo$db_path, sample, new_sample, path_name, as.integer(start), as.integer(end), library, parts, collection_name)
+    update_with_library_files(workspace_path, repo$db_path, sample, new_sample, path_name, as.integer(start), as.integer(end), library, parts, collection)
   }
 
-  repo$export_fasta <- function(filename, sample = NULL, collection_name = NULL) {
+  repo$export_fasta <- function(filename, sample = NULL, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    export_fasta(workspace_path, repo$db_path, filename, sample, collection_name)
+    export_fasta(workspace_path, repo$db_path, filename, sample, collection)
   }
 
-  repo$export_gfa <- function(filename, sample, node_max = NULL, collection_name = NULL) {
+  repo$export_gfa <- function(filename, sample, node_max = NULL, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    export_gfa(workspace_path, repo$db_path, filename, sample, node_max, collection_name)
+    export_gfa(workspace_path, repo$db_path, filename, sample, node_max, collection)
   }
 
-  repo$export_genbank <- function(filename, sample, collection_name = NULL) {
+  repo$export_genbank <- function(filename, sample, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    export_genbank(workspace_path, repo$db_path, filename, sample, collection_name)
+    export_genbank(workspace_path, repo$db_path, filename, sample, collection)
   }
 
-  repo$derive_subgraph <- function(sample, new_sample, region, backbone = NULL, collection_name = NULL) {
+  repo$derive_subgraph <- function(sample, new_sample, region, backbone = NULL, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    derive_subgraph(workspace_path, repo$db_path, sample, new_sample, region, backbone, collection_name)
+    derive_subgraph(workspace_path, repo$db_path, sample, new_sample, region, backbone, collection)
   }
 
-  repo$derive_chunks <- function(sample, new_sample, region, backbone = NULL, breakpoints = NULL, chunk_size = NULL, collection_name = NULL) {
+  repo$derive_chunks <- function(sample, new_sample, region, backbone = NULL, breakpoints = NULL, chunk_size = NULL, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    derive_chunks(workspace_path, repo$db_path, sample, new_sample, region, backbone, breakpoints, chunk_size, collection_name)
+    derive_chunks(workspace_path, repo$db_path, sample, new_sample, region, backbone, breakpoints, chunk_size, collection)
   }
 
-  repo$make_stitch <- function(sample, new_sample, regions, new_region, collection_name = NULL) {
+  repo$make_stitch <- function(sample, new_sample, regions, new_region, collection = NULL) {
     workspace_path <- dirname(repo$gen_dir)
-    make_stitch(workspace_path, repo$db_path, sample, new_sample, regions, new_region, collection_name)
+    make_stitch(workspace_path, repo$db_path, sample, new_sample, regions, new_region, collection)
   }
 
   class(repo) <- "gen_repository"

@@ -109,10 +109,9 @@ fn resolve_collection_name(
 ) -> std::result::Result<String, String> {
     match collection_name {
         Some(name) => Ok(name),
-        None => Defaults::get(operations_conn)
-            .ok_or_else(|| "No defaults row is set. Pass `name` explicitly.".to_string())?
-            .collection_name
-            .ok_or_else(|| "No default collection is set. Pass `name` explicitly.".to_string()),
+        None => Ok(Defaults::get(operations_conn)
+            .and_then(|d| d.collection_name)
+            .unwrap_or_else(|| "default".to_string())),
     }
 }
 
@@ -153,7 +152,7 @@ fn rollback_transactions(context: &GenDbContext) {
 
 fn open_repo_gen_dir(path: Option<String>) -> PathBuf {
     match path {
-        Some(path_str) => PathBuf::from(path_str),
+        Some(path_str) => Workspace::new(path_str).ensure_gen_dir(),
         None => Workspace::from_current_dir().ensure_gen_dir(),
     }
 }
@@ -783,16 +782,18 @@ fn import_fasta(
     filename: String,
     sample: String,
     shallow: bool,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
 
@@ -825,7 +826,7 @@ fn import_sequences(
     names: Vec<String>,
     sequences: Vec<String>,
     sample: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     if names.len() != sequences.len() {
         return Err(Error::Other(
@@ -837,9 +838,11 @@ fn import_sequences(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
 
@@ -873,7 +876,7 @@ fn import_genomic_regions(
     region_starts: Vec<f64>,
     region_ends: Vec<f64>,
     sample: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     if seq_names.len() != seq_sequences.len() {
         return Err(Error::Other(
@@ -891,9 +894,11 @@ fn import_genomic_regions(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
 
@@ -937,16 +942,18 @@ fn import_gfa(
     db_path: Nullable<String>,
     filename: String,
     sample: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
     match r#gen::imports::gfa::import_gfa(&context, Path::new(&filename), &collection_name, &sample)
@@ -972,14 +979,14 @@ fn import_genbank(
     db_path: Nullable<String>,
     filename: String,
     sample: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name_opt = nullable_string_to_option(name);
+    let collection_name_opt = nullable_string_to_option(collection);
     let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
@@ -1018,7 +1025,7 @@ fn import_library_files(
     parts: String,
     library: String,
     sample: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let parts_list = parse_library(&parts, &library)
         .map_err(|err| Error::Other(format!("Problem parsing library files: {err}")))?;
@@ -1027,9 +1034,11 @@ fn import_library_files(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
     match r#gen::imports::library::import_library(
@@ -1065,7 +1074,7 @@ fn import_library(
     library_name: String,
     parts_list: Robj,
     sample: Nullable<String>,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
     let (context, _, _) = open_db_context(
@@ -1073,9 +1082,11 @@ fn import_library(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
     let sample_name = nullable_string_to_option(sample)
         .unwrap_or_else(|| gen_models::sample::Sample::DEFAULT_NAME.to_string());
 
@@ -1114,16 +1125,18 @@ fn update_with_fasta(
     sample: String,
     new_sample: String,
     region_name: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
     match r#gen::updates::fasta::update_with_fasta(
@@ -1157,16 +1170,18 @@ fn update_with_gfa(
     filename: String,
     sample: String,
     new_sample: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
     match r#gen::updates::gfa::update_with_gfa(
@@ -1195,16 +1210,18 @@ fn update_with_gaf(
     csv: String,
     sample: String,
     parent_sample: Nullable<String>,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
     match r#gen::updates::gaf::update_with_gaf(
@@ -1235,16 +1252,18 @@ fn update_with_vcf(
     sample: Nullable<String>,
     parent_samples: Vec<String>,
     in_place: bool,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
     let genotype = nullable_string_to_option(genotype).unwrap_or_default();
     let sample = nullable_string_to_option(sample);
 
@@ -1282,14 +1301,14 @@ fn update_with_genbank(
     filename: String,
     sample: String,
     create_missing: bool,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name_opt = nullable_string_to_option(name);
+    let collection_name_opt = nullable_string_to_option(collection);
     let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
@@ -1327,7 +1346,7 @@ fn update_with_library_files(
     path_name: String,
     library: String,
     parts: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let parts_list = parse_library(&parts, &library)
         .map_err(|err| Error::Other(format!("Couldn't parse library files: {err}")))?;
@@ -1336,9 +1355,11 @@ fn update_with_library_files(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
     match r#gen::updates::library::update_with_library(
@@ -1370,7 +1391,7 @@ fn update_with_library(
     new_sample_name: String,
     path_name: String,
     parts_list: Robj,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
     let (context, _, _) = open_db_context(
@@ -1378,9 +1399,11 @@ fn update_with_library(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
     let sample_name = nullable_string_to_option(sample)
         .unwrap_or_else(|| gen_models::sample::Sample::DEFAULT_NAME.to_string());
 
@@ -1415,16 +1438,18 @@ fn update_with_sequence(
     new_sample: String,
     region_name: String,
     no_reference_path_update: bool,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
     match r#gen::updates::sequence::update_with_sequence(
@@ -1453,16 +1478,18 @@ fn export_fasta(
     db_path: Nullable<String>,
     filename: String,
     sample: Nullable<String>,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     r#gen::track_database(context.graph().conn(), context.operations().conn())
         .map_err(|err| Error::Other(format!("Failed to track database: {err}")))?;
@@ -1485,16 +1512,18 @@ fn export_gfa(
     filename: String,
     sample: String,
     node_max: Nullable<i64>,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     r#gen::track_database(context.graph().conn(), context.operations().conn())
         .map_err(|err| Error::Other(format!("Failed to track database: {err}")))?;
@@ -1520,16 +1549,18 @@ fn export_genbank(
     db_path: Nullable<String>,
     filename: String,
     sample: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name =
-        resolve_collection_name(context.operations().conn(), nullable_string_to_option(name))
-            .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
 
     r#gen::track_database(context.graph().conn(), context.operations().conn())
         .map_err(|err| Error::Other(format!("Failed to track database: {err}")))?;
@@ -1559,7 +1590,7 @@ fn derive_chunks(
     backbone: Nullable<String>,
     breakpoints: Vec<i32>,
     chunk_size: Nullable<i64>,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1569,7 +1600,7 @@ fn derive_chunks(
 
     r#gen::commands::graph_operations::derive_chunks::derive_chunks_operation(
         &context,
-        nullable_string_to_option(name),
+        nullable_string_to_option(collection),
         sample,
         new_sample,
         region,
@@ -1597,7 +1628,7 @@ fn derive_subgraph(
     new_sample: String,
     region: String,
     backbone: Nullable<String>,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1607,7 +1638,7 @@ fn derive_subgraph(
 
     r#gen::commands::graph_operations::derive_subgraph::derive_subgraph_operation(
         &context,
-        nullable_string_to_option(name),
+        nullable_string_to_option(collection),
         sample,
         new_sample,
         region,
@@ -1626,7 +1657,7 @@ fn make_stitch(
     new_sample: String,
     regions: String,
     new_region: String,
-    name: Nullable<String>,
+    collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
     let (context, _, _) = open_db_context(
         nullable_string_to_option(workspace_path),
@@ -1636,7 +1667,7 @@ fn make_stitch(
 
     r#gen::commands::graph_operations::make_stitch::make_stitch_operation(
         &context,
-        nullable_string_to_option(name),
+        nullable_string_to_option(collection),
         sample,
         new_sample,
         regions,
