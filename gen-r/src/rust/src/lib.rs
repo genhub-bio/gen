@@ -1650,35 +1650,6 @@ fn derive_subgraph(
 }
 
 #[extendr]
-fn make_stitch(
-    workspace_path: Nullable<String>,
-    db_path: Nullable<String>,
-    sample: String,
-    new_sample: String,
-    regions: String,
-    new_region: String,
-    collection: Nullable<String>,
-) -> std::result::Result<String, Error> {
-    let (context, _, _) = open_db_context(
-        nullable_string_to_option(workspace_path),
-        nullable_string_to_option(db_path),
-    )
-    .map_err(Error::Other)?;
-
-    r#gen::commands::graph_operations::make_stitch::make_stitch_operation(
-        &context,
-        nullable_string_to_option(collection),
-        sample,
-        new_sample,
-        regions,
-        new_region,
-    )
-    .map_err(|err| Error::Other(format!("Error making stitch: {err}")))?;
-
-    Ok("Made stitch.".to_string())
-}
-
-#[extendr]
 fn repo_get_gen_dir(path: Nullable<String>) -> String {
     open_repo_gen_dir(nullable_string_to_option(path))
         .to_string_lossy()
@@ -2191,7 +2162,6 @@ extendr_module! {
     fn export_genbank;
     fn derive_chunks;
     fn derive_subgraph;
-    fn make_stitch;
     fn repo_get_gen_dir;
     fn repo_get_db_path;
     fn repo_execute;
