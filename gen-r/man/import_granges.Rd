@@ -8,7 +8,7 @@ import_granges(
   regions,
   sequences,
   sample = "sample",
-  collection_name = NULL,
+  collection = NULL,
   repo = NULL
 )
 }
@@ -24,7 +24,7 @@ Must cover every sequence referenced by at least one region.}
 
 \item{sample}{Character. Sample name (default \code{"sample"}).}
 
-\item{collection_name}{Character or \code{NULL}. Collection name; if
+\item{collection}{Character or \code{NULL}. Collection name; if
 \code{NULL} the workspace default is used.}
 
 \item{repo}{A \code{gen_repository} from \code{Repository()}, or \code{NULL}

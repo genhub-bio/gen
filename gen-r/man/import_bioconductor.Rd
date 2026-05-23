@@ -7,7 +7,7 @@
 import_bioconductor(
   sequences,
   sample = "sample",
-  collection_name = NULL,
+  collection = NULL,
   repo = NULL
 )
 }
@@ -18,7 +18,7 @@ names and must all be non-empty.}
 
 \item{sample}{Character. Sample name (default \code{"sample"}).}
 
-\item{collection_name}{Character or \code{NULL}. Collection name; if
+\item{collection}{Character or \code{NULL}. Collection name; if
 \code{NULL} the workspace default is used.}
 
 \item{repo}{A \code{gen_repository} from \code{Repository()}, or \code{NULL}
