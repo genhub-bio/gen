@@ -69,7 +69,7 @@ import_library(
 
   \item{library}{Path to a CSV library layout file for \code{import_library_files()}.}
 
-  \item{parts_list}{Nested list of \code{\link{SequencePart}} objects for in-memory library import.}
+  \item{parts_list}{List of columns for in-memory library import. Each column is a named character vector or \code{XStringSet}.}
 }
 \value{
 Each function returns a character scalar confirming the import path taken.
@@ -88,8 +88,8 @@ import_gfa(filename = "graph.gfa", name = "demo", sample = "sample-a")
 import_genbank(filename = "record.gb", name = "demo", sample = "sample-a")
 
 parts_list <- list(
-  list(SequencePart("part-a", "AAAA"), SequencePart("part-b", "CCCC")),
-  list(SequencePart("part-c", "GGGG"), SequencePart("part-d", "TTTT"))
+  c(`part-a` = "AAAA", `part-b` = "CCCC"),
+  c(`part-c` = "GGGG", `part-d` = "TTTT")
 )
 import_library("library-a", parts_list, name = "demo", sample = "sample-a")
 }

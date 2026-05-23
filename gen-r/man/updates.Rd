@@ -125,7 +125,7 @@ update_with_sequence(
 
   \item{new_sample_name}{New sample name created by \code{update_with_library()}.}
 
-  \item{parts_list}{Nested list of \code{\link{SequencePart}} objects for \code{update_with_library()}.}
+  \item{parts_list}{List of columns for \code{update_with_library()}. Each column is a named character vector or \code{XStringSet}.}
 
   \item{sequence}{Literal replacement sequence for \code{update_with_sequence()}.}
 

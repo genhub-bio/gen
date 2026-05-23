@@ -50,16 +50,8 @@ expect_binding_result <- function(result) {
 
 simple_parts_list <- function() {
   list(
-    list(
-      SequencePart("part-a", "AAAA"),
-      SequencePart("part-b", "TAAT"),
-      SequencePart("part-c", "CAAC")
-    ),
-    list(
-      SequencePart("part-d", "ATGA"),
-      SequencePart("part-e", "TGTT"),
-      SequencePart("part-f", "TGCT")
-    )
+    c(`part-a` = "AAAA", `part-b` = "TAAT", `part-c` = "CAAC"),
+    c(`part-d` = "ATGA", `part-e` = "TGTT", `part-f` = "TGCT")
   )
 }
 
@@ -75,13 +67,10 @@ import_simple_reference <- function(collection = "test-collection", sample = "sa
 test_that("constructors and workspace bindings work", {
   with_workspace("genr-core-", function(workspace) {
     hash_id <- HashId("abc123")
-    node_key <- NodeKey(hash_id, 1, 4)
-    part <- SequencePart("demo", "ATCG")
+    block <- Block(hash_id, 1, 4)
 
     expect_s3_class(hash_id, "gen_hash_id")
-    expect_s3_class(node_key, "gen_node_key")
-    expect_s3_class(part, "gen_sequence_part")
-    expect_equal(part$sequence_length, 4)
+    expect_s3_class(block, "gen_block")
 
     msg <- init()
     expect_match(msg, "initialized", ignore.case = TRUE)
@@ -384,7 +373,7 @@ test_that("repository and graph controller helpers work", {
     expect_true(length(graph_dict$edges) >= 1)
 
     node <- graph_dict$nodes[[1]]
-    key <- NodeKey(node$node_id, node$sequence_start, node$sequence_end)
+    key <- Block(node$node_id, node$sequence_start, node$sequence_end)
     expect_equal(
       repo$get_block_sequence(key),
       genr:::repo_get_block_sequence(repo$db_path, node$node_id, node$sequence_start, node$sequence_end)

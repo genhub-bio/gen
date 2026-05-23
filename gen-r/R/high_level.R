@@ -17,46 +17,81 @@ HashId <- function(hash_id) {
   structure(list(hash_id = as.character(hash_id)), class = "gen_hash_id")
 }
 
-#' Construct a NodeKey
+#' Construct a Block
 #'
-#' A node key identifies a contiguous byte range within a graph node.
+#' A block identifies a contiguous byte range within a graph node.
 #' Pass the result to \code{repo$get_block_sequence()} to retrieve the
 #' underlying sequence.
 #'
 #' @param node_id Character or \code{gen_hash_id}. Node identifier.
 #' @param sequence_start Integer. Start byte offset (inclusive).
 #' @param sequence_end Integer. End byte offset (exclusive).
-#' @return A \code{gen_node_key} list.
+#' @return A \code{gen_block} list.
 #' @export
-NodeKey <- function(node_id, sequence_start, sequence_end) {
+Block <- function(node_id, sequence_start, sequence_end) {
   structure(
     list(
       node_id = if (inherits(node_id, "gen_hash_id")) node_id else HashId(node_id),
       sequence_start = as.integer(sequence_start),
       sequence_end = as.integer(sequence_end)
     ),
-    class = "gen_node_key"
+    class = "gen_block"
   )
 }
 
-#' Construct a SequencePart
-#'
-#' Represents a named sequence element used when importing combinatorial
-#' libraries via \code{repo$import_library()}.
-#'
-#' @param name Character. Display name for the part.
-#' @param sequence Character. Nucleotide or amino-acid sequence string.
-#' @return A \code{gen_sequence_part} list.
-#' @export
-SequencePart <- function(name, sequence) {
-  structure(
-    list(
-      name = as.character(name),
-      sequence = as.character(sequence),
-      sequence_length = nchar(as.character(sequence), type = "chars")
-    ),
-    class = "gen_sequence_part"
+
+# Extract the genome string from a sequence container.
+# Supported: BSgenome, DNAStringSet (with metadata$genome set), FaFile, TwoBitFile.
+.container_genome <- function(container) {
+  if (inherits(container, "BSgenome")) {
+    return(unique(GenomeInfoDb::genome(GenomeInfoDb::seqinfo(container))))
+  }
+  # DNAStringSet, FaFile, TwoBitFile: genome must be set via metadata(x)$genome.
+  meta <- S4Vectors::metadata(container)
+  meta[["genome"]] %||% stop(
+    "seq_container has no genome metadata. Set it with: metadata(x)$genome <- \"<assembly>\""
   )
+}
+
+# Resolve every GRanges column in parts_list to a DNAStringSet using getSeq().
+# Non-GRanges columns pass through unchanged.
+#
+# Future: replace getSeq() with coordinate-based part references so sequences
+# already in the gen database are reused rather than copied as flat strings.
+# The flow would be:
+#   1. Match each unique seqname to an existing Sequence in the DB by name.
+#   2. Auto-import missing contigs from the matched container (getSeq one contig
+#      at a time, import_fasta into DB, retrieve sequence_hash).
+#   3. Construct (sequence_hash, start, end, strand, part_name) tuples and pass
+#      a new Rust entry point that creates coordinate-based Node slices instead
+#      of copying strings into SequencePart records.
+resolve_granges_columns <- function(parts_list, seq_containers) {
+  if (length(seq_containers) == 0L) {
+    return(parts_list)
+  }
+
+  container_genomes <- vapply(seq_containers, .container_genome, character(1))
+
+  lapply(parts_list, function(col) {
+    if (!inherits(col, "GRanges")) {
+      return(col)
+    }
+
+    col_genome <- unique(GenomeInfoDb::genome(GenomeInfoDb::seqinfo(col)))
+    if (length(col_genome) != 1L) {
+      stop("GRanges column spans multiple genome assemblies; split into one GRanges per assembly.")
+    }
+
+    idx <- match(col_genome, container_genomes)
+    if (is.na(idx)) {
+      stop(sprintf(
+        "No seq_container found for genome \"%s\". Available: %s",
+        col_genome, paste(container_genomes, collapse = ", ")
+      ))
+    }
+
+    Biostrings::getSeq(seq_containers[[idx]], col)
+  })
 }
 
 #' Construct a DbContext
@@ -514,7 +549,7 @@ import_granges <- function(regions, sequences, sample = "sample", collection_nam
 #'     \item{\code{get_block_groups()}}{Return a list of all block groups.}
 #'     \item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
 #'     \item{\code{get_block_groups_by_collection(collection_name)}}{Return block groups in a collection.}
-#'     \item{\code{get_block_sequence(node_key)}}{Return the sequence string for a \code{NodeKey}.}
+#'     \item{\code{get_block_sequence(block)}}{Return the sequence string for a \code{Block}.}
 #'     \item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
 #'     \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate block groups end-to-end into a new block group.}
 #'     \item{\code{make_stitch(sample, new_sample, regions, new_region, collection_name=NULL)}}{Stitch named regions into a new block group by name.}
@@ -573,12 +608,12 @@ Repository <- function(path = NULL) {
     GenPlot(repo$db_path, block_group$id$hash_id, detail = detail, rows = rows, cols = cols)
   }
 
-  repo$get_block_sequence <- function(node_key) {
+  repo$get_block_sequence <- function(block) {
     repo_get_block_sequence(
       repo$db_path,
-      node_key$node_id$hash_id,
-      as.integer(node_key$sequence_start),
-      as.integer(node_key$sequence_end)
+      block$node_id$hash_id,
+      as.integer(block$sequence_start),
+      as.integer(block$sequence_end)
     )
   }
 
@@ -639,8 +674,9 @@ Repository <- function(path = NULL) {
     import_genbank(workspace_path, repo$db_path, filename, sample, collection_name)
   }
 
-  repo$import_library <- function(library_name, parts_list, sample = NULL, collection_name = NULL) {
+  repo$import_library <- function(library_name, parts_list, seq_containers = list(), sample = NULL, collection_name = NULL) {
     workspace_path <- dirname(repo$gen_dir)
+    parts_list <- resolve_granges_columns(parts_list, seq_containers)
     import_library(workspace_path, repo$db_path, library_name, parts_list, sample, collection_name)
   }
 
@@ -679,8 +715,9 @@ Repository <- function(path = NULL) {
     update_with_sequence(workspace_path, repo$db_path, sequence, sample, new_sample, region_name, as.integer(start), as.integer(end), no_reference_path_update, collection_name)
   }
 
-  repo$update_with_library <- function(sample = NULL, new_sample_name, path_name, start, end, parts_list, collection_name = NULL) {
+  repo$update_with_library <- function(sample = NULL, new_sample_name, path_name, start, end, parts_list, seq_containers = list(), collection_name = NULL) {
     workspace_path <- dirname(repo$gen_dir)
+    parts_list <- resolve_granges_columns(parts_list, seq_containers)
     update_with_library(workspace_path, repo$db_path, sample, new_sample_name, path_name, as.integer(start), as.integer(end), parts_list, collection_name)
   }
 

@@ -24,6 +24,6 @@ rendering block groups through a \code{GraphController()}.
 \code{zoom_in}, \code{zoom_out}, \code{handle_click}, and \code{move_by}.
 }
 \seealso{
-\code{\link{HashId}}, \code{\link{NodeKey}}, \code{\link{db_context}},
+\code{\link{HashId}}, \code{\link{Block}}, \code{\link{db_context}},
 \code{\link{derive_chunks}}
 }

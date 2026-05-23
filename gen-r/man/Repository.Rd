@@ -13,28 +13,31 @@ Repository(path = NULL)
 \value{
 A \code{gen_repository} environment with the following methods:
 \describe{
-\item{\code{import_fasta(filename, sample, shallow, name=NULL)}}{Import a FASTA file as a new block group.}
-\item{\code{import_gfa(filename, sample, name=NULL)}}{Import a GFA file.}
-\item{\code{import_genbank(filename, sample, name=NULL)}}{Import a GenBank file (plain or gzipped).}
-\item{\code{import_library(library_name, parts_list, sample=NULL, name=NULL)}}{Import a combinatorial sequence library.}
-\item{\code{import_library_files(library_name, parts, library, sample, name=NULL)}}{Import a library from parts/library CSV files.}
-\item{\code{export_fasta(block_group, filename)}}{Export a block group to FASTA.}
-\item{\code{export_gfa(block_group, filename, node_max)}}{Export a block group to GFA.}
-\item{\code{export_genbank(block_group, filename)}}{Export a block group to GenBank.}
-\item{\code{update_with_fasta(filename, sample, new_sample, region_name, start, end, name=NULL)}}{Apply a FASTA update to an existing block group.}
-\item{\code{update_with_gfa(filename, sample, new_sample, name=NULL)}}{Apply a GFA update.}
-\item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples, in_place, name=NULL)}}{Apply a VCF update.}
-\item{\code{update_with_genbank(filename, sample, create_missing, name=NULL)}}{Apply a GenBank update.}
-\item{\code{update_with_sequence(sequence, sample, new_sample, region_name, start, end, no_reference_path_update, name=NULL)}}{Apply a raw sequence update.}
-\item{\code{update_with_library(sample=NULL, new_sample_name, path_name, start, end, parts_list, name=NULL)}}{Apply a library update.}
+\item{\code{import_fasta(filename, sample="sample", shallow=FALSE, collection_name=NULL)}}{Import a FASTA file as a new block group.}
+\item{\code{import_gfa(filename, sample="sample", collection_name=NULL)}}{Import a GFA file.}
+\item{\code{import_genbank(filename, sample="sample", collection_name=NULL)}}{Import a GenBank file (plain or gzipped).}
+\item{\code{import_library(library_name, parts_list, sample=NULL, collection_name=NULL)}}{Import a combinatorial sequence library.}
+\item{\code{import_library_files(library_name, parts, library, sample="sample", collection_name=NULL)}}{Import a library from parts/library CSV files.}
+\item{\code{export_fasta(filename, sample=NULL, collection_name=NULL)}}{Export sequences to FASTA.}
+\item{\code{export_gfa(filename, sample, node_max=NULL, collection_name=NULL)}}{Export to GFA.}
+\item{\code{export_genbank(filename, sample, collection_name=NULL)}}{Export to GenBank.}
+\item{\code{update_with_fasta(filename, sample, new_sample, region_name, start, end, collection_name=NULL)}}{Apply a FASTA update to an existing block group.}
+\item{\code{update_with_gfa(filename, sample, new_sample, collection_name=NULL)}}{Apply a GFA update.}
+\item{\code{update_with_gaf(filename, csv, sample, parent_sample=NULL, collection_name=NULL)}}{Apply a GAF update.}
+\item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples=character(), in_place=FALSE, collection_name=NULL)}}{Apply a VCF update.}
+\item{\code{update_with_genbank(filename, sample, create_missing=FALSE, collection_name=NULL)}}{Apply a GenBank update.}
+\item{\code{update_with_sequence(sequence, sample, new_sample, region_name, start, end, no_reference_path_update=FALSE, collection_name=NULL)}}{Apply a raw sequence update.}
+\item{\code{update_with_library(sample=NULL, new_sample_name, path_name, start, end, parts_list, collection_name=NULL)}}{Apply a library update.}
+\item{\code{update_with_library_files(sample, new_sample, path_name, start, end, library, parts, collection_name=NULL)}}{Apply a library-files update.}
 \item{\code{get_block_groups()}}{Return a list of all block groups.}
 \item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
 \item{\code{get_block_groups_by_collection(collection_name)}}{Return block groups in a collection.}
-\item{\code{get_block_sequence(node_key)}}{Return the sequence string for a \code{NodeKey}.}
+\item{\code{get_block_sequence(block)}}{Return the sequence string for a \code{Block}.}
 \item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
 \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate block groups end-to-end into a new block group.}
-\item{\code{derive_subgraph(new_sample, start, end, backbone)}}{Derive a subgraph block group.}
-\item{\code{derive_chunks(new_sample, breakpoints, chunk_size, backbone)}}{Split a block group into chunks.}
+\item{\code{make_stitch(sample, new_sample, regions, new_region, collection_name=NULL)}}{Stitch named regions into a new block group by name.}
+\item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection_name=NULL)}}{Derive a subgraph block group.}
+\item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection_name=NULL)}}{Split a block group into chunks.}
 \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
 \item{\code{search(query, bgs, sequence_kind)}}{Search for exact sequence occurrences across block groups.}
 \item{\code{clear_index(bgs)}}{Remove cached search index files.}

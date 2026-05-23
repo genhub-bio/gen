@@ -222,55 +222,49 @@ fn query_rows(conn: &Connection, query: &str) -> std::result::Result<List, Strin
     Ok(List::from_values(rows))
 }
 
-fn parse_sequence_part(part: &Robj) -> std::result::Result<SequencePart, String> {
-    if !part.is_list() {
-        return Err("Each sequence part must be a list.".to_string());
+fn is_xstringset(obj: &Robj) -> bool {
+    call!("is", obj, "XStringSet")
+        .ok()
+        .and_then(|r| r.as_logical_vector())
+        .and_then(|v| v.into_iter().next())
+        .map(|b| b == Rbool::from(true))
+        .unwrap_or(false)
+}
+
+fn parse_column(column: &Robj) -> std::result::Result<Vec<SequencePart>, String> {
+    let sequences = if is_xstringset(column) {
+        call!("as.character", column)
+            .ok()
+            .and_then(|r| r.as_string_vector())
+            .ok_or_else(|| "Failed to convert XStringSet to character strings.".to_string())?
+    } else {
+        column.as_string_vector().ok_or_else(|| {
+            "Each library column must be a named character vector or XStringSet.".to_string()
+        })?
+    };
+    let names = call!("names", column)
+        .ok()
+        .and_then(|r| r.as_string_vector())
+        .ok_or_else(|| "Library column must have a name for every element.".to_string())?;
+    if names.len() != sequences.len() {
+        return Err("Library column names and sequences have different lengths.".to_string());
     }
-
-    let name = part
-        .dollar("name")
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .or_else(|| {
-            part.index(1)
-                .ok()
-                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+    Ok(names
+        .into_iter()
+        .zip(sequences)
+        .map(|(name, sequence)| SequencePart {
+            sequence_length: sequence.len() as i64,
+            name,
+            sequence,
         })
-        .ok_or_else(|| "Sequence part is missing a 'name' field.".to_string())?;
-    let sequence = part
-        .dollar("sequence")
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .or_else(|| {
-            part.index(2)
-                .ok()
-                .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        })
-        .ok_or_else(|| "Sequence part is missing a 'sequence' field.".to_string())?;
-
-    Ok(SequencePart {
-        name,
-        sequence_length: sequence.len() as i64,
-        sequence,
-    })
+        .collect())
 }
 
 fn parse_parts_list(parts_list: Robj) -> std::result::Result<Vec<Vec<SequencePart>>, String> {
     let outer = parts_list
         .as_list()
         .ok_or_else(|| "parts_list must be a list of columns.".to_string())?;
-    outer
-        .values()
-        .map(|column| {
-            let column_list = column
-                .as_list()
-                .ok_or_else(|| "Each library column must be a list of parts.".to_string())?;
-            column_list
-                .values()
-                .map(|part| parse_sequence_part(&part))
-                .collect()
-        })
-        .collect()
+    outer.values().map(|column| parse_column(&column)).collect()
 }
 
 fn read_genbank_reader(filename: &str) -> std::result::Result<Box<dyn Read>, String> {

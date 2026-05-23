@@ -1,7 +1,6 @@
 \name{HashId}
 \alias{HashId}
-\alias{NodeKey}
-\alias{SequencePart}
+\alias{Block}
 \alias{DbContext}
 \alias{GraphController}
 \alias{Repository}
@@ -9,9 +8,7 @@
 \usage{
 HashId(hash_id)
 
-NodeKey(node_id, sequence_start, sequence_end)
-
-SequencePart(name, sequence)
+Block(node_id, sequence_start, sequence_end)
 
 DbContext(workspace_path = NULL, db_path = NULL)
 
@@ -34,10 +31,6 @@ Repository(path = NULL)
 
   \item{sequence_end}{End offset within a node sequence.}
 
-  \item{name}{Object name. For \code{SequencePart()}, the part name.}
-
-  \item{sequence}{Literal sequence string for a \code{SequencePart()}.}
-
   \item{workspace_path}{Optional workspace root passed through to \code{\link{db_context}}.}
 
   \item{db_path}{Path to a Gen SQLite database.}
@@ -53,14 +46,14 @@ Repository(path = NULL)
   \item{path}{Optional workspace or \code{.gen} directory path for \code{Repository()}.}
 }
 \value{
-\code{HashId()}, \code{NodeKey()}, \code{SequencePart()}, and \code{DbContext()}
+\code{HashId()}, \code{Block()}, and \code{DbContext()}
 return lightweight S3 objects. \code{GraphController()} and \code{Repository()}
 return environment-backed helper objects with methods attached as fields.
 }
 \description{
 These constructors provide the main R-side object model for \pkg{genr}.
-\code{HashId()}, \code{NodeKey()}, and \code{SequencePart()} are small value
-objects. \code{DbContext()} resolves workspace and database paths.
+\code{HashId()} and \code{Block()} are small value objects.
+\code{DbContext()} resolves workspace and database paths.
 \code{Repository()} exposes database and block-group helper methods, while
 \code{GraphController()} exposes stateful rendering and navigation methods for a
 single block group.
@@ -97,8 +90,7 @@ single block group.
 init()
 
 id <- HashId("abc123")
-part <- SequencePart("promoter", "ATCG")
-key <- NodeKey(id, 1, 4)
+key <- Block(id, 1, 4)
 ctx <- DbContext()
 
 repo <- Repository()
