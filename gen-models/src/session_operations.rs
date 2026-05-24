@@ -347,7 +347,7 @@ mod tests {
     use super::*;
     use crate::{
         files::GenDatabase,
-        operations::{Branch, OperationFile, OperationInfo, OperationState},
+        operations::{OperationFile, OperationInfo},
         sequence::NewSequence,
         test_helpers::{create_bg, setup_gen},
     };
@@ -432,8 +432,6 @@ mod tests {
 
         let db_uuid = metadata::get_db_uuid(graph_conn);
         GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
-        Branch::get_or_create(operation_conn, "main").unwrap();
-        OperationState::set_branch(operation_conn, "main");
 
         let absolute_path = context
             .workspace()
