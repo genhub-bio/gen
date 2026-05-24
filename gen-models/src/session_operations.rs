@@ -76,19 +76,13 @@ pub fn end_operation(
                     Ok(fa) => fa,
                     Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
                 };
-                let storage_file_path = crate::operations::OperationFile::storage_file_path(
-                    context.workspace(),
-                    &op_file.file_path,
-                    &fa.checksum,
-                    op_file.file_type,
-                )
-                .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 Operation::add_file(
+                    context.workspace(),
                     operation_conn,
                     &operation.hash,
-                    &fa.id,
+                    &fa,
                     &op_file.filename,
-                    &storage_file_path,
+                    &op_file.file_path,
                 )
                 .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {

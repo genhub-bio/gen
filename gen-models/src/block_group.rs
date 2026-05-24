@@ -3237,7 +3237,7 @@ mod tests {
     #[test]
     fn test_blockgroup_interval_tree() {
         let conn = &get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(conn);
+        let (block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(
             conn,
             NewSample {

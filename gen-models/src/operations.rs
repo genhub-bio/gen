@@ -157,17 +157,24 @@ impl Operation {
     }
 
     pub fn add_file(
+        workspace: &Workspace,
         conn: &OperationsConnection,
         operation_hash: &HashId,
-        file_addition_id: &HashId,
+        file_addition: &FileAddition,
         filename: &str,
         file_path: &str,
-    ) -> SQLResult<()> {
+    ) -> Result<(), FileAdditionError> {
+        let file_path = OperationFile::storage_file_path(
+            workspace,
+            file_path,
+            &file_addition.checksum,
+            file_addition.file_type,
+        )?;
         let query = "INSERT INTO operation_files (operation_hash, file_addition_id, filename, file_path) VALUES (?1, ?2, ?3, ?4)";
-        let mut stmt = conn.prepare(query).unwrap();
+        let mut stmt = conn.prepare(query)?;
         stmt.execute(params![
             operation_hash,
-            file_addition_id,
+            file_addition.id,
             filename,
             file_path
         ])?;
@@ -561,9 +568,10 @@ pub fn add_files_operation(
 
     for (file_addition, filename, file_path) in &unique_file_additions {
         Operation::add_file(
+            workspace,
             operation_conn,
             &operation.hash,
-            &file_addition.id,
+            file_addition,
             filename,
             file_path,
         )?;
