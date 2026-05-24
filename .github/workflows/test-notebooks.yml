@@ -21,8 +21,12 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y capnproto
       - name: Build and install gen package
-        run: pip install maturin && maturin develop --no-venv
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin
+          maturin develop
       - name: Install notebook test dependencies
-        run: pip install pytest nbmake
+        run: source .venv/bin/activate && pip install pytest nbmake
       - name: Test notebooks
-        run: pytest --nbmake --nbmake-timeout=120 "**/*.ipynb"
+        run: source .venv/bin/activate && pytest --nbmake --nbmake-timeout=120 "**/*.ipynb"
