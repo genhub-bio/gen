@@ -76,12 +76,19 @@ pub fn end_operation(
                     Ok(fa) => fa,
                     Err(err) => return Err(OperationError::SQLError(format!("{err}"))),
                 };
+                let storage_file_path = crate::operations::OperationFile::storage_file_path(
+                    context.workspace(),
+                    &op_file.file_path,
+                    &fa.checksum,
+                    op_file.file_type,
+                )
+                .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 Operation::add_file(
                     operation_conn,
                     &operation.hash,
                     &fa.id,
                     &op_file.filename,
-                    &op_file.file_path,
+                    &storage_file_path,
                 )
                 .map_err(|err| OperationError::SQLError(format!("{err}")))?;
                 if fa.file_type != FileTypes::Changeset && fa.file_type != FileTypes::None {
@@ -332,11 +339,18 @@ impl<'a> Capnp<'a> for DependencyModels {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use capnp::message::TypedBuilder;
     use gen_core::Strand;
 
     use super::*;
-    use crate::sequence::NewSequence;
+    use crate::{
+        files::GenDatabase,
+        operations::{Branch, OperationFile, OperationInfo, OperationState},
+        sequence::NewSequence,
+        test_helpers::{create_bg, setup_gen},
+    };
 
     #[test]
     fn test_dependency_models_capnp_serialization() {
@@ -408,5 +422,52 @@ mod tests {
         let deserialized = DependencyModels::read_capnp(root.into_reader());
 
         assert_eq!(dependency_models, deserialized);
+    }
+
+    #[test]
+    fn test_end_operation_stores_repo_relative_file_path_for_absolute_input() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
+
+        let db_uuid = metadata::get_db_uuid(graph_conn);
+        GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
+        Branch::get_or_create(operation_conn, "main").unwrap();
+        OperationState::set_branch(operation_conn, "main");
+
+        let absolute_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("nested/input.fa");
+        fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
+        fs::write(&absolute_path, b"test file content").unwrap();
+
+        let mut session = start_operation(graph_conn);
+        create_bg(graph_conn, "collection", "sample", "bg");
+
+        let operation = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![
+                    OperationFile::new(absolute_path.to_string_lossy().to_string())
+                        .set_file_type(FileTypes::Fasta),
+                ],
+                description: "test".to_string(),
+            },
+            "test operation",
+            None,
+        )
+        .unwrap();
+
+        let files = crate::operations::OperationFile::get_files_for_operation(
+            operation_conn,
+            &operation.hash,
+        )
+        .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_path, "nested/input.fa");
     }
 }

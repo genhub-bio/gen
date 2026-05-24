@@ -431,6 +431,19 @@ impl OperationFile {
         self
     }
 
+    pub fn storage_file_path(
+        workspace: &Workspace,
+        path_or_uri: &str,
+        checksum: &HashId,
+        file_type: FileTypes,
+    ) -> Result<String, FileAdditionError> {
+        if LocalAssetUri::is_local_path_or_file_uri(path_or_uri) {
+            LocalAssetUri::operation_file_path(workspace, path_or_uri, checksum, file_type)
+        } else {
+            Ok(path_or_uri.to_string())
+        }
+    }
+
     pub fn get_files_for_operation(
         conn: &OperationsConnection,
         operation_hash: &HashId,
@@ -503,16 +516,12 @@ pub fn add_files_operation(
             let file_type = FileTypes::infer_from_path(path);
             let file_addition =
                 FileAddition::get_or_create(workspace, operation_conn, path, file_type, None)?;
-            let operation_file_path = if LocalAssetUri::is_local_path_or_file_uri(path) {
-                LocalAssetUri::operation_file_path(
-                    workspace,
-                    path,
-                    &file_addition.checksum,
-                    file_type,
-                )?
-            } else {
-                path.clone()
-            };
+            let operation_file_path = OperationFile::storage_file_path(
+                workspace,
+                path,
+                &file_addition.checksum,
+                file_type,
+            )?;
             Ok::<(FileAddition, String, String), FileAdditionError>((
                 file_addition,
                 OperationFile::new(path.clone()).filename,
@@ -2699,6 +2708,27 @@ mod tests {
         assert_eq!(operation_file.file_path, "fixtures/sample.gb");
         assert_eq!(operation_file.file_type, FileTypes::GenBank);
         assert_eq!(operation_file.checksum_override, None);
+    }
+
+    #[test]
+    fn test_operation_file_storage_path_normalizes_absolute_repo_path() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let absolute_path = repo_root.join("nested").join("sample.fa");
+
+        fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
+        fs::write(&absolute_path, b"sample").unwrap();
+
+        let checksum = calculate_file_checksum(&absolute_path).unwrap();
+        let storage_path = OperationFile::storage_file_path(
+            context.workspace(),
+            &absolute_path.to_string_lossy(),
+            &checksum,
+            FileTypes::Fasta,
+        )
+        .unwrap();
+
+        assert_eq!(storage_path, "nested/sample.fa");
     }
 
     #[test]
