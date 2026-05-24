@@ -29,4 +29,4 @@ jobs:
       - name: Install notebook test dependencies
         run: source .venv/bin/activate && pip install pytest nbmake
       - name: Test notebooks
-        run: source .venv/bin/activate && pytest --nbmake --nbmake-timeout=120 "**/*.ipynb"
+        run: source .venv/bin/activate && pytest --nbmake --nbmake-timeout=120 gen-python/examples/
