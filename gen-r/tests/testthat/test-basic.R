@@ -119,38 +119,37 @@ test_that("sequence update bindings work", {
     region_name = "m123:3-5"
   ), silent = TRUE))
 
-    expect_binding_result(try(update_with_fasta(
-        filename = fixture_path("aa.fa"),
-        collection_name = "update-collection",
-        sample = "sample-a",
-        new_sample = "from-fasta",
-        region_name = "m123:3-5"
-      ), silent = TRUE))
+  expect_binding_result(try(update_with_fasta(
+    filename = fixture_path("aa.fa"),
+    collection_name = "update-collection",
+    sample = "sample-a",
+    new_sample = "from-fasta",
+    region_name = "m123:3-5"
+  ), silent = TRUE))
 
-    expect_true(inherits(try(update_with_fasta(
-        filename = fixture_path("aa.fa"),
-        name = "update-collection",
-        sample = "sample-a",
-        new_sample = "missing-coords",
-        region_name = "m123"
-      ), silent = TRUE), "try-error"))
+  expect_true(inherits(try(update_with_fasta(
+    filename = fixture_path("aa.fa"),
+    name = "update-collection",
+    sample = "sample-a",
+    new_sample = "missing-coords",
+    region_name = "m123"
+  ), silent = TRUE), "try-error"))
 
-    expect_binding_result(try(update_with_sequence(
-        sequence = "AAAAAAAA",
-        collection_name = "update-collection",
-        sample = "sample-a",
-        new_sample = "from-sequence",
-        region_name = "m123:2-5"
-      ), silent = TRUE))
+  expect_binding_result(try(update_with_sequence(
+    sequence = "AAAAAAAA",
+    collection_name = "update-collection",
+    sample = "sample-a",
+    new_sample = "from-sequence",
+    region_name = "m123:2-5"
+  ), silent = TRUE))
 
-    expect_true(inherits(try(update_with_sequence(
-        sequence = "AAAAAAAA",
-        name = "update-collection",
-        sample = "sample-a",
-        new_sample = "missing-seq-coords",
-        region_name = "m123"
-      ), silent = TRUE), "try-error"))
-  })
+  expect_true(inherits(try(update_with_sequence(
+    sequence = "AAAAAAAA",
+    name = "update-collection",
+    sample = "sample-a",
+    new_sample = "missing-seq-coords",
+    region_name = "m123"
+  ), silent = TRUE), "try-error"))
 })
 
 test_that("graph-derived update bindings work", {
