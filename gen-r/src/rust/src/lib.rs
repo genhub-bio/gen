@@ -16,7 +16,7 @@ use r#gen::{
         fasta::export_fasta as fasta_export, genbank::export_genbank as genbank_export,
         gfa::export_gfa as gfa_export,
     },
-    get_connection,
+    get_connection, get_operation_connection,
     graphs::{
         combinatorial_library::{SequencePart, parse_library},
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
@@ -38,9 +38,9 @@ use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
-    locus::{BlockSlice, GraphLocus},
     db::{DbContext as GenDbContext, GraphConnection},
     errors::OperationError,
+    locus::{BlockSlice, GraphLocus},
     node::Node,
     operations::{Defaults, OperationFile, OperationInfo},
     traits::Query,
@@ -666,10 +666,22 @@ fn apply_graph_ops(
                     let seq_end = parts[base + 2]
                         .parse::<i64>()
                         .map_err(|err| format!("Invalid hl seq_end[{i}] in '{op}': {err}"))?;
-                    let block = GraphNode { node_id, sequence_start: seq_start, sequence_end: seq_end };
+                    let block = GraphNode {
+                        node_id,
+                        sequence_start: seq_start,
+                        sequence_end: seq_end,
+                    };
                     let slice_start = if i == 0 { start_offset } else { 0 };
-                    let slice_end = if i == n - 1 { end_offset } else { block.length() as usize };
-                    slices.push(BlockSlice { block, start: slice_start, end: slice_end });
+                    let slice_end = if i == n - 1 {
+                        end_offset
+                    } else {
+                        block.length() as usize
+                    };
+                    slices.push(BlockSlice {
+                        block,
+                        start: slice_start,
+                        end: slice_end,
+                    });
                 }
                 let locus = GraphLocus { slices, strand };
                 let style = PathStyle::new(color)
@@ -706,17 +718,31 @@ fn graph_locus_record(locus: &GraphLocus) -> List {
         _ => "unknown",
     };
     let start = list!(
-        block = block_record(first.block.node_id, first.block.sequence_start, first.block.sequence_end),
+        block = block_record(
+            first.block.node_id,
+            first.block.sequence_start,
+            first.block.sequence_end
+        ),
         offset = first.start as i64
     );
     let end = list!(
-        block = block_record(last.block.node_id, last.block.sequence_start, last.block.sequence_end),
+        block = block_record(
+            last.block.node_id,
+            last.block.sequence_start,
+            last.block.sequence_end
+        ),
         offset = last.end as i64
     );
     let blocks = locus
         .slices
         .iter()
-        .map(|s| block_record(s.block.node_id, s.block.sequence_start, s.block.sequence_end))
+        .map(|s| {
+            block_record(
+                s.block.node_id,
+                s.block.sequence_start,
+                s.block.sequence_end,
+            )
+        })
         .collect::<Vec<_>>();
     list!(
         start = start,
@@ -726,26 +752,7 @@ fn graph_locus_record(locus: &GraphLocus) -> List {
     )
 }
 
-/// Initialise a Gen workspace in the current directory.
-/// @export
-#[extendr]
-fn init() -> std::result::Result<String, Error> {
-    Workspace::from_current_dir().ensure_gen_dir();
-    Ok("Gen repository initialized.".to_string())
-}
-
-/// Return the path to the current workspace's .gen directory.
-/// @export
-#[extendr]
-fn get_gen_dir() -> std::result::Result<String, Error> {
-    Ok(Workspace::from_current_dir()
-        .ensure_gen_dir()
-        .to_string_lossy()
-        .into_owned())
-}
-
 /// Open a Gen database context.
-/// @export
 #[extendr]
 fn db_context(
     workspace_path: Nullable<String>,
@@ -2125,10 +2132,1104 @@ fn repo_bg_export_genbank(
         .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))
 }
 
+#[extendr]
+#[derive(Clone)]
+struct GenRepository {
+    context: GenDbContext,
+}
+
+// DbContext uses Rc internally; R is single-threaded so this is safe.
+unsafe impl Send for GenRepository {}
+unsafe impl Sync for GenRepository {}
+
+#[extendr]
+impl GenRepository {
+    fn new(path: Nullable<String>) -> std::result::Result<GenRepository, Error> {
+        let workspace = match nullable_string_to_option(path) {
+            Some(p) => Workspace::new(p),
+            None => Workspace::from_current_dir(),
+        };
+        let gen_dir = workspace.ensure_gen_dir();
+        let ops_path = gen_dir.join("gen.db");
+        let ops_conn = get_operation_connection(Some(ops_path))
+            .map_err(|e| Error::Other(format!("Failed to open operations database: {e}")))?;
+        let db_path = Defaults::get(&ops_conn)
+            .and_then(|d| d.db_name)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| gen_dir.join("default.db"));
+        let graph_conn = get_connection(db_path.clone()).map_err(|e| {
+            Error::Other(format!(
+                "Failed to open database '{}': {e}",
+                db_path.display()
+            ))
+        })?;
+        Ok(GenRepository {
+            context: GenDbContext::new(workspace, graph_conn, ops_conn),
+        })
+    }
+
+    fn gen_dir(&self) -> String {
+        self.context
+            .workspace()
+            .ensure_gen_dir()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn db_path(&self) -> String {
+        self.context
+            .graph()
+            .conn()
+            .path()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| {
+                self.context
+                    .workspace()
+                    .ensure_gen_dir()
+                    .join("default.db")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+    }
+
+    fn execute(&self, query: String) -> std::result::Result<(), Error> {
+        self.context
+            .graph()
+            .conn()
+            .execute(&query, [])
+            .map(|_| ())
+            .map_err(|e| Error::Other(format!("SQLite error: {e}")))
+    }
+
+    fn query(&self, query: String) -> std::result::Result<List, Error> {
+        query_rows(self.context.graph().conn(), &query).map_err(Error::Other)
+    }
+
+    fn get_block_group_by_id(&self, id: String) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        let bg_id = hash_id_from_string(&id).map_err(Error::Other)?;
+        let bg = BlockGroup::get_by_id(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
+        let db_path = self.db_path();
+        Ok(block_group_record(bg, Some(&db_path)))
+    }
+
+    fn get_block_groups(&self) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        let db_path = self.db_path();
+        let values = BlockGroup::all(conn)
+            .into_iter()
+            .map(|bg| block_group_record(bg, Some(&db_path)))
+            .collect::<Vec<_>>();
+        Ok(List::from_values(values))
+    }
+
+    fn get_block_groups_by_collection(
+        &self,
+        collection_name: String,
+    ) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        let db_path = self.db_path();
+        let values = BlockGroup::query(
+            conn,
+            "SELECT * FROM block_groups WHERE collection_name = ?1",
+            rusqlite::params![collection_name],
+        )
+        .into_iter()
+        .map(|bg| block_group_record(bg, Some(&db_path)))
+        .collect::<Vec<_>>();
+        Ok(List::from_values(values))
+    }
+
+    fn block_group_to_dict(&self, block_group_id: String) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let graph = BlockGroup::get_graph(conn, &bg_id);
+
+        let nodes = graph
+            .nodes()
+            .map(|node| {
+                list!(
+                    key = block_record(node.node_id, node.sequence_start, node.sequence_end),
+                    node_id = node.node_id.to_string(),
+                    sequence_start = node.sequence_start,
+                    sequence_end = node.sequence_end
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let edges = graph
+            .all_edges()
+            .map(|(src, dst, edge_weights)| {
+                let weights = edge_weights
+                    .iter()
+                    .map(|weight| {
+                        list!(
+                            edge_id = weight.edge_id.to_string(),
+                            source_strand = weight.source_strand.to_string(),
+                            target_strand = weight.target_strand.to_string(),
+                            chromosome_index = weight.chromosome_index,
+                            phased = weight.phased
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                list!(
+                    source = block_record(src.node_id, src.sequence_start, src.sequence_end),
+                    target = block_record(dst.node_id, dst.sequence_start, dst.sequence_end),
+                    weights = List::from_values(weights)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Ok(list!(
+            nodes = List::from_values(nodes),
+            edges = List::from_values(edges)
+        ))
+    }
+
+    fn get_block_sequence(
+        &self,
+        node_id: String,
+        sequence_start: i64,
+        sequence_end: i64,
+    ) -> std::result::Result<String, Error> {
+        let conn = self.context.graph().conn();
+        let nid = hash_id_from_string(&node_id).map_err(Error::Other)?;
+        let sequences = Node::get_sequences_by_node_ids(conn, &[nid]);
+        let seq = sequences
+            .get(&nid)
+            .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
+        Ok(seq
+            .get_sequence(sequence_start, sequence_end)
+            .map_err(|e| Error::Other(e.to_string()))?)
+    }
+
+    fn import_fasta(
+        &self,
+        filename: String,
+        sample: String,
+        shallow: bool,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::imports::fasta::import_fasta(
+            &self.context,
+            &filename,
+            &collection_name,
+            &sample,
+            shallow,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Fasta imported.".to_string())
+            }
+            Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other("Fasta contents already exist.".to_string()))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Import failed: {e}")))
+            }
+        }
+    }
+
+    fn import_sequences(
+        &self,
+        names: Vec<String>,
+        sequences: Vec<String>,
+        sample: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        if names.len() != sequences.len() {
+            return Err(Error::Other(
+                "names and sequences must have the same length".to_string(),
+            ));
+        }
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        let entries: Vec<(String, String)> = names.into_iter().zip(sequences).collect();
+        match r#gen::imports::sequences::import_sequences(
+            &self.context,
+            &entries,
+            &collection_name,
+            &sample,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Sequences imported.".to_string())
+            }
+            Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other("Sequence contents already exist.".to_string()))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Import failed: {e}")))
+            }
+        }
+    }
+
+    fn import_genomic_regions(
+        &self,
+        seq_names: Vec<String>,
+        seq_sequences: Vec<String>,
+        region_names: Vec<String>,
+        region_seq_names: Vec<String>,
+        region_starts: Vec<f64>,
+        region_ends: Vec<f64>,
+        sample: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        if seq_names.len() != seq_sequences.len() {
+            return Err(Error::Other(
+                "seq_names and seq_sequences must have the same length".to_string(),
+            ));
+        }
+        let n = region_names.len();
+        if region_seq_names.len() != n || region_starts.len() != n || region_ends.len() != n {
+            return Err(Error::Other("region_names, region_seq_names, region_starts, and region_ends must all have the same length".to_string()));
+        }
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        let reference_sequences: Vec<(String, String)> =
+            seq_names.into_iter().zip(seq_sequences).collect();
+        let regions: Vec<(String, String, i64, i64)> = region_names
+            .into_iter()
+            .zip(region_seq_names)
+            .zip(region_starts)
+            .zip(region_ends)
+            .map(|(((rn, rsn), rs), re)| (rn, rsn, rs as i64, re as i64))
+            .collect();
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::imports::sequences::import_genomic_regions(
+            &self.context,
+            &reference_sequences,
+            &regions,
+            &collection_name,
+            &sample,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Genomic regions imported.".to_string())
+            }
+            Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(
+                    "Genomic region contents already exist.".to_string(),
+                ))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Import failed: {e}")))
+            }
+        }
+    }
+
+    fn import_gfa(
+        &self,
+        filename: String,
+        sample: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::imports::gfa::import_gfa(
+            &self.context,
+            Path::new(&filename),
+            &collection_name,
+            &sample,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("GFA imported.".to_string())
+            }
+            Err(r#gen::imports::gfa::GFAImportError::OperationError(OperationError::NoChanges)) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other("GFA already exists.".to_string()))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Import failed: {e}")))
+            }
+        }
+    }
+
+    fn import_genbank(
+        &self,
+        filename: String,
+        sample: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name_opt = nullable_string_to_option(collection);
+        let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::imports::genbank::import_genbank(
+            &self.context,
+            &mut reader,
+            collection_name_opt.as_deref(),
+            &sample,
+            OperationInfo {
+                files: vec![
+                    OperationFile::new(filename.clone())
+                        .set_file_type(gen_models::file_types::FileTypes::GenBank),
+                ],
+                description: "GenBank Import".to_string(),
+            },
+            r#gen::imports::genbank::GenBankImportOptions::default()
+                .annotation_name_from_path(&filename),
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("GenBank imported.".to_string())
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Import failed: {e}")))
+            }
+        }
+    }
+
+    fn import_library_files(
+        &self,
+        library_name: String,
+        parts: String,
+        library: String,
+        sample: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let parts_list = parse_library(&parts, &library)
+            .map_err(|e| Error::Other(format!("Problem parsing library files: {e}")))?;
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::imports::library::import_library(
+            &self.context,
+            &collection_name,
+            &sample,
+            &library_name,
+            parts_list,
+            Some(&parts),
+            Some(&library),
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Library imported.".to_string())
+            }
+            Err(r#gen::imports::library::LibraryImportError::OperationError(
+                OperationError::NoChanges,
+            )) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other("Library already exists.".to_string()))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Library import failed: {e}")))
+            }
+        }
+    }
+
+    fn import_library(
+        &self,
+        library_name: String,
+        parts_list: Robj,
+        sample: Nullable<String>,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        let sample_name = nullable_string_to_option(sample)
+            .unwrap_or_else(|| gen_models::sample::Sample::DEFAULT_NAME.to_string());
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::imports::library::import_library(
+            &self.context,
+            &collection_name,
+            &sample_name,
+            &library_name,
+            rust_parts_list,
+            None,
+            None,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Library imported.".to_string())
+            }
+            Err(r#gen::imports::library::LibraryImportError::OperationError(
+                OperationError::NoChanges,
+            )) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other("Library already exists.".to_string()))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Library import failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_fasta(
+        &self,
+        filename: String,
+        sample: String,
+        new_sample: String,
+        region_name: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::fasta::update_with_fasta(
+            &self.context,
+            &collection_name,
+            &sample,
+            &new_sample,
+            &region_name,
+            &filename,
+            false,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with fasta.".to_string())
+            }
+            Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other("Fasta contents already exist.".to_string()))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_gfa(
+        &self,
+        filename: String,
+        sample: String,
+        new_sample: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::gfa::update_with_gfa(
+            &self.context,
+            &collection_name,
+            &sample,
+            &new_sample,
+            &filename,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with GFA.".to_string())
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_gaf(
+        &self,
+        filename: String,
+        csv: String,
+        sample: String,
+        parent_sample: Nullable<String>,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::gaf::update_with_gaf(
+            &self.context,
+            &filename,
+            &csv,
+            &collection_name,
+            &sample,
+            nullable_string_to_option(parent_sample).as_deref(),
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with GAF.".to_string())
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_vcf(
+        &self,
+        filename: String,
+        genotype: Nullable<String>,
+        sample: Nullable<String>,
+        parent_samples: Vec<String>,
+        in_place: bool,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        let genotype = nullable_string_to_option(genotype).unwrap_or_default();
+        let sample = nullable_string_to_option(sample);
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::vcf::update_with_vcf(
+            &self.context,
+            &filename,
+            &collection_name,
+            genotype,
+            sample.as_deref(),
+            parent_samples,
+            in_place,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with VCF.".to_string())
+            }
+            Err(r#gen::updates::vcf::VcfError::OperationError(OperationError::NoChanges)) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(
+                    "No changes made. Provide sample and genotype if missing from VCF.".to_string(),
+                ))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_genbank(
+        &self,
+        filename: String,
+        sample: String,
+        create_missing: bool,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name_opt = nullable_string_to_option(collection);
+        let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::genbank::update_with_genbank(
+            &self.context,
+            &mut reader,
+            collection_name_opt.as_deref(),
+            &sample,
+            create_missing,
+            &OperationInfo {
+                files: vec![
+                    OperationFile::new(filename.clone())
+                        .set_file_type(gen_models::file_types::FileTypes::GenBank),
+                ],
+                description: "Update from GenBank".to_string(),
+            },
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with GenBank.".to_string())
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_library_files(
+        &self,
+        sample: String,
+        new_sample: String,
+        path_name: String,
+        library: String,
+        parts: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let parts_list = parse_library(&parts, &library)
+            .map_err(|e| Error::Other(format!("Couldn't parse library files: {e}")))?;
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::library::update_with_library(
+            &self.context,
+            &collection_name,
+            &sample,
+            &new_sample,
+            &path_name,
+            parts_list,
+            Some(&parts),
+            Some(&library),
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with library.".to_string())
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_library(
+        &self,
+        sample: Nullable<String>,
+        new_sample_name: String,
+        path_name: String,
+        parts_list: Robj,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        let sample_name = nullable_string_to_option(sample)
+            .unwrap_or_else(|| gen_models::sample::Sample::DEFAULT_NAME.to_string());
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::library::update_with_library(
+            &self.context,
+            &collection_name,
+            &sample_name,
+            &new_sample_name,
+            &path_name,
+            rust_parts_list,
+            None,
+            None,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with library.".to_string())
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn update_with_sequence(
+        &self,
+        sequence: String,
+        sample: String,
+        new_sample: String,
+        region_name: String,
+        no_reference_path_update: bool,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        match r#gen::updates::sequence::update_with_sequence(
+            &self.context,
+            &collection_name,
+            &sample,
+            &new_sample,
+            &region_name,
+            &sequence,
+            no_reference_path_update,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Updated with sequence.".to_string())
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Update failed: {e}")))
+            }
+        }
+    }
+
+    fn export_fasta(
+        &self,
+        filename: String,
+        sample: Nullable<String>,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        r#gen::track_database(
+            self.context.graph().conn(),
+            self.context.operations().conn(),
+        )
+        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
+        r#gen::exports::fasta::export_fasta(
+            self.context.graph().conn(),
+            &collection_name,
+            nullable_string_to_option(sample).as_deref(),
+            &PathBuf::from(&filename),
+        )
+        .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))?;
+        Ok(filename)
+    }
+
+    fn export_gfa(
+        &self,
+        filename: String,
+        sample: String,
+        node_max: Nullable<i64>,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        r#gen::track_database(
+            self.context.graph().conn(),
+            self.context.operations().conn(),
+        )
+        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
+        r#gen::exports::gfa::export_gfa(
+            self.context.graph().conn(),
+            &collection_name,
+            &PathBuf::from(&filename),
+            &sample,
+            nullable_i64_to_option(node_max),
+        )
+        .map_err(|e| Error::Other(format!("GFA export failed: {e}")))?;
+        Ok(filename)
+    }
+
+    fn export_genbank(
+        &self,
+        filename: String,
+        sample: String,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        r#gen::track_database(
+            self.context.graph().conn(),
+            self.context.operations().conn(),
+        )
+        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
+        let writer = BufWriter::new(File::create(&filename).map_err(|e| {
+            Error::Other(format!("Failed to create GenBank file '{filename}': {e}"))
+        })?);
+        r#gen::exports::genbank::export_genbank(
+            self.context.graph().conn(),
+            &collection_name,
+            &sample,
+            writer,
+        )
+        .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))?;
+        Ok(filename)
+    }
+
+    fn stitch(
+        &self,
+        collection_name: String,
+        sample_name: String,
+        new_sample: String,
+        new_region: String,
+        regions: String,
+    ) -> std::result::Result<List, Error> {
+        make_stitch_operation(
+            &self.context,
+            Some(collection_name.clone()),
+            sample_name,
+            new_sample.clone(),
+            regions,
+            new_region.clone(),
+        )
+        .map_err(|e| Error::Other(format!("Error stitching block groups: {e}")))?;
+        let conn = self.context.graph().conn();
+        let db_path = self.db_path();
+        BlockGroup::query(conn, "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3", rusqlite::params![collection_name, new_sample, new_region])
+            .into_iter()
+            .next()
+            .map(|bg| block_group_record(bg, Some(&db_path)))
+            .ok_or_else(|| Error::Other("Stitched block group not found after creation".to_string()))
+    }
+
+    fn build_index(
+        &self,
+        block_group_ids: Vec<String>,
+        sequence_kind: String,
+        k: i32,
+    ) -> std::result::Result<(), Error> {
+        let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
+        let normalized = kind != SequenceKind::Exact;
+        let conn = self.context.graph().conn();
+        let index_dir = self
+            .context
+            .workspace()
+            .ensure_gen_dir()
+            .join("search_index");
+        fs::create_dir_all(&index_dir)
+            .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
+        let bgs: Vec<_> = if block_group_ids.is_empty() {
+            BlockGroup::all(conn)
+        } else {
+            block_group_ids
+                .iter()
+                .filter_map(|id| hash_id_from_string(id).ok())
+                .filter_map(|id| BlockGroup::get_by_id(conn, &id).ok())
+                .collect()
+        };
+        for bg in bgs {
+            let graph = BlockGroup::get_graph(conn, &bg.id);
+            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+            let index = SeedIndex::build(&matcher, k as usize, normalized);
+            let path = index_dir.join(format!("{}.bin", bg.id));
+            let bytes = index
+                .to_bytes_with_header()
+                .map_err(|e| Error::Other(format!("Failed to serialize index: {e}")))?;
+            fs::write(&path, bytes)
+                .map_err(|e| Error::Other(format!("Failed to write index: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn search(
+        &self,
+        query: String,
+        block_group_ids: Vec<String>,
+        sequence_kind: String,
+    ) -> std::result::Result<List, Error> {
+        let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
+        let conn = self.context.graph().conn();
+        let bgs: Vec<_> = if block_group_ids.is_empty() {
+            BlockGroup::all(conn)
+        } else {
+            block_group_ids
+                .iter()
+                .filter_map(|id| hash_id_from_string(id).ok())
+                .filter_map(|id| BlockGroup::get_by_id(conn, &id).ok())
+                .collect()
+        };
+        let query_bytes = query.as_bytes();
+        let index_dir = self
+            .context
+            .workspace()
+            .ensure_gen_dir()
+            .join("search_index");
+        let db_path = self.db_path();
+        let mut results = Vec::new();
+        for bg in bgs {
+            let graph = BlockGroup::get_graph(conn, &bg.id);
+            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+            let index_path = index_dir.join(format!("{}.bin", bg.id));
+            let index = fs::read(&index_path)
+                .ok()
+                .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok());
+            let matches = match index {
+                Some(idx) => matcher
+                    .find_all_with_seed_index(&idx, query_bytes)
+                    .unwrap_or_else(|_| matcher.find_all(query_bytes)),
+                None => matcher.find_all(query_bytes),
+            };
+            if !matches.is_empty() {
+                let locus_records = matches.iter().map(graph_locus_record).collect::<Vec<_>>();
+                results.push(list!(
+                    block_group = block_group_record(bg, Some(&db_path)),
+                    matches = List::from_values(locus_records)
+                ));
+            }
+        }
+        Ok(List::from_values(results))
+    }
+
+    fn clear_index(&self, block_group_ids: Vec<String>) -> std::result::Result<(), Error> {
+        let index_dir = self
+            .context
+            .workspace()
+            .ensure_gen_dir()
+            .join("search_index");
+        if !index_dir.exists() {
+            return Ok(());
+        }
+        if block_group_ids.is_empty() {
+            for entry in fs::read_dir(&index_dir)
+                .map_err(|e| Error::Other(format!("Failed to read index dir: {e}")))?
+            {
+                let entry =
+                    entry.map_err(|e| Error::Other(format!("Failed to read entry: {e}")))?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("bin") {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        } else {
+            for id in &block_group_ids {
+                let path = index_dir.join(format!("{id}.bin"));
+                if path.exists() {
+                    fs::remove_file(&path)
+                        .map_err(|e| Error::Other(format!("Failed to delete index: {e}")))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn bg_subgraph(
+        &self,
+        collection_name: String,
+        sample_name: String,
+        bg_name: String,
+        new_sample: String,
+        start: i64,
+        end: i64,
+        backbone: Nullable<String>,
+    ) -> std::result::Result<List, Error> {
+        let db_path = self.db_path();
+        let region = format!("{bg_name}:{start}-{end}");
+        derive_subgraph_operation(
+            &self.context,
+            Some(collection_name.clone()),
+            sample_name,
+            new_sample.clone(),
+            region,
+            nullable_string_to_option(backbone),
+        )
+        .map_err(|e| Error::Other(format!("Error deriving subgraph: {e}")))?;
+        let conn = self.context.graph().conn();
+        BlockGroup::query(conn, "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3", rusqlite::params![collection_name, new_sample, bg_name])
+            .into_iter()
+            .next()
+            .map(|bg| block_group_record(bg, Some(&db_path)))
+            .ok_or_else(|| Error::Other("Derived subgraph not found after creation".to_string()))
+    }
+
+    fn bg_chunks(
+        &self,
+        collection_name: String,
+        sample_name: String,
+        bg_name: String,
+        new_sample: String,
+        breakpoints: Vec<i32>,
+        chunk_size: Nullable<i64>,
+        backbone: Nullable<String>,
+    ) -> std::result::Result<List, Error> {
+        let db_path = self.db_path();
+        derive_chunks_operation(
+            &self.context,
+            Some(collection_name.clone()),
+            sample_name,
+            new_sample.clone(),
+            bg_name.clone(),
+            nullable_string_to_option(backbone),
+            if breakpoints.is_empty() {
+                None
+            } else {
+                Some(breakpoints.into_iter().map(i64::from).collect())
+            },
+            nullable_i64_to_option(chunk_size),
+        )
+        .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
+        let conn = self.context.graph().conn();
+        let prefix = format!("{bg_name}.");
+        let matching = BlockGroup::query(
+            conn,
+            "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2",
+            rusqlite::params![collection_name, new_sample],
+        )
+        .into_iter()
+        .filter(|bg| bg.name == bg_name || bg.name.starts_with(&prefix))
+        .map(|bg| block_group_record(bg, Some(&db_path)))
+        .collect::<Vec<_>>();
+        Ok(List::from_values(matching))
+    }
+
+    fn derive_subgraph(
+        &self,
+        collection: Nullable<String>,
+        sample: String,
+        new_sample: String,
+        region: String,
+        backbone: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        derive_subgraph_operation(
+            &self.context,
+            nullable_string_to_option(collection),
+            sample,
+            new_sample,
+            region,
+            nullable_string_to_option(backbone),
+        )
+        .map_err(|e| Error::Other(format!("Error deriving subgraph: {e}")))?;
+        Ok("Derived subgraph.".to_string())
+    }
+
+    fn derive_chunks(
+        &self,
+        collection: Nullable<String>,
+        sample: String,
+        new_sample: String,
+        region: String,
+        backbone: Nullable<String>,
+        breakpoints: Vec<i32>,
+        chunk_size: Nullable<i64>,
+    ) -> std::result::Result<String, Error> {
+        derive_chunks_operation(
+            &self.context,
+            nullable_string_to_option(collection),
+            sample,
+            new_sample,
+            region,
+            nullable_string_to_option(backbone),
+            if breakpoints.is_empty() {
+                None
+            } else {
+                Some(breakpoints.into_iter().map(i64::from).collect())
+            },
+            nullable_i64_to_option(chunk_size),
+        )
+        .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
+        Ok("Derived chunks.".to_string())
+    }
+}
+
 extendr_module! {
     mod genr;
-    fn init;
-    fn get_gen_dir;
+    impl GenRepository;
     fn db_context;
     fn import_fasta;
     fn import_sequences;

@@ -10,7 +10,6 @@ rendering block groups through a \code{GraphController()}.
 \code{gen_dir}, \code{db_path}, \code{execute}, \code{query},
 \code{get_block_group_by_id}, \code{get_block_groups},
 \code{get_block_groups_by_collection}, \code{block_group_to_dict},
-\code{block_group_to_rustworkx}, \code{block_group_to_networkx},
 \code{plot}, \code{get_block_sequence}, \code{stitch},
 \code{build_index}, \code{search}, and \code{clear_index}.
 
@@ -24,6 +23,5 @@ rendering block groups through a \code{GraphController()}.
 \code{zoom_in}, \code{zoom_out}, \code{handle_click}, and \code{move_by}.
 }
 \seealso{
-\code{\link{HashId}}, \code{\link{Block}}, \code{\link{db_context}},
-\code{\link{derive_chunks}}
+\code{\link{HashId}}, \code{\link{Block}}, \code{\link{derive_chunks}}
 }

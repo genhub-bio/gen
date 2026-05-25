@@ -59,7 +59,7 @@ Bioconductor `DNAStringSet` / `GRanges` objects.
 |--------|-------------|
 | `derive_subgraph(sample, new_sample, region, ...)` | Extract a coordinate-bounded subgraph |
 | `derive_chunks(sample, new_sample, region, ...)` | Split a block group at breakpoints or a fixed chunk size |
-| `make_stitch(bgs, new_sample, new_region)` | Concatenate block groups end-to-end |
+| `stitch(bgs, new_sample, new_region)` | Concatenate block groups end-to-end |
 
 **Query**
 

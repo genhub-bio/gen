@@ -1,13 +1,4 @@
-#' Initialise a Gen workspace in the current directory.
-#' @export
-init <- function() .Call("wrap__init", PACKAGE = "genr")
-
-#' Return the path to the current workspace's .gen directory.
-#' @export
-get_gen_dir <- function() .Call("wrap__get_gen_dir", PACKAGE = "genr")
-
 #' Open a Gen database context.
-#' @export
 db_context <- function(workspace_path, db_path) .Call("wrap__db_context", workspace_path, db_path, PACKAGE = "genr")
 
 import_fasta <- function(workspace_path, db_path, filename, sample, shallow, collection) .Call("wrap__import_fasta", workspace_path, db_path, filename, sample, shallow, collection, PACKAGE = "genr")
@@ -89,5 +80,85 @@ repo_bg_export_genbank <- function(db_path, collection_name, sample_name, filena
 graph_render_frame <- function(db_path, block_group_id, detail, cols, rows, ops, tracks_json) .Call("wrap__graph_render_frame", db_path, block_group_id, detail, cols, rows, ops, tracks_json, PACKAGE = "genr")
 
 graph_handle_click <- function(db_path, block_group_id, detail, ops, col, row) .Call("wrap__graph_handle_click", db_path, block_group_id, detail, ops, col, row, PACKAGE = "genr")
+
+GenRepository <- new.env(parent = emptyenv())
+
+GenRepository$new <- function(path) .Call("wrap__GenRepository__new", path, PACKAGE = "genr")
+
+GenRepository$gen_dir <- function() .Call("wrap__GenRepository__gen_dir", self, PACKAGE = "genr")
+
+GenRepository$db_path <- function() .Call("wrap__GenRepository__db_path", self, PACKAGE = "genr")
+
+GenRepository$execute <- function(query) .Call("wrap__GenRepository__execute", self, query, PACKAGE = "genr")
+
+GenRepository$query <- function(query) .Call("wrap__GenRepository__query", self, query, PACKAGE = "genr")
+
+GenRepository$get_block_group_by_id <- function(id) .Call("wrap__GenRepository__get_block_group_by_id", self, id, PACKAGE = "genr")
+
+GenRepository$get_block_groups <- function() .Call("wrap__GenRepository__get_block_groups", self, PACKAGE = "genr")
+
+GenRepository$get_block_groups_by_collection <- function(collection_name) .Call("wrap__GenRepository__get_block_groups_by_collection", self, collection_name, PACKAGE = "genr")
+
+GenRepository$block_group_to_dict <- function(block_group_id) .Call("wrap__GenRepository__block_group_to_dict", self, block_group_id, PACKAGE = "genr")
+
+GenRepository$get_block_sequence <- function(node_id, sequence_start, sequence_end) .Call("wrap__GenRepository__get_block_sequence", self, node_id, sequence_start, sequence_end, PACKAGE = "genr")
+
+GenRepository$import_fasta <- function(filename, sample, shallow, collection) .Call("wrap__GenRepository__import_fasta", self, filename, sample, shallow, collection, PACKAGE = "genr")
+
+GenRepository$import_sequences <- function(names, sequences, sample, collection) .Call("wrap__GenRepository__import_sequences", self, names, sequences, sample, collection, PACKAGE = "genr")
+
+GenRepository$import_genomic_regions <- function(seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection) .Call("wrap__GenRepository__import_genomic_regions", self, seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection, PACKAGE = "genr")
+
+GenRepository$import_gfa <- function(filename, sample, collection) .Call("wrap__GenRepository__import_gfa", self, filename, sample, collection, PACKAGE = "genr")
+
+GenRepository$import_genbank <- function(filename, sample, collection) .Call("wrap__GenRepository__import_genbank", self, filename, sample, collection, PACKAGE = "genr")
+
+GenRepository$import_library_files <- function(library_name, parts, library, sample, collection) .Call("wrap__GenRepository__import_library_files", self, library_name, parts, library, sample, collection, PACKAGE = "genr")
+
+GenRepository$import_library <- function(library_name, parts_list, sample, collection) .Call("wrap__GenRepository__import_library", self, library_name, parts_list, sample, collection, PACKAGE = "genr")
+
+GenRepository$update_with_fasta <- function(filename, sample, new_sample, region_name, collection) .Call("wrap__GenRepository__update_with_fasta", self, filename, sample, new_sample, region_name, collection, PACKAGE = "genr")
+
+GenRepository$update_with_gfa <- function(filename, sample, new_sample, collection) .Call("wrap__GenRepository__update_with_gfa", self, filename, sample, new_sample, collection, PACKAGE = "genr")
+
+GenRepository$update_with_gaf <- function(filename, csv, sample, parent_sample, collection) .Call("wrap__GenRepository__update_with_gaf", self, filename, csv, sample, parent_sample, collection, PACKAGE = "genr")
+
+GenRepository$update_with_vcf <- function(filename, genotype, sample, parent_samples, in_place, collection) .Call("wrap__GenRepository__update_with_vcf", self, filename, genotype, sample, parent_samples, in_place, collection, PACKAGE = "genr")
+
+GenRepository$update_with_genbank <- function(filename, sample, create_missing, collection) .Call("wrap__GenRepository__update_with_genbank", self, filename, sample, create_missing, collection, PACKAGE = "genr")
+
+GenRepository$update_with_library_files <- function(sample, new_sample, path_name, library, parts, collection) .Call("wrap__GenRepository__update_with_library_files", self, sample, new_sample, path_name, library, parts, collection, PACKAGE = "genr")
+
+GenRepository$update_with_library <- function(sample, new_sample_name, path_name, parts_list, collection) .Call("wrap__GenRepository__update_with_library", self, sample, new_sample_name, path_name, parts_list, collection, PACKAGE = "genr")
+
+GenRepository$update_with_sequence <- function(sequence, sample, new_sample, region_name, no_reference_path_update, collection) .Call("wrap__GenRepository__update_with_sequence", self, sequence, sample, new_sample, region_name, no_reference_path_update, collection, PACKAGE = "genr")
+
+GenRepository$export_fasta <- function(filename, sample, collection) .Call("wrap__GenRepository__export_fasta", self, filename, sample, collection, PACKAGE = "genr")
+
+GenRepository$export_gfa <- function(filename, sample, node_max, collection) .Call("wrap__GenRepository__export_gfa", self, filename, sample, node_max, collection, PACKAGE = "genr")
+
+GenRepository$export_genbank <- function(filename, sample, collection) .Call("wrap__GenRepository__export_genbank", self, filename, sample, collection, PACKAGE = "genr")
+
+GenRepository$stitch <- function(collection_name, sample_name, new_sample, new_region, regions) .Call("wrap__GenRepository__stitch", self, collection_name, sample_name, new_sample, new_region, regions, PACKAGE = "genr")
+
+GenRepository$build_index <- function(block_group_ids, sequence_kind, k) .Call("wrap__GenRepository__build_index", self, block_group_ids, sequence_kind, k, PACKAGE = "genr")
+
+GenRepository$search <- function(query, block_group_ids, sequence_kind) .Call("wrap__GenRepository__search", self, query, block_group_ids, sequence_kind, PACKAGE = "genr")
+
+GenRepository$clear_index <- function(block_group_ids) .Call("wrap__GenRepository__clear_index", self, block_group_ids, PACKAGE = "genr")
+
+GenRepository$bg_subgraph <- function(collection_name, sample_name, bg_name, new_sample, start, end, backbone) .Call("wrap__GenRepository__bg_subgraph", self, collection_name, sample_name, bg_name, new_sample, start, end, backbone, PACKAGE = "genr")
+
+GenRepository$bg_chunks <- function(collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone) .Call("wrap__GenRepository__bg_chunks", self, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone, PACKAGE = "genr")
+
+GenRepository$derive_subgraph <- function(collection, sample, new_sample, region, backbone) .Call("wrap__GenRepository__derive_subgraph", self, collection, sample, new_sample, region, backbone, PACKAGE = "genr")
+
+GenRepository$derive_chunks <- function(collection, sample, new_sample, region, backbone, breakpoints, chunk_size) .Call("wrap__GenRepository__derive_chunks", self, collection, sample, new_sample, region, backbone, breakpoints, chunk_size, PACKAGE = "genr")
+
+#' @export
+`$.GenRepository` <- function (self, name) { func <- GenRepository[[name]]; environment(func) <- environment(); func }
+
+#' @export
+`[[.GenRepository` <- `$.GenRepository`
 
 

@@ -94,13 +94,11 @@ repo$update_with_sequence(
   sequence    = golden_gate_mcs,
   sample      = "wt",
   new_sample  = "gg_design",
-  region_name = "pUC19",
   # MCS coordinates from the GenBank misc_feature annotation (1-based 396..452),
-  # converted to 0-based half-open.  Programmatic annotation lookup is not yet
-  # exposed in the R API; a future repo$get_annotations(bg) call would return
-  # these with their coordinates directly.
-  start       = 395L,
-  end         = 452L
+  # converted to 0-based half-open interval encoded in the region string.
+  # Programmatic annotation lookup is not yet exposed in the R API;
+  # a future repo$get_annotations(bg) call would return these directly.
+  region_name = "pUC19:395-452"
 )
 ```
 
