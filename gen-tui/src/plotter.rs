@@ -256,6 +256,8 @@ pub fn plot_viewport_graph<R, G>(
         &[],
         &[],
         &[],
+        &[],
+        &[],
         theme,
     )
 }
@@ -286,6 +288,8 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     node_highlights: &[(WorldPos, PathStyle)],
     edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
     cell_highlights: &[(WorldPos, (i64, i64), (i64, i64), PathStyle)],
+    lowlights: &[(WorldPos, WorldPos)],
+    node_lowlights: &[WorldPos],
     theme: &Theme,
 ) where
     R: NodeRenderer<G>,
@@ -301,12 +305,24 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             .map(|(_, style)| *style)
             .next_back();
 
+        let is_lowlight = lowlights
+            .iter()
+            .any(|(s, t)| (*s == source && *t == target) || (*s == target && *t == source));
+
         if let Some(style) = highlighted_style {
             let edge_color = match style.color {
                 Color::Reset => theme[0x07],
                 color => color,
             };
-            draw_edge_with_style(buffer, source, target, edge_color, style.line_style);
+            // highlight+lowlight: dashed in the highlight color
+            let line_style = if is_lowlight {
+                LineStyle::Dashed
+            } else {
+                style.line_style
+            };
+            draw_edge_with_style(buffer, source, target, edge_color, line_style);
+        } else if is_lowlight {
+            draw_edge_with_style(buffer, source, target, theme[0x04], LineStyle::Dashed);
         } else if !bundle.is_empty() {
             // Normal edge with data
             draw_edge_with_style(buffer, source, target, theme[0x05], LineStyle::Normal);
@@ -324,6 +340,25 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
+
+                // If lowlighted, dim the node background to theme[0x04].
+                // Applied before highlights so highlights take priority.
+                if node_lowlights.contains(world_pos) {
+                    let dim = theme[0x04];
+                    for y in world_rect.min.y..=world_rect.max.y {
+                        for x in world_rect.min.x..=world_rect.max.x {
+                            let pos = WorldPos::new(x, y);
+                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
+                                let new_style = if ch == NODE_GLYPH {
+                                    style.fg(dim)
+                                } else {
+                                    style.bg(dim)
+                                };
+                                buffer.set_char_styled(pos, ch, new_style);
+                            }
+                        }
+                    }
+                }
 
                 // Check if this node is highlighted
                 let highlighted_style = node_highlights
@@ -383,21 +418,18 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             }
             NodeRole::Routing => {
                 let edge_color = theme[0x05];
-                let base_glyph = compute_junction_glyph(viewport_graph, *world_pos);
+                let base_glyph =
+                    compute_junction_glyph(viewport_graph.neighbors(*world_pos), *world_pos);
 
                 // Check if this routing node is part of any highlighted edge
                 let highlighted_style = edge_highlights
                     .iter()
                     .filter(|((s, t), _)| {
-                        // A routing node is highlighted if it lies on a highlighted edge segment
-                        // Since edges are either horizontal or vertical, we can check if the point lies between endpoints
                         if s.x == t.x {
-                            // Vertical edge
                             world_pos.x == s.x
                                 && world_pos.y >= s.y.min(t.y)
                                 && world_pos.y <= s.y.max(t.y)
                         } else {
-                            // Horizontal edge
                             world_pos.y == s.y
                                 && world_pos.x >= s.x.min(t.x)
                                 && world_pos.x <= s.x.max(t.x)
@@ -406,23 +438,20 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     .map(|(_, style)| *style)
                     .next_back();
 
-                let character = if let Some(style) = highlighted_style {
-                    // Create a temporary graph for the active highlight style
-                    // to compute the correct glyph
+                // Collect neighbors once; reused for both glyph shape and color decisions.
+                let all_neighbors: Vec<WorldPos> = viewport_graph.neighbors(*world_pos).collect();
+
+                // Highlight takes full priority: skip lowlight logic entirely when present.
+                let (character, fg_color) = if let Some(style) = highlighted_style {
                     let active_edges: Vec<_> = edge_highlights
                         .iter()
                         .filter(|(_, s)| *s == style)
                         .cloned()
                         .collect();
                     let highlight_graph = CroppedGraph::from_visual_edges(&active_edges);
-                    let high_glyph = compute_junction_glyph(&highlight_graph, *world_pos);
-
-                    // Decision tree:
-                    // 1. Is this routing node part of any highlighted path?
-                    // 2. If it is, do we merge with the current glyph or replace it?
-                    //    - Merge if merge_glyphs is true
-                    //    - Replace if merge_glyphs is false (avoids spiney artefacts with color tinting)
-                    if style.merge_glyphs {
+                    let high_glyph =
+                        compute_junction_glyph(highlight_graph.neighbors(*world_pos), *world_pos);
+                    let ch = if style.merge_glyphs {
                         let high_char = match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
                             LineStyle::Bold => high_glyph.heavy_glyph(),
@@ -434,26 +463,42 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                             .next()
                             .unwrap_or('?')
                     } else {
-                        // Replace mode: use the highlight glyph directly
                         match style.line_style {
                             LineStyle::Normal => high_glyph.glyph(),
                             LineStyle::Bold => high_glyph.heavy_glyph(),
                             LineStyle::Dashed => high_glyph.dashed_glyph(),
                         }
-                    }
-                } else {
-                    base_glyph.glyph()
-                };
-
-                let fg_color = match highlighted_style {
-                    None => edge_color,
-                    Some(style) => match style.color {
+                    };
+                    let color = match style.color {
                         Color::Reset => theme[0x07],
                         c => c,
-                    },
+                    };
+                    (ch, color)
+                } else {
+                    // Compute once, share between glyph and color decisions below.
+                    let lowlight_mask: Vec<bool> = all_neighbors
+                        .iter()
+                        .map(|&nb| {
+                            is_lowlight_only_connection(*world_pos, nb, lowlights, edge_highlights)
+                        })
+                        .collect();
+                    let all_dim = !lowlight_mask.is_empty() && lowlight_mask.iter().all(|&x| x);
+                    let any_dim = lowlight_mask.iter().any(|&x| x);
+                    // Mixed junction: exclude lowlight-only arms so the glyph reflects only the
+                    // live connections, avoiding spurious branches pointing into dimmed edges.
+                    let ch = if any_dim && !all_dim {
+                        let lit = all_neighbors
+                            .iter()
+                            .zip(&lowlight_mask)
+                            .filter_map(|(&nb, &dim)| (!dim).then_some(nb));
+                        compute_junction_glyph(lit, *world_pos).glyph()
+                    } else {
+                        base_glyph.glyph()
+                    };
+                    let color = if all_dim { theme[0x04] } else { edge_color };
+                    (ch, color)
                 };
-                let style = Style::default().fg(fg_color);
-                buffer.set_char_styled(*world_pos, character, style);
+                buffer.set_char_styled(*world_pos, character, Style::default().fg(fg_color));
             }
             NodeRole::Stitch(_) => {
                 // Stitch nodes should have been replaced by actual content in ViewportGraph
@@ -464,12 +509,51 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     }
 }
 
-/// Compute the junction glyph for a routing node based on its connections
-fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> JunctionSymbol {
-    let mut connections = 0u8;
+/// Returns true if both `point_a` and `point_b` lie on the axis-aligned segment
+/// from `seg_start` to `seg_end`.
+fn both_points_on_segment(
+    seg_start: WorldPos,
+    seg_end: WorldPos,
+    point_a: WorldPos,
+    point_b: WorldPos,
+) -> bool {
+    if seg_start.x == seg_end.x && point_a.x == seg_start.x && point_b.x == seg_start.x {
+        let lo = seg_start.y.min(seg_end.y);
+        let hi = seg_start.y.max(seg_end.y);
+        point_a.y >= lo && point_a.y <= hi && point_b.y >= lo && point_b.y <= hi
+    } else if seg_start.y == seg_end.y && point_a.y == seg_start.y && point_b.y == seg_start.y {
+        let lo = seg_start.x.min(seg_end.x);
+        let hi = seg_start.x.max(seg_end.x);
+        point_a.x >= lo && point_a.x <= hi && point_b.x >= lo && point_b.x <= hi
+    } else {
+        false
+    }
+}
 
-    // Check connections in all four directions
-    for neighbor in viewport_graph.neighbors(pos) {
+/// Returns true if the connection from `routing_node` to `neighbor` lies on a lowlight
+/// segment but not on any highlight segment — meaning it should be rendered dimmed.
+fn is_lowlight_only_connection(
+    routing_node: WorldPos,
+    neighbor: WorldPos,
+    lowlights: &[(WorldPos, WorldPos)],
+    edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
+) -> bool {
+    let on_lowlight = lowlights
+        .iter()
+        .any(|(start, end)| both_points_on_segment(*start, *end, routing_node, neighbor));
+    let on_highlight = edge_highlights
+        .iter()
+        .any(|((start, end), _)| both_points_on_segment(*start, *end, routing_node, neighbor));
+    on_lowlight && !on_highlight
+}
+
+/// Compute the junction glyph for a routing node given its neighbors.
+fn compute_junction_glyph(
+    neighbors: impl Iterator<Item = WorldPos>,
+    pos: WorldPos,
+) -> JunctionSymbol {
+    let mut connections = 0u8;
+    for neighbor in neighbors {
         if neighbor.y < pos.y {
             connections |= 0b0010; // South
         } else if neighbor.y > pos.y {
@@ -481,7 +565,6 @@ fn compute_junction_glyph(viewport_graph: &CroppedGraph, pos: WorldPos) -> Junct
             connections |= 0b0100; // East
         }
     }
-
     JunctionSymbol::new(connections)
 }
 
@@ -499,7 +582,7 @@ fn draw_edge_with_style(
     let (v_ch, h_ch) = match line_style {
         LineStyle::Normal => ('│', '─'),
         LineStyle::Bold => ('┃', '━'),
-        LineStyle::Dashed => ('┆', '┄'),
+        LineStyle::Dashed => ('┊', '╌'),
     };
 
     if source.x == target.x {
@@ -526,7 +609,7 @@ fn draw_edge_with_style(
 
             // Don't overwrite a vertical line with a horizontal one.
             // Vertical edges take priority at crossings (normal, heavy, and dashed).
-            if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┆')) {
+            if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┊')) {
                 buffer.set_char_styled(pos, h_ch, style);
             }
         }

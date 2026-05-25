@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_core::{is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode};
+use gen_core::{
+    INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+    is_end_node, is_start_node,
+};
+use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{db::GraphConnection, node::Node, sequence::SequenceError};
 use gen_tui::{
     geometry::{WorldPos, WorldRect},
@@ -188,6 +191,83 @@ pub fn create_gen_graph_widget(
     GraphWidget::with_renderer(renderer)
 }
 
+/// Compute which edges would be removed by `BlockGroup::prune_graph`.
+///
+/// Mirrors the per-source-node, per-chromosome_index deduplication logic: for each
+/// chromosome_index appearing on outgoing edges of a node, the edge with the highest
+/// `created_on` is kept; all others are dimmed. Edges with
+/// `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` are always dimmed; edges with
+/// `NO_CHROMOSOME_INDEX` or `INDETERMINATE_CHROMOSOME_INDEX` are never dimmed.
+fn compute_pruned_edges(graph: &GenGraph) -> HashSet<(GraphNode, GraphNode)> {
+    let mut pruned: HashSet<(GraphNode, GraphNode)> = HashSet::new();
+
+    for node in graph.nodes() {
+        // chromosome_index -> (source, target, best_created_on)
+        let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
+
+        for (source_node, target_node, edge_weights) in graph.edges(node) {
+            for edge_weight in edge_weights {
+                let GraphEdge {
+                    chromosome_index,
+                    created_on,
+                    ..
+                } = *edge_weight;
+
+                if chromosome_index == NO_CHROMOSOME_INDEX
+                    || chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
+                {
+                    continue;
+                }
+                if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
+                    pruned.insert((source_node, target_node));
+                    continue;
+                }
+                edges_by_ci
+                    .entry(chromosome_index)
+                    .and_modify(|(best_src, best_tgt, best_ts)| {
+                        if created_on > *best_ts {
+                            pruned.insert((*best_src, *best_tgt));
+                            *best_src = source_node;
+                            *best_tgt = target_node;
+                            *best_ts = created_on;
+                        } else {
+                            pruned.insert((source_node, target_node));
+                        }
+                    })
+                    .or_insert((source_node, target_node, created_on));
+            }
+        }
+    }
+
+    pruned
+}
+
+/// Find nodes that become inaccessible when all pruned edges are removed.
+///
+/// BFS from all start nodes following only non-pruned edges. Any node not reached
+/// is only reachable through pruned (lowlighted) edges and should be dimmed.
+fn compute_inaccessible_nodes(
+    graph: &GenGraph,
+    pruned: &HashSet<(GraphNode, GraphNode)>,
+) -> Vec<GraphNode> {
+    let mut reachable: HashSet<GraphNode> = HashSet::new();
+    let mut queue: VecDeque<GraphNode> =
+        graph.nodes().filter(|n| is_start_node(n.node_id)).collect();
+    for &node in &queue {
+        reachable.insert(node);
+    }
+
+    while let Some(node) = queue.pop_front() {
+        for (src, tgt, _) in graph.edges(node) {
+            if !pruned.contains(&(src, tgt)) && reachable.insert(tgt) {
+                queue.push_back(tgt);
+            }
+        }
+    }
+
+    graph.nodes().filter(|n| !reachable.contains(n)).collect()
+}
+
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
 ///
 /// This is the standard way to initialize a graph controller for GenGraph visualization.
@@ -202,8 +282,16 @@ pub fn create_gen_graph_widget(
 pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
+    let pruned = compute_pruned_edges(&graph);
+    let inaccessible = compute_inaccessible_nodes(&graph, &pruned);
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer);
+    for edge in pruned {
+        controller.dim_edge(edge);
+    }
+    for node in inaccessible {
+        controller.dim_node(node);
+    }
     controller.set_detail_level(VisualDetail::Truncated);
     controller.hide_cursor();
     controller
@@ -484,5 +572,75 @@ mod tests {
         let s = "hello world";
         let truncated = inner_truncation(s, 3);
         assert_eq!(truncated, NODE_GLYPH.to_string());
+    }
+
+    #[test]
+    fn snapshot_zygosity_pruned_edges() {
+        use std::path::PathBuf;
+
+        use gen_models::sample::Sample;
+        use gen_tui::{graph_widget::GraphWidget, testing::create_test_terminal};
+        use ratatui::widgets::StatefulWidget as _;
+
+        use crate::{
+            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
+            updates::vcf::update_with_vcf,
+        };
+
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple_zygosity.vcf")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path,
+            collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1");
+        let mut controller = create_gen_graph_controller(gen_graph);
+
+        let mut terminal = create_test_terminal(120, 30);
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                controller.viewport_state.viewport_bounds = area;
+                controller.ensure_camera_coverage().unwrap();
+                controller.rebuild_viewport_graph().unwrap();
+                GraphWidget::with_renderer(GenGraphNodeRenderer::new(conn)).render(
+                    area,
+                    f.buffer_mut(),
+                    &mut controller,
+                );
+            })
+            .unwrap();
+
+        insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
     }
 }

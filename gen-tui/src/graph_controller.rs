@@ -69,6 +69,12 @@ where
     /// Persistent requested highlights in domain terms
     pub highlights: Vec<(HighlightKind<G::NodeId>, PathStyle)>,
 
+    /// Persistent dimmed edges in domain terms: (src_id, tgt_id)
+    pub edge_lowlights: Vec<(G::NodeId, G::NodeId)>,
+
+    /// Persistent dimmed nodes in domain terms
+    pub node_lowlights: Vec<G::NodeId>,
+
     /// When set, the next rebuild with a known viewport size will center the
     /// cursor's viewport position so the camera-anchored formula lands the
     /// camera exactly on the cursor's world position.
@@ -149,6 +155,8 @@ where
             rebuild_needed: true,
             layout_changed: true, // Treat initial build as a layout change to place the camera
             highlights: Vec::new(),
+            edge_lowlights: Vec::new(),
+            node_lowlights: Vec::new(),
             go_to_pending: false,
         }
     }
@@ -485,6 +493,85 @@ where
         self.viewport_graph.edge_highlights.clear();
         self.viewport_graph.cell_highlights.clear();
         self.trigger_rebuild();
+    }
+
+    /// Dim an edge: store in domain terms so it survives viewport rebuilds.
+    pub fn dim_edge(&mut self, edge: (G::NodeId, G::NodeId)) {
+        self.edge_lowlights.push(edge);
+    }
+
+    /// Return the domain-level list of dimmed edges.
+    pub fn get_lowlights(&self) -> &[(G::NodeId, G::NodeId)] {
+        &self.edge_lowlights
+    }
+
+    /// Return the visual (WorldPos) lowlight segments for the current viewport.
+    pub fn get_edge_lowlights(&self) -> &[(WorldPos, WorldPos)] {
+        &self.viewport_graph.edge_lowlights
+    }
+
+    /// Populate viewport_graph.edge_lowlights from domain edge pairs.
+    /// A visual edge segment is lowlighted when ALL domain edges in its bundle are dimmed.
+    fn apply_lowlights(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        domain_lowlights: &[(G::NodeId, G::NodeId)],
+    ) {
+        let lowlight_pairs: Vec<(NodeIndex, NodeIndex)> = domain_lowlights
+            .iter()
+            .map(|(src, tgt)| {
+                let u = NodeIndex::new(<G as NodeIndexable>::to_index(graph, *src));
+                let v = NodeIndex::new(<G as NodeIndexable>::to_index(graph, *tgt));
+                (u, v)
+            })
+            .collect();
+
+        let edges: Vec<(WorldPos, WorldPos)> = viewport_graph
+            .edges()
+            .filter(|(_, _, bundle)| {
+                !bundle.is_empty()
+                    && bundle.iter().all(|(u, v)| {
+                        lowlight_pairs.contains(&(*u, *v)) || lowlight_pairs.contains(&(*v, *u))
+                    })
+            })
+            .map(|(s, t, _)| (s, t))
+            .collect();
+
+        viewport_graph.edge_lowlights.extend(edges);
+    }
+
+    /// Dim a node: store in domain terms so it survives viewport rebuilds.
+    pub fn dim_node(&mut self, node_id: G::NodeId) {
+        self.node_lowlights.push(node_id);
+    }
+
+    /// Return the domain-level list of dimmed nodes.
+    pub fn get_node_lowlights(&self) -> &[G::NodeId] {
+        &self.node_lowlights
+    }
+
+    /// Return the visual (WorldPos) lowlight positions for nodes in the current viewport.
+    pub fn get_viewport_node_lowlights(&self) -> &[WorldPos] {
+        &self.viewport_graph.node_lowlights
+    }
+
+    /// Populate viewport_graph.node_lowlights from domain node ids.
+    fn apply_node_lowlights(
+        viewport_graph: &mut CroppedGraph,
+        graph: &G,
+        domain_node_lowlights: &[G::NodeId],
+    ) {
+        let lowlight_indices: Vec<NodeIndex> = domain_node_lowlights
+            .iter()
+            .map(|id| NodeIndex::new(<G as NodeIndexable>::to_index(graph, *id)))
+            .collect();
+
+        let positions: Vec<WorldPos> = lowlight_indices
+            .iter()
+            .filter_map(|idx| viewport_graph.node_positions.get(idx).copied())
+            .collect();
+
+        viewport_graph.node_lowlights.extend(positions);
     }
 
     /// Calculate total bounds needed to display all partitions
@@ -1024,6 +1111,18 @@ where
                 }
             }
         }
+
+        // Apply domain-level lowlights to the new viewport graph
+        Self::apply_lowlights(
+            &mut self.viewport_graph,
+            &self.partition_controller.graph,
+            &self.edge_lowlights,
+        );
+        Self::apply_node_lowlights(
+            &mut self.viewport_graph,
+            &self.partition_controller.graph,
+            &self.node_lowlights,
+        );
 
         // Update rebuild tracking
         self.last_rebuild_camera_center = self.viewport_state.camera_current;
