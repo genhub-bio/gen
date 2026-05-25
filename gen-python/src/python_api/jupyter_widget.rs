@@ -7,7 +7,6 @@ use std::{
 
 use r#gen::{
     get_connection,
-    graphs::graph_search::GraphLocus,
     views::{
         annotation_groups::load_annotation_group_entries,
         annotation_track::{AnnotationSpan, AnnotationTrack},
@@ -21,7 +20,9 @@ use r#gen::{
 };
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, project_path};
-use gen_models::{annotations::AnnotationError, block_group::BlockGroup, db::GraphConnection};
+use gen_models::{
+    annotations::AnnotationError, block_group::BlockGroup, db::GraphConnection, locus::GraphLocus,
+};
 use gen_tui::{
     LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
     plotter::PathStyle, theme::current_theme,

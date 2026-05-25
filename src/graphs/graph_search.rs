@@ -5,7 +5,12 @@ use std::{
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{db::GraphConnection, node::Node};
+use gen_models::{
+    db::GraphConnection,
+    locus::{BlockSlice, GraphLocus},
+    node::Node,
+    sequence::reverse_complement,
+};
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 
@@ -19,58 +24,6 @@ pub struct GraphPos {
     pub block: GraphNode,
     /// Local offset within `block`'s sequence slice: `0..=block.length()`.
     pub offset: usize,
-}
-
-/// A linear walk through graph space that covers a complete match.
-///
-/// `blocks[0]` is the first node containing matched bytes;
-/// `blocks.last()` is the last. `start_offset` and `end_offset` anchor the
-/// match within those boundary nodes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GraphLocus {
-    /// Local offset of the first matched byte inside `blocks[0]`.
-    pub start_offset: usize,
-    /// Local offset past the last consumed byte in `blocks.last()`.
-    pub end_offset: usize,
-    /// Ordered sequence of nodes that spell the match. Length is at least 1.
-    pub blocks: Vec<GraphNode>,
-    /// Strand of the matched sequence.
-    pub strand: Strand,
-}
-
-/// Return the sequence bytes spanned by `locus`.
-///
-/// Fetches node sequences from the database, concatenates the relevant slices
-/// across all blocks, and reverse-complements the result for `Strand::Reverse`
-/// loci.
-pub fn locus_sequence(conn: &GraphConnection, locus: &GraphLocus) -> Vec<u8> {
-    let node_ids: Vec<HashId> = locus.blocks.iter().map(|n| n.node_id).collect();
-    let sequences = Node::get_sequences_by_node_ids(conn, &node_ids);
-
-    let n = locus.blocks.len();
-    let mut out = Vec::new();
-    for (i, block) in locus.blocks.iter().enumerate() {
-        let full = sequences[&block.node_id]
-            .get_sequence(None, None)
-            .expect("sequence data corrupt")
-            .into_bytes();
-        let block_start = usize::try_from(block.sequence_start).expect("negative sequence_start");
-        let block_end = usize::try_from(block.sequence_end).expect("negative sequence_end");
-        let text = &full[block_start..block_end];
-        let start = if i == 0 { locus.start_offset } else { 0 };
-        let end = if i == n - 1 {
-            locus.end_offset
-        } else {
-            text.len()
-        };
-        out.extend_from_slice(&text[start..end]);
-    }
-
-    if locus.strand == Strand::Reverse {
-        reverse_complement(&out)
-    } else {
-        out
-    }
 }
 
 /// Biological interpretation of the sequences being searched.
@@ -184,32 +137,6 @@ fn degenerate_matches(query_byte: u8, graph_byte: u8) -> bool {
         b'V' => matches!(graph_byte, b'A' | b'C' | b'G'),
         other => graph_byte == other,
     }
-}
-
-/// Compute the reverse complement of a DNA sequence, including IUPAC codes.
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&base| match base.to_ascii_uppercase() {
-            b'A' => b'T',
-            b'T' => b'A',
-            b'C' => b'G',
-            b'G' => b'C',
-            b'U' => b'A',
-            b'N' => b'N',
-            b'R' => b'Y',
-            b'Y' => b'R',
-            b'S' => b'S',
-            b'W' => b'W',
-            b'K' => b'M',
-            b'M' => b'K',
-            b'B' => b'V',
-            b'V' => b'B',
-            b'D' => b'H',
-            b'H' => b'D',
-            _ => base,
-        })
-        .collect()
 }
 
 pub struct GenGraphMatcher {
@@ -484,10 +411,23 @@ impl GenGraphMatcher {
 
         while let Some(ts) = stack.pop() {
             if ts.state.q_idx == query.len() {
+                let n = ts.path.len();
+                let slices = ts
+                    .path
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, node)| BlockSlice {
+                        block: node,
+                        start: if i == 0 { ts.start_offset } else { 0 },
+                        end: if i == n - 1 {
+                            ts.state.offset
+                        } else {
+                            node.length() as usize
+                        },
+                    })
+                    .collect();
                 out.push(GraphLocus {
-                    start_offset: ts.start_offset,
-                    end_offset: ts.state.offset,
-                    blocks: ts.path,
+                    slices,
                     strand: Strand::Unknown,
                 });
                 continue;
@@ -989,11 +929,9 @@ mod tests {
         let hits = matcher.find_all(b"AAAAAAAAAA");
         assert_eq!(hits.len(), 2);
 
-        assert!(
-            hits.iter().any(|hit| {
-                hit.start_offset == 0 && hit.end_offset == 10 && hit.blocks.len() == 1
-            })
-        );
+        assert!(hits.iter().any(|hit| {
+            hit.slices.len() == 1 && hit.slices[0].start == 0 && hit.slices[0].end == 10
+        }));
     }
 
     #[test]
@@ -1003,11 +941,9 @@ mod tests {
         let hits = matcher.find_all(b"AAAAATTTTT");
         assert_eq!(hits.len(), 2);
 
-        assert!(
-            hits.iter().any(|hit| {
-                hit.blocks.len() == 2 && hit.start_offset == 5 && hit.end_offset == 5
-            })
-        );
+        assert!(hits.iter().any(|hit| {
+            hit.slices.len() == 2 && hit.slices[0].start == 5 && hit.slices[1].end == 5
+        }));
     }
 
     #[test]

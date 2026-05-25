@@ -34,6 +34,9 @@ rust-analyzer.json
 # Terminal recording via VHS
 *.tape
 
+# R bindings (library crate — lock not committed)
+gen-r/src/rust/Cargo.lock
+
 # Python bindings
 **/__pycache__/
 gen-python/python/gen/*.so

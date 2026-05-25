@@ -5,18 +5,17 @@ use std::{
 
 use gen_core::{HashId, Strand, is_end_node, is_start_node};
 use gen_graph::GenGraph;
+use gen_models::locus::{BlockSlice, GraphLocus};
 use gen_tui::{
     GraphController, ViewportState, VisualDetail, WorldRect, plotter::NodeSizer,
     theme::current_theme,
 };
-use petgraph::visit::NodeIndexable;
+use petgraph::visit::{IntoNodeIdentifiers, NodeIndexable};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
 };
-
-use crate::graphs::graph_search::GraphLocus;
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSegment {
@@ -42,29 +41,15 @@ pub struct AnnotationTrack {
     pub max_rows: usize,
 }
 
-pub fn graphlocus_to_annotation_span(locus: &GraphLocus, name: &str) -> AnnotationSpan {
-    let n = locus.blocks.len();
+pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> AnnotationSpan {
     let segments = locus
-        .blocks
+        .slices
         .iter()
-        .enumerate()
-        .map(|(i, node)| {
-            let start = if i == 0 {
-                node.sequence_start + locus.start_offset as i64
-            } else {
-                node.sequence_start
-            };
-            let end = if i == n - 1 {
-                node.sequence_start + locus.end_offset as i64
-            } else {
-                node.sequence_end
-            };
-            AnnotationSegment {
-                node_id: node.node_id,
-                start,
-                end,
-                strand: locus.strand,
-            }
+        .map(|s| AnnotationSegment {
+            node_id: s.block.node_id,
+            start: s.block.sequence_start + s.start as i64,
+            end: s.block.sequence_start + s.end as i64,
+            strand: locus.strand,
         })
         .collect();
     AnnotationSpan {
@@ -72,6 +57,31 @@ pub fn graphlocus_to_annotation_span(locus: &GraphLocus, name: &str) -> Annotati
         name: name.to_string(),
         segments,
     }
+}
+
+pub fn graph_locus_from_annotation_span(
+    span: &AnnotationSpan,
+    graph: &GenGraph,
+) -> Option<GraphLocus> {
+    if span.segments.is_empty() {
+        return None;
+    }
+    let strand = span.segments.first()?.strand;
+    let node_map: HashMap<_, _> = graph.node_identifiers().map(|n| (n.node_id, n)).collect();
+    let slices: Option<Vec<BlockSlice>> = span
+        .segments
+        .iter()
+        .map(|seg| {
+            let block = *node_map.get(&seg.node_id)?;
+            let start = (seg.start - block.sequence_start).max(0) as usize;
+            let end = (seg.end - block.sequence_start).max(0) as usize;
+            Some(BlockSlice { block, start, end })
+        })
+        .collect();
+    Some(GraphLocus {
+        slices: slices?,
+        strand,
+    })
 }
 
 impl AnnotationTrack {
@@ -767,7 +777,94 @@ fn draw_label_clipped_over_existing(
 
 #[cfg(test)]
 mod tests {
+    use gen_graph::{GenGraph, GraphNode};
+
     use super::*;
+
+    fn make_node(node_id: &str, seq_start: i64, seq_end: i64) -> GraphNode {
+        GraphNode {
+            node_id: HashId::convert_str(node_id),
+            sequence_start: seq_start,
+            sequence_end: seq_end,
+        }
+    }
+
+    fn make_graph(nodes: &[GraphNode]) -> GenGraph {
+        let mut g = GenGraph::new();
+        for &n in nodes {
+            g.add_node(n);
+        }
+        g
+    }
+
+    #[test]
+    fn annotation_span_from_graph_locus_preserves_name_and_coordinates() {
+        let node = make_node("n1", 100, 200);
+        let locus = GraphLocus {
+            slices: vec![BlockSlice {
+                block: node,
+                start: 5,
+                end: 15,
+            }],
+            strand: Strand::Forward,
+        };
+        let span = annotation_span_from_graph_locus(&locus, "my_gene");
+        assert_eq!(span.name, "my_gene");
+        assert_eq!(span.segments.len(), 1);
+        let seg = &span.segments[0];
+        assert_eq!(seg.node_id, node.node_id);
+        assert_eq!(seg.start, 105); // sequence_start + slice.start
+        assert_eq!(seg.end, 115); // sequence_start + slice.end
+        assert_eq!(seg.strand, Strand::Forward);
+    }
+
+    #[test]
+    fn graph_locus_from_annotation_span_inverts_to_annotation_span() {
+        let node = make_node("n1", 100, 200);
+        let graph = make_graph(&[node]);
+        let locus = GraphLocus {
+            slices: vec![BlockSlice {
+                block: node,
+                start: 5,
+                end: 15,
+            }],
+            strand: Strand::Forward,
+        };
+        let span = annotation_span_from_graph_locus(&locus, "");
+        let recovered = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        assert_eq!(recovered.slices.len(), 1);
+        assert_eq!(recovered.slices[0].block, node);
+        assert_eq!(recovered.slices[0].start, 5);
+        assert_eq!(recovered.slices[0].end, 15);
+        assert_eq!(recovered.strand, Strand::Forward);
+    }
+
+    #[test]
+    fn graph_locus_from_annotation_span_returns_none_for_empty_span() {
+        let graph = make_graph(&[]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![],
+        };
+        assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+    }
+
+    #[test]
+    fn graph_locus_from_annotation_span_returns_none_when_node_missing_from_graph() {
+        let node = make_node("n1", 0, 100);
+        let graph = make_graph(&[]); // node not in graph
+        let locus = GraphLocus {
+            slices: vec![BlockSlice {
+                block: node,
+                start: 0,
+                end: 10,
+            }],
+            strand: Strand::Forward,
+        };
+        let span = annotation_span_from_graph_locus(&locus, "");
+        assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+    }
 
     fn track_with_names(names: &[&str]) -> AnnotationTrack {
         AnnotationTrack::new(

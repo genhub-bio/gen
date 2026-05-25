@@ -507,6 +507,31 @@ impl Query for Sequence {
     }
 }
 
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&base| match base.to_ascii_uppercase() {
+            b'A' => b'T',
+            b'T' => b'A',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'U' => b'A',
+            b'N' => b'N',
+            b'R' => b'Y',
+            b'Y' => b'R',
+            b'S' => b'S',
+            b'W' => b'W',
+            b'K' => b'M',
+            b'M' => b'K',
+            b'B' => b'V',
+            b'V' => b'B',
+            b'D' => b'H',
+            b'H' => b'D',
+            _ => base,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.

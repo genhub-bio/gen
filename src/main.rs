@@ -24,7 +24,7 @@ use r#gen::{
     },
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection,
-    graphs::graph_search::{GenGraphMatcher, GraphLocus, SeedIndex},
+    graphs::graph_search::{GenGraphMatcher, SeedIndex},
     operation_management,
     operation_management::{parse_patch_operations, pull, push},
     patch,
@@ -707,15 +707,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|| Ok(matcher.find_all(query_bytes)))?;
                 for m in matches {
                     let block_strings: Vec<String> = m
-                        .blocks
+                        .slices
                         .iter()
-                        .map(|node| {
-                            let hash = format!("{}", node.node_id);
+                        .map(|s| {
+                            let hash = format!("{}", s.block.node_id);
                             format!(
                                 "{}:{}-{}",
                                 &hash[..12],
-                                node.sequence_start,
-                                node.sequence_end
+                                s.block.sequence_start,
+                                s.block.sequence_end
                             )
                         })
                         .collect();
@@ -724,7 +724,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         bg.sample_name,
                         bg.name,
                         block_strings.join(", "),
-                        m.start_offset
+                        m.slices.first().map(|s| s.start).unwrap_or(0)
                     );
                 }
             }

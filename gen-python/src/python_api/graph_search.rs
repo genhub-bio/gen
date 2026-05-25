@@ -1,9 +1,12 @@
 use r#gen::{
-    graphs::graph_search::{GraphLocus, GraphPos},
-    views::annotation_track::{AnnotationSegment, AnnotationSpan, graphlocus_to_annotation_span},
+    graphs::graph_search::GraphPos,
+    views::annotation_track::{
+        AnnotationSegment, AnnotationSpan, annotation_span_from_graph_locus,
+    },
 };
 use gen_core::{HashId, Strand};
 use gen_graph::GraphNode;
+use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
 use super::block::PyBlock;
@@ -71,7 +74,7 @@ impl PyGraphLocus {
 
     /// Return the raw node sequence for highlight operations.
     pub fn locus_nodes(&self) -> Vec<GraphNode> {
-        self.inner.blocks.clone()
+        self.inner.slices.iter().map(|s| s.block).collect()
     }
 }
 
@@ -79,12 +82,14 @@ impl PyGraphLocus {
 impl PyGraphLocus {
     /// Position of the first matched byte (start of the locus).
     fn start(&self) -> PyGraphPos {
-        PyGraphPos::new(self.inner.blocks[0], self.inner.start_offset)
+        let s = &self.inner.slices[0];
+        PyGraphPos::new(s.block, s.start)
     }
 
     /// Position one past the last matched byte (exclusive end of the locus).
     fn end(&self) -> PyGraphPos {
-        PyGraphPos::new(*self.inner.blocks.last().unwrap(), self.inner.end_offset)
+        let s = self.inner.slices.last().unwrap();
+        PyGraphPos::new(s.block, s.end)
     }
 
     /// Ordered sequence of blocks that span this locus.
@@ -96,9 +101,15 @@ impl PyGraphLocus {
     #[getter]
     fn blocks(&self) -> Vec<PyBlock> {
         self.inner
-            .blocks
+            .slices
             .iter()
-            .map(|n| PyBlock::new(n.node_id, n.sequence_start, n.sequence_end))
+            .map(|s| {
+                PyBlock::new(
+                    s.block.node_id,
+                    s.block.sequence_start,
+                    s.block.sequence_end,
+                )
+            })
             .collect()
     }
 
@@ -113,10 +124,10 @@ impl PyGraphLocus {
     }
 
     fn __repr__(&self) -> String {
-        let sn = self.inner.blocks[0];
-        let en = *self.inner.blocks.last().unwrap();
-        let sh = format!("{}", sn.node_id);
-        let eh = format!("{}", en.node_id);
+        let first = &self.inner.slices[0];
+        let last = self.inner.slices.last().unwrap();
+        let sh = format!("{}", first.block.node_id);
+        let eh = format!("{}", last.block.node_id);
         let strand = match self.inner.strand {
             Strand::Forward => "+",
             Strand::Reverse => "-",
@@ -125,14 +136,14 @@ impl PyGraphLocus {
         format!(
             "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks, strand={})",
             &sh[..8],
-            sn.sequence_start,
-            sn.sequence_end,
-            self.inner.start_offset,
+            first.block.sequence_start,
+            first.block.sequence_end,
+            first.start,
             &eh[..8],
-            en.sequence_start,
-            en.sequence_end,
-            self.inner.end_offset,
-            self.inner.blocks.len(),
+            last.block.sequence_start,
+            last.block.sequence_end,
+            last.end,
+            self.inner.slices.len(),
             strand,
         )
     }
@@ -157,14 +168,14 @@ impl PyAnnotation {
     #[new]
     fn new(locus_or_loci: &Bound<'_, PyAny>, name: &str) -> PyResult<Self> {
         if let Ok(single) = locus_or_loci.extract::<PyRef<PyGraphLocus>>() {
-            let span = graphlocus_to_annotation_span(&single.inner, name);
+            let span = annotation_span_from_graph_locus(&single.inner, name);
             let loci = vec![single.inner.clone()];
             Ok(PyAnnotation { inner: span, loci })
         } else if let Ok(list) = locus_or_loci.extract::<Vec<PyRef<PyGraphLocus>>>() {
             let loci: Vec<GraphLocus> = list.iter().map(|l| l.inner.clone()).collect();
             let segments: Vec<AnnotationSegment> = loci
                 .iter()
-                .flat_map(|l| graphlocus_to_annotation_span(l, name).segments)
+                .flat_map(|l| annotation_span_from_graph_locus(l, name).segments)
                 .collect();
             let span = AnnotationSpan {
                 id: HashId::convert_str(name),
