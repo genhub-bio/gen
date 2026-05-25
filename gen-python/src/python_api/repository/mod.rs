@@ -340,8 +340,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
@@ -362,12 +362,12 @@ mod python_tests {
 
             py_repo
                 .borrow(py)
-                .import_fasta(path.clone(), Some("test".to_string()), None, false)
+                .import_fasta(path.clone(), Some("test".to_string()), false, None)
                 .unwrap();
 
             let err = py_repo
                 .borrow(py)
-                .import_fasta(path, Some("test".to_string()), None, false)
+                .import_fasta(path, Some("test".to_string()), false, None)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -394,16 +394,16 @@ mod python_tests {
                     .import_fasta(
                         fasta1.to_str().unwrap().to_string(),
                         Some("test".to_string()),
-                        None,
                         false,
+                        None,
                     )
                     .unwrap();
                 borrow
                     .import_fasta(
                         fasta2.to_str().unwrap().to_string(),
                         Some("test".to_string()),
-                        None,
                         false,
+                        None,
                     )
                     .unwrap();
             }
@@ -432,8 +432,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
@@ -458,8 +458,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
@@ -481,8 +481,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
@@ -518,8 +518,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
@@ -542,8 +542,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
@@ -581,8 +581,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
@@ -627,8 +627,8 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    None,
                     false,
+                    None,
                 )
                 .unwrap();
 
