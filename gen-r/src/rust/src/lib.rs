@@ -151,13 +151,6 @@ fn rollback_transactions(context: &GenDbContext) {
     let _ = operations_conn.execute("ROLLBACK TRANSACTION;", []);
 }
 
-fn open_repo_gen_dir(path: Option<String>) -> PathBuf {
-    match path {
-        Some(path_str) => Workspace::new(path_str).ensure_gen_dir(),
-        None => Workspace::from_current_dir().ensure_gen_dir(),
-    }
-}
-
 fn open_repo_connection(db_path: &str) -> std::result::Result<GraphConnection, String> {
     get_connection(db_path).map_err(|err| format!("Failed to open database '{db_path}': {err}"))
 }
@@ -1642,21 +1635,6 @@ fn derive_subgraph(
     .map_err(|err| Error::Other(format!("Error deriving subgraph: {err}")))?;
 
     Ok("Derived subgraph.".to_string())
-}
-
-#[extendr]
-fn repo_get_gen_dir(path: Nullable<String>) -> String {
-    open_repo_gen_dir(nullable_string_to_option(path))
-        .to_string_lossy()
-        .into_owned()
-}
-
-#[extendr]
-fn repo_get_db_path(path: Nullable<String>) -> String {
-    open_repo_gen_dir(nullable_string_to_option(path))
-        .join("default.db")
-        .to_string_lossy()
-        .into_owned()
 }
 
 #[extendr]
@@ -3251,8 +3229,6 @@ extendr_module! {
     fn export_genbank;
     fn derive_chunks;
     fn derive_subgraph;
-    fn repo_get_gen_dir;
-    fn repo_get_db_path;
     fn repo_execute;
     fn repo_query;
     fn repo_get_block_group_by_id;

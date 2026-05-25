@@ -269,9 +269,6 @@ test_that("repository inspection and graph controller work", {
     genr:::repo_get_block_sequence(repo$db_path, node$node_id, node$sequence_start, node$sequence_end)
   )
 
-  expect_type(repo$block_group_to_rustworkx(groups[[1]]), "list")
-  expect_type(repo$block_group_to_networkx(groups[[1]]), "list")
-
   controller <- repo$plot(groups[[1]], rows = 12, cols = 40)
   expect_s3_class(controller, "gen_plot")
   controller$set_detail("minimal")

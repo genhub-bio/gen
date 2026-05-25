@@ -41,10 +41,6 @@ derive_chunks <- function(workspace_path, db_path, sample, new_sample, region, b
 
 derive_subgraph <- function(workspace_path, db_path, sample, new_sample, region, backbone, collection) .Call("wrap__derive_subgraph", workspace_path, db_path, sample, new_sample, region, backbone, collection, PACKAGE = "genr")
 
-repo_get_gen_dir <- function(path) .Call("wrap__repo_get_gen_dir", path, PACKAGE = "genr")
-
-repo_get_db_path <- function(path) .Call("wrap__repo_get_db_path", path, PACKAGE = "genr")
-
 repo_execute <- function(db_path, query) .Call("wrap__repo_execute", db_path, query, PACKAGE = "genr")
 
 repo_query <- function(db_path, query) .Call("wrap__repo_query", db_path, query, PACKAGE = "genr")

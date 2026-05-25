@@ -576,10 +576,6 @@ Repository <- function(path = NULL) {
     inner$block_group_to_dict(block_group$id$hash_id)
   }
 
-  repo$block_group_to_rustworkx <- function(block_group) repo$block_group_to_dict(block_group)
-
-  repo$block_group_to_networkx <- function(block_group) repo$block_group_to_dict(block_group)
-
   repo$plot <- function(block_group, rows = NULL, cols = NULL, detail = "normal") {
     GenPlot(repo$db_path, block_group$id$hash_id, detail = detail, rows = rows, cols = cols)
   }
