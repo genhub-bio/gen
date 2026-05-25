@@ -34,7 +34,7 @@ A \code{gen_repository} environment with the following methods:
 \item{\code{get_block_groups_by_collection(collection)}}{Return block groups in a collection.}
 \item{\code{get_block_sequence(block)}}{Return the sequence string for a \code{Block}.}
 \item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
-\item{\code{make_stitch(bgs, new_sample, new_region)}}{Concatenate block groups end-to-end into a new block group.}
+\item{\code{make_stitch(bgs, new_sample, new_region)}}{Concatenate a list of block groups end-to-end into a new block group.}
 \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection=NULL)}}{Derive a subgraph block group.}
 \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection=NULL)}}{Split a block group into chunks.}
 \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}

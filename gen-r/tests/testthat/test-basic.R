@@ -234,9 +234,9 @@ test_that("graph operation bindings work", {
     region = "m123:3-12"
   ), silent = TRUE))
 
+  chunks <- Filter(function(bg) bg$sample_name == "chunked", repo$get_block_groups())
   expect_binding_result(try(repo$make_stitch(
-    sample = "chunked", new_sample = "stitched",
-    regions = "m123.1,m123.2", new_region = "m123.stitched"
+    bgs = chunks, new_sample = "stitched", new_region = "m123.stitched"
   ), silent = TRUE))
 })
 

@@ -19,7 +19,7 @@ use r#gen::{
     get_connection,
     graphs::{
         combinatorial_library::{SequencePart, parse_library},
-        graph_search::{GenGraphMatcher, GraphLocus, SeedIndex, SequenceKind},
+        graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
     },
     views::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
@@ -38,6 +38,7 @@ use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
+    locus::{BlockSlice, GraphLocus},
     db::{DbContext as GenDbContext, GraphConnection},
     errors::OperationError,
     node::Node,
@@ -175,12 +176,14 @@ fn block_group_record(block_group: BlockGroup, db_path: Option<&str>) -> List {
     )
 }
 
-fn node_key_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> List {
-    list!(
+fn block_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Robj {
+    let mut obj = r!(list!(
         node_id = node_id.to_string(),
         sequence_start = sequence_start,
         sequence_end = sequence_end
-    )
+    ));
+    obj.set_class(&["gen_block"]).unwrap();
+    obj
 }
 
 fn sqlite_value_to_robj(value: ValueRef<'_>) -> Robj {
@@ -652,7 +655,7 @@ fn apply_graph_ops(
                         parts.len()
                     ));
                 }
-                let mut blocks = Vec::with_capacity(n);
+                let mut slices = Vec::with_capacity(n);
                 for i in 0..n {
                     let base = 6 + i * 3;
                     let node_id = hash_id_from_string(parts[base])
@@ -663,18 +666,12 @@ fn apply_graph_ops(
                     let seq_end = parts[base + 2]
                         .parse::<i64>()
                         .map_err(|err| format!("Invalid hl seq_end[{i}] in '{op}': {err}"))?;
-                    blocks.push(GraphNode {
-                        node_id,
-                        sequence_start: seq_start,
-                        sequence_end: seq_end,
-                    });
+                    let block = GraphNode { node_id, sequence_start: seq_start, sequence_end: seq_end };
+                    let slice_start = if i == 0 { start_offset } else { 0 };
+                    let slice_end = if i == n - 1 { end_offset } else { block.length() as usize };
+                    slices.push(BlockSlice { block, start: slice_start, end: slice_end });
                 }
-                let locus = GraphLocus {
-                    start_offset,
-                    end_offset,
-                    blocks,
-                    strand,
-                };
+                let locus = GraphLocus { slices, strand };
                 let style = PathStyle::new(color)
                     .with_line_style(LineStyle::Bold)
                     .with_merge_glyphs(true);
@@ -701,35 +698,26 @@ fn parse_sequence_kind_r(s: &str) -> std::result::Result<SequenceKind, String> {
 }
 
 fn graph_locus_record(locus: &GraphLocus) -> List {
-    let start_block = locus.blocks[0];
-    let end_block = *locus.blocks.last().unwrap();
-
-    let start = list!(
-        block = node_key_record(
-            start_block.node_id,
-            start_block.sequence_start,
-            start_block.sequence_end
-        ),
-        offset = locus.start_offset as i64
-    );
-    let end = list!(
-        block = node_key_record(
-            end_block.node_id,
-            end_block.sequence_start,
-            end_block.sequence_end
-        ),
-        offset = locus.end_offset as i64
-    );
-    let blocks = locus
-        .blocks
-        .iter()
-        .map(|n| node_key_record(n.node_id, n.sequence_start, n.sequence_end))
-        .collect::<Vec<_>>();
+    let first = &locus.slices[0];
+    let last = locus.slices.last().unwrap();
     let strand = match locus.strand {
         Strand::Forward => "forward",
         Strand::Reverse => "reverse",
         _ => "unknown",
     };
+    let start = list!(
+        block = block_record(first.block.node_id, first.block.sequence_start, first.block.sequence_end),
+        offset = first.start as i64
+    );
+    let end = list!(
+        block = block_record(last.block.node_id, last.block.sequence_start, last.block.sequence_end),
+        offset = last.end as i64
+    );
+    let blocks = locus
+        .slices
+        .iter()
+        .map(|s| block_record(s.block.node_id, s.block.sequence_start, s.block.sequence_end))
+        .collect::<Vec<_>>();
     list!(
         start = start,
         end = end,
@@ -1727,7 +1715,7 @@ fn repo_block_group_to_dict(
         .nodes()
         .map(|node| {
             list!(
-                key = node_key_record(node.node_id, node.sequence_start, node.sequence_end),
+                key = block_record(node.node_id, node.sequence_start, node.sequence_end),
                 node_id = node.node_id.to_string(),
                 sequence_start = node.sequence_start,
                 sequence_end = node.sequence_end
@@ -1751,8 +1739,8 @@ fn repo_block_group_to_dict(
                 })
                 .collect::<Vec<_>>();
             list!(
-                source = node_key_record(src.node_id, src.sequence_start, src.sequence_end),
-                target = node_key_record(dst.node_id, dst.sequence_start, dst.sequence_end),
+                source = block_record(src.node_id, src.sequence_start, src.sequence_end),
+                target = block_record(dst.node_id, dst.sequence_start, dst.sequence_end),
                 weights = List::from_values(weights)
             )
         })
