@@ -33,7 +33,7 @@ use crate::{
 pub fn import_fasta(
     context: &DbContext,
     fasta: &String,
-    name: &str,
+    collection_name: &str,
     sample: &str,
     shallow: bool,
 ) -> Result<Operation, FastaError> {
@@ -53,7 +53,7 @@ pub fn import_fasta(
     };
     let mut reader = fasta::io::reader::Builder.build_from_reader(reader_stream)?;
 
-    let collection = match Collection::create(conn, name) {
+    let collection = match Collection::create(conn, collection_name) {
         Ok(collection) => collection,
         Err(CollectionError::Duplicate(collection)) => collection,
         Err(e) => return Err(FastaError::CollectionError(e)),
