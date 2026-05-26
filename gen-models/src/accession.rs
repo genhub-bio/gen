@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
-    calculate_hash,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
@@ -13,10 +12,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group::{BlockGroup, BlockGroupChange, BlockGroupTreeSource, IntervalTreeSource},
-    block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
+    block_group::{
+        AccessionChange, BlockGroup, BlockGroupTreeSource, IntervalTreeSource,
+        ResolvedBlockGroupChange,
+    },
+    block_group_edge::{AugmentedEdgeData, BlockGroupEdge},
     db::GraphConnection,
-    edge::{Edge, EdgeData},
+    edge::EdgeData,
     gen_models_capnp::{accession, accession_edge, accession_path},
     traits::*,
 };
@@ -363,21 +365,6 @@ impl Accession {
         AccessionEdge::query(conn, query, params![accession_id])
     }
 
-    pub fn get_by_name_and_block_group(
-        conn: &GraphConnection,
-        name: &str,
-        block_group_id: &HashId,
-    ) -> Result<Accession, AccessionError> {
-        Accession::query(
-            conn,
-            "select * from accessions where lower(name) = lower(?1) and block_group_id = ?2",
-            params![name, block_group_id],
-        )
-        .into_iter()
-        .next()
-        .ok_or_else(|| AccessionError::NotFound(name.to_string()))
-    }
-
     pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
         let edges = Self::get_edges_by_id(conn, &self.id);
         if edges.is_empty() {
@@ -508,62 +495,52 @@ impl Accession {
         ))
     }
 
-    pub fn insert_change_on_block_group(
+    pub fn query_target_blocks(
         &self,
         conn: &GraphConnection,
         target_block_group_id: &HashId,
-        start: i64,
-        end: i64,
-        block: PathBlock,
-        chromosome_index: i64,
-        phased: i64,
-        preserve_edge: bool,
-    ) -> Result<(), AccessionError> {
-        if insert_change_from_negative_start(
-            self,
-            conn,
-            target_block_group_id,
-            start,
-            end,
-            &block,
-            chromosome_index,
-            phased,
-        )? {
-            return Ok(());
+        coordinate: i64,
+    ) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
+        let mapped_coordinate =
+            self.coordinate_to_block_group(conn, target_block_group_id, coordinate)?;
+        let tree = BlockGroup::intervaltree_for(conn, target_block_group_id, false);
+        Ok(tree
+            .query_point(mapped_coordinate)
+            .map(|entry| entry.value)
+            .collect())
+    }
+
+    pub fn resolve_block_group_change(
+        &self,
+        conn: &GraphConnection,
+        change: &AccessionChange,
+    ) -> Result<ResolvedBlockGroupChange, AccessionError> {
+        if let Some(new_edges) = insert_change_from_negative_start(self, conn, change)? {
+            return Ok(ResolvedBlockGroupChange::DirectEdges(new_edges));
         }
 
-        let (start, end) =
-            self.coordinates_to_block_group(conn, target_block_group_id, start, end)?;
-        let change = BlockGroupChange {
-            block_group_id: *target_block_group_id,
-            intervaltree_source: BlockGroupTreeSource {
-                block_group_id: *target_block_group_id,
-                remove_ambiguous_positions: false,
-            },
-            path_accession: None,
-            start,
-            end,
-            block: block.clone(),
-            chromosome_index,
-            phased,
-            preserve_edge,
-        };
-        let tree = change
-            .intervaltree_source
-            .intervaltree(conn)
-            .map_err(|err| AccessionError::BlockGroup(err.to_string()))?;
+        let (start, end) = self.coordinates_to_block_group(
+            conn,
+            &change.block_group_id,
+            change.start,
+            change.end,
+        )?;
+        let tree = BlockGroupTreeSource {
+            block_group_id: change.block_group_id,
+            remove_ambiguous_positions: false,
+        }
+        .intervaltree(conn)
+        .map_err(|err| AccessionError::BlockGroup(err.to_string()))?;
         let use_block_group_insert = tree.query_point(start).count() == 1
             && tree.query_point(start - 1).count() == 1
             && tree.query_point(end).count() == 1;
 
         if use_block_group_insert {
-            BlockGroup::insert_change(conn, &change)
-                .map_err(|err| AccessionError::BlockGroup(err.to_string()))?;
-            return Ok(());
+            return Ok(ResolvedBlockGroupChange::Interval { tree, start, end });
         }
 
-        if insert_ambiguous_start_change(conn, target_block_group_id, &change)? {
-            return Ok(());
+        if let Some(new_edges) = insert_ambiguous_start_change(conn, change, start, end)? {
+            return Ok(ResolvedBlockGroupChange::DirectEdges(new_edges));
         }
 
         Err(AccessionError::NotFound(self.name.clone()))
@@ -590,36 +567,33 @@ fn block_sequence_coordinate_to_interval(
 
 fn insert_ambiguous_start_change(
     conn: &GraphConnection,
-    target_block_group_id: &HashId,
-    change: &BlockGroupChange<BlockGroupTreeSource>,
-) -> Result<bool, AccessionError> {
+    change: &AccessionChange,
+    start: i64,
+    end: i64,
+) -> Result<Option<Vec<AugmentedEdgeData>>, AccessionError> {
     if change.block.sequence_start == change.block.sequence_end {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let tree = change
-        .intervaltree_source
-        .intervaltree(conn)
-        .map_err(|err| AccessionError::BlockGroup(err.to_string()))?;
+    let tree = BlockGroup::intervaltree_for(conn, &change.block_group_id, false);
     let start_blocks = tree
-        .query_point(change.start)
+        .query_point(start)
         .map(|entry| entry.value)
         .collect::<Vec<_>>();
     let end_blocks = tree
-        .query_point(change.end)
+        .query_point(end)
         .map(|entry| entry.value)
         .collect::<Vec<_>>();
 
-    if change.start != 0 || start_blocks.len() <= 1 || end_blocks.len() != 1 {
-        return Ok(false);
+    if start != 0 || start_blocks.len() <= 1 || end_blocks.len() != 1 {
+        return Ok(None);
     }
 
     let end_block = end_blocks[0];
-    let end_coordinate = change.end - end_block.start + end_block.sequence_start;
-    let edge_ids = Edge::bulk_create(
-        conn,
-        &[
-            EdgeData {
+    let end_coordinate = end - end_block.start + end_block.sequence_start;
+    Ok(Some(vec![
+        AugmentedEdgeData {
+            edge_data: EdgeData {
                 source_node_id: PATH_START_NODE_ID,
                 source_coordinate: 0,
                 source_strand: Strand::Forward,
@@ -627,7 +601,11 @@ fn insert_ambiguous_start_change(
                 target_coordinate: change.block.sequence_start,
                 target_strand: Strand::Forward,
             },
-            EdgeData {
+            chromosome_index: change.chromosome_index,
+            phased: change.phased,
+        },
+        AugmentedEdgeData {
+            edge_data: EdgeData {
                 source_node_id: change.block.node_id,
                 source_coordinate: change.block.sequence_end,
                 source_strand: Strand::Forward,
@@ -635,33 +613,19 @@ fn insert_ambiguous_start_change(
                 target_coordinate: end_coordinate,
                 target_strand: Strand::Forward,
             },
-        ],
-    );
-    let block_group_edges = edge_ids
-        .into_iter()
-        .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: *target_block_group_id,
-            edge_id,
             chromosome_index: change.chromosome_index,
             phased: change.phased,
-        })
-        .collect::<Vec<_>>();
-    BlockGroupEdge::bulk_create(conn, &block_group_edges);
-    Ok(true)
+        },
+    ]))
 }
 
 fn insert_change_from_negative_start(
     accession: &Accession,
     conn: &GraphConnection,
-    target_block_group_id: &HashId,
-    start: i64,
-    end: i64,
-    block: &PathBlock,
-    chromosome_index: i64,
-    phased: i64,
-) -> Result<bool, AccessionError> {
-    if start >= 0 || block.sequence_start == block.sequence_end {
-        return Ok(false);
+    change: &AccessionChange,
+) -> Result<Option<Vec<AugmentedEdgeData>>, AccessionError> {
+    if change.start >= 0 || change.block.sequence_start == change.block.sequence_end {
+        return Ok(None);
     }
 
     let accession_blocks = accession.blocks(conn)?;
@@ -672,41 +636,54 @@ fn insert_change_from_negative_start(
         .ok_or_else(|| AccessionError::NotFound(accession.name.clone()))?;
     let start_points = walk_back_to_anchor_points(
         conn,
-        target_block_group_id,
+        &change.block_group_id,
         start_block.node_id,
         start_block.sequence_start,
-        -start,
+        -change.start,
     )?;
-    let end_points = if start == end {
-        points_after_anchor(conn, target_block_group_id, &start_points)?
+    let end_points = if change.start == change.end {
+        points_after_anchor(conn, &change.block_group_id, &start_points)?
     } else {
         vec![
-            coordinate_to_anchor_point(&accession_blocks, accession_length, end, &accession.name)?
-                .ok_or_else(|| AccessionError::NotFound(accession.name.clone()))?,
+            coordinate_to_anchor_point(
+                &accession_blocks,
+                accession_length,
+                change.end,
+                &accession.name,
+            )?
+            .ok_or_else(|| AccessionError::NotFound(accession.name.clone()))?,
         ]
     };
 
     let mut new_edges = Vec::new();
     for start_point in start_points {
         match start_point {
-            AnchorPoint::PathStart => new_edges.push(EdgeData {
-                source_node_id: PATH_START_NODE_ID,
-                source_coordinate: 0,
-                source_strand: Strand::Forward,
-                target_node_id: block.node_id,
-                target_coordinate: block.sequence_start,
-                target_strand: Strand::Forward,
+            AnchorPoint::PathStart => new_edges.push(AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: PATH_START_NODE_ID,
+                    source_coordinate: 0,
+                    source_strand: Strand::Forward,
+                    target_node_id: change.block.node_id,
+                    target_coordinate: change.block.sequence_start,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index: change.chromosome_index,
+                phased: change.phased,
             }),
             AnchorPoint::Node {
                 node_id,
                 coordinate,
-            } => new_edges.push(EdgeData {
-                source_node_id: node_id,
-                source_coordinate: coordinate,
-                source_strand: Strand::Forward,
-                target_node_id: block.node_id,
-                target_coordinate: block.sequence_start,
-                target_strand: Strand::Forward,
+            } => new_edges.push(AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: node_id,
+                    source_coordinate: coordinate,
+                    source_strand: Strand::Forward,
+                    target_node_id: change.block.node_id,
+                    target_coordinate: change.block.sequence_start,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index: change.chromosome_index,
+                phased: change.phased,
             }),
         }
     }
@@ -718,29 +695,22 @@ fn insert_change_from_negative_start(
             AnchorPoint::Node {
                 node_id,
                 coordinate,
-            } => new_edges.push(EdgeData {
-                source_node_id: block.node_id,
-                source_coordinate: block.sequence_end,
-                source_strand: Strand::Forward,
-                target_node_id: node_id,
-                target_coordinate: coordinate,
-                target_strand: Strand::Forward,
+            } => new_edges.push(AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: change.block.node_id,
+                    source_coordinate: change.block.sequence_end,
+                    source_strand: Strand::Forward,
+                    target_node_id: node_id,
+                    target_coordinate: coordinate,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index: change.chromosome_index,
+                phased: change.phased,
             }),
         }
     }
 
-    let edge_ids = Edge::bulk_create(conn, &new_edges);
-    let block_group_edges = edge_ids
-        .into_iter()
-        .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: *target_block_group_id,
-            edge_id,
-            chromosome_index,
-            phased,
-        })
-        .collect::<Vec<_>>();
-    BlockGroupEdge::bulk_create(conn, &block_group_edges);
-    Ok(true)
+    Ok(Some(new_edges))
 }
 
 fn points_after_anchor(

@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     accession::{Accession, AccessionError},
-    block_group::{BlockGroup, PathCache},
+    block_group::{AnnotationChange, BlockGroup, PathCache, ResolvedBlockGroupChange},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, GraphConnection, OperationsConnection},
     errors::{FileAdditionError, OperationError},
@@ -391,52 +391,45 @@ impl Annotation {
         accession.intervaltree(conn).map_err(Into::into)
     }
 
-    pub fn get_by_name_and_block_group(
-        conn: &GraphConnection,
-        name: &str,
-        block_group_id: &HashId,
-    ) -> Result<Annotation, AnnotationError> {
-        Annotation::query(
-            conn,
-            "select a.* \
-             from annotations a \
-             join accessions acc on a.accession_id = acc.id \
-             where lower(a.name) = lower(?1) and acc.block_group_id = ?2",
-            params![name, block_group_id],
-        )
-        .into_iter()
-        .next()
-        .ok_or_else(|| AnnotationError::AccessionError(AccessionError::NotFound(name.to_string())))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_change_on_block_group(
+    pub fn query_target_blocks(
         &self,
         conn: &GraphConnection,
         target_block_group_id: &HashId,
-        start: i64,
-        end: i64,
-        block: gen_core::PathBlock,
-        chromosome_index: i64,
-        phased: i64,
-        preserve_edge: bool,
-    ) -> Result<(), AnnotationError> {
+        coordinate: i64,
+    ) -> Result<Vec<NodeIntervalBlock>, AnnotationError> {
         let source_accession = Accession::get(
             conn,
             "select * from accessions where id = ?1",
             params![self.accession_id],
         )?;
         source_accession
-            .insert_change_on_block_group(
-                conn,
-                target_block_group_id,
-                start,
-                end,
-                block,
-                chromosome_index,
-                phased,
-                preserve_edge,
-            )
+            .query_target_blocks(conn, target_block_group_id, coordinate)
+            .map_err(Into::into)
+    }
+
+    pub fn resolve_block_group_change(
+        &self,
+        conn: &GraphConnection,
+        change: &AnnotationChange,
+    ) -> Result<ResolvedBlockGroupChange, AnnotationError> {
+        let source_accession = Accession::get(
+            conn,
+            "select * from accessions where id = ?1",
+            params![self.accession_id],
+        )?;
+        let accession_change = crate::block_group::AccessionChange {
+            block_group_id: change.block_group_id,
+            intervaltree_source: source_accession.clone(),
+            path_accession: change.path_accession.clone(),
+            start: change.start,
+            end: change.end,
+            block: change.block.clone(),
+            chromosome_index: change.chromosome_index,
+            phased: change.phased,
+            preserve_edge: change.preserve_edge,
+        };
+        source_accession
+            .resolve_block_group_change(conn, &accession_change)
             .map_err(Into::into)
     }
 }

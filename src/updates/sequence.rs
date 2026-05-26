@@ -3,12 +3,11 @@ use std::str;
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand, region::RegionResolver};
 use gen_models::{
     annotations::Annotation,
-    block_group::{BlockGroup, PathChange},
+    block_group::{AccessionChange, AnnotationChange, BlockGroup, PathChange},
     db::DbContext,
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
-    path::Path,
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind, resolve},
     sample::Sample,
     sequence::Sequence,
@@ -105,66 +104,91 @@ pub fn update_with_sequence(
             None
         };
         let node_id = if sequence.is_empty() {
-            let node_id = HashId::convert_str("");
-            let path_block = PathBlock {
-                node_id,
-                block_sequence: sequence.to_string(),
-                sequence_start: 0,
-                sequence_end: 0,
-                path_start: resolved_region.start,
-                path_end: resolved_region.end,
-                strand: Strand::Forward,
-            };
-            insert_sequence_change(
-                conn,
-                target_block_group,
-                path.as_ref(),
-                &parsed_region.name,
-                source_annotation.as_ref(),
-                &resolved_region,
-                path_block,
-            )?;
-            node_id
+            HashId::convert_str("")
         } else {
             let seq = Sequence::new()
                 .sequence_type("DNA")
                 .sequence(sequence)
                 .save(conn)?;
-            let node_id = Node::create(
+            Node::create(
                 conn,
                 &seq.hash,
                 &HashId::convert_str(&format!(
                     "{target_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                    target_id = path
-                        .as_ref()
-                        .map(|path| path.id.to_string())
-                        .unwrap_or_else(|| target_block_group.id.to_string()),
+                    target_id = target_block_group.id,
                     ref_start = 0,
                     ref_end = seq.length,
                     sequence_hash = seq.hash
                 )),
-            )?;
-
-            let path_block = PathBlock {
-                node_id,
-                block_sequence: sequence.to_string(),
-                sequence_start: 0,
-                sequence_end: seq.length,
-                path_start: resolved_region.start,
-                path_end: resolved_region.end,
-                strand: Strand::Forward,
-            };
-            insert_sequence_change(
-                conn,
-                target_block_group,
-                path.as_ref(),
-                &parsed_region.name,
-                source_annotation.as_ref(),
-                &resolved_region,
-                path_block,
-            )?;
-            node_id
+            )?
         };
+        let path_block = PathBlock {
+            node_id,
+            block_sequence: sequence.to_string(),
+            sequence_start: 0,
+            sequence_end: if sequence.is_empty() {
+                0
+            } else {
+                sequence.len() as i64
+            },
+            path_start: resolved_region.start,
+            path_end: resolved_region.end,
+            strand: Strand::Forward,
+        };
+
+        match resolved_region.kind {
+            ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
+                let path = path.as_ref().ok_or_else(|| {
+                    GenRegionError::Unmappable(resolved_region.block_group.name.clone())
+                })?;
+                let path_change = PathChange {
+                    block_group_id: target_block_group.id,
+                    intervaltree_source: path.clone(),
+                    path_accession: None,
+                    start: resolved_region.start,
+                    end: resolved_region.end,
+                    block: path_block,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    preserve_edge: true,
+                };
+                BlockGroup::insert_change(conn, &path_change)?;
+            }
+            ResolvedRegionKind::Annotation => {
+                let annotation = source_annotation.as_ref().ok_or_else(|| {
+                    GenRegionError::Unmappable(resolved_region.block_group.name.clone())
+                })?;
+                let change = AnnotationChange {
+                    block_group_id: target_block_group.id,
+                    intervaltree_source: annotation.clone(),
+                    path_accession: None,
+                    start: resolved_region.start,
+                    end: resolved_region.end,
+                    block: path_block,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    preserve_edge: true,
+                };
+                BlockGroup::insert_change(conn, &change)?;
+            }
+            ResolvedRegionKind::Accession => {
+                let resolved_accession = resolved_region.accession.as_ref().ok_or_else(|| {
+                    GenRegionError::Unmappable(resolved_region.block_group.name.clone())
+                })?;
+                let change = AccessionChange {
+                    block_group_id: target_block_group.id,
+                    intervaltree_source: resolved_accession.clone(),
+                    path_accession: None,
+                    start: resolved_region.start,
+                    end: resolved_region.end,
+                    block: path_block,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    preserve_edge: true,
+                };
+                BlockGroup::insert_change(conn, &change)?;
+            }
+        }
 
         if !disable_reference_path_update
             && matches!(
@@ -222,79 +246,6 @@ pub fn update_with_sequence(
     Ok(op)
 }
 
-fn insert_sequence_change(
-    conn: &gen_models::db::GraphConnection,
-    target_block_group: &BlockGroup,
-    path: Option<&Path>,
-    _region_name: &str,
-    source_annotation: Option<&Annotation>,
-    resolved_region: &ResolvedGenRegion,
-    block: PathBlock,
-) -> Result<(), SequenceUpdateError> {
-    match resolved_region.kind {
-        ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
-            let path = path.ok_or_else(|| {
-                GenRegionError::Unmappable(resolved_region.block_group.name.clone())
-            })?;
-            let path_change = PathChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: path.clone(),
-                path_accession: None,
-                start: resolved_region.start,
-                end: resolved_region.end,
-                block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-
-            BlockGroup::insert_change(conn, &path_change).unwrap();
-        }
-        ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {
-            match resolved_region.kind {
-                ResolvedRegionKind::Annotation => {
-                    let annotation = source_annotation.ok_or_else(|| {
-                        GenRegionError::Unmappable(resolved_region.block_group.name.clone())
-                    })?;
-                    annotation
-                        .insert_change_on_block_group(
-                            conn,
-                            &target_block_group.id,
-                            resolved_region.start,
-                            resolved_region.end,
-                            block,
-                            NO_CHROMOSOME_INDEX,
-                            0,
-                            true,
-                        )
-                        .map_err(GenRegionError::from)?;
-                }
-                ResolvedRegionKind::Accession => {
-                    let resolved_accession =
-                        resolved_region.accession.as_ref().ok_or_else(|| {
-                            GenRegionError::Unmappable(resolved_region.block_group.name.clone())
-                        })?;
-                    resolved_accession
-                        .insert_change_on_block_group(
-                            conn,
-                            &target_block_group.id,
-                            resolved_region.start,
-                            resolved_region.end,
-                            block,
-                            NO_CHROMOSOME_INDEX,
-                            0,
-                            true,
-                        )
-                        .map_err(GenRegionError::from)?;
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn resolved_path_update_coordinates(resolved_region: &ResolvedGenRegion) -> (i64, i64) {
     (resolved_region.start, resolved_region.end)
 }
@@ -310,6 +261,7 @@ mod tests {
         block_group::{NewBlockGroup, PathCache},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
+        path::Path,
         sample::NewSample,
     };
 
@@ -729,11 +681,11 @@ mod tests {
             false,
         )
         .unwrap_err();
-
         assert!(matches!(
             err,
-            SequenceUpdateError::RegionError(GenRegionError::Accession(AccessionError::NotFound(ref name)))
-                if name == "mreB"
+            SequenceUpdateError::BlockGroupError(gen_models::errors::BlockGroupError::AccessionError(
+                AccessionError::NotFound(ref name)
+            )) if name == "mreB"
         ));
         assert_eq!(
             BlockGroup::get_all_sequences(

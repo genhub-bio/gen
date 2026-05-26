@@ -182,11 +182,50 @@ pub struct BlockGroupTreeSource {
     pub remove_ambiguous_positions: bool,
 }
 
+#[derive(Clone, Debug)]
+pub enum ResolvedBlockGroupChange {
+    Interval {
+        tree: IntervalTree<i64, NodeIntervalBlock>,
+        start: i64,
+        end: i64,
+    },
+    DirectEdges(Vec<AugmentedEdgeData>),
+}
+
 pub trait IntervalTreeSource {
     fn intervaltree(
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError>;
+
+    fn query_point(
+        &self,
+        conn: &GraphConnection,
+        target_block_group_id: &HashId,
+        coordinate: i64,
+    ) -> Result<Vec<NodeIntervalBlock>, BlockGroupError> {
+        let _ = target_block_group_id;
+        Ok(self
+            .intervaltree(conn)?
+            .query_point(coordinate)
+            .map(|entry| entry.value)
+            .collect())
+    }
+
+    fn resolve_change(
+        &self,
+        conn: &GraphConnection,
+        change: &BlockGroupChange<Self>,
+    ) -> Result<ResolvedBlockGroupChange, BlockGroupError>
+    where
+        Self: Sized,
+    {
+        Ok(ResolvedBlockGroupChange::Interval {
+            tree: self.intervaltree(conn)?,
+            start: change.start,
+            end: change.end,
+        })
+    }
 }
 
 impl IntervalTreeSource for Path {
@@ -205,6 +244,25 @@ impl IntervalTreeSource for Accession {
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
         Accession::intervaltree(self, conn).map_err(Into::into)
     }
+
+    fn query_point(
+        &self,
+        conn: &GraphConnection,
+        target_block_group_id: &HashId,
+        coordinate: i64,
+    ) -> Result<Vec<NodeIntervalBlock>, BlockGroupError> {
+        self.query_target_blocks(conn, target_block_group_id, coordinate)
+            .map_err(Into::into)
+    }
+
+    fn resolve_change(
+        &self,
+        conn: &GraphConnection,
+        change: &BlockGroupChange<Self>,
+    ) -> Result<ResolvedBlockGroupChange, BlockGroupError> {
+        self.resolve_block_group_change(conn, change)
+            .map_err(Into::into)
+    }
 }
 
 impl IntervalTreeSource for AccessionAnnotation {
@@ -213,6 +271,25 @@ impl IntervalTreeSource for AccessionAnnotation {
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
         AccessionAnnotation::intervaltree(self, conn).map_err(Into::into)
+    }
+
+    fn query_point(
+        &self,
+        conn: &GraphConnection,
+        target_block_group_id: &HashId,
+        coordinate: i64,
+    ) -> Result<Vec<NodeIntervalBlock>, BlockGroupError> {
+        self.query_target_blocks(conn, target_block_group_id, coordinate)
+            .map_err(Into::into)
+    }
+
+    fn resolve_change(
+        &self,
+        conn: &GraphConnection,
+        change: &BlockGroupChange<Self>,
+    ) -> Result<ResolvedBlockGroupChange, BlockGroupError> {
+        self.resolve_block_group_change(conn, change)
+            .map_err(Into::into)
     }
 }
 
@@ -773,14 +850,17 @@ impl BlockGroup {
             None => &mut local_tree_map,
         };
         for change in changes {
-            if !tree_map.contains_key(&change.intervaltree_source) {
-                tree_map.insert(
-                    change.intervaltree_source.clone(),
-                    change.intervaltree_source.intervaltree(conn)?,
-                );
-            }
-            let tree = tree_map.get(&change.intervaltree_source).unwrap();
-            let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
+            let new_augmented_edges =
+                match change.intervaltree_source.resolve_change(conn, change)? {
+                    ResolvedBlockGroupChange::Interval { tree, start, end } => {
+                        tree_map
+                            .entry(change.intervaltree_source.clone())
+                            .or_insert(tree);
+                        let tree = tree_map.get(&change.intervaltree_source).unwrap();
+                        BlockGroup::set_up_new_edges(change, tree, start, end)?
+                    }
+                    ResolvedBlockGroupChange::DirectEdges(edges) => edges,
+                };
             new_augmented_edges_by_block_group
                 .entry(change.block_group_id)
                 .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
@@ -864,8 +944,12 @@ impl BlockGroup {
         conn: &GraphConnection,
         change: &BlockGroupChange<T>,
     ) -> Result<(), BlockGroupError> {
-        let tree = change.intervaltree_source.intervaltree(conn)?;
-        let new_augmented_edges = BlockGroup::set_up_new_edges(change, &tree)?;
+        let new_augmented_edges = match change.intervaltree_source.resolve_change(conn, change)? {
+            ResolvedBlockGroupChange::Interval { tree, start, end } => {
+                BlockGroup::set_up_new_edges(change, &tree, start, end)?
+            }
+            ResolvedBlockGroupChange::DirectEdges(edges) => edges,
+        };
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
             .insert(change.block_group_id, new_augmented_edges.clone());
@@ -886,18 +970,18 @@ impl BlockGroup {
     fn set_up_new_edges<T: IntervalTreeSource>(
         change: &BlockGroupChange<T>,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
+        start: i64,
+        end: i64,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         let start_blocks: Vec<&NodeIntervalBlock> =
-            tree.query_point(change.start).map(|x| &x.value).collect();
+            tree.query_point(start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
         // NOTE: This may not be used but needs to be initialized here instead of inside the if
         // statement that uses it, so that the borrow checker is happy
-        let previous_start_blocks: Vec<&NodeIntervalBlock> = tree
-            .query_point(change.start - 1)
-            .map(|x| &x.value)
-            .collect();
+        let previous_start_blocks: Vec<&NodeIntervalBlock> =
+            tree.query_point(start - 1).map(|x| &x.value).collect();
         assert_eq!(previous_start_blocks.len(), 1);
-        let start_block = if start_blocks[0].start == change.start {
+        let start_block = if start_blocks[0].start == start {
             // First part of this block will be replaced/deleted, need to get previous block to add
             // edge including it
             previous_start_blocks[0]
@@ -911,22 +995,21 @@ impl BlockGroup {
         // interval tree. So while it's ok to have a start/end block be the start/end block (for
         // changes at the extremes, it's not ok for the change to start beyond the current
         // boundaries.
-        if is_start_node(start_block.node_id) && change.start < start_block.end {
+        if is_start_node(start_block.node_id) && start < start_block.end {
             return Err(BlockGroupError::ChangeOutOfBounds(format!(
                 "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
-                pos = change.start,
+                pos = start,
                 path_pos = start_block.end
             )));
         }
-        let end_blocks: Vec<&NodeIntervalBlock> =
-            tree.query_point(change.end).map(|x| &x.value).collect();
+        let end_blocks: Vec<&NodeIntervalBlock> = tree.query_point(end).map(|x| &x.value).collect();
         assert_eq!(end_blocks.len(), 1);
         let end_block = end_blocks[0];
 
-        if is_end_node(end_block.node_id) && change.end > end_block.start {
+        if is_end_node(end_block.node_id) && end > end_block.start {
             return Err(BlockGroupError::ChangeOutOfBounds(format!(
                 "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
-                pos = change.end,
+                pos = end,
                 path_pos = end_block.start
             )));
         }
@@ -935,8 +1018,8 @@ impl BlockGroup {
 
         if change.block.sequence_start == change.block.sequence_end {
             // Deletion
-            let source_coordinate = change.start - start_block.start + start_block.sequence_start;
-            let target_coordinate = change.end - end_block.start + end_block.sequence_start;
+            let source_coordinate = start - start_block.start + start_block.sequence_start;
+            let target_coordinate = end - end_block.start + end_block.sequence_start;
             let mut aug_edges = vec![];
             let new_edge = EdgeData {
                 source_node_id: start_block.node_id,
@@ -955,8 +1038,8 @@ impl BlockGroup {
             // NOTE: If the deletion is happening at the very beginning of a path, we need to add
             // an edge from the dedicated start node to the end of the deletion, to indicate it's
             // another start point in the block group DAG.
-            if change.start == 0 {
-                let target_coordinate = change.end - end_block.start + end_block.sequence_start;
+            if start == 0 {
+                let target_coordinate = end - end_block.start + end_block.sequence_start;
                 let new_beginning_edge = EdgeData {
                     source_node_id: PATH_START_NODE_ID,
                     source_coordinate: 0,
@@ -1032,8 +1115,7 @@ impl BlockGroup {
             // doesn't affect sequence readouts, so it may not be worth it.
         } else {
             // Insertion/replacement
-            let insertion_start_coordinate =
-                change.start - start_block.start + start_block.sequence_start;
+            let insertion_start_coordinate = start - start_block.start + start_block.sequence_start;
             let new_start_edge = EdgeData {
                 source_node_id: start_block.node_id,
                 source_coordinate: insertion_start_coordinate,
@@ -1047,7 +1129,7 @@ impl BlockGroup {
                 chromosome_index: change.chromosome_index,
                 phased: change.phased,
             };
-            let insertion_end_coordinate = change.end - end_block.start + end_block.sequence_start;
+            let insertion_end_coordinate = end - end_block.start + end_block.sequence_start;
             let new_end_edge = EdgeData {
                 source_node_id: change.block.node_id,
                 source_coordinate: change.block.sequence_end,
@@ -1062,7 +1144,7 @@ impl BlockGroup {
                 phased: change.phased,
             };
 
-            if change.start == 0 {
+            if start == 0 {
                 new_edges.push(AugmentedEdgeData {
                     edge_data: EdgeData {
                         source_node_id: PATH_START_NODE_ID,
@@ -3237,7 +3319,7 @@ mod tests {
     #[test]
     fn test_blockgroup_interval_tree() {
         let conn = &get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(conn);
+        let (block_group_id, _path) = setup_block_group(conn);
         let _new_sample = Sample::get_or_create(
             conn,
             NewSample {
