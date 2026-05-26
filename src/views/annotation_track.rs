@@ -384,6 +384,41 @@ fn resolve_endpoint(
     (node_x1 + half, None)
 }
 
+/// Return the ids of annotations in `track` whose every segment endpoint is
+/// exact (not in a truncated node interior) and whose full visual span fits
+/// within the camera window — i.e. both ends are visible on screen at once.
+pub fn collect_fully_visible_span_ids<S: NodeSizer<GenGraph>>(
+    track: &AnnotationTrack,
+    controller: &GraphController<GenGraph, S>,
+) -> HashSet<HashId> {
+    let (_, segments_by_annotation, _) = collect_visual_segments(track, controller);
+
+    let camera_rect = controller.viewport_state.camera_rect();
+    let win_start = camera_rect.min.x;
+    let win_end = camera_rect.max.x;
+
+    segments_by_annotation
+        .into_iter()
+        .filter(|(_, segs)| {
+            segs.iter()
+                .all(|s| s.start.1.is_some() && s.end.1.is_some())
+                && segs
+                    .iter()
+                    .map(VisualSegment::start_x)
+                    .min()
+                    .unwrap_or(i64::MAX)
+                    >= win_start
+                && segs
+                    .iter()
+                    .map(VisualSegment::end_x)
+                    .max()
+                    .unwrap_or(i64::MIN)
+                    <= win_end
+        })
+        .map(|(idx, _)| track.annotations[idx].id)
+        .collect()
+}
+
 /// Collect visible annotation segments, resolving endpoint positions against
 /// the current layout and detail level.
 ///

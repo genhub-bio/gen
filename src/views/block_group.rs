@@ -23,7 +23,10 @@ use rusqlite::params;
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        annotation_track::{AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span},
+        annotation_track::{
+            AnnotationSpan, AnnotationTrack, collect_fully_visible_span_ids,
+            graph_locus_from_annotation_span,
+        },
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
             load_annotations_for_group,
@@ -179,18 +182,12 @@ fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
 enum AnnotationDisplayMode {
     Track,
     Inline,
+    Mixed,
+    Off,
 }
 
 fn span_coordinate_length(span: &AnnotationSpan) -> i64 {
     span.segments.iter().map(|s| s.end - s.start).sum()
-}
-
-fn span_fits_in_window(span: &AnnotationSpan, window: (i64, i64)) -> bool {
-    !span.segments.is_empty()
-        && span
-            .segments
-            .iter()
-            .all(|s| s.start >= window.0 && s.end <= window.1)
 }
 
 pub fn view_block_group(
@@ -419,7 +416,9 @@ pub fn view_block_group(
                             KeyCode::Char('i') => {
                                 annotation_display_mode = match annotation_display_mode {
                                     AnnotationDisplayMode::Track => AnnotationDisplayMode::Inline,
-                                    AnnotationDisplayMode::Inline => AnnotationDisplayMode::Track,
+                                    AnnotationDisplayMode::Inline => AnnotationDisplayMode::Mixed,
+                                    AnnotationDisplayMode::Mixed => AnnotationDisplayMode::Off,
+                                    AnnotationDisplayMode::Off => AnnotationDisplayMode::Track,
                                 };
                                 if annotation_display_mode == AnnotationDisplayMode::Track {
                                     for &style in inline_span_styles.values() {
@@ -840,59 +839,6 @@ pub fn view_block_group(
             }
         }
 
-        // Inline annotation highlight management: decide per-frame which spans are
-        // fully visible (inline) vs extending beyond the viewport (track).
-        {
-            let current_inline_ids: HashSet<HashId> =
-                if annotation_display_mode == AnnotationDisplayMode::Inline {
-                    current_view_coordinate_window(&graph_controller)
-                        .map(|window| {
-                            annotation_file_tracks
-                                .values()
-                                .chain(annotation_group_tracks.values())
-                                .flat_map(|track| track.annotations.iter())
-                                .filter(|span| span_fits_in_window(span, window))
-                                .map(|span| span.id)
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    HashSet::new()
-                };
-
-            for id in prev_inline_span_ids.difference(&current_inline_ids) {
-                if let Some(&style) = inline_span_styles.get(id) {
-                    graph_controller.clear_highlight(&style);
-                }
-            }
-
-            let mut newly_inline: Vec<&AnnotationSpan> = annotation_file_tracks
-                .values()
-                .chain(annotation_group_tracks.values())
-                .flat_map(|track| track.annotations.iter())
-                .filter(|span| {
-                    current_inline_ids.contains(&span.id)
-                        && !prev_inline_span_ids.contains(&span.id)
-                })
-                .collect();
-            // Outermost spans first so innermost highlights are applied last and win
-            newly_inline.sort_by_key(|span| -span_coordinate_length(span));
-
-            for span in newly_inline {
-                inline_span_styles.entry(span.id).or_insert_with(|| {
-                    let color = current_theme()[0x08 + (inline_accent_idx % 8)];
-                    inline_accent_idx += 1;
-                    PathStyle::new(color)
-                });
-                let style = inline_span_styles[&span.id];
-                if let Some(locus) = graph_locus_from_annotation_span(span, &block_graph) {
-                    highlight_match_range(&mut graph_controller, &locus, style);
-                }
-            }
-
-            prev_inline_span_ids = current_inline_ids;
-        }
-
         // Calculate frame delta for smooth animations
         let now = Instant::now();
         let frame_delta = now.duration_since(last_frame_time);
@@ -951,6 +897,55 @@ pub fn view_block_group(
             // Update animations with frame delta for smooth camera and cursor animations
             graph_controller.update_animations(frame_delta);
 
+            // Inline annotation highlight management: decide per-frame which spans are
+            // fully visible (inline) vs extending beyond the viewport (track).
+            {
+                let current_inline_ids: HashSet<HashId> = match annotation_display_mode {
+                    AnnotationDisplayMode::Inline => annotation_file_tracks
+                        .values()
+                        .chain(annotation_group_tracks.values())
+                        .flat_map(|track| track.annotations.iter().map(|s| s.id))
+                        .collect(),
+                    AnnotationDisplayMode::Mixed => annotation_file_tracks
+                        .values()
+                        .chain(annotation_group_tracks.values())
+                        .flat_map(|track| collect_fully_visible_span_ids(track, &graph_controller))
+                        .collect(),
+                    AnnotationDisplayMode::Track | AnnotationDisplayMode::Off => HashSet::new(),
+                };
+
+                for id in prev_inline_span_ids.difference(&current_inline_ids) {
+                    if let Some(&style) = inline_span_styles.get(id) {
+                        graph_controller.clear_highlight(&style);
+                    }
+                }
+
+                let mut newly_inline: Vec<&AnnotationSpan> = annotation_file_tracks
+                    .values()
+                    .chain(annotation_group_tracks.values())
+                    .flat_map(|track| track.annotations.iter())
+                    .filter(|span| {
+                        current_inline_ids.contains(&span.id)
+                            && !prev_inline_span_ids.contains(&span.id)
+                    })
+                    .collect();
+                newly_inline.sort_by_key(|span| -span_coordinate_length(span));
+
+                for span in newly_inline {
+                    inline_span_styles.entry(span.id).or_insert_with(|| {
+                        let color = current_theme()[0x08 + (inline_accent_idx % 8)];
+                        inline_accent_idx += 1;
+                        PathStyle::new(color)
+                    });
+                    let style = inline_span_styles[&span.id];
+                    if let Some(locus) = graph_locus_from_annotation_span(span, &block_graph) {
+                        highlight_match_range(&mut graph_controller, &locus, style);
+                    }
+                }
+
+                prev_inline_span_ids = current_inline_ids;
+            }
+
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;
             if show_sidebar {
@@ -988,7 +983,9 @@ pub fn view_block_group(
                     let tab_dest = if show_panel { "to panel" } else { "to sidebar" };
                     let mode_hint = match annotation_display_mode {
                         AnnotationDisplayMode::Track => "*i* inline",
-                        AnnotationDisplayMode::Inline => "*i* track",
+                        AnnotationDisplayMode::Inline => "*i* mixed",
+                        AnnotationDisplayMode::Mixed => "*i* off",
+                        AnnotationDisplayMode::Off => "*i* track",
                     };
                     if !graph_controller.is_cursor_visible() {
                         format!("*drag* pan | *click* select | *↑↓←→* show cursor | *tab* {tab_dest}")
@@ -1076,8 +1073,10 @@ pub fn view_block_group(
                 frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
 
                 // Draw inline annotation labels over the graph
-                if annotation_display_mode == AnnotationDisplayMode::Inline
-                    && !prev_inline_span_ids.is_empty()
+                if matches!(
+                    annotation_display_mode,
+                    AnnotationDisplayMode::Inline | AnnotationDisplayMode::Mixed
+                ) && !prev_inline_span_ids.is_empty()
                 {
                     let pos_map = viewport_pos_map(&graph_controller);
                     let detail_level = graph_controller.get_detail_level();
@@ -1115,8 +1114,10 @@ pub fn view_block_group(
                 // In inline mode, build filtered tracks that exclude spans rendered inline.
                 let mut remaining = canvas_area;
                 let filtered_storage: Option<Vec<AnnotationTrack>> =
-                    if annotation_display_mode == AnnotationDisplayMode::Inline
-                        && !prev_inline_span_ids.is_empty()
+                    if matches!(
+                        annotation_display_mode,
+                        AnnotationDisplayMode::Inline | AnnotationDisplayMode::Mixed
+                    ) && !prev_inline_span_ids.is_empty()
                     {
                         Some(
                             annotation_file_tracks
@@ -1136,13 +1137,18 @@ pub fn view_block_group(
                     } else {
                         None
                     };
-                let tracks: Vec<&AnnotationTrack> = match &filtered_storage {
-                    Some(filtered) => filtered.iter().collect(),
-                    None => annotation_file_tracks
-                        .values()
-                        .chain(annotation_group_tracks.values())
-                        .collect(),
-                };
+                let tracks: Vec<&AnnotationTrack> =
+                    if annotation_display_mode == AnnotationDisplayMode::Off {
+                        vec![]
+                    } else {
+                        match &filtered_storage {
+                            Some(filtered) => filtered.iter().collect(),
+                            None => annotation_file_tracks
+                                .values()
+                                .chain(annotation_group_tracks.values())
+                                .collect(),
+                        }
+                    };
                 for track in tracks.into_iter().rev() {
                     let height = track.draw(frame.buffer_mut(), remaining, &graph_controller);
                     if height == 0 {
