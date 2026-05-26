@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, calculate_hash, is_terminal,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
@@ -49,6 +50,12 @@ pub enum AccessionError {
 enum AnchorPoint {
     PathStart,
     Node { node_id: HashId, coordinate: i64 },
+}
+
+struct AccessionProjectionContext {
+    accession_blocks: Vec<NodeIntervalBlock>,
+    accession_length: i64,
+    target_interval_blocks: Vec<NodeIntervalBlock>,
 }
 
 impl<'a> Capnp<'a> for Accession {
@@ -422,64 +429,37 @@ impl Accession {
             .collect())
     }
 
+    fn projection_context(
+        &self,
+        conn: &GraphConnection,
+        target_block_group_id: &HashId,
+    ) -> Result<AccessionProjectionContext, AccessionError> {
+        let accession_blocks = self.blocks(conn)?;
+        let accession_length = accession_blocks
+            .last()
+            .map(|block| block.start)
+            .ok_or_else(|| AccessionError::NotFound(self.name.clone()))?;
+        let target_interval_blocks =
+            BlockGroup::intervaltree_for(conn, target_block_group_id, false)
+                .iter_sorted()
+                .map(|entry| entry.value)
+                .collect();
+
+        Ok(AccessionProjectionContext {
+            accession_blocks,
+            accession_length,
+            target_interval_blocks,
+        })
+    }
+
     pub fn coordinate_to_block_group(
         &self,
         conn: &GraphConnection,
         target_block_group_id: &HashId,
         coordinate: i64,
     ) -> Result<i64, AccessionError> {
-        let tree = BlockGroup::intervaltree_for(conn, target_block_group_id, false);
-        let interval_blocks = tree
-            .iter_sorted()
-            .map(|entry| entry.value)
-            .collect::<Vec<_>>();
-        let accession_blocks = self.blocks(conn)?;
-        let accession_length = self.length(conn)?;
-        let accession_start = accession_blocks
-            .iter()
-            .find(|block| block.start == 0)
-            .ok_or_else(|| AccessionError::NotFound(self.name.clone()))?;
-        let accession_end = accession_blocks
-            .iter()
-            .find(|block| block.end == accession_length)
-            .ok_or_else(|| AccessionError::NotFound(self.name.clone()))?;
-
-        if coordinate < 0 {
-            return Ok(block_sequence_coordinate_to_interval(
-                &interval_blocks,
-                accession_start,
-                accession_start.sequence_start,
-                &self.name,
-            )? + coordinate);
-        }
-        if coordinate > accession_length {
-            return Ok(block_sequence_coordinate_to_interval(
-                &interval_blocks,
-                accession_end,
-                accession_end.sequence_end,
-                &self.name,
-            )? + (coordinate - accession_length));
-        }
-
-        let (block, sequence_coordinate) = {
-            let block = accession_blocks
-                .iter()
-                .find(|block| {
-                    block.start <= coordinate
-                        && coordinate <= block.end
-                        && block.node_id != PATH_START_NODE_ID
-                        && block.node_id != PATH_END_NODE_ID
-                })
-                .ok_or_else(|| AccessionError::NotFound(self.name.clone()))?;
-            (block, block.sequence_start + (coordinate - block.start))
-        };
-
-        block_sequence_coordinate_to_interval(
-            &interval_blocks,
-            block,
-            sequence_coordinate,
-            &self.name,
-        )
+        let context = self.projection_context(conn, target_block_group_id)?;
+        coordinate_to_target_interval(&context, coordinate, &self.name)
     }
 
     pub fn coordinates_to_block_group(
@@ -489,9 +469,10 @@ impl Accession {
         start: i64,
         end: i64,
     ) -> Result<(i64, i64), AccessionError> {
+        let context = self.projection_context(conn, target_block_group_id)?;
         Ok((
-            self.coordinate_to_block_group(conn, target_block_group_id, start)?,
-            self.coordinate_to_block_group(conn, target_block_group_id, end)?,
+            coordinate_to_target_interval(&context, start, &self.name)?,
+            coordinate_to_target_interval(&context, end, &self.name)?,
         ))
     }
 
@@ -501,13 +482,8 @@ impl Accession {
         target_block_group_id: &HashId,
         coordinate: i64,
     ) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
-        let mapped_coordinate =
-            self.coordinate_to_block_group(conn, target_block_group_id, coordinate)?;
-        let tree = BlockGroup::intervaltree_for(conn, target_block_group_id, false);
-        Ok(tree
-            .query_point(mapped_coordinate)
-            .map(|entry| entry.value)
-            .collect())
+        let context = self.projection_context(conn, target_block_group_id)?;
+        target_blocks_for_coordinate(&context, coordinate, &self.name)
     }
 
     pub fn resolve_block_group_change(
@@ -515,16 +491,17 @@ impl Accession {
         conn: &GraphConnection,
         change: &AccessionChange,
     ) -> Result<ResolvedBlockGroupChange, AccessionError> {
-        if let Some(new_edges) = insert_change_from_negative_start(self, conn, change)? {
+        let context = self.projection_context(conn, &change.block_group_id)?;
+        if let Some(new_edges) =
+            insert_change_from_out_of_bounds(conn, change, &context, &self.name)?
+        {
             return Ok(ResolvedBlockGroupChange::DirectEdges(new_edges));
         }
 
-        let (start, end) = self.coordinates_to_block_group(
-            conn,
-            &change.block_group_id,
-            change.start,
-            change.end,
-        )?;
+        let (start, end) = (
+            coordinate_to_target_interval(&context, change.start, &self.name)?,
+            coordinate_to_target_interval(&context, change.end, &self.name)?,
+        );
         let tree = BlockGroupTreeSource {
             block_group_id: change.block_group_id,
             remove_ambiguous_positions: false,
@@ -563,6 +540,114 @@ fn block_sequence_coordinate_to_interval(
         .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
 
     Ok(interval_block.start + (sequence_coordinate - interval_block.sequence_start))
+}
+
+fn coordinate_to_target_interval(
+    context: &AccessionProjectionContext,
+    coordinate: i64,
+    accession_name: &str,
+) -> Result<i64, AccessionError> {
+    let accession_start = context
+        .accession_blocks
+        .iter()
+        .find(|block| block.start == 0)
+        .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
+    let accession_end = context
+        .accession_blocks
+        .iter()
+        .find(|block| block.end == context.accession_length)
+        .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
+
+    if coordinate < 0 {
+        return Ok(block_sequence_coordinate_to_interval(
+            &context.target_interval_blocks,
+            accession_start,
+            accession_start.sequence_start,
+            accession_name,
+        )? + coordinate);
+    }
+    if coordinate > context.accession_length {
+        return Ok(block_sequence_coordinate_to_interval(
+            &context.target_interval_blocks,
+            accession_end,
+            accession_end.sequence_end,
+            accession_name,
+        )? + (coordinate - context.accession_length));
+    }
+
+    let (block, sequence_coordinate) = coordinate_to_sequence_anchor(
+        &context.accession_blocks,
+        context.accession_length,
+        coordinate,
+        accession_name,
+    )?
+    .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
+
+    block_sequence_coordinate_to_interval(
+        &context.target_interval_blocks,
+        block,
+        sequence_coordinate,
+        accession_name,
+    )
+}
+
+fn target_blocks_for_coordinate(
+    context: &AccessionProjectionContext,
+    coordinate: i64,
+    accession_name: &str,
+) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
+    if coordinate < 0 || coordinate > context.accession_length {
+        let mapped_coordinate = coordinate_to_target_interval(context, coordinate, accession_name)?;
+        return Ok(context
+            .target_interval_blocks
+            .iter()
+            .copied()
+            .filter(|block| block.start <= mapped_coordinate && mapped_coordinate <= block.end)
+            .collect());
+    }
+
+    let (source_block, sequence_coordinate) = coordinate_to_sequence_anchor(
+        &context.accession_blocks,
+        context.accession_length,
+        coordinate,
+        accession_name,
+    )?
+    .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
+    Ok(context
+        .target_interval_blocks
+        .iter()
+        .copied()
+        .filter(|block| {
+            block.node_id == source_block.node_id
+                && block.sequence_start <= sequence_coordinate
+                && sequence_coordinate <= block.sequence_end
+        })
+        .collect())
+}
+
+fn coordinate_to_sequence_anchor<'a>(
+    accession_blocks: &'a [NodeIntervalBlock],
+    accession_length: i64,
+    coordinate: i64,
+    accession_name: &str,
+) -> Result<Option<(&'a NodeIntervalBlock, i64)>, AccessionError> {
+    if !(0..=accession_length).contains(&coordinate) {
+        return Ok(None);
+    }
+
+    let block = accession_blocks
+        .iter()
+        .find(|block| {
+            block.start <= coordinate
+                && coordinate <= block.end
+                && block.node_id != PATH_START_NODE_ID
+                && block.node_id != PATH_END_NODE_ID
+        })
+        .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
+    Ok(Some((
+        block,
+        block.sequence_start + (coordinate - block.start),
+    )))
 }
 
 fn insert_ambiguous_start_change(
@@ -619,40 +704,36 @@ fn insert_ambiguous_start_change(
     ]))
 }
 
-fn insert_change_from_negative_start(
-    accession: &Accession,
+fn insert_change_from_out_of_bounds(
     conn: &GraphConnection,
     change: &AccessionChange,
+    context: &AccessionProjectionContext,
+    accession_name: &str,
 ) -> Result<Option<Vec<AugmentedEdgeData>>, AccessionError> {
-    if change.start >= 0 || change.block.sequence_start == change.block.sequence_end {
+    let is_out_of_bounds = change.start < 0 || change.end > context.accession_length;
+    if !is_out_of_bounds {
         return Ok(None);
     }
 
-    let accession_blocks = accession.blocks(conn)?;
-    let accession_length = accession.length(conn)?;
-    let start_block = accession_blocks
-        .iter()
-        .find(|block| block.start == 0 && block.node_id != PATH_START_NODE_ID)
-        .ok_or_else(|| AccessionError::NotFound(accession.name.clone()))?;
-    let start_points = walk_back_to_anchor_points(
+    let start_points = resolve_anchor_points_for_coordinate(
         conn,
         &change.block_group_id,
-        start_block.node_id,
-        start_block.sequence_start,
-        -change.start,
+        &context.accession_blocks,
+        context.accession_length,
+        change.start,
+        accession_name,
     )?;
     let end_points = if change.start == change.end {
         points_after_anchor(conn, &change.block_group_id, &start_points)?
     } else {
-        vec![
-            coordinate_to_anchor_point(
-                &accession_blocks,
-                accession_length,
-                change.end,
-                &accession.name,
-            )?
-            .ok_or_else(|| AccessionError::NotFound(accession.name.clone()))?,
-        ]
+        resolve_anchor_points_for_coordinate(
+            conn,
+            &change.block_group_id,
+            &context.accession_blocks,
+            context.accession_length,
+            change.end,
+            accession_name,
+        )?
     };
 
     let mut new_edges = Vec::new();
@@ -673,44 +754,131 @@ fn insert_change_from_negative_start(
             AnchorPoint::Node {
                 node_id,
                 coordinate,
-            } => new_edges.push(AugmentedEdgeData {
-                edge_data: EdgeData {
-                    source_node_id: node_id,
-                    source_coordinate: coordinate,
-                    source_strand: Strand::Forward,
-                    target_node_id: change.block.node_id,
-                    target_coordinate: change.block.sequence_start,
-                    target_strand: Strand::Forward,
-                },
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            }),
+            } => {
+                if !is_terminal(node_id) {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: node_id,
+                            source_coordinate: coordinate,
+                            source_strand: Strand::Forward,
+                            target_node_id: node_id,
+                            target_coordinate: coordinate,
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: if change.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
+                        phased: 0,
+                    });
+                }
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: node_id,
+                        source_coordinate: coordinate,
+                        source_strand: Strand::Forward,
+                        target_node_id: change.block.node_id,
+                        target_coordinate: change.block.sequence_start,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: change.chromosome_index,
+                    phased: change.phased,
+                });
+            }
         }
     }
     for end_point in end_points {
         match end_point {
             AnchorPoint::PathStart => {
-                return Err(AccessionError::NotFound(accession.name.clone()));
+                return Err(AccessionError::NotFound(accession_name.to_string()));
             }
             AnchorPoint::Node {
                 node_id,
                 coordinate,
-            } => new_edges.push(AugmentedEdgeData {
-                edge_data: EdgeData {
-                    source_node_id: change.block.node_id,
-                    source_coordinate: change.block.sequence_end,
-                    source_strand: Strand::Forward,
-                    target_node_id: node_id,
-                    target_coordinate: coordinate,
-                    target_strand: Strand::Forward,
-                },
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            }),
+            } => {
+                if !is_terminal(node_id) {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: node_id,
+                            source_coordinate: coordinate,
+                            source_strand: Strand::Forward,
+                            target_node_id: node_id,
+                            target_coordinate: coordinate,
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: if change.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
+                        phased: 0,
+                    });
+                }
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: change.block.node_id,
+                        source_coordinate: change.block.sequence_end,
+                        source_strand: Strand::Forward,
+                        target_node_id: node_id,
+                        target_coordinate: coordinate,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: change.chromosome_index,
+                    phased: change.phased,
+                });
+            }
         }
     }
 
     Ok(Some(new_edges))
+}
+
+fn resolve_anchor_points_for_coordinate(
+    conn: &GraphConnection,
+    target_block_group_id: &HashId,
+    accession_blocks: &[NodeIntervalBlock],
+    accession_length: i64,
+    coordinate: i64,
+    accession_name: &str,
+) -> Result<Vec<AnchorPoint>, AccessionError> {
+    if coordinate < 0 {
+        let start_block = accession_blocks
+            .iter()
+            .find(|block| block.start == 0 && block.node_id != PATH_START_NODE_ID)
+            .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
+        return walk_back_to_anchor_points(
+            conn,
+            target_block_group_id,
+            start_block.node_id,
+            start_block.sequence_start,
+            -coordinate,
+        );
+    }
+
+    if coordinate > accession_length {
+        let end_block = accession_blocks
+            .iter()
+            .find(|block| block.end == accession_length && block.node_id != PATH_END_NODE_ID)
+            .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
+        return walk_forward_to_anchor_points(
+            conn,
+            target_block_group_id,
+            end_block.node_id,
+            end_block.sequence_end,
+            coordinate - accession_length,
+        );
+    }
+
+    Ok(vec![
+        coordinate_to_anchor_point(
+            accession_blocks,
+            accession_length,
+            coordinate,
+            accession_name,
+        )?
+        .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?,
+    ])
 }
 
 fn points_after_anchor(
@@ -753,21 +921,15 @@ fn coordinate_to_anchor_point(
     coordinate: i64,
     accession_name: &str,
 ) -> Result<Option<AnchorPoint>, AccessionError> {
-    if !(0..=accession_length).contains(&coordinate) {
-        return Ok(None);
-    }
-    let block = accession_blocks
-        .iter()
-        .find(|block| {
-            block.start <= coordinate
-                && coordinate <= block.end
-                && block.node_id != PATH_START_NODE_ID
-                && block.node_id != PATH_END_NODE_ID
-        })
-        .ok_or_else(|| AccessionError::NotFound(accession_name.to_string()))?;
-    Ok(Some(AnchorPoint::Node {
+    Ok(coordinate_to_sequence_anchor(
+        accession_blocks,
+        accession_length,
+        coordinate,
+        accession_name,
+    )?
+    .map(|(block, sequence_coordinate)| AnchorPoint::Node {
         node_id: block.node_id,
-        coordinate: block.sequence_start + (coordinate - block.start),
+        coordinate: sequence_coordinate,
     }))
 }
 
@@ -781,6 +943,19 @@ fn walk_back_to_anchor_points(
     let edges = BlockGroupEdge::edges_for_block_group(conn, target_block_group_id);
     let mut points = HashSet::new();
     collect_backtrack_points(&edges, node_id, coordinate, remaining, &mut points);
+    Ok(points.into_iter().collect())
+}
+
+fn walk_forward_to_anchor_points(
+    conn: &GraphConnection,
+    target_block_group_id: &HashId,
+    node_id: HashId,
+    coordinate: i64,
+    remaining: i64,
+) -> Result<Vec<AnchorPoint>, AccessionError> {
+    let edges = BlockGroupEdge::edges_for_block_group(conn, target_block_group_id);
+    let mut points = HashSet::new();
+    collect_forward_points(&edges, node_id, coordinate, remaining, &mut points);
     Ok(points.into_iter().collect())
 }
 
@@ -832,6 +1007,63 @@ fn collect_backtrack_points(
                 out,
             );
         }
+    }
+}
+
+fn collect_forward_points(
+    edges: &[crate::block_group_edge::AugmentedEdge],
+    node_id: HashId,
+    coordinate: i64,
+    remaining: i64,
+    out: &mut HashSet<AnchorPoint>,
+) {
+    if remaining == 0 {
+        out.insert(AnchorPoint::Node {
+            node_id,
+            coordinate,
+        });
+        return;
+    }
+
+    let outgoing = edges
+        .iter()
+        .filter(|edge| {
+            edge.edge.source_node_id == node_id
+                && edge.edge.target_node_id != node_id
+                && edge.edge.source_coordinate >= coordinate
+        })
+        .collect::<Vec<_>>();
+    let node_end = outgoing
+        .iter()
+        .map(|edge| edge.edge.source_coordinate)
+        .min();
+
+    match node_end {
+        Some(node_end) if remaining < node_end - coordinate => {
+            out.insert(AnchorPoint::Node {
+                node_id,
+                coordinate: coordinate + remaining,
+            });
+        }
+        Some(node_end) => {
+            let remainder = remaining - (node_end - coordinate);
+            for edge in outgoing
+                .into_iter()
+                .filter(|edge| edge.edge.source_coordinate == node_end)
+            {
+                if edge.edge.target_node_id == PATH_END_NODE_ID {
+                    continue;
+                }
+                collect_forward_points(
+                    edges,
+                    edge.edge.target_node_id,
+                    edge.edge.target_coordinate,
+                    remainder,
+                    out,
+                );
+            }
+        }
+        None => {}
     }
 }
 

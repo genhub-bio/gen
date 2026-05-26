@@ -2302,6 +2302,57 @@ mod tests {
     }
 
     #[test]
+    fn insert_accession_change_past_end_get_all() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
+        let mut path_cache = PathCache::new(&conn);
+        let accession =
+            BlockGroup::add_accession(&conn, &path, "test-accession", 10, 30, &mut path_cache)
+                .unwrap();
+        let insert_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("NNNN")
+            .save(&conn)
+            .unwrap();
+        let insert_node_id = Node::create(
+            &conn,
+            &insert_sequence.hash,
+            &HashId::convert_str("acc-end-insert-node"),
+        )
+        .unwrap();
+        let insert = PathBlock {
+            node_id: insert_node_id,
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
+            sequence_start: 0,
+            sequence_end: 4,
+            path_start: 25,
+            path_end: 25,
+            strand: Strand::Forward,
+        };
+        let change = AccessionChange {
+            block_group_id,
+            intervaltree_source: accession,
+            path_accession: None,
+            start: 25,
+            end: 25,
+            block: insert,
+            chromosome_index: 1,
+            phased: 0,
+            preserve_edge: true,
+        };
+
+        BlockGroup::insert_change(&conn, &change).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        assert_eq!(
+            all_sequences,
+            HashSet::from_iter(vec![
+                "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGNNNNGGGGG".to_string(),
+            ])
+        );
+    }
+
+    #[test]
     fn insert_annotation_change_get_all() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
