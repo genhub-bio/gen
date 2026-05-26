@@ -11,12 +11,12 @@
 //!
 //! The search algorithm, for example, is a lot easier to understand on Blocks
 //! rather than Nodes. It's output can be used to address graph space and in
-//! the form of a list of BlockSlices: segments from blocks, in the block's
+//! the form of a list of GraphNodeSlices: segments from blocks, in the
 //! coordinate reference frame (left side = 0). But to store graph changes in
 //! the additive model in the database we must convert back to the Node format.
 
 use gen_core::{HashId, Strand};
-pub use gen_graph::BlockSlice;
+pub use gen_graph::GraphNodeSlice;
 
 use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
 
@@ -25,7 +25,7 @@ use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
 /// individual exons may come from opposite strands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphLocus {
-    pub slices: Vec<BlockSlice>,
+    pub slices: Vec<GraphNodeSlice>,
 }
 
 impl GraphLocus {

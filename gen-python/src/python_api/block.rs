@@ -1,41 +1,33 @@
 use r#gen::core::HashId;
 use gen_core::Strand;
-use gen_graph::BlockSlice;
+use gen_graph::GraphNodeSlice;
 use pyo3::prelude::*;
 
-use super::hash_id::PyHashId;
-
-/// A Python-friendly representation of a block (node id, sequence start, sequence end).
+/// An opaque handle to a graph node, usable as a dict key in Python.
 /// Used to ensure consistent hashing when used as dictionary keys in Python.
-#[pyclass(name = "Block")] // pyclass includes  #[derive(IntoPyObject)]
+#[pyclass(name = "Node")] // pyclass includes  #[derive(IntoPyObject)]
 #[derive(Clone, Copy)]
-pub struct PyBlock {
+pub struct PyGraphNode {
     pub node_id: HashId,
-    #[pyo3(get)]
     pub sequence_start: i64,
-    #[pyo3(get)]
     pub sequence_end: i64,
 }
 
-#[pymethods]
-impl PyBlock {
-    #[new]
+impl PyGraphNode {
     pub fn new(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Self {
-        PyBlock {
+        PyGraphNode {
             node_id,
             sequence_start,
             sequence_end,
         }
     }
+}
 
-    #[getter]
-    fn node_id(&self) -> PyHashId {
-        PyHashId::new(self.node_id)
-    }
-
+#[pymethods]
+impl PyGraphNode {
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "Block({}, {}, {})",
+            "Node({}, {}, {})",
             self.node_id, self.sequence_start, self.sequence_end
         ))
     }
@@ -56,7 +48,7 @@ impl PyBlock {
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
-        if let Ok(other_key) = other.extract::<PyRef<PyBlock>>() {
+        if let Ok(other_key) = other.extract::<PyRef<PyGraphNode>>() {
             Ok(self.node_id == other_key.node_id
                 && self.sequence_start == other_key.sequence_start
                 && self.sequence_end == other_key.sequence_end)
@@ -67,23 +59,23 @@ impl PyBlock {
 }
 
 /// A slice of a single graph block with local byte offsets and strand.
-#[pyclass(name = "BlockSlice")]
+#[pyclass(name = "NodeSlice")]
 #[derive(Clone, Copy)]
-pub struct PyBlockSlice {
-    pub inner: BlockSlice,
+pub struct PyGraphNodeSlice {
+    pub inner: GraphNodeSlice,
 }
 
-impl PyBlockSlice {
-    pub fn from_slice(s: BlockSlice) -> Self {
+impl PyGraphNodeSlice {
+    pub fn from_slice(s: GraphNodeSlice) -> Self {
         Self { inner: s }
     }
 }
 
 #[pymethods]
-impl PyBlockSlice {
+impl PyGraphNodeSlice {
     #[getter]
-    fn block(&self) -> PyBlock {
-        PyBlock::new(
+    fn block(&self) -> PyGraphNode {
+        PyGraphNode::new(
             self.inner.block.node_id,
             self.inner.block.sequence_start,
             self.inner.block.sequence_end,
@@ -111,7 +103,7 @@ impl PyBlockSlice {
 
     fn __repr__(&self) -> String {
         format!(
-            "BlockSlice({}[{}..{}], {}..{}, strand={})",
+            "NodeSlice({}[{}..{}], {}..{}, strand={})",
             self.inner.block.node_id,
             self.inner.block.sequence_start,
             self.inner.block.sequence_end,

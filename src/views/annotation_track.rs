@@ -4,7 +4,7 @@ use std::{
 };
 
 use gen_core::{HashId, Strand, is_end_node, is_start_node};
-use gen_graph::{BlockSlice, GenGraph};
+use gen_graph::{GenGraph, GraphNodeSlice};
 use gen_models::locus::GraphLocus;
 use gen_tui::{
     GraphController, ViewportState, VisualDetail, WorldRect, plotter::NodeSizer,
@@ -67,14 +67,14 @@ pub fn graph_locus_from_annotation_span(
         return None;
     }
     let node_map: HashMap<_, _> = graph.node_identifiers().map(|n| (n.node_id, n)).collect();
-    let slices: Option<Vec<BlockSlice>> = span
+    let slices: Option<Vec<GraphNodeSlice>> = span
         .segments
         .iter()
         .map(|seg| {
             let block = *node_map.get(&seg.node_id)?;
             let start = (seg.start - block.sequence_start).max(0) as usize;
             let end = (seg.end - block.sequence_start).max(0) as usize;
-            Some(BlockSlice {
+            Some(GraphNodeSlice {
                 block,
                 start,
                 end,
@@ -802,7 +802,7 @@ mod tests {
     fn annotation_span_from_graph_locus_preserves_name_and_coordinates() {
         let node = make_node("n1", 100, 200);
         let locus = GraphLocus {
-            slices: vec![BlockSlice {
+            slices: vec![GraphNodeSlice {
                 block: node,
                 start: 5,
                 end: 15,
@@ -824,7 +824,7 @@ mod tests {
         let node = make_node("n1", 100, 200);
         let graph = make_graph(&[node]);
         let locus = GraphLocus {
-            slices: vec![BlockSlice {
+            slices: vec![GraphNodeSlice {
                 block: node,
                 start: 5,
                 end: 15,
@@ -856,7 +856,7 @@ mod tests {
         let node = make_node("n1", 0, 100);
         let graph = make_graph(&[]); // node not in graph
         let locus = GraphLocus {
-            slices: vec![BlockSlice {
+            slices: vec![GraphNodeSlice {
                 block: node,
                 start: 0,
                 end: 10,

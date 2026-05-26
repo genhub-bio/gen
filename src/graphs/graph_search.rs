@@ -4,7 +4,7 @@ use std::{
 };
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_graph::{BlockSlice, GenGraph, GraphNode};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     db::GraphConnection, locus::GraphLocus, node::Node, sequence::reverse_complement,
 };
@@ -417,7 +417,7 @@ impl GenGraphMatcher {
                     .path
                     .into_iter()
                     .enumerate()
-                    .map(|(i, node)| BlockSlice {
+                    .map(|(i, node)| GraphNodeSlice {
                         block: node,
                         start: if i == 0 { ts.start_offset } else { 0 },
                         end: if i == n - 1 {

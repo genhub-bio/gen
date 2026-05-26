@@ -9,7 +9,7 @@ use gen_models::{
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{
-    block::PyBlock,
+    block::PyGraphNode,
     block_group::PyBlockGroup,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
@@ -261,7 +261,7 @@ impl PyRepository {
         build_widget(py, ctrl, rows, cols)
     }
 
-    fn get_block_sequence(&self, node_key: &PyBlock) -> PyResult<String> {
+    fn get_block_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
         let sequences_by_node_id =
             Node::get_sequences_by_node_ids(self.context.graph().conn(), &[node_key.node_id]);
         let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {

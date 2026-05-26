@@ -9,7 +9,7 @@ use gen_graph::GraphNode;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
-use super::block::{PyBlock, PyBlockSlice};
+use super::block::{PyGraphNode, PyGraphNodeSlice};
 
 /// A position in the graph: a specific node plus a byte offset within that
 /// node's local text (`0..node.length()`).
@@ -34,9 +34,9 @@ impl PyGraphPos {
 impl PyGraphPos {
     /// The graph node this position is inside.
     #[getter]
-    fn block(&self) -> PyBlock {
+    fn block(&self) -> PyGraphNode {
         let n = self.inner.block;
-        PyBlock::new(n.node_id, n.sequence_start, n.sequence_end)
+        PyGraphNode::new(n.node_id, n.sequence_start, n.sequence_end)
     }
 
     /// Byte offset within the node's local text (`0..node.length()`).
@@ -94,14 +94,14 @@ impl PyGraphLocus {
 
     /// Ordered sequence of block slices that span this locus.
     ///
-    /// Each `BlockSlice` carries the underlying block, local byte offsets
+    /// Each `NodeSlice` carries the underlying block, local byte offsets
     /// within that block, and the strand for that slice.
     #[getter]
-    fn slices(&self) -> Vec<PyBlockSlice> {
+    fn slices(&self) -> Vec<PyGraphNodeSlice> {
         self.inner
             .slices
             .iter()
-            .map(|s| PyBlockSlice::from_slice(*s))
+            .map(|s| PyGraphNodeSlice::from_slice(*s))
             .collect()
     }
 

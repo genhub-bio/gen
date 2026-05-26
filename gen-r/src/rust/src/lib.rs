@@ -35,7 +35,7 @@ use r#gen::{
 };
 use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
 use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
-use gen_graph::{BlockSlice, GenGraph, GraphNode};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
@@ -691,7 +691,7 @@ fn apply_graph_ops(
                     } else {
                         block.length() as usize
                     };
-                    slices.push(BlockSlice {
+                    slices.push(GraphNodeSlice {
                         block,
                         start: slice_start,
                         end: slice_end,
