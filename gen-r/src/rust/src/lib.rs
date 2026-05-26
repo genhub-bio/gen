@@ -35,12 +35,12 @@ use r#gen::{
 };
 use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
 use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode};
+use gen_graph::{BlockSlice, GenGraph, GraphNode};
 use gen_models::{
     block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
     errors::OperationError,
-    locus::{BlockSlice, GraphLocus},
+    locus::GraphLocus,
     node::Node,
     operations::{Defaults, OperationFile, OperationInfo},
     traits::Query,
@@ -3213,7 +3213,11 @@ impl GenBlockGroup {
         .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))
     }
 
-    fn export_gfa(&self, filename: String, node_max: Nullable<i64>) -> std::result::Result<(), Error> {
+    fn export_gfa(
+        &self,
+        filename: String,
+        node_max: Nullable<i64>,
+    ) -> std::result::Result<(), Error> {
         let conn = self.context.graph().conn();
         gfa_export(
             conn,
@@ -3253,8 +3257,7 @@ impl GenBlockGroup {
         let bytes = index
             .to_bytes_with_header()
             .map_err(|e| Error::Other(format!("Failed to serialize index: {e}")))?;
-        fs::write(&path, bytes)
-            .map_err(|e| Error::Other(format!("Failed to write index: {e}")))
+        fs::write(&path, bytes).map_err(|e| Error::Other(format!("Failed to write index: {e}")))
     }
 
     fn search(&self, query: String, sequence_kind: String) -> std::result::Result<List, Error> {

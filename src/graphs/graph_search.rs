@@ -4,12 +4,9 @@ use std::{
 };
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_graph::{GenGraph, GraphNode};
+use gen_graph::{BlockSlice, GenGraph, GraphNode};
 use gen_models::{
-    db::GraphConnection,
-    locus::{BlockSlice, GraphLocus},
-    node::Node,
-    sequence::reverse_complement,
+    db::GraphConnection, locus::GraphLocus, node::Node, sequence::reverse_complement,
 };
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};

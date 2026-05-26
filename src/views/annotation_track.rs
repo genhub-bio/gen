@@ -4,8 +4,8 @@ use std::{
 };
 
 use gen_core::{HashId, Strand, is_end_node, is_start_node};
-use gen_graph::GenGraph;
-use gen_models::locus::{BlockSlice, GraphLocus};
+use gen_graph::{BlockSlice, GenGraph};
+use gen_models::locus::GraphLocus;
 use gen_tui::{
     GraphController, ViewportState, VisualDetail, WorldRect, plotter::NodeSizer,
     theme::current_theme,

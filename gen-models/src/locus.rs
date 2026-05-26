@@ -16,32 +16,10 @@
 //! the additive model in the database we must convert back to the Node format.
 
 use gen_core::{HashId, Strand};
+pub use gen_graph::BlockSlice;
 use gen_graph::GraphNode;
-use serde::{Deserialize, Serialize};
 
 use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
-
-/// A slice of a single graph block: the block itself plus local start/end byte
-/// offsets within that block's sequence.  Middle blocks in a multi-block locus
-/// span the full block (`start = 0`, `end = block.length()`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BlockSlice {
-    pub block: GraphNode,
-    /// Local start offset within the block's sequence slice (`0..block.length()`).
-    pub start: usize,
-    /// Local end offset, exclusive (`start..=block.length()`).
-    pub end: usize,
-}
-
-impl BlockSlice {
-    pub fn full(block: GraphNode) -> Self {
-        Self {
-            block,
-            start: 0,
-            end: block.length() as usize,
-        }
-    }
-}
 
 /// A region in graph space expressed as an ordered list of block slices.
 /// The strand field specifies the 5'-3' orientation for double stranded DNA.
