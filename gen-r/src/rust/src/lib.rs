@@ -2183,20 +2183,18 @@ impl GenRepository {
         query_rows(self.context.graph().conn(), &query).map_err(Error::Other)
     }
 
-    fn get_block_group_by_id(&self, id: String) -> std::result::Result<List, Error> {
+    fn get_block_group_by_id(&self, id: String) -> std::result::Result<GenBlockGroup, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
-        let db_path = self.db_path();
-        Ok(block_group_record(bg, Some(&db_path)))
+        Ok(self.into_gen_block_group(bg))
     }
 
     fn get_block_groups(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let db_path = self.db_path();
         let values = BlockGroup::all(conn)
             .into_iter()
-            .map(|bg| block_group_record(bg, Some(&db_path)))
+            .map(|bg| r!(self.into_gen_block_group(bg)))
             .collect::<Vec<_>>();
         Ok(List::from_values(values))
     }
@@ -2206,14 +2204,13 @@ impl GenRepository {
         collection_name: String,
     ) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let db_path = self.db_path();
         let values = BlockGroup::query(
             conn,
             "SELECT * FROM block_groups WHERE collection_name = ?1",
             rusqlite::params![collection_name],
         )
         .into_iter()
-        .map(|bg| block_group_record(bg, Some(&db_path)))
+        .map(|bg| r!(self.into_gen_block_group(bg)))
         .collect::<Vec<_>>();
         Ok(List::from_values(values))
     }
@@ -2948,7 +2945,7 @@ impl GenRepository {
         new_sample: String,
         new_region: String,
         regions: String,
-    ) -> std::result::Result<List, Error> {
+    ) -> std::result::Result<GenBlockGroup, Error> {
         make_stitch_operation(
             &self.context,
             Some(collection_name.clone()),
@@ -2959,11 +2956,10 @@ impl GenRepository {
         )
         .map_err(|e| Error::Other(format!("Error stitching block groups: {e}")))?;
         let conn = self.context.graph().conn();
-        let db_path = self.db_path();
         BlockGroup::query(conn, "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3", rusqlite::params![collection_name, new_sample, new_region])
             .into_iter()
             .next()
-            .map(|bg| block_group_record(bg, Some(&db_path)))
+            .map(|bg| self.into_gen_block_group(bg))
             .ok_or_else(|| Error::Other("Stitched block group not found after creation".to_string()))
     }
 
@@ -3029,7 +3025,6 @@ impl GenRepository {
             .workspace()
             .ensure_gen_dir()
             .join("search_index");
-        let db_path = self.db_path();
         let mut results = Vec::new();
         for bg in bgs {
             let graph = BlockGroup::get_graph(conn, &bg.id);
@@ -3046,8 +3041,9 @@ impl GenRepository {
             };
             if !matches.is_empty() {
                 let locus_records = matches.iter().map(graph_locus_record).collect::<Vec<_>>();
+                let gen_bg = self.into_gen_block_group(bg);
                 results.push(list!(
-                    block_group = block_group_record(bg, Some(&db_path)),
+                    block_group = r!(gen_bg),
                     matches = List::from_values(locus_records)
                 ));
             }
@@ -3085,75 +3081,6 @@ impl GenRepository {
             }
         }
         Ok(())
-    }
-
-    fn bg_subgraph(
-        &self,
-        collection_name: String,
-        sample_name: String,
-        bg_name: String,
-        new_sample: String,
-        start: i64,
-        end: i64,
-        backbone: Nullable<String>,
-    ) -> std::result::Result<List, Error> {
-        let db_path = self.db_path();
-        let region = format!("{bg_name}:{start}-{end}");
-        derive_subgraph_operation(
-            &self.context,
-            Some(collection_name.clone()),
-            sample_name,
-            new_sample.clone(),
-            region,
-            nullable_string_to_option(backbone),
-        )
-        .map_err(|e| Error::Other(format!("Error deriving subgraph: {e}")))?;
-        let conn = self.context.graph().conn();
-        BlockGroup::query(conn, "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3", rusqlite::params![collection_name, new_sample, bg_name])
-            .into_iter()
-            .next()
-            .map(|bg| block_group_record(bg, Some(&db_path)))
-            .ok_or_else(|| Error::Other("Derived subgraph not found after creation".to_string()))
-    }
-
-    fn bg_chunks(
-        &self,
-        collection_name: String,
-        sample_name: String,
-        bg_name: String,
-        new_sample: String,
-        breakpoints: Vec<i32>,
-        chunk_size: Nullable<i64>,
-        backbone: Nullable<String>,
-    ) -> std::result::Result<List, Error> {
-        let db_path = self.db_path();
-        derive_chunks_operation(
-            &self.context,
-            Some(collection_name.clone()),
-            sample_name,
-            new_sample.clone(),
-            bg_name.clone(),
-            nullable_string_to_option(backbone),
-            if breakpoints.is_empty() {
-                None
-            } else {
-                Some(breakpoints.into_iter().map(i64::from).collect())
-            },
-            nullable_i64_to_option(chunk_size),
-        )
-        .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
-        let conn = self.context.graph().conn();
-        let prefix = format!("{bg_name}.");
-        let matching = BlockGroup::query(
-            conn,
-            "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2",
-            rusqlite::params![collection_name, new_sample],
-        )
-        .into_iter()
-        .filter(|bg| bg.name == bg_name || bg.name.starts_with(&prefix))
-        .map(|bg| block_group_record(bg, Some(&db_path)))
-        .collect::<Vec<_>>();
-        Ok(List::from_values(matching))
     }
 
     fn derive_subgraph(
@@ -3205,9 +3132,299 @@ impl GenRepository {
     }
 }
 
+impl GenRepository {
+    fn into_gen_block_group(&self, bg: BlockGroup) -> GenBlockGroup {
+        GenBlockGroup {
+            context: self.context.clone(),
+            id: bg.id,
+            collection_name: bg.collection_name,
+            sample_name: bg.sample_name,
+            name: bg.name,
+        }
+    }
+}
+
+// --- GenBlockGroup ---
+
+#[extendr]
+#[derive(Clone)]
+struct GenBlockGroup {
+    context: GenDbContext,
+    id: HashId,
+    collection_name: String,
+    sample_name: String,
+    name: String,
+}
+
+// DbContext uses Rc internally; R is single-threaded so this is safe.
+unsafe impl Send for GenBlockGroup {}
+unsafe impl Sync for GenBlockGroup {}
+
+#[extendr]
+impl GenBlockGroup {
+    fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    fn collection(&self) -> &str {
+        &self.collection_name
+    }
+
+    fn sample_name(&self) -> &str {
+        &self.sample_name
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn db_path(&self) -> String {
+        self.context
+            .graph()
+            .conn()
+            .path()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| {
+                self.context
+                    .workspace()
+                    .ensure_gen_dir()
+                    .join("default.db")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+    }
+
+    fn gen_dir(&self) -> String {
+        self.context
+            .workspace()
+            .ensure_gen_dir()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn export_fasta(&self, filename: String) -> std::result::Result<(), Error> {
+        let conn = self.context.graph().conn();
+        fasta_export(
+            conn,
+            &self.collection_name,
+            Some(&self.sample_name),
+            &PathBuf::from(&filename),
+        )
+        .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))
+    }
+
+    fn export_gfa(&self, filename: String, node_max: Nullable<i64>) -> std::result::Result<(), Error> {
+        let conn = self.context.graph().conn();
+        gfa_export(
+            conn,
+            &self.collection_name,
+            &PathBuf::from(&filename),
+            &self.sample_name,
+            nullable_i64_to_option(node_max),
+        )
+        .map_err(|e| Error::Other(format!("GFA export failed: {e}")))
+    }
+
+    fn export_genbank(&self, filename: String) -> std::result::Result<(), Error> {
+        let conn = self.context.graph().conn();
+        let writer = BufWriter::new(
+            File::create(&filename)
+                .map_err(|e| Error::Other(format!("Failed to create file '{filename}': {e}")))?,
+        );
+        genbank_export(conn, &self.collection_name, &self.sample_name, writer)
+            .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))
+    }
+
+    fn build_index(&self, sequence_kind: String, k: i32) -> std::result::Result<(), Error> {
+        let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
+        let normalized = kind != SequenceKind::Exact;
+        let conn = self.context.graph().conn();
+        let index_dir = self
+            .context
+            .workspace()
+            .ensure_gen_dir()
+            .join("search_index");
+        fs::create_dir_all(&index_dir)
+            .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
+        let graph = BlockGroup::get_graph(conn, &self.id);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+        let index = SeedIndex::build(&matcher, k as usize, normalized);
+        let path = index_dir.join(format!("{}.bin", self.id));
+        let bytes = index
+            .to_bytes_with_header()
+            .map_err(|e| Error::Other(format!("Failed to serialize index: {e}")))?;
+        fs::write(&path, bytes)
+            .map_err(|e| Error::Other(format!("Failed to write index: {e}")))
+    }
+
+    fn search(&self, query: String, sequence_kind: String) -> std::result::Result<List, Error> {
+        let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
+        let conn = self.context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, &self.id);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+        let index_dir = self
+            .context
+            .workspace()
+            .ensure_gen_dir()
+            .join("search_index");
+        let index_path = index_dir.join(format!("{}.bin", self.id));
+        let index = fs::read(&index_path)
+            .ok()
+            .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok());
+        let query_bytes = query.as_bytes();
+        let matches = match index {
+            Some(idx) => matcher
+                .find_all_with_seed_index(&idx, query_bytes)
+                .unwrap_or_else(|_| matcher.find_all(query_bytes)),
+            None => matcher.find_all(query_bytes),
+        };
+        let locus_records = matches.iter().map(graph_locus_record).collect::<Vec<_>>();
+        Ok(List::from_values(locus_records))
+    }
+
+    fn clear_index(&self) -> std::result::Result<(), Error> {
+        let path = self
+            .context
+            .workspace()
+            .ensure_gen_dir()
+            .join("search_index")
+            .join(format!("{}.bin", self.id));
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|e| Error::Other(format!("Failed to delete index: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn subgraph(
+        &self,
+        new_sample: String,
+        start: i64,
+        end: i64,
+        backbone: Nullable<String>,
+    ) -> std::result::Result<GenBlockGroup, Error> {
+        let region = format!("{}:{start}-{end}", self.name);
+        derive_subgraph_operation(
+            &self.context,
+            Some(self.collection_name.clone()),
+            self.sample_name.clone(),
+            new_sample.clone(),
+            region,
+            nullable_string_to_option(backbone),
+        )
+        .map_err(|e| Error::Other(format!("Error deriving subgraph: {e}")))?;
+        let conn = self.context.graph().conn();
+        BlockGroup::query(
+            conn,
+            "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+            rusqlite::params![self.collection_name, new_sample, self.name],
+        )
+        .into_iter()
+        .next()
+        .map(|bg| GenBlockGroup {
+            context: self.context.clone(),
+            id: bg.id,
+            collection_name: bg.collection_name,
+            sample_name: bg.sample_name,
+            name: bg.name,
+        })
+        .ok_or_else(|| Error::Other("Derived subgraph not found after creation".to_string()))
+    }
+
+    fn chunks(
+        &self,
+        new_sample: String,
+        breakpoints: Vec<i32>,
+        chunk_size: Nullable<i64>,
+        backbone: Nullable<String>,
+    ) -> std::result::Result<List, Error> {
+        derive_chunks_operation(
+            &self.context,
+            Some(self.collection_name.clone()),
+            self.sample_name.clone(),
+            new_sample.clone(),
+            self.name.clone(),
+            nullable_string_to_option(backbone),
+            if breakpoints.is_empty() {
+                None
+            } else {
+                Some(breakpoints.into_iter().map(i64::from).collect())
+            },
+            nullable_i64_to_option(chunk_size),
+        )
+        .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
+        let conn = self.context.graph().conn();
+        let prefix = format!("{}.", self.name);
+        let gen_bgs: Vec<Robj> = BlockGroup::query(
+            conn,
+            "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2",
+            rusqlite::params![self.collection_name, new_sample],
+        )
+        .into_iter()
+        .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
+        .map(|bg| {
+            r!(GenBlockGroup {
+                context: self.context.clone(),
+                id: bg.id,
+                collection_name: bg.collection_name,
+                sample_name: bg.sample_name,
+                name: bg.name,
+            })
+        })
+        .collect();
+        Ok(List::from_values(gen_bgs))
+    }
+
+    fn block_group_to_dict(&self) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, &self.id);
+
+        let nodes = graph
+            .nodes()
+            .map(|node| {
+                list!(
+                    key = block_record(node.node_id, node.sequence_start, node.sequence_end),
+                    node_id = node.node_id.to_string(),
+                    sequence_start = node.sequence_start,
+                    sequence_end = node.sequence_end
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let edges = graph
+            .all_edges()
+            .map(|(src, dst, edge_weights)| {
+                let weights = edge_weights
+                    .iter()
+                    .map(|weight| {
+                        list!(
+                            edge_id = weight.edge_id.to_string(),
+                            source_strand = weight.source_strand.to_string(),
+                            target_strand = weight.target_strand.to_string(),
+                            chromosome_index = weight.chromosome_index,
+                            phased = weight.phased
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                list!(
+                    source = block_record(src.node_id, src.sequence_start, src.sequence_end),
+                    target = block_record(dst.node_id, dst.sequence_start, dst.sequence_end),
+                    weights = List::from_values(weights)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Ok(list!(
+            nodes = List::from_values(nodes),
+            edges = List::from_values(edges)
+        ))
+    }
+}
+
 extendr_module! {
     mod genr;
     impl GenRepository;
+    impl GenBlockGroup;
     fn db_context;
     fn import_fasta;
     fn import_sequences;

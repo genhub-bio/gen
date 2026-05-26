@@ -143,10 +143,6 @@ GenRepository$search <- function(query, block_group_ids, sequence_kind) .Call("w
 
 GenRepository$clear_index <- function(block_group_ids) .Call("wrap__GenRepository__clear_index", self, block_group_ids, PACKAGE = "genr")
 
-GenRepository$bg_subgraph <- function(collection_name, sample_name, bg_name, new_sample, start, end, backbone) .Call("wrap__GenRepository__bg_subgraph", self, collection_name, sample_name, bg_name, new_sample, start, end, backbone, PACKAGE = "genr")
-
-GenRepository$bg_chunks <- function(collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone) .Call("wrap__GenRepository__bg_chunks", self, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone, PACKAGE = "genr")
-
 GenRepository$derive_subgraph <- function(collection, sample, new_sample, region, backbone) .Call("wrap__GenRepository__derive_subgraph", self, collection, sample, new_sample, region, backbone, PACKAGE = "genr")
 
 GenRepository$derive_chunks <- function(collection, sample, new_sample, region, backbone, breakpoints, chunk_size) .Call("wrap__GenRepository__derive_chunks", self, collection, sample, new_sample, region, backbone, breakpoints, chunk_size, PACKAGE = "genr")
@@ -156,5 +152,43 @@ GenRepository$derive_chunks <- function(collection, sample, new_sample, region, 
 
 #' @export
 `[[.GenRepository` <- `$.GenRepository`
+
+GenBlockGroup <- new.env(parent = emptyenv())
+
+GenBlockGroup$id <- function() .Call("wrap__GenBlockGroup__id", self, PACKAGE = "genr")
+
+GenBlockGroup$collection <- function() .Call("wrap__GenBlockGroup__collection", self, PACKAGE = "genr")
+
+GenBlockGroup$sample_name <- function() .Call("wrap__GenBlockGroup__sample_name", self, PACKAGE = "genr")
+
+GenBlockGroup$name <- function() .Call("wrap__GenBlockGroup__name", self, PACKAGE = "genr")
+
+GenBlockGroup$db_path <- function() .Call("wrap__GenBlockGroup__db_path", self, PACKAGE = "genr")
+
+GenBlockGroup$gen_dir <- function() .Call("wrap__GenBlockGroup__gen_dir", self, PACKAGE = "genr")
+
+GenBlockGroup$export_fasta <- function(filename) .Call("wrap__GenBlockGroup__export_fasta", self, filename, PACKAGE = "genr")
+
+GenBlockGroup$export_gfa <- function(filename, node_max) .Call("wrap__GenBlockGroup__export_gfa", self, filename, node_max, PACKAGE = "genr")
+
+GenBlockGroup$export_genbank <- function(filename) .Call("wrap__GenBlockGroup__export_genbank", self, filename, PACKAGE = "genr")
+
+GenBlockGroup$build_index <- function(sequence_kind, k) .Call("wrap__GenBlockGroup__build_index", self, sequence_kind, k, PACKAGE = "genr")
+
+GenBlockGroup$search <- function(query, sequence_kind) .Call("wrap__GenBlockGroup__search", self, query, sequence_kind, PACKAGE = "genr")
+
+GenBlockGroup$clear_index <- function() .Call("wrap__GenBlockGroup__clear_index", self, PACKAGE = "genr")
+
+GenBlockGroup$subgraph <- function(new_sample, start, end, backbone) .Call("wrap__GenBlockGroup__subgraph", self, new_sample, start, end, backbone, PACKAGE = "genr")
+
+GenBlockGroup$chunks <- function(new_sample, breakpoints, chunk_size, backbone) .Call("wrap__GenBlockGroup__chunks", self, new_sample, breakpoints, chunk_size, backbone, PACKAGE = "genr")
+
+GenBlockGroup$block_group_to_dict <- function() .Call("wrap__GenBlockGroup__block_group_to_dict", self, PACKAGE = "genr")
+
+#' @export
+`$.GenBlockGroup` <- function (self, name) { func <- GenBlockGroup[[name]]; environment(func) <- environment(); func }
+
+#' @export
+`[[.GenBlockGroup` <- `$.GenBlockGroup`
 
 

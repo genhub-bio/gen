@@ -95,77 +95,48 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 }
 
 
-.as_block_group <- function(x, gen_dir = NULL) {
+.as_block_group <- function(gen_bg) {
   bg <- new.env(parent = emptyenv())
-  bg$id <- HashId(x$id)
-  bg$collection <- x$collection
-  bg$sample_name <- x$sample_name
-  bg$name <- x$name
-  bg$db_path <- x$db_path %||% NULL
-  bg$gen_dir <- gen_dir
+  bg$.inner <- gen_bg
+  bg$id <- HashId(gen_bg$id())
+  bg$collection <- gen_bg$collection()
+  bg$sample_name <- gen_bg$sample_name()
+  bg$name <- gen_bg$name()
+  bg$db_path <- gen_bg$db_path()
+  bg$gen_dir <- gen_bg$gen_dir()
 
   bg$plot <- function(rows = NULL, cols = NULL, detail = "normal") {
-    if (is.null(bg$db_path)) {
-      stop("plot() requires a db_path; obtain BlockGroup via Repository()", call. = FALSE)
-    }
     GenPlot(bg$db_path, bg$id$hash_id, detail = detail, rows = rows, cols = cols)
   }
 
-  bg$export_fasta <- function(filename) {
-    if (is.null(bg$db_path)) stop("export_fasta() requires a db_path", call. = FALSE)
-    repo_bg_export_fasta(bg$db_path, bg$collection, bg$sample_name, filename)
-  }
+  bg$export_fasta <- function(filename) gen_bg$export_fasta(filename)
 
-  bg$export_gfa <- function(filename, node_max = NULL) {
-    if (is.null(bg$db_path)) stop("export_gfa() requires a db_path", call. = FALSE)
-    repo_bg_export_gfa(bg$db_path, bg$collection, bg$sample_name, filename, node_max)
-  }
+  bg$export_gfa <- function(filename, node_max = NULL) gen_bg$export_gfa(filename, node_max)
 
-  bg$export_genbank <- function(filename) {
-    if (is.null(bg$db_path)) stop("export_genbank() requires a db_path", call. = FALSE)
-    repo_bg_export_genbank(bg$db_path, bg$collection, bg$sample_name, filename)
-  }
+  bg$export_genbank <- function(filename) gen_bg$export_genbank(filename)
 
   bg$build_index <- function(sequence_kind = "dna", k = 16L) {
-    if (is.null(bg$db_path) || is.null(bg$gen_dir))
-      stop("build_index() requires a Repository context", call. = FALSE)
-    repo_build_index(bg$db_path, bg$gen_dir, c(bg$id$hash_id), sequence_kind, as.integer(k))
+    gen_bg$build_index(sequence_kind, as.integer(k))
   }
 
-  bg$search <- function(query, sequence_kind = "dna") {
-    if (is.null(bg$db_path) || is.null(bg$gen_dir))
-      stop("search() requires a Repository context", call. = FALSE)
-    result <- repo_search(bg$db_path, bg$gen_dir, query, c(bg$id$hash_id), sequence_kind)
-    if (length(result) == 0L) list() else result[[1L]]$matches
-  }
+  bg$search <- function(query, sequence_kind = "dna") gen_bg$search(query, sequence_kind)
 
-  bg$clear_index <- function() {
-    if (is.null(bg$gen_dir)) stop("clear_index() requires a Repository context", call. = FALSE)
-    repo_clear_index(bg$gen_dir, c(bg$id$hash_id))
-  }
+  bg$clear_index <- function() gen_bg$clear_index()
 
   bg$subgraph <- function(new_sample, start, end, backbone = NULL) {
-    if (is.null(bg$db_path) || is.null(bg$gen_dir))
-      stop("subgraph() requires a Repository context", call. = FALSE)
-    workspace_path <- dirname(bg$gen_dir)
-    result <- repo_bg_subgraph(
-      workspace_path, bg$db_path, bg$collection, bg$sample_name,
-      bg$name, new_sample, as.integer(start), as.integer(end), backbone
-    )
-    .as_block_group(result, gen_dir = bg$gen_dir)
+    .as_block_group(gen_bg$subgraph(new_sample, as.integer(start), as.integer(end), backbone))
   }
 
   bg$chunks <- function(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL) {
-    if (is.null(bg$db_path) || is.null(bg$gen_dir))
-      stop("chunks() requires a Repository context", call. = FALSE)
-    workspace_path <- dirname(bg$gen_dir)
-    results <- repo_bg_chunks(
-      workspace_path, bg$db_path, bg$collection, bg$sample_name,
-      bg$name, new_sample, breakpoints,
-      if (is.null(chunk_size)) NULL else as.integer(chunk_size),
-      backbone
+    lapply(
+      gen_bg$chunks(
+        new_sample,
+        if (is.null(breakpoints)) integer(0) else as.integer(breakpoints),
+        chunk_size,
+        backbone
+      ),
+      .as_block_group
     )
-    lapply(results, .as_block_group, gen_dir = bg$gen_dir)
   }
 
   class(bg) <- "gen_block_group"
@@ -561,15 +532,15 @@ Repository <- function(path = NULL) {
 
   repo$get_block_group_by_id <- function(id) {
     id_str <- if (inherits(id, "gen_hash_id")) id$hash_id else as.character(id)
-    .as_block_group(inner$get_block_group_by_id(id_str), gen_dir = repo$gen_dir)
+    .as_block_group(inner$get_block_group_by_id(id_str))
   }
 
   repo$get_block_groups <- function() {
-    lapply(inner$get_block_groups(), .as_block_group, gen_dir = repo$gen_dir)
+    lapply(inner$get_block_groups(), .as_block_group)
   }
 
   repo$get_block_groups_by_collection <- function(collection) {
-    lapply(inner$get_block_groups_by_collection(collection), .as_block_group, gen_dir = repo$gen_dir)
+    lapply(inner$get_block_groups_by_collection(collection), .as_block_group)
   }
 
   repo$block_group_to_dict <- function(block_group) {
@@ -601,8 +572,7 @@ Repository <- function(path = NULL) {
                      sample_name, bg$sample_name), call. = FALSE)
     }
     regions <- paste(sapply(bgs, function(bg) bg$name), collapse = ",")
-    result <- inner$stitch(collection, sample_name, new_sample, new_region, regions)
-    .as_block_group(result, gen_dir = repo$gen_dir)
+    .as_block_group(inner$stitch(collection, sample_name, new_sample, new_region, regions))
   }
 
   repo$build_index <- function(bgs = NULL, sequence_kind = "dna", k = 16L) {
@@ -615,7 +585,7 @@ Repository <- function(path = NULL) {
     results <- inner$search(query, ids, sequence_kind)
     lapply(results, function(r) {
       list(
-        block_group = .as_block_group(r$block_group, gen_dir = repo$gen_dir),
+        block_group = .as_block_group(r$block_group),
         matches = r$matches
       )
     })
