@@ -30,12 +30,12 @@ pub(crate) fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
     }
 }
 
-/// A block group returned by a ``Repository``.
+/// A sequence graph returned by a ``Repository``.
 ///
 /// ``BlockGroup`` objects cannot be shared across threads because they hold a
 /// reference to the database connection of the ``Repository`` that created them.
 ///
-/// To use a block group's identity in another thread, capture its ``id``,
+/// To use a sequence graph's identity in another thread, capture its ``id``,
 /// open a fresh ``Repository`` in that thread, and look it up by id::
 ///
 ///     bg_id = bg.id
@@ -46,9 +46,9 @@ pub(crate) fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
 ///         bg = r.get_block_group_by_id(bg_id)
 ///         ...
 // unsendable because DbContext contains Rc (rusqlite::Connection is !Sync)
-#[pyclass(name = "BlockGroup", unsendable)]
+#[pyclass(name = "SequenceGraph", unsendable)]
 #[derive(Clone)]
-pub struct PyBlockGroup {
+pub struct PySequenceGraph {
     pub id: HashId,
     #[pyo3(get)]
     pub collection_name: String,
@@ -60,10 +60,10 @@ pub struct PyBlockGroup {
 }
 
 #[pymethods]
-impl PyBlockGroup {
+impl PySequenceGraph {
     #[new]
     pub fn new(id: HashId, collection_name: String, name: String, sample_name: String) -> Self {
-        PyBlockGroup {
+        PySequenceGraph {
             id,
             collection_name,
             sample_name,
@@ -79,7 +79,7 @@ impl PyBlockGroup {
 
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "BlockGroup({}, {}, {}, {})",
+            "SequenceGraph({}, {}, {}, {})",
             self.id, self.collection_name, self.sample_name, self.name
         ))
     }
@@ -93,7 +93,7 @@ impl PyBlockGroup {
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
-        if let Ok(other_bg) = other.extract::<PyRef<PyBlockGroup>>() {
+        if let Ok(other_bg) = other.extract::<PyRef<PySequenceGraph>>() {
             Ok(self.id == other_bg.id
                 && self.collection_name == other_bg.collection_name
                 && self.sample_name == other_bg.sample_name
@@ -103,13 +103,13 @@ impl PyBlockGroup {
         }
     }
 
-    /// Plot this block group's graph as an interactive Jupyter widget.
+    /// Plot this sequence graph as an interactive Jupyter widget.
     ///
     /// Displays the widget immediately and returns it for further use.
     /// Outside of an IPython/Jupyter environment the display call is silently
     /// skipped and only the widget is returned.
     ///
-    /// Raises ``RuntimeError`` if this block group was not created via a
+    /// Raises ``RuntimeError`` if this sequence graph was not created via a
     /// ``Repository``.
     ///
     /// Parameters
@@ -124,7 +124,7 @@ impl PyBlockGroup {
     ///     shows the smallest representation.
     #[pyo3(signature = (rows=None, cols=None, detail=None))]
     fn plot(
-        slf: &Bound<'_, PyBlockGroup>,
+        slf: &Bound<'_, PySequenceGraph>,
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
@@ -137,7 +137,7 @@ impl PyBlockGroup {
                 Some(ctx) => (ctx, bg.id),
                 None => {
                     return Err(PyRuntimeError::new_err(
-                        "plot() requires a Repository context; obtain BlockGroups via Repository by query or id.",
+                        "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
                     ));
                 }
             }
@@ -158,7 +158,7 @@ impl PyBlockGroup {
         build_widget(py, ctrl, rows, cols)
     }
 
-    /// Search for exact occurrences of `query` in this block group.
+    /// Search for exact occurrences of `query` in this sequence graph.
     ///
     /// Returns a list of `GraphLocus` objects. Each locus exposes:
     ///   - `.start()` / `.end()` → `GraphPos` (node + byte offset)
@@ -181,7 +181,7 @@ impl PyBlockGroup {
         let kind = parse_sequence_kind(sequence_kind)?;
         let context = self.context.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
-                "search() requires a Repository context; obtain BlockGroup via Repository",
+                "search() requires a Repository context; obtain SequenceGraph via Repository",
             )
         })?;
         let conn = context.graph().conn();
@@ -210,20 +210,20 @@ impl PyBlockGroup {
             .collect())
     }
 
-    /// IPython display hook — called when a cell ends with a BlockGroup.
-    fn _ipython_display_(slf: &Bound<'_, PyBlockGroup>) -> PyResult<()> {
+    /// IPython display hook — called when a cell ends with a SequenceGraph.
+    fn _ipython_display_(slf: &Bound<'_, PySequenceGraph>) -> PyResult<()> {
         let py = slf.py();
         let widget = slf.call_method0("plot")?;
         PyModule::import(py, "IPython.display")?.call_method1("display", (widget,))?;
         Ok(())
     }
 
-    /// Build a junction-aware k-mer seed index for this block group.
+    /// Build a junction-aware k-mer seed index for this sequence graph.
     ///
     /// Saves the index to `.gen/search_index/{id}.bin` so that subsequent
     /// calls to `Repository.search()` load it automatically.
     ///
-    /// Raises ``RuntimeError`` if this block group was not created via a
+    /// Raises ``RuntimeError`` if this sequence graph was not created via a
     /// ``Repository``.
     ///
     /// Parameters
@@ -239,7 +239,7 @@ impl PyBlockGroup {
         let kind = parse_sequence_kind(sequence_kind)?;
         let context = self.context.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
-                "build_index() requires a Repository context; obtain BlockGroup via Repository",
+                "build_index() requires a Repository context; obtain SequenceGraph via Repository",
             )
         })?;
         let gen_dir = context.workspace().ensure_gen_dir();
@@ -260,16 +260,16 @@ impl PyBlockGroup {
         Ok(())
     }
 
-    /// Clear the search index for this block group.
+    /// Clear the search index for this sequence graph.
     ///
     /// Removes `.gen/search_index/{id}.bin` if it exists.
     ///
-    /// Raises ``RuntimeError`` if this block group was not created via a
+    /// Raises ``RuntimeError`` if this sequence graph was not created via a
     /// ``Repository``.
     pub fn clear_index(&self) -> PyResult<()> {
         let context = self.context.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
-                "clear_index() requires a Repository context; obtain BlockGroup via Repository",
+                "clear_index() requires a Repository context; obtain SequenceGraph via Repository",
             )
         })?;
         let gen_dir = context.workspace().ensure_gen_dir();
@@ -426,8 +426,8 @@ impl PyBlockGroup {
 }
 
 #[pymethods]
-impl PyBlockGroup {
-    /// Export all block groups in this block group's sample to FASTA.
+impl PySequenceGraph {
+    /// Export all sequence graphs in this sequence graph's sample to FASTA.
     ///
     /// Parameters
     /// ----------
@@ -445,7 +445,7 @@ impl PyBlockGroup {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export FASTA '{}': {e}", filename)))
     }
 
-    /// Export all block groups in this block group's sample to GFA.
+    /// Export all sequence graphs in this sequence graph's sample to GFA.
     ///
     /// Parameters
     /// ----------
@@ -467,7 +467,7 @@ impl PyBlockGroup {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export GFA '{}': {e}", filename)))
     }
 
-    /// Export all block groups in this block group's sample to GenBank.
+    /// Export all sequence graphs in this sequence graph's sample to GenBank.
     ///
     /// Parameters
     /// ----------
@@ -485,18 +485,18 @@ impl PyBlockGroup {
     }
 }
 
-impl PyBlockGroup {
+impl PySequenceGraph {
     fn require_context(&self, method: &str) -> PyResult<&DbContext> {
         self.context.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(format!(
-                "{method} requires a Repository context; obtain BlockGroup via Repository"
+                "{method} requires a Repository context; obtain SequenceGraph via Repository"
             ))
         })
     }
 
-    /// Wraps a raw `BlockGroup` model with this block group's database context.
+    /// Wraps a raw `BlockGroup` model with this sequence graph's database context.
     fn into_py_block_group(&self, bg: BlockGroup) -> Self {
-        PyBlockGroup {
+        PySequenceGraph {
             id: bg.id,
             collection_name: bg.collection_name,
             sample_name: bg.sample_name,
@@ -507,13 +507,13 @@ impl PyBlockGroup {
 }
 
 #[pymethods]
-impl PyBlockGroup {
-    /// Derive a coordinate-bounded subgraph from this block group.
+impl PySequenceGraph {
+    /// Derive a coordinate-bounded subgraph from this sequence graph.
     ///
     /// Parameters
     /// ----------
     /// new_sample : str
-    ///     Sample name for the derived block group.
+    ///     Sample name for the derived sequence graph.
     /// start : int
     ///     Start coordinate along the path (inclusive).
     /// end : int
@@ -527,7 +527,7 @@ impl PyBlockGroup {
         start: i64,
         end: i64,
         backbone: Option<String>,
-    ) -> PyResult<PyBlockGroup> {
+    ) -> PyResult<PySequenceGraph> {
         let ctx = self.require_context("subgraph()")?;
         let region = format!("{}:{}-{}", self.name, start, end);
         derive_subgraph_operation(
@@ -551,12 +551,12 @@ impl PyBlockGroup {
         Ok(self.into_py_block_group(found))
     }
 
-    /// Split this block group into coordinate-bounded subgraphs.
+    /// Split this sequence graph into coordinate-bounded subgraphs.
     ///
     /// Parameters
     /// ----------
     /// new_sample : str
-    ///     Sample name for the derived block groups.
+    ///     Sample name for the derived sequence graphs.
     /// breakpoints : str, optional
     ///     Comma-separated coordinate values at which to split.
     /// chunk_size : int, optional
@@ -570,7 +570,7 @@ impl PyBlockGroup {
         breakpoints: Option<Vec<i64>>,
         chunk_size: Option<i64>,
         backbone: Option<String>,
-    ) -> PyResult<Vec<PyBlockGroup>> {
+    ) -> PyResult<Vec<PySequenceGraph>> {
         let ctx = self.require_context("chunks()")?;
         derive_chunks_operation(
             ctx,

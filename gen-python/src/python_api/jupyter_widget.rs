@@ -41,7 +41,7 @@ use ratatui::{
 use serde::Serialize;
 
 use crate::python_api::{
-    block_group::PyBlockGroup,
+    block_group::PySequenceGraph,
     graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
     repository::PyRepository,
 };
@@ -294,12 +294,12 @@ impl PyGraphController {
 
 #[pymethods]
 impl PyGraphController {
-    /// Create a `GraphController` from a `Repository` and a `PyBlockGroup`.
+    /// Create a `GraphController` from a `Repository` and a `PySequenceGraph`.
     #[classmethod]
     fn from_block_group(
         _cls: &Bound<'_, PyType>,
         repo: &PyRepository,
-        block_group: &PyBlockGroup,
+        block_group: &PySequenceGraph,
     ) -> PyResult<Self> {
         let bg_id = block_group.id;
         let conn = repo.context.graph().conn();
@@ -939,7 +939,7 @@ mod tests {
 }
 
 /// Instantiate a `GenGraphWidget` from a controller and optional viewport
-/// Shared by `PyBlockGroup::plot` and `PyRepository::plot`.
+/// Shared by `PySequenceGraph::plot` and `PyRepository::plot`.
 pub fn build_widget(
     py: Python<'_>,
     ctrl: Py<PyGraphController>,
