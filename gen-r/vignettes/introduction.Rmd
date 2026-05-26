@@ -148,6 +148,29 @@ hits_wt <- repo$search("GGTCTC", bgs = list(bg_wt))
 cat("BsaI sites in wild-type:", length(hits_wt[[1]]$matches), "\n")   # 0
 ```
 
+### Navigate and highlight search results
+
+Each entry in the `matches` list is a locus record with `start`, `end`,
+`blocks`, and `strand`.  Pass a locus directly to `goto_match` to centre the
+viewport on it, and to `highlight_match` to colour it on the canvas.
+
+```{r highlight-bsai}
+matches <- hits[[1]]$matches
+
+# Jump to the first BsaI site and highlight both sites.
+p_gg$goto_match(matches[[1]])
+p_gg$highlight_match(matches[[1]], color = "cyan")
+p_gg$highlight_match(matches[[2]], color = "cyan")
+p_gg
+```
+
+`clear_highlights()` removes all highlights without affecting the viewport:
+
+```{r clear-highlights}
+p_gg$clear_highlights()
+p_gg
+```
+
 ## Export and send for sequencing
 
 ```{r export}

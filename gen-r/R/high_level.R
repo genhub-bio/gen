@@ -161,8 +161,14 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #'     \item{\code{zoom_out()}}{Step one zoom level out. Returns self invisibly.}
 #'     \item{\code{move_by(dx, dy)}}{Pan the viewport by \code{dx} columns and \code{dy} rows. Returns self invisibly.}
 #'     \item{\code{handle_click(col, row)}}{Send a mouse click; returns \code{TRUE} if a node was hit.}
-#'     \item{\code{set_detail(detail)}}{Change node detail level. Returns self invisibly.}
+#'     \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
 #'     \item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
+#'     \item{\code{goto_match(match_locus)}}{Center the viewport on a search result locus. Sets detail to \code{"full"}. Returns self invisibly.}
+#'     \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be any named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}). Returns self invisibly.}
+#'     \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
+#'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
+#'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
+#'     \item{\code{clear_tracks()}}{Remove all annotation track panels. Returns self invisibly.}
 #'   }
 #' @export
 GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL) {
@@ -511,7 +517,15 @@ import_granges <- function(regions, sequences, sample = "sample", collection = N
 #'     \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection=NULL)}}{Derive a subgraph block group.}
 #'     \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection=NULL)}}{Split a block group into chunks.}
 #'     \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
-#'     \item{\code{search(query, bgs, sequence_kind)}}{Search for exact sequence occurrences across block groups.}
+#'     \item{\code{search(query, bgs = NULL, sequence_kind = "dna")}}{Search for exact sequence occurrences across block groups.
+#'       Returns a list, one entry per block group that has at least one hit.  Each entry is a list with:
+#'       \code{block_group} (a \code{gen_block_group}) and \code{matches} (a list of locus records).
+#'       Each locus record has fields \code{start}, \code{end}, \code{blocks}, and \code{strand}.
+#'       \code{start$block} is the first \code{gen_block} of the match; \code{start$offset} is the byte offset within that block's local sequence where the match begins (\code{0} = block start).
+#'       \code{end$block} is the last \code{gen_block}; \code{end$offset} is the exclusive end offset within that block's local sequence.
+#'       \code{blocks} is a list of every \code{gen_block} spanned by the match; middle blocks are fully covered.
+#'       \code{strand} is one of \code{"forward"}, \code{"reverse"}, or \code{"unknown"}.
+#'       Pass a match locus directly to \code{plot$goto_match()} or \code{plot$highlight_match()}.}
 #'     \item{\code{clear_index(bgs)}}{Remove cached search index files.}
 #'     \item{\code{execute(query)}}{Run a raw SQL statement against the graph database.}
 #'     \item{\code{query(query)}}{Run a raw SQL query and return results as a list of rows.}
