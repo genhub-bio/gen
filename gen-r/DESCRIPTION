@@ -3,21 +3,31 @@ Title: R Bindings for the Gen Sequence Graph Database
 Version: 0.1.31
 Authors@R:
     person("GenHub", "Bio", email = "opensource@genhub.bio", role = c("aut", "cre"))
-Description: R bindings for the Gen graph database and sequence version control
-    system. The package embeds the Rust Gen engine via extendr and exposes
-    repository initialization and database-context helpers to R. It targets
-    sequence-centric genomics workflows and provides a small R interface over
-    the Gen sequence graph engine.
+Description: R bindings for the Gen sequence graph database and version control
+    system. The package embeds the Rust Gen engine via extendr and exposes a
+    Repository interface for importing, updating, exporting, and visualising
+    sequence graphs. Supports FASTA, GFA, GenBank, and VCF workflows, as well
+    as combinatorial library design and Bioconductor DNAStringSet/GRanges input.
 License: Apache License 2.0 + file LICENSE
 URL: https://github.com/genhub-bio/gen
 BugReports: https://github.com/genhub-bio/gen/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
 SystemRequirements: Prebuilt release binaries require no external toolchain;
     source builds require Cargo (Rust toolchain), libclang, and Cap'n Proto
 Depends: R (>= 4.2)
+Imports:
+    anyhtmlwidget,
+    jsonlite,
+    methods
+Remotes:
+    keller-mark/anyhtmlwidget
 Suggests:
+    knitr,
+    rmarkdown,
     testthat (>= 3.0.0)
+VignetteBuilder: knitr
 Config/testthat/edition: 3
 NeedsCompilation: yes
+Config/roxygen2/version: 8.0.0
+Config/rextendr/version: 0.5.0

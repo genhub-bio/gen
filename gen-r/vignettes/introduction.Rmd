@@ -1,0 +1,242 @@
+---
+title: "Introduction to genr: design, track, and discover"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to genr: design, track, and discover}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+Gen is a sequence version control system built around a graph database.  Rather
+than storing sequences as flat strings, Gen stores them as a sequence graph where
+every sample is a named path through that graph.  Edits branch the graph rather
+than overwriting it, so every version of a sequence coexists in the same
+database and their differences are always queryable.
+
+This vignette walks through a concrete lab scenario that shows where that
+design pays off: you design an edit, apply it, confirm it with search, export
+for sequencing — and then discover an unintended mutation in the result.
+
+## Setup
+
+Install and load the package, then initialise a workspace and open a
+repository handle.
+
+```{r setup}
+library(genr)
+
+# Create a fresh workspace directory and open a repository handle.
+ws <- file.path(tempdir(), "puc19_demo")
+dir.create(ws)
+setwd(ws)
+
+repo <- Repository()
+```
+
+`Repository()` discovers the `.gen/` directory from the current working
+directory (or from the `path` argument) and opens the graph and operations
+databases.  All subsequent operations go through this object.
+
+## Import an annotated vector
+
+We start with a fully annotated pUC19 sequence from NEB.  The GenBank format
+carries feature annotations (genes, promoters, the MCS) that will be preserved
+in the graph and displayed in the viewer.
+
+```{r import}
+gbk_path <- system.file("extdata", "puc19.gbk", package = "genr")
+repo$import_genbank(gbk_path, sample = "wt")
+```
+
+List the block groups in the repository to confirm the import:
+
+```{r list-bgs}
+bgs <- repo$get_block_groups()
+bg_wt <- bgs[[1]]
+cat("Block group:", bg_wt$name, "| sample:", bg_wt$sample_name, "\n")
+```
+
+## Visualise the reference
+
+```{r plot-wt}
+p <- repo$plot(bg_wt)
+p
+```
+
+The viewer renders a pannable, zoomable canvas of the sequence graph.  At this
+stage the graph for the wild-type sample is a single linear path.  Annotations
+from the GenBank file (lacZα, bla, the MCS) appear as tracks above the
+sequence.
+
+## Design a Golden Gate conversion
+
+The pUC19 multiple cloning site (MCS, positions 396–452) contains a set of
+traditional type-II restriction sites.  We want to replace it with a minimal
+Golden Gate entry site — two BsaI recognition sequences (GGTCTC) flanking a
+stuffer, oriented to cut inward and expose compatible 4-nt overhangs for
+assembly.
+
+```{r design-gg}
+# Original MCS (1-based 396..452):
+#   GAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTT
+#   EcoRI SacI  KpnI  SmaI  BamHI XbaI    SalI   PstI SphI HindIII
+#
+# Replacement: two BsaI sites flanking a stuffer, retaining EcoRI/HindIII ends.
+#   GAATTC [BsaI→ GGTCTCA] [AATG overhang] [stuffer] [GCAT overhang] [←BsaI TGAGACC] AAGCTT
+
+golden_gate_mcs <- "GAATTCGGTCTCAAATGCATCATCATCATGCATTGAGACCAAGCTT"
+
+repo$update_with_sequence(
+  sequence    = golden_gate_mcs,
+  sample      = "wt",
+  new_sample  = "gg_design",
+  # MCS coordinates from the GenBank misc_feature annotation (1-based 396..452),
+  # converted to 0-based half-open interval encoded in the region string.
+  # Programmatic annotation lookup is not yet exposed in the R API;
+  # a future repo$get_annotations(bg) call would return these directly.
+  region_name = "pUC19:395-452"
+)
+```
+
+`update_with_sequence` creates a new sample ("gg_design") that shares the
+entire graph with "wt" except at the edited region, where the path diverges
+through the new MCS nodes.
+
+## Inspect the design
+
+```{r get-gg-bg}
+bg_gg <- repo$get_block_groups_by_collection(bg_wt$collection)
+bg_gg <- Filter(function(x) x$sample_name == "gg_design", bg_gg)[[1]]
+```
+
+```{r plot-gg}
+p_gg <- repo$plot(bg_gg)
+p_gg
+```
+
+Zoom into the MCS region to see both paths: the wild-type MCS and the new
+Golden Gate site diverge at position 395 and reconverge 57 bp later (original)
+or 46 bp later (new design).
+
+### Confirm the BsaI sites with search
+
+Before synthesis, we verify the Golden Gate sites landed correctly by searching
+for the BsaI recognition sequence on both strands.
+
+```{r build-index}
+repo$build_index(bgs = list(bg_gg))
+```
+
+```{r search-bsai}
+# GGTCTC is the BsaI recognition sequence (cuts 1 nt downstream on sense strand).
+# Searching both the sense strand and its reverse complement locates both sites.
+hits <- repo$search("GGTCTC", bgs = list(bg_gg))
+cat("BsaI sites found:", length(hits[[1]]$matches), "\n")
+```
+
+Two hits — one forward, one reverse — confirm the orientation of the flanking
+BsaI sites.  As a sanity check, the same search against the wild-type sample
+should return zero hits:
+
+```{r search-wt}
+repo$build_index(bgs = list(bg_wt))
+hits_wt <- repo$search("GGTCTC", bgs = list(bg_wt))
+cat("BsaI sites in wild-type:", length(hits_wt[[1]]$matches), "\n")   # 0
+```
+
+### Navigate and highlight search results
+
+Each entry in the `matches` list is a locus record with `start`, `end`,
+`blocks`, and `strand`.  Pass a locus directly to `goto_match` to centre the
+viewport on it, and to `highlight_match` to colour it on the canvas.
+
+```{r highlight-bsai}
+matches <- hits[[1]]$matches
+
+# Jump to the first BsaI site and highlight both sites.
+p_gg$goto_match(matches[[1]])
+p_gg$highlight_match(matches[[1]], color = "cyan")
+p_gg$highlight_match(matches[[2]], color = "cyan")
+p_gg
+```
+
+`clear_highlights()` removes all highlights without affecting the viewport:
+
+```{r clear-highlights}
+p_gg$clear_highlights()
+p_gg
+```
+
+## Export and send for sequencing
+
+```{r export}
+repo$export_fasta("pUC19_gg_design.fa", sample = "gg_design")
+```
+
+You send `pUC19_gg_design.fa` to your synthesis provider.  A few days later
+sequencing results arrive as a VCF.
+
+## Import the sequencing result — and find a surprise
+
+```{r update-vcf}
+vcf_path <- system.file("extdata", "puc19_sequenced.vcf", package = "genr")
+
+repo$update_with_vcf(
+  filename       = vcf_path,
+  sample         = "sequenced",
+  parent_samples = c("gg_design")
+)
+```
+
+Plot the sequenced sample:
+
+```{r get-sequenced-bg}
+bg_seq <- repo$get_block_groups_by_collection(bg_wt$collection)
+bg_seq <- Filter(function(x) x$sample_name == "sequenced", bg_seq)[[1]]
+```
+
+```{r plot-sequenced}
+p_seq <- repo$plot(bg_seq)
+p_seq
+```
+
+The graph now shows a branch at position 1904 — outside the MCS, inside the
+**bla** (β-lactamase / AmpR) coding sequence.  The sequencing run picked up a
+C→T substitution that was not in the design.  Because Gen stores every sample
+as a path through the same graph, the mutation shows up as a new node rather
+than a silent overwrite: the gg_design path and the sequenced path diverge
+exactly here.
+
+This is the kind of mutation that is easy to miss in a flat-file workflow.
+Gen surfaces it because "what changed between two samples" is a native
+database query, not a diff of exported files.
+
+## Version control on the command line
+
+Everything above runs inside R.  Gen also ships a command-line interface that
+adds the operations that make it a true version control system:
+
+```sh
+gen init
+gen import --fasta reference.fa --sample wt
+gen checkout -b gg_design
+gen apply --vcf site.vcf
+gen push origin gg_design
+gen pull
+gen log
+```
+
+`push`, `pull`, `checkout`, `log`, and `merge` work like their git equivalents
+but operate on sequence graphs rather than text files.  A Gen remote holds the
+full graph history: who edited which sample, when, and how the paths diverged.
+
+The R bindings and the CLI share the same database, so you can design a
+construct in R, push it from the terminal, and a colleague can pull the graph
+and visualise it in their own R session — with the full annotation and variant
+history intact.
+
+To learn more about the CLI, run `gen --help` or visit the project documentation.

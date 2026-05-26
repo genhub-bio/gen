@@ -32,6 +32,7 @@ COPY gen-capnp-schemas ./gen-capnp-schemas
 COPY gen-r ./gen-r
 
 RUN Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
+RUN Rscript -e "if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes', repos='https://cloud.r-project.org'); remotes::install_github('keller-mark/anyhtmlwidget', upgrade='never')"
 
 RUN R CMD INSTALL gen-r
 

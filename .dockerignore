@@ -32,6 +32,8 @@ fixtures/*.ipynb
 gen-python/python/gen/*.so
 gen-python/target/
 gen-r/src/rust/target/
+gen-r/src/*.o
+gen-r/src/*.so
 
 # Generated sources
 **/generated/*capnp.rs

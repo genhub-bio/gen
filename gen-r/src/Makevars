@@ -3,6 +3,12 @@ LIBDIR = $(TARGET_DIR)/release
 STATLIB = $(LIBDIR)/libgenr.a
 PKG_LIBS += $(abspath $(STATLIB))
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  PKG_CFLAGS = -mmacosx-version-min=11.0
+  CARGO_ENV = MACOSX_DEPLOYMENT_TARGET=11.0
+endif
+
 all: $(SHLIB)
 
 .PHONY: $(STATLIB)
@@ -10,7 +16,7 @@ all: $(SHLIB)
 $(SHLIB): $(STATLIB)
 
 $(STATLIB):
-	cargo build --release --lib --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
+	$(CARGO_ENV) cargo build --release --lib --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
 
 clean:
 	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR)
