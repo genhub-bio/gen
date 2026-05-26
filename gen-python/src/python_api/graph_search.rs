@@ -9,7 +9,7 @@ use gen_graph::GraphNode;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
-use super::block::PyBlock;
+use super::block::{PyBlock, PyBlockSlice};
 
 /// A position in the graph: a specific node plus a byte offset within that
 /// node's local text (`0..node.length()`).
@@ -92,33 +92,25 @@ impl PyGraphLocus {
         PyGraphPos::new(s.block, s.end)
     }
 
-    /// Ordered sequence of blocks that span this locus.
+    /// Ordered sequence of block slices that span this locus.
     ///
-    /// Each `PyBlock` carries `(node_id, sequence_start, sequence_end)`.
-    /// Note that `node_id` alone is **not** unique — multiple blocks can be
-    /// carved from the same graph node.  Use all three fields together to
-    /// uniquely identify a block.
+    /// Each `BlockSlice` carries the underlying block, local byte offsets
+    /// within that block, and the strand for that slice.
     #[getter]
-    fn blocks(&self) -> Vec<PyBlock> {
+    fn slices(&self) -> Vec<PyBlockSlice> {
         self.inner
             .slices
             .iter()
-            .map(|s| {
-                PyBlock::new(
-                    s.block.node_id,
-                    s.block.sequence_start,
-                    s.block.sequence_end,
-                )
-            })
+            .map(|s| PyBlockSlice::from_slice(*s))
             .collect()
     }
 
-    /// Strand of the matched sequence: `"forward"`, `"reverse"`, or `"unknown"`.
+    /// Strand of the first slice: `"forward"`, `"reverse"`, or `"unknown"`.
     #[getter]
     fn strand(&self) -> &str {
-        match self.inner.strand {
-            Strand::Forward => "forward",
-            Strand::Reverse => "reverse",
+        match self.inner.slices.first().map(|s| s.strand) {
+            Some(Strand::Forward) => "forward",
+            Some(Strand::Reverse) => "reverse",
             _ => "unknown",
         }
     }
@@ -128,7 +120,7 @@ impl PyGraphLocus {
         let last = self.inner.slices.last().unwrap();
         let sh = format!("{}", first.block.node_id);
         let eh = format!("{}", last.block.node_id);
-        let strand = match self.inner.strand {
+        let strand = match first.strand {
             Strand::Forward => "+",
             Strand::Reverse => "-",
             _ => ".",

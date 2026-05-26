@@ -1,4 +1,6 @@
 use r#gen::core::HashId;
+use gen_core::Strand;
+use gen_graph::BlockSlice;
 use pyo3::prelude::*;
 
 use super::hash_id::PyHashId;
@@ -61,5 +63,61 @@ impl PyBlock {
         } else {
             Ok(false)
         }
+    }
+}
+
+/// A slice of a single graph block with local byte offsets and strand.
+#[pyclass(name = "BlockSlice")]
+#[derive(Clone, Copy)]
+pub struct PyBlockSlice {
+    pub inner: BlockSlice,
+}
+
+impl PyBlockSlice {
+    pub fn from_slice(s: BlockSlice) -> Self {
+        Self { inner: s }
+    }
+}
+
+#[pymethods]
+impl PyBlockSlice {
+    #[getter]
+    fn block(&self) -> PyBlock {
+        PyBlock::new(
+            self.inner.block.node_id,
+            self.inner.block.sequence_start,
+            self.inner.block.sequence_end,
+        )
+    }
+
+    #[getter]
+    fn start(&self) -> usize {
+        self.inner.start
+    }
+
+    #[getter]
+    fn end(&self) -> usize {
+        self.inner.end
+    }
+
+    #[getter]
+    fn strand(&self) -> &str {
+        match self.inner.strand {
+            Strand::Forward => "forward",
+            Strand::Reverse => "reverse",
+            _ => "unknown",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BlockSlice({}[{}..{}], {}..{}, strand={})",
+            self.inner.block.node_id,
+            self.inner.block.sequence_start,
+            self.inner.block.sequence_end,
+            self.inner.start,
+            self.inner.end,
+            self.strand(),
+        )
     }
 }

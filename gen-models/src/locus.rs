@@ -17,17 +17,15 @@
 
 use gen_core::{HashId, Strand};
 pub use gen_graph::BlockSlice;
-use gen_graph::GraphNode;
 
 use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
 
 /// A region in graph space expressed as an ordered list of block slices.
-/// The strand field specifies the 5'-3' orientation for double stranded DNA.
-///
+/// Each slice carries its own strand, allowing trans-spliced loci where
+/// individual exons may come from opposite strands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphLocus {
     pub slices: Vec<BlockSlice>,
-    pub strand: Strand,
 }
 
 impl GraphLocus {
@@ -44,13 +42,14 @@ impl GraphLocus {
                 .into_bytes();
             let block_start = s.block.sequence_start as usize;
             let text = &full[block_start..block_start + s.block.length() as usize];
-            out.extend_from_slice(&text[s.start..s.end]);
+            let slice_bytes = &text[s.start..s.end];
+            if s.strand == Strand::Reverse {
+                out.extend_from_slice(&reverse_complement(slice_bytes));
+            } else {
+                out.extend_from_slice(slice_bytes);
+            }
         }
 
-        if self.strand == Strand::Reverse {
-            reverse_complement(&out)
-        } else {
-            out
-        }
+        out
     }
 }

@@ -179,6 +179,27 @@ fn block_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Robj
     obj
 }
 
+fn block_slice_record(
+    node_id: HashId,
+    sequence_start: i64,
+    sequence_end: i64,
+    strand: Strand,
+) -> Robj {
+    let strand_str = match strand {
+        Strand::Forward => "forward",
+        Strand::Reverse => "reverse",
+        _ => "unknown",
+    };
+    let mut obj = r!(list!(
+        node_id = node_id.to_string(),
+        sequence_start = sequence_start,
+        sequence_end = sequence_end,
+        strand = strand_str
+    ));
+    obj.set_class(&["gen_block_slice"]).unwrap();
+    obj
+}
+
 fn sqlite_value_to_robj(value: ValueRef<'_>) -> Robj {
     match value {
         ValueRef::Null => NULL.into(),
@@ -674,9 +695,10 @@ fn apply_graph_ops(
                         block,
                         start: slice_start,
                         end: slice_end,
+                        strand,
                     });
                 }
-                let locus = GraphLocus { slices, strand };
+                let locus = GraphLocus { slices };
                 let style = PathStyle::new(color)
                     .with_line_style(LineStyle::Bold)
                     .with_merge_glyphs(true);
@@ -705,44 +727,37 @@ fn parse_sequence_kind_r(s: &str) -> std::result::Result<SequenceKind, String> {
 fn graph_locus_record(locus: &GraphLocus) -> List {
     let first = &locus.slices[0];
     let last = locus.slices.last().unwrap();
-    let strand = match locus.strand {
-        Strand::Forward => "forward",
-        Strand::Reverse => "reverse",
-        _ => "unknown",
-    };
     let start = list!(
-        block = block_record(
+        block = block_slice_record(
             first.block.node_id,
             first.block.sequence_start,
-            first.block.sequence_end
+            first.block.sequence_end,
+            first.strand,
         ),
         offset = first.start as i64
     );
     let end = list!(
-        block = block_record(
+        block = block_slice_record(
             last.block.node_id,
             last.block.sequence_start,
-            last.block.sequence_end
+            last.block.sequence_end,
+            last.strand,
         ),
         offset = last.end as i64
     );
-    let blocks = locus
+    let slices = locus
         .slices
         .iter()
         .map(|s| {
-            block_record(
+            block_slice_record(
                 s.block.node_id,
                 s.block.sequence_start,
                 s.block.sequence_end,
+                s.strand,
             )
         })
         .collect::<Vec<_>>();
-    list!(
-        start = start,
-        end = end,
-        blocks = List::from_values(blocks),
-        strand = strand
-    )
+    list!(start = start, end = end, slices = List::from_values(slices))
 }
 
 /// Open a Gen database context.

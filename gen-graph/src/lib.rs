@@ -59,14 +59,17 @@ pub struct BlockSlice {
     pub start: usize,
     /// Local end offset, exclusive (`start..=block.length()`).
     pub end: usize,
+    /// 5'→3' orientation of this slice.
+    pub strand: Strand,
 }
 
 impl BlockSlice {
-    pub fn full(block: GraphNode) -> Self {
+    pub fn full(block: GraphNode, strand: Strand) -> Self {
         Self {
             block,
             start: 0,
             end: block.length() as usize,
+            strand,
         }
     }
 }

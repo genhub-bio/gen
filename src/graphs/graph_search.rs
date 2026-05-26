@@ -256,13 +256,17 @@ impl GenGraphMatcher {
 
         if self.sequence_kind == SequenceKind::Dna {
             for m in out.iter_mut() {
-                m.strand = Strand::Forward;
+                for s in m.slices.iter_mut() {
+                    s.strand = Strand::Forward;
+                }
             }
             let rc = reverse_complement(query);
             let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
             let rc_matches = self.find_all_query_orientation(&rc, rc_matcher);
             for mut m in rc_matches {
-                m.strand = Strand::Reverse;
+                for s in m.slices.iter_mut() {
+                    s.strand = Strand::Reverse;
+                }
                 out.push(m);
             }
         }
@@ -421,12 +425,10 @@ impl GenGraphMatcher {
                         } else {
                             node.length() as usize
                         },
+                        strand: Strand::Unknown,
                     })
                     .collect();
-                out.push(GraphLocus {
-                    slices,
-                    strand: Strand::Unknown,
-                });
+                out.push(GraphLocus { slices });
                 continue;
             }
 

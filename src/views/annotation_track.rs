@@ -49,7 +49,7 @@ pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> Annot
             node_id: s.block.node_id,
             start: s.block.sequence_start + s.start as i64,
             end: s.block.sequence_start + s.end as i64,
-            strand: locus.strand,
+            strand: s.strand,
         })
         .collect();
     AnnotationSpan {
@@ -66,7 +66,6 @@ pub fn graph_locus_from_annotation_span(
     if span.segments.is_empty() {
         return None;
     }
-    let strand = span.segments.first()?.strand;
     let node_map: HashMap<_, _> = graph.node_identifiers().map(|n| (n.node_id, n)).collect();
     let slices: Option<Vec<BlockSlice>> = span
         .segments
@@ -75,13 +74,15 @@ pub fn graph_locus_from_annotation_span(
             let block = *node_map.get(&seg.node_id)?;
             let start = (seg.start - block.sequence_start).max(0) as usize;
             let end = (seg.end - block.sequence_start).max(0) as usize;
-            Some(BlockSlice { block, start, end })
+            Some(BlockSlice {
+                block,
+                start,
+                end,
+                strand: seg.strand,
+            })
         })
         .collect();
-    Some(GraphLocus {
-        slices: slices?,
-        strand,
-    })
+    Some(GraphLocus { slices: slices? })
 }
 
 impl AnnotationTrack {
@@ -805,8 +806,8 @@ mod tests {
                 block: node,
                 start: 5,
                 end: 15,
+                strand: Strand::Forward,
             }],
-            strand: Strand::Forward,
         };
         let span = annotation_span_from_graph_locus(&locus, "my_gene");
         assert_eq!(span.name, "my_gene");
@@ -827,8 +828,8 @@ mod tests {
                 block: node,
                 start: 5,
                 end: 15,
+                strand: Strand::Forward,
             }],
-            strand: Strand::Forward,
         };
         let span = annotation_span_from_graph_locus(&locus, "");
         let recovered = graph_locus_from_annotation_span(&span, &graph).unwrap();
@@ -836,7 +837,7 @@ mod tests {
         assert_eq!(recovered.slices[0].block, node);
         assert_eq!(recovered.slices[0].start, 5);
         assert_eq!(recovered.slices[0].end, 15);
-        assert_eq!(recovered.strand, Strand::Forward);
+        assert_eq!(recovered.slices[0].strand, Strand::Forward);
     }
 
     #[test]
@@ -859,8 +860,8 @@ mod tests {
                 block: node,
                 start: 0,
                 end: 10,
+                strand: Strand::Forward,
             }],
-            strand: Strand::Forward,
         };
         let span = annotation_span_from_graph_locus(&locus, "");
         assert!(graph_locus_from_annotation_span(&span, &graph).is_none());

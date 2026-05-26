@@ -10,7 +10,7 @@ pub mod sequence_part;
 pub mod utils;
 
 use crate::python_api::{
-    block::PyBlock,
+    block::{PyBlock, PyBlockSlice},
     block_group::PyBlockGroup,
     graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
     hash_id::PyHashId,
@@ -28,6 +28,7 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlockGroup>()?;
     m.add_class::<PyHashId>()?;
     m.add_class::<PyBlock>()?;
+    m.add_class::<PyBlockSlice>()?;
     m.add_class::<PyGraphPos>()?;
     m.add_class::<PyGraphLocus>()?;
     m.add_class::<PyAnnotation>()?;
