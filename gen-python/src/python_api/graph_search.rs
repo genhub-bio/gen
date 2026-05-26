@@ -4,7 +4,7 @@ use r#gen::{
         AnnotationSegment, AnnotationSpan, annotation_span_from_graph_locus,
     },
 };
-use gen_core::{HashId, Strand};
+use gen_core::HashId;
 use gen_graph::GraphNode;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
@@ -105,28 +105,13 @@ impl PyGraphLocus {
             .collect()
     }
 
-    /// Strand of the first slice: `"forward"`, `"reverse"`, or `"unknown"`.
-    #[getter]
-    fn strand(&self) -> &str {
-        match self.inner.slices.first().map(|s| s.strand) {
-            Some(Strand::Forward) => "forward",
-            Some(Strand::Reverse) => "reverse",
-            _ => "unknown",
-        }
-    }
-
     fn __repr__(&self) -> String {
         let first = &self.inner.slices[0];
         let last = self.inner.slices.last().unwrap();
         let sh = format!("{}", first.block.node_id);
         let eh = format!("{}", last.block.node_id);
-        let strand = match first.strand {
-            Strand::Forward => "+",
-            Strand::Reverse => "-",
-            _ => ".",
-        };
         format!(
-            "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks, strand={})",
+            "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks)",
             &sh[..8],
             first.block.sequence_start,
             first.block.sequence_end,
@@ -136,7 +121,6 @@ impl PyGraphLocus {
             last.block.sequence_end,
             last.end,
             self.inner.slices.len(),
-            strand,
         )
     }
 }
