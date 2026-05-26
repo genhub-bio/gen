@@ -3,6 +3,7 @@ use std::io::Error as IOError;
 use gen_models::{
     errors::{BlockGroupError, NodeError, OperationError, PathError, QueryError, SequenceError},
     region::GenRegionError,
+    sample::SampleError,
 };
 use thiserror::Error;
 
@@ -29,6 +30,8 @@ pub enum SequenceUpdateError {
     BlockGroupError(#[from] BlockGroupError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
+    #[error("Sample error: {0}")]
+    SampleError(#[from] SampleError),
     #[error("Missing segment '{0}' in GFA input")]
     MissingSegment(String),
     #[error("Missing strand for path '{path_name}' at segment index {index}")]
