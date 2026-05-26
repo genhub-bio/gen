@@ -3,7 +3,7 @@
 \description{
 \code{Repository()} opens a Gen database and exposes higher-level helper methods
 for querying block groups, executing SQL, extracting graph dictionaries, and
-rendering block groups through a \code{GraphController()}.
+rendering block groups through \code{GenPlot()}.
 }
 \details{
 \code{Repository()} returns an environment with at least these fields:
@@ -17,7 +17,7 @@ rendering block groups through a \code{GraphController()}.
 \code{export_gfa}, \code{export_genbank}, \code{build_index}, \code{search},
 \code{clear_index}, \code{subgraph}, and \code{chunks}.
 
-\code{GraphController()} returns an environment with the fields \code{db_path},
+\code{GenPlot()} returns a \code{gen_plot} environment with the fields \code{db_path},
 \code{block_group_id}, \code{detail}, \code{ops}, \code{rows}, and
 \code{cols}, plus the methods \code{set_detail}, \code{render_frame},
 \code{zoom_in}, \code{zoom_out}, \code{handle_click}, and \code{move_by}.

@@ -1,7 +1,7 @@
 \name{HashId}
 \alias{HashId}
 \alias{Block}
-\alias{GraphController}
+\alias{GenPlot}
 \alias{Repository}
 \title{Constructors for Gen R Objects}
 \usage{
@@ -9,7 +9,7 @@ HashId(hash_id)
 
 Block(node_id, sequence_start, sequence_end)
 
-GraphController(
+GenPlot(
   db_path,
   block_group_id,
   detail = "normal",
@@ -42,14 +42,14 @@ Repository(path = NULL)
 }
 \value{
 \code{HashId()} and \code{Block()} return lightweight S3 objects.
-\code{GraphController()} and \code{Repository()} return environment-backed
+\code{GenPlot()} and \code{Repository()} return environment-backed
 helper objects with methods attached as fields.
 }
 \description{
 These constructors provide the main R-side object model for \pkg{genr}.
 \code{HashId()} and \code{Block()} are small value objects.
 \code{Repository()} opens a Gen workspace and exposes database and
-block-group helper methods. \code{GraphController()} exposes stateful
+block-group helper methods. \code{GenPlot()} exposes stateful
 rendering and navigation methods for a single block group.
 }
 \details{
@@ -73,7 +73,7 @@ rendering and navigation methods for a single block group.
 \code{subgraph(new_sample, start, end, backbone = NULL)}, and
 \code{chunks(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL)}.
 
-\code{GraphController()} exposes the methods \code{set_detail(detail)},
+\code{GenPlot()} exposes the methods \code{set_detail(detail)},
 \code{render_frame(cols = ctrl$cols, rows = ctrl$rows)}, \code{zoom_in()},
 \code{zoom_out()}, \code{handle_click(col, row)}, and \code{move_by(dx, dy)}.
 }
