@@ -375,7 +375,7 @@ impl BlockGroup {
         conn: &GraphConnection,
         collection_name: &str,
     ) -> Result<Vec<BlockGroup>, BlockGroupError> {
-        Ok(BlockGroup::try_query(
+        BlockGroup::try_query(
             conn,
             "select bg.*
              from block_groups bg
@@ -383,7 +383,8 @@ impl BlockGroup {
              where bg.collection_name = ?1 and s.is_reference = 1
              order by bg.name, bg.sample_name, bg.created_on, bg.id;",
             params![collection_name],
-        )?)
+        )
+        .map_err(BlockGroupError::from)
     }
 
     fn copy_paths_and_accessions_into(
@@ -507,7 +508,7 @@ impl BlockGroup {
             return Ok(vec![]);
         }
 
-        Ok(BlockGroup::try_query(
+        BlockGroup::try_query(
             conn,
             "select * from block_groups
              where collection_name = ?1 AND sample_name IN rarray(?2) AND name = ?3
@@ -523,7 +524,8 @@ impl BlockGroup {
                 ),
                 group_name
             ],
-        )?)
+        )
+        .map_err(BlockGroupError::from)
     }
 
     fn copy_contents_from(

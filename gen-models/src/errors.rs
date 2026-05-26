@@ -15,8 +15,10 @@ pub use crate::{
     sequence::SequenceError,
 };
 
-#[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
+#[derive(Debug, Error, PartialEq)]
 pub enum QueryError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
     #[error("Results not found: {0}")]
     ResultsNotFound(String),
 }

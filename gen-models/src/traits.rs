@@ -1,7 +1,9 @@
 use std::rc::Rc;
 
 use itertools::Itertools;
-use rusqlite::{Connection, Params, Result, Row, limits::Limit, params, types::Value};
+use rusqlite::{Connection, Params, Result as SQLResult, Row, limits::Limit, params, types::Value};
+
+use crate::errors::QueryError;
 
 /// Returns the SQLite variable parameter limit for the provided connection.
 pub fn sqlite_parameter_limit(conn: &Connection) -> usize {
@@ -33,7 +35,11 @@ pub trait Query {
         objs
     }
 
-    fn try_query(conn: &Connection, query: &str, params: impl Params) -> Result<Vec<Self::Model>> {
+    fn try_query(
+        conn: &Connection,
+        query: &str,
+        params: impl Params,
+    ) -> Result<Vec<Self::Model>, QueryError> {
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map(params, |row| Ok(Self::process_row(row)))?;
         let mut objs = vec![];
@@ -43,7 +49,7 @@ pub trait Query {
         Ok(objs)
     }
 
-    fn get(conn: &Connection, query: &str, params: impl Params) -> Result<Self::Model> {
+    fn get(conn: &Connection, query: &str, params: impl Params) -> SQLResult<Self::Model> {
         let mut stmt = conn.prepare(query).unwrap();
         stmt.query_row(params, |row| Ok(Self::process_row(row)))
     }
