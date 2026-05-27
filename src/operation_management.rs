@@ -681,9 +681,10 @@ fn apply_operations_to_remote(
                         None,
                     )?;
                     Operation::add_file(
+                        remote_workspace,
                         remote_op_conn,
                         &operation.hash,
-                        &remote_file_addition.id,
+                        &remote_file_addition,
                         &file_addition.filename,
                         &file_addition.file_path,
                     )?;
@@ -1139,9 +1140,10 @@ fn ingest_manifest_operation(
                     None,
                 )?;
                 Operation::add_file(
+                    workspace,
                     operation_conn,
                     &operation.hash,
-                    &local_file_addition.id,
+                    &local_file_addition,
                     &file_addition.filename,
                     &file_addition.file_path,
                 )?;
