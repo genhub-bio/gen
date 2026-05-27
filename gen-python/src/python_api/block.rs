@@ -106,9 +106,9 @@ impl PyGraphNodeSlice {
     #[getter]
     fn strand(&self) -> &str {
         match self.inner.strand {
-            Strand::Forward => "forward",
-            Strand::Reverse => "reverse",
-            _ => "unknown",
+            Strand::Forward => "+",
+            Strand::Reverse => "-",
+            _ => ".",
         }
     }
 

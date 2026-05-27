@@ -121,12 +121,28 @@ impl PyGraphLocus {
             .collect()
     }
 
+    /// Strand of this locus: ``"+"`` forward, ``"-"`` reverse, ``"mixed"`` if slices differ, ``"."`` if empty.
+    #[getter]
+    fn strand(&self) -> &str {
+        let mut iter = self.inner.slices.iter().map(|s| s.strand);
+        match iter.next() {
+            None => ".",
+            Some(first) => {
+                if iter.all(|s| s == first) {
+                    match first {
+                        Strand::Forward => "+",
+                        Strand::Reverse => "-",
+                        _ => ".",
+                    }
+                } else {
+                    "mixed"
+                }
+            }
+        }
+    }
+
     fn __repr__(&self) -> String {
-        let strand = match self.inner.slices.first().map(|s| s.strand) {
-            Some(Strand::Forward) => "+",
-            Some(Strand::Reverse) => "-",
-            _ => ".",
-        };
+        let strand = self.strand();
         let segs: Vec<String> = self
             .inner
             .slices
@@ -167,10 +183,10 @@ impl PyGraphLocus {
             })
             .collect();
         let coords = segs.join(",");
-        match self.inner.slices.first().map(|s| s.strand) {
-            Some(Strand::Forward) => format!("{}(+)", coords),
-            Some(Strand::Reverse) => format!("{}(-)", coords),
-            _ => coords,
+        match self.strand() {
+            "+" => format!("{}(+)", coords),
+            "-" => format!("{}(-)", coords),
+            s => format!("{}({})", coords, s),
         }
     }
 
