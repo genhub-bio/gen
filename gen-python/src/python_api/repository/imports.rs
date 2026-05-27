@@ -10,7 +10,10 @@ use r#gen::{
         library::{LibraryImportError, import_library},
     },
 };
-use gen_models::{errors::OperationError, sample::Sample};
+use gen_models::{
+    errors::OperationError,
+    sample::{NewSample, Sample},
+};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{PyRepository, run_write};
@@ -30,6 +33,37 @@ impl PyRepository {
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_write(&self.context, !self.in_transaction, |ctx| {
             import_fasta(ctx, &filename, &collection, &sample, shallow)
+                .map(|_| format!("'{}' imported.", filename))
+                .map_err(|e| match e {
+                    FastaError::OperationError(OperationError::NoChanges) => {
+                        PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
+                    }
+                    _ => PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename)),
+                })
+        })
+    }
+
+    #[pyo3(signature = (filename, reference, shallow=false, collection=None))]
+    pub fn import_reference_fasta(
+        &self,
+        filename: String,
+        reference: String,
+        shallow: bool,
+        collection: Option<String>,
+    ) -> PyResult<String> {
+        let collection = collection.unwrap_or_else(|| self.get_default_collection());
+        run_write(&self.context, !self.in_transaction, |ctx| {
+            Sample::get_or_create(
+                ctx.graph().conn(),
+                NewSample {
+                    name: &reference,
+                    is_reference: true,
+                },
+            )
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to create reference sample: {e}"))
+            })?;
+            import_fasta(ctx, &filename, &collection, &reference, shallow)
                 .map(|_| format!("'{}' imported.", filename))
                 .map_err(|e| match e {
                     FastaError::OperationError(OperationError::NoChanges) => {

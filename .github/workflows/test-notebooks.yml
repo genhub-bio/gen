@@ -27,6 +27,6 @@ jobs:
           pip install maturin
           maturin develop
       - name: Install notebook test dependencies
-        run: source .venv/bin/activate && pip install pytest nbmake
+        run: source .venv/bin/activate && pip install pytest nbmake anywidget traitlets
       - name: Test notebooks
         run: source .venv/bin/activate && pytest --nbmake --nbmake-timeout=120 .

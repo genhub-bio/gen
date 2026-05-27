@@ -187,13 +187,15 @@ class GenGraphWidget(anywidget.AnyWidget):
         self._frozen = True
         self.send({"type": "freeze"})
 
-    def go_to(self, pos) -> None:
-        """Instantly move the camera to a graph position.
+    def go_to(self, target) -> None:
+        """Instantly move the camera to a graph position, locus, or annotation.
 
         Parameters
         ----------
-        pos:
-            A ``GraphPos`` obtained from ``locus.start()`` or ``locus.end()``.
+        target:
+            A ``GraphPos`` (from ``locus.start()`` / ``locus.end()``),
+            a ``GraphLocus`` (from ``repo.search()``), or
+            an ``Annotation`` object (e.g. from ``widget.list_annotations()``).
 
         Example
         -------
@@ -201,19 +203,31 @@ class GenGraphWidget(anywidget.AnyWidget):
 
             matches = repo.search(bg, "ACGT...")
             widget.go_to(matches[0].start())
+            widget.go_to(matches[0])
+
+            records = widget.list_annotations()
+            widget.go_to(records[0])
         """
         if self._frozen:
             return
-        self._controller.go_to_pos(pos)
+        from gen import Annotation, GraphLocus  # noqa: PLC0415
+
+        if isinstance(target, Annotation):
+            self._controller.go_to_annotation_obj(target)
+        elif isinstance(target, GraphLocus):
+            self._controller.go_to_locus(target)
+        else:
+            self._controller.go_to_pos(target)
         self._render()
 
-    def show(self, locus, color: str | None = None) -> None:
-        """Navigate to and highlight a graph locus in one call.
+    def show(self, target, color: str | None = None) -> None:
+        """Navigate to and highlight a graph locus or annotation in one call.
 
         Parameters
         ----------
-        locus:
-            A ``GraphLocus`` returned by ``repo.search()``.
+        target:
+            A ``GraphLocus`` returned by ``repo.search()``, or an ``Annotation``
+            object (e.g. from ``widget.list_annotations()``).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -226,11 +240,20 @@ class GenGraphWidget(anywidget.AnyWidget):
 
             matches = repo.search(bg, "ACGT...")
             widget.show(matches[0])
+
+            records = widget.list_annotations()
+            widget.show(records[0])
         """
         if self._frozen:
             return
-        self._controller.go_to_pos(locus.start())
-        self._controller.highlight_match(locus, color)
+        from gen import Annotation  # noqa: PLC0415
+
+        if isinstance(target, Annotation):
+            self._controller.go_to_annotation_obj(target)
+            self._controller.highlight_annotation_obj(target, color)
+        else:
+            self._controller.go_to_pos(target.start())
+            self._controller.highlight_match(target, color)
         self._render()
 
     def highlight_match(self, locus, color: str | None = None) -> None:
@@ -294,70 +317,58 @@ class GenGraphWidget(anywidget.AnyWidget):
 
     # ── Annotation API ────────────────────────────────────────────────────
 
-    def add_annotation_track(self, annotations, name: str) -> None:
-        """Add a list of named annotations as a track panel below the graph.
-
-        Parameters
-        ----------
-        annotations : list[Annotation]
-            Annotations built with ``Annotation(locus, name)``.
-        name : str
-            Label shown on the track panel.
-        """
-        if self._frozen:
-            return
-        self._controller.add_track_annotations(annotations, name)
-        self._render()
-
-    def add_annotation_track_group(self, group: str) -> None:
-        """Add an annotation group from the database as a track panel below the graph.
-
-        Parameters
-        ----------
-        group : str
-            Annotation group name stored in the repository.
-        """
-        if self._frozen:
-            return
-        self._controller.add_track_group(group)
-        self._render()
-
-    def add_annotation_track_file(
+    def add_annotation_track(
         self,
-        file: str,
+        annotations=None,
+        *,
+        file: str | None = None,
+        group: str | None = None,
         name: str | None = None,
         from_sample: str | None = None,
         filter=None,
     ) -> None:
-        """Add a GFF3 or BED file as a track panel below the graph.
+        """Add an annotation track panel below the graph.
 
-        Both standard files (chromosome/contig names as reference) and
-        pre-translated files (node hash-IDs as reference) are accepted.
-        Standard files are translated automatically.
+        Exactly one of *annotations*, *file*, or *group* must be supplied.
 
         Parameters
         ----------
-        file : str
-            Path to a GFF3 or BED annotation file.
+        annotations : list[Annotation], optional
+            Annotations built with ``Annotation(locus, name)``.  *name* is
+            required when using this form.
+        file : str, optional
+            Path to a GFF3 or BED annotation file.  Both standard files
+            (chromosome/contig names as reference) and pre-translated files
+            (node hash-IDs as reference) are accepted; standard files are
+            translated automatically.  *name* defaults to the file path.
+        group : str, optional
+            Annotation group name stored in the repository.
         name : str, optional
-            Label shown on the track panel.  Defaults to the file path.
+            Track panel label.  Required when *annotations* is supplied.
         from_sample : str, optional
-            The sample whose path defines the coordinate space used by the
-            annotation file — i.e. the sample the GFF/BED was produced from.
-            Defaults to ``"reference"``, which is correct for annotation files
-            derived from the reference sequence.  Pass a different sample name
-            if the file uses coordinates from a non-reference sample
-            (e.g. ``from_sample="BRQ"``).
+            Sample whose coordinate space the file uses (file tracks only).
+            Defaults to ``"reference"``.
         filter : callable, optional
-            Function ``(row: str) -> bool`` called for each non-header line.
-            Return ``True`` to keep the row, ``False`` to drop it.  When
-            ``None`` (default) all rows are passed through.
+            ``(row: str) -> bool`` predicate applied to each non-header line
+            (file tracks only).
         """
         if self._frozen:
             return
-        if filter is not None:
-            file = self._apply_row_filter(file, filter)
-        self._controller.add_track_file(file, name, from_sample)
+        given = sum(x is not None for x in (annotations, file, group))
+        if given != 1:
+            raise ValueError(
+                "exactly one of annotations, file, or group must be supplied"
+            )
+        if annotations is not None:
+            if name is None:
+                raise ValueError("name is required when annotations is supplied")
+            self._controller.add_track_annotations(annotations, name)
+        elif file is not None:
+            if filter is not None:
+                file = self._apply_row_filter(file, filter)
+            self._controller.add_track_file(file, name, from_sample)
+        else:
+            self._controller.add_track_group(group)
         self._render()
 
     @staticmethod
@@ -385,30 +396,6 @@ class GenGraphWidget(anywidget.AnyWidget):
     def annotation_tracks(self) -> list:
         """Return list of loaded track-panel annotation names."""
         return json.loads(self._controller.get_track_names())
-
-    def go_to_annotation(self, name: str):
-        """Navigate to the first annotation span matching ``name`` across all loaded tracks.
-
-        Returns the ``GraphPos`` the camera moved to.  Raises ``KeyError`` if
-        no annotation with that name is loaded.
-
-        Parameters
-        ----------
-        name : str
-            Annotation name to search for (e.g. ``"STL1"``).
-
-        Note
-        ----
-        When multiple spans share the same name the camera jumps to the first
-        one found.  Cycling through multiple matches (next/previous) is not yet
-        implemented — that will require surfacing match rank from the graph
-        controller and maintaining index state here.
-        """
-        if self._frozen:
-            return
-        pos = self._controller.go_to_annotation(name)
-        self._render()
-        return pos
 
     def remove_annotation_track(self, name: str) -> None:
         """Remove an annotation track panel by name."""
@@ -452,6 +439,19 @@ class GenGraphWidget(anywidget.AnyWidget):
     def inline_annotations(self) -> list:
         """Return list of inline annotation names currently displayed."""
         return json.loads(self._controller.get_inline_annotation_names())
+
+    def list_annotations(self) -> list:
+        """Return all loaded annotations (track and inline) as ``Annotation`` objects.
+
+        Example
+        -------
+        ::
+
+            records = widget.list_annotations()
+            mcs = next(r for r in records if r.name == "MCS")
+            widget.go_to(mcs)
+        """
+        return self._controller.list_annotations()
 
     def remove_annotation(self, name: str) -> None:
         """Remove all inline annotations with the given name.

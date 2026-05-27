@@ -254,6 +254,7 @@ impl PyRepository {
         let graph = BlockGroup::get_graph(graph_conn, &block_group.id);
         let mut ctrl = PyGraphController::new(db_path, graph);
         ctrl.block_group_id = Some(block_group.id);
+        ctrl.auto_load_annotation_groups(graph_conn);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
@@ -280,7 +281,7 @@ impl PyRepository {
 mod python_tests {
     use std::fs;
 
-    use r#gen::test_helpers::{setup_gen, setup_gen_on_disk};
+    use r#gen::test_helpers::setup_gen_on_disk;
     use pyo3::{PyTypeInfo, prelude::*, py_run};
     use tempfile::tempdir;
 
@@ -311,18 +312,21 @@ mod python_tests {
 
     #[test]
     fn test_repository_creation() {
-        setup_gen();
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
+            let tmp_dir = tempdir().unwrap();
+            let path = tmp_dir.path().to_str().unwrap().to_string();
             let repository = PyRepository::type_object(py);
             py_run!(
                 py,
                 repository,
-                r#"
-                repo = repository()
-                assert hasattr(repo, "gen_dir")
-                assert hasattr(repo, "db_path")
-            "#
+                &format!(
+                    r#"
+                    repo = repository("{path}")
+                    assert hasattr(repo, "gen_dir")
+                    assert hasattr(repo, "db_path")
+                    "#
+                )
             );
         });
     }

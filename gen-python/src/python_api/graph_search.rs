@@ -1,11 +1,8 @@
 use r#gen::{
     graphs::graph_search::GraphPos,
-    views::annotation_track::{
-        AnnotationSegment, AnnotationSpan, annotation_span_from_graph_locus,
-    },
+    views::annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
 };
-use gen_core::HashId;
-use gen_graph::GraphNode;
+use gen_core::Strand;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
@@ -47,14 +44,38 @@ impl PyGraphPos {
 
     fn __repr__(&self) -> String {
         let n = self.inner.block;
-        let hash = format!("{}", n.node_id);
+        let h = format!("{}", n.node_id);
+        let hash8 = &h[..8.min(h.len())];
         format!(
-            "GraphPos({}[{}..{}] +{})",
-            &hash[..8],
-            n.sequence_start,
-            n.sequence_end,
-            self.inner.offset
+            "GraphPos({}[{}:{}][{}])",
+            hash8, n.sequence_start, n.sequence_end, self.inner.offset
         )
+    }
+
+    fn __str__(&self) -> String {
+        let n = self.inner.block;
+        let h = format!("{}", n.node_id);
+        let hash8 = &h[..8.min(h.len())];
+        format!(
+            "{}:{}-{}+{}",
+            hash8, n.sequence_start, n.sequence_end, self.inner.offset
+        )
+    }
+
+    fn __hash__(&self) -> isize {
+        let n = self.inner.block;
+        let mut hash: isize = 0;
+        for &b in &n.node_id.0 {
+            hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+        }
+        hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(n.sequence_start as isize);
+        hash = hash.wrapping_mul(31).wrapping_add(n.sequence_end as isize);
+        hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(self.inner.offset as isize);
+        hash
     }
 }
 
@@ -70,11 +91,6 @@ pub struct PyGraphLocus {
 impl PyGraphLocus {
     pub fn from_locus(l: GraphLocus) -> Self {
         Self { inner: l }
-    }
-
-    /// Return the raw node sequence for highlight operations.
-    pub fn locus_nodes(&self) -> Vec<GraphNode> {
-        self.inner.slices.iter().map(|s| s.block).collect()
     }
 }
 
@@ -105,23 +121,92 @@ impl PyGraphLocus {
             .collect()
     }
 
+    /// Strand of this locus: ``"+"`` forward, ``"-"`` reverse, ``"mixed"`` if slices differ, ``"."`` if empty.
+    #[getter]
+    fn strand(&self) -> &str {
+        let mut iter = self.inner.slices.iter().map(|s| s.strand);
+        match iter.next() {
+            None => ".",
+            Some(first) => {
+                if iter.all(|s| s == first) {
+                    match first {
+                        Strand::Forward => "+",
+                        Strand::Reverse => "-",
+                        _ => ".",
+                    }
+                } else {
+                    "mixed"
+                }
+            }
+        }
+    }
+
     fn __repr__(&self) -> String {
-        let first = &self.inner.slices[0];
-        let last = self.inner.slices.last().unwrap();
-        let sh = format!("{}", first.block.node_id);
-        let eh = format!("{}", last.block.node_id);
-        format!(
-            "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks)",
-            &sh[..8],
-            first.block.sequence_start,
-            first.block.sequence_end,
-            first.start,
-            &eh[..8],
-            last.block.sequence_start,
-            last.block.sequence_end,
-            last.end,
-            self.inner.slices.len(),
-        )
+        let strand = self.strand();
+        let segs: Vec<String> = self
+            .inner
+            .slices
+            .iter()
+            .map(|s| {
+                let h = format!("{}", s.block.node_id);
+                let hash8 = &h[..8.min(h.len())];
+                let block_len = (s.block.sequence_end - s.block.sequence_start) as usize;
+                let full_width = s.start == 0 && s.end == block_len;
+                if full_width {
+                    format!(
+                        "{}[{}:{}][:]",
+                        hash8, s.block.sequence_start, s.block.sequence_end
+                    )
+                } else {
+                    format!(
+                        "{}[{}:{}][{}:{}]",
+                        hash8, s.block.sequence_start, s.block.sequence_end, s.start, s.end
+                    )
+                }
+            })
+            .collect();
+        format!("GraphLocus([{}], strand='{}')", segs.join(", "), strand)
+    }
+
+    fn __str__(&self) -> String {
+        let segs: Vec<String> = self
+            .inner
+            .slices
+            .iter()
+            .map(|s| {
+                let h = format!("{}", s.block.node_id);
+                let hash8 = &h[..8.min(h.len())];
+                format!(
+                    "{}:{}-{}",
+                    hash8, s.block.sequence_start, s.block.sequence_end
+                )
+            })
+            .collect();
+        let coords = segs.join(",");
+        match self.strand() {
+            "+" => format!("{}(+)", coords),
+            "-" => format!("{}(-)", coords),
+            s => format!("{}({})", coords, s),
+        }
+    }
+
+    fn __hash__(&self) -> isize {
+        let mut hash: isize = 0;
+        for s in &self.inner.slices {
+            for &b in &s.block.node_id.0 {
+                hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+            }
+            hash = hash
+                .wrapping_mul(31)
+                .wrapping_add(s.block.sequence_start as isize);
+            hash = hash
+                .wrapping_mul(31)
+                .wrapping_add(s.block.sequence_end as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(s.start as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(s.end as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(s.strand as isize);
+        }
+        hash
     }
 }
 
@@ -135,31 +220,27 @@ impl PyGraphLocus {
 #[derive(Clone)]
 pub struct PyAnnotation {
     pub inner: AnnotationSpan,
+    pub(crate) locus: GraphLocus,
 }
 
 #[pymethods]
 impl PyAnnotation {
     #[new]
-    fn new(locus_or_loci: &Bound<'_, PyAny>, name: &str) -> PyResult<Self> {
-        if let Ok(single) = locus_or_loci.extract::<PyRef<PyGraphLocus>>() {
-            let span = annotation_span_from_graph_locus(&single.inner, name);
-            Ok(PyAnnotation { inner: span })
-        } else if let Ok(list) = locus_or_loci.extract::<Vec<PyRef<PyGraphLocus>>>() {
-            let segments: Vec<AnnotationSegment> = list
-                .iter()
-                .flat_map(|l| annotation_span_from_graph_locus(&l.inner, name).segments)
-                .collect();
-            let span = AnnotationSpan {
-                id: HashId::convert_str(name),
-                name: name.to_string(),
-                segments,
-            };
-            Ok(PyAnnotation { inner: span })
-        } else {
-            Err(pyo3::exceptions::PyTypeError::new_err(
-                "first argument must be a GraphLocus or list[GraphLocus]",
-            ))
+    fn new(locus: PyRef<PyGraphLocus>, name: &str) -> Self {
+        PyAnnotation {
+            inner: annotation_span_from_graph_locus(&locus.inner, name),
+            locus: locus.inner.clone(),
         }
+    }
+
+    /// The graph-space locus covered by this annotation.
+    ///
+    /// Provides ``.blocks`` (list of ``Block`` objects with
+    /// ``node_id``, ``sequence_start``, ``sequence_end``),
+    /// ``.start()`` / ``.end()`` (``GraphPos``), and ``.strand``.
+    #[getter]
+    fn locus(&self) -> PyGraphLocus {
+        PyGraphLocus::from_locus(self.locus.clone())
     }
 
     #[getter]
@@ -173,5 +254,25 @@ impl PyAnnotation {
             self.inner.name,
             self.inner.segments.len()
         )
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.name.clone()
+    }
+
+    fn __hash__(&self) -> isize {
+        let mut hash: isize = 0;
+        for &b in &self.inner.id.0 {
+            hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+        }
+        for seg in &self.inner.segments {
+            for &b in &seg.node_id.0 {
+                hash = hash.wrapping_mul(31).wrapping_add(b as isize);
+            }
+            hash = hash.wrapping_mul(31).wrapping_add(seg.start as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(seg.end as isize);
+            hash = hash.wrapping_mul(31).wrapping_add(seg.strand as isize);
+        }
+        hash
     }
 }

@@ -15,7 +15,8 @@ from .gen import (
     Annotation,
     BlockGroup,
     HashId,
-    Block,
+    Node,
+    NodeSlice,
     GraphPos,
     GraphLocus,
     SequencePart,
@@ -30,12 +31,13 @@ except ImportError:
 
 __all__ = [
     "Annotation",
-    "Block",
     "BlockGroup",
     "GenGraphWidget",
     "GraphLocus",
     "GraphPos",
     "HashId",
+    "Node",
+    "NodeSlice",
     "Repository",
     "SequencePart",
 ]

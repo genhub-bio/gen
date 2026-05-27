@@ -22,6 +22,7 @@ gen-graph = { path = "../../../gen-graph", version = "0.1.31" }
 gen-models = { path = "../../../gen-models", version = "0.1.31" }
 gen-annotations = { path = "../../../gen-annotations", version = "0.1.31" }
 gen-tui = { path = "../../../gen-tui", version = "0.1.31", default-features = false }
+petgraph = "0.6.5"
 log = "0.4.26"
 ratatui = { version = "0.30.0", default-features = false }
 rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }

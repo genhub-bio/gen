@@ -3,6 +3,8 @@ db_context <- function(workspace_path, db_path) .Call("wrap__db_context", worksp
 
 import_fasta <- function(workspace_path, db_path, filename, sample, shallow, collection) .Call("wrap__import_fasta", workspace_path, db_path, filename, sample, shallow, collection, PACKAGE = "genr")
 
+import_reference_fasta <- function(workspace_path, db_path, filename, reference, shallow, collection) .Call("wrap__import_reference_fasta", workspace_path, db_path, filename, reference, shallow, collection, PACKAGE = "genr")
+
 import_sequences <- function(workspace_path, db_path, names, sequences, sample, collection) .Call("wrap__import_sequences", workspace_path, db_path, names, sequences, sample, collection, PACKAGE = "genr")
 
 import_genomic_regions <- function(workspace_path, db_path, seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection) .Call("wrap__import_genomic_regions", workspace_path, db_path, seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection, PACKAGE = "genr")
@@ -21,7 +23,7 @@ update_with_gfa <- function(workspace_path, db_path, filename, sample, new_sampl
 
 update_with_gaf <- function(workspace_path, db_path, filename, csv, sample, parent_sample, collection) .Call("wrap__update_with_gaf", workspace_path, db_path, filename, csv, sample, parent_sample, collection, PACKAGE = "genr")
 
-update_with_vcf <- function(workspace_path, db_path, filename, genotype, sample, parent_samples, in_place, collection) .Call("wrap__update_with_vcf", workspace_path, db_path, filename, genotype, sample, parent_samples, in_place, collection, PACKAGE = "genr")
+update_with_vcf <- function(workspace_path, db_path, filename, genotype, sample, reference, in_place, collection) .Call("wrap__update_with_vcf", workspace_path, db_path, filename, genotype, sample, reference, in_place, collection, PACKAGE = "genr")
 
 update_with_genbank <- function(workspace_path, db_path, filename, sample, create_missing, collection) .Call("wrap__update_with_genbank", workspace_path, db_path, filename, sample, create_missing, collection, PACKAGE = "genr")
 
@@ -101,6 +103,8 @@ GenRepository$get_block_sequence <- function(node_id, sequence_start, sequence_e
 
 GenRepository$import_fasta <- function(filename, sample, shallow, collection) .Call("wrap__GenRepository__import_fasta", self, filename, sample, shallow, collection, PACKAGE = "genr")
 
+GenRepository$import_reference_fasta <- function(filename, reference, shallow, collection) .Call("wrap__GenRepository__import_reference_fasta", self, filename, reference, shallow, collection, PACKAGE = "genr")
+
 GenRepository$import_sequences <- function(names, sequences, sample, collection) .Call("wrap__GenRepository__import_sequences", self, names, sequences, sample, collection, PACKAGE = "genr")
 
 GenRepository$import_genomic_regions <- function(seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection) .Call("wrap__GenRepository__import_genomic_regions", self, seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection, PACKAGE = "genr")
@@ -119,7 +123,7 @@ GenRepository$update_with_gfa <- function(filename, sample, new_sample, collecti
 
 GenRepository$update_with_gaf <- function(filename, csv, sample, parent_sample, collection) .Call("wrap__GenRepository__update_with_gaf", self, filename, csv, sample, parent_sample, collection, PACKAGE = "genr")
 
-GenRepository$update_with_vcf <- function(filename, genotype, sample, parent_samples, in_place, collection) .Call("wrap__GenRepository__update_with_vcf", self, filename, genotype, sample, parent_samples, in_place, collection, PACKAGE = "genr")
+GenRepository$update_with_vcf <- function(filename, genotype, sample, reference, in_place, collection) .Call("wrap__GenRepository__update_with_vcf", self, filename, genotype, sample, reference, in_place, collection, PACKAGE = "genr")
 
 GenRepository$update_with_genbank <- function(filename, sample, create_missing, collection) .Call("wrap__GenRepository__update_with_genbank", self, filename, sample, create_missing, collection, PACKAGE = "genr")
 

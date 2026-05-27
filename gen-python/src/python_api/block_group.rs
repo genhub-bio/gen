@@ -79,7 +79,7 @@ impl PyBlockGroup {
 
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "BlockGroup({}, {}, {}, {})",
+            "BlockGroup({}, collection={:?}, sample={:?}, name={:?})",
             self.id, self.collection_name, self.sample_name, self.name
         ))
     }
@@ -151,6 +151,7 @@ impl PyBlockGroup {
         let graph = BlockGroup::get_graph(graph_conn, &bg_id);
         let mut ctrl = PyGraphController::new(db_path, graph);
         ctrl.block_group_id = Some(bg_id);
+        ctrl.auto_load_annotation_groups(graph_conn);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
