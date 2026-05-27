@@ -188,7 +188,7 @@ vcf_path <- system.file("extdata", "puc19_sequenced.vcf", package = "genr")
 repo$update_with_vcf(
   filename       = vcf_path,
   sample         = "sequenced",
-  parent_samples = c("gg_design")
+  reference = c("gg_design")
 )
 ```
 

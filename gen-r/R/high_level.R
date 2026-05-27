@@ -614,6 +614,10 @@ Repository <- function(path = NULL) {
     inner$import_fasta(filename, sample, isTRUE(shallow), collection)
   }
 
+  repo$import_reference_fasta <- function(filename, reference, shallow = FALSE, collection = NULL) {
+    inner$import_reference_fasta(filename, reference, isTRUE(shallow), collection)
+  }
+
   repo$import_gfa <- function(filename, sample = "sample", collection = NULL) {
     inner$import_gfa(filename, sample, collection)
   }
@@ -643,8 +647,8 @@ Repository <- function(path = NULL) {
     inner$update_with_gaf(filename, csv, sample, parent_sample, collection)
   }
 
-  repo$update_with_vcf <- function(filename, genotype = NULL, sample = NULL, parent_samples = character(), in_place = FALSE, collection = NULL) {
-    inner$update_with_vcf(filename, genotype, sample, parent_samples, isTRUE(in_place), collection)
+  repo$update_with_vcf <- function(filename, genotype = NULL, sample = NULL, reference = character(), in_place = FALSE, collection = NULL) {
+    inner$update_with_vcf(filename, genotype, sample, reference, isTRUE(in_place), collection)
   }
 
   repo$update_with_genbank <- function(filename, sample, create_missing = FALSE, collection = NULL) {

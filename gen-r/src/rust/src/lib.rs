@@ -41,6 +41,7 @@ use gen_models::{
     locus::GraphLocus,
     node::Node,
     operations::{Defaults, OperationFile, OperationInfo},
+    sample::{NewSample, Sample},
     traits::Query,
 };
 use gen_tui::{
@@ -844,6 +845,63 @@ fn import_fasta(
 }
 
 #[extendr]
+fn import_reference_fasta(
+    workspace_path: Nullable<String>,
+    db_path: Nullable<String>,
+    filename: String,
+    reference: String,
+    shallow: bool,
+    collection: Nullable<String>,
+) -> std::result::Result<String, Error> {
+    let (context, _, _) = open_db_context(
+        nullable_string_to_option(workspace_path),
+        nullable_string_to_option(db_path),
+    )
+    .map_err(Error::Other)?;
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
+
+    begin_transactions(&context).map_err(Error::Other)?;
+
+    if let Err(e) = Sample::get_or_create(
+        context.graph().conn(),
+        NewSample {
+            name: &reference,
+            is_reference: true,
+        },
+    ) {
+        rollback_transactions(&context);
+        return Err(Error::Other(format!(
+            "Failed to create reference sample: {e}"
+        )));
+    }
+
+    match r#gen::imports::fasta::import_fasta(
+        &context,
+        &filename,
+        &collection_name,
+        &reference,
+        shallow,
+    ) {
+        Ok(_) => {
+            end_transactions(&context).map_err(Error::Other)?;
+            Ok("Fasta imported.".to_string())
+        }
+        Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+            rollback_transactions(&context);
+            Err(Error::Other("Fasta contents already exist.".to_string()))
+        }
+        Err(err) => {
+            rollback_transactions(&context);
+            Err(Error::Other(format!("Import failed: {err}")))
+        }
+    }
+}
+
+#[extendr]
 fn import_sequences(
     workspace_path: Nullable<String>,
     db_path: Nullable<String>,
@@ -1274,7 +1332,7 @@ fn update_with_vcf(
     filename: String,
     genotype: Nullable<String>,
     sample: Nullable<String>,
-    parent_samples: Vec<String>,
+    reference: Vec<String>,
     in_place: bool,
     collection: Nullable<String>,
 ) -> std::result::Result<String, Error> {
@@ -1298,7 +1356,7 @@ fn update_with_vcf(
         &collection_name,
         genotype,
         sample.as_deref(),
-        parent_samples,
+        reference,
         in_place,
     ) {
         Ok(_) => {
@@ -2349,6 +2407,53 @@ impl GenRepository {
         }
     }
 
+    fn import_reference_fasta(
+        &self,
+        filename: String,
+        reference: String,
+        shallow: bool,
+        collection: Nullable<String>,
+    ) -> std::result::Result<String, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        begin_transactions(&self.context).map_err(Error::Other)?;
+        if let Err(e) = Sample::get_or_create(
+            self.context.graph().conn(),
+            NewSample {
+                name: &reference,
+                is_reference: true,
+            },
+        ) {
+            rollback_transactions(&self.context);
+            return Err(Error::Other(format!(
+                "Failed to create reference sample: {e}"
+            )));
+        }
+        match r#gen::imports::fasta::import_fasta(
+            &self.context,
+            &filename,
+            &collection_name,
+            &reference,
+            shallow,
+        ) {
+            Ok(_) => {
+                end_transactions(&self.context).map_err(Error::Other)?;
+                Ok("Fasta imported.".to_string())
+            }
+            Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other("Fasta contents already exist.".to_string()))
+            }
+            Err(e) => {
+                rollback_transactions(&self.context);
+                Err(Error::Other(format!("Import failed: {e}")))
+            }
+        }
+    }
+
     fn import_sequences(
         &self,
         names: Vec<String>,
@@ -2707,7 +2812,7 @@ impl GenRepository {
         filename: String,
         genotype: Nullable<String>,
         sample: Nullable<String>,
-        parent_samples: Vec<String>,
+        reference: Vec<String>,
         in_place: bool,
         collection: Nullable<String>,
     ) -> std::result::Result<String, Error> {
@@ -2725,7 +2830,7 @@ impl GenRepository {
             &collection_name,
             genotype,
             sample.as_deref(),
-            parent_samples,
+            reference,
             in_place,
         ) {
             Ok(_) => {
@@ -3466,6 +3571,7 @@ extendr_module! {
     impl GenBlockGroup;
     fn db_context;
     fn import_fasta;
+    fn import_reference_fasta;
     fn import_sequences;
     fn import_genomic_regions;
     fn import_gfa;
