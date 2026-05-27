@@ -282,14 +282,13 @@ function render({ model, el }) {
   wrapper.appendChild(canvas);
   el.appendChild(wrapper);
   const ctx = canvas.getContext("2d");
-  let nodeCells = /* @__PURE__ */ new Set();
-  let frozen = false;
-  function repaint(frame) {
-    nodeCells = paintFrame(ctx, canvas, grid, frame);
-  }
-  repaint(model.get("frame"));
-  model.on("change:frame", () => repaint(model.get("frame")));
+  paintFrame(ctx, canvas, grid, model.get("frame"));
   if (true) {
+    let nodeCells = /* @__PURE__ */ new Set();
+    let frozen = false;
+    model.on("change:frame", () => {
+      nodeCells = paintFrame(ctx, canvas, grid, model.get("frame"));
+    });
     const sharedBtnStyle = [
       "width: 24px",
       "height: 24px",
