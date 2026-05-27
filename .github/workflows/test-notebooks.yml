@@ -1,0 +1,32 @@
+name: Test Notebooks
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-notebooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+      - name: Build and install gen package
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin
+          maturin develop
+      - name: Install notebook test dependencies
+        run: source .venv/bin/activate && pip install pytest nbmake
+      - name: Test notebooks
+        run: source .venv/bin/activate && pytest --nbmake --nbmake-timeout=120 .
