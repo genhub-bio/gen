@@ -28,9 +28,7 @@ use r#gen::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
         },
-        gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, center_on_node_offset, highlight_match_range,
-        },
+        gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer, highlight_match_range},
     },
 };
 use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
@@ -49,6 +47,7 @@ use gen_tui::{
     LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
     plotter::PathStyle,
 };
+use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use rusqlite::{Connection, types::ValueRef};
 use serde::{Deserialize, Serialize};
@@ -584,10 +583,71 @@ fn parse_op_color(s: &str) -> std::result::Result<ratatui::style::Color, String>
     }
 }
 
+fn parse_hl_op(op: &str) -> std::result::Result<(GraphLocus, ratatui::style::Color), String> {
+    let parts = op.split(',').collect::<Vec<_>>();
+    if parts.len() < 6 {
+        return Err(format!("Invalid hl op (too short): {op}"));
+    }
+    let color = parse_op_color(parts[1])?;
+    let start_offset = parts[2]
+        .parse::<usize>()
+        .map_err(|err| format!("Invalid hl start_offset in '{op}': {err}"))?;
+    let end_offset = parts[3]
+        .parse::<usize>()
+        .map_err(|err| format!("Invalid hl end_offset in '{op}': {err}"))?;
+    let strand = match parts[4] {
+        "f" => Strand::Forward,
+        "r" => Strand::Reverse,
+        _ => Strand::Unknown,
+    };
+    let n = parts[5]
+        .parse::<usize>()
+        .map_err(|err| format!("Invalid hl block count in '{op}': {err}"))?;
+    if parts.len() != 6 + n * 3 {
+        return Err(format!(
+            "Invalid hl op: expected {} parts for {n} blocks, got {}",
+            6 + n * 3,
+            parts.len()
+        ));
+    }
+    let mut slices = Vec::with_capacity(n);
+    for i in 0..n {
+        let base = 6 + i * 3;
+        let node_id = hash_id_from_string(parts[base])
+            .map_err(|err| format!("Invalid hl node_id[{i}] in '{op}': {err}"))?;
+        let seq_start = parts[base + 1]
+            .parse::<i64>()
+            .map_err(|err| format!("Invalid hl seq_start[{i}] in '{op}': {err}"))?;
+        let seq_end = parts[base + 2]
+            .parse::<i64>()
+            .map_err(|err| format!("Invalid hl seq_end[{i}] in '{op}': {err}"))?;
+        let block = GraphNode {
+            node_id,
+            sequence_start: seq_start,
+            sequence_end: seq_end,
+        };
+        let slice_start = if i == 0 { start_offset } else { 0 };
+        let slice_end = if i == n - 1 {
+            end_offset
+        } else {
+            block.length() as usize
+        };
+        slices.push(GraphNodeSlice {
+            block,
+            start: slice_start,
+            end: slice_end,
+            strand,
+        });
+    }
+    Ok((GraphLocus { slices }, color))
+}
+
 fn apply_graph_ops(
     controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
     ops: &str,
 ) -> std::result::Result<(), String> {
+    let mut deferred_hl: Vec<&str> = Vec::new();
+
     for op in ops.split(';').filter(|segment| !segment.is_empty()) {
         let parts = op.split(',').collect::<Vec<_>>();
         match parts.first().copied() {
@@ -639,76 +699,37 @@ fn apply_graph_ops(
                     sequence_end: seq_end,
                 };
                 controller.set_detail_level(VisualDetail::Full);
-                center_on_node_offset(controller, node, (frac_x, 0.5));
+                if let Ok((partition_idx, _)) = controller
+                    .partition_controller
+                    .partition_table
+                    .find_node(&node)
+                {
+                    let _ = controller.ensure_partition_loaded(partition_idx);
+                    let _ = controller.set_anchor_partition(partition_idx);
+                }
+                let domain_idx = NodeIndex::new(NodeIndexable::to_index(controller.graph(), node));
+                controller.go_to_node(domain_idx, (frac_x, 0.5));
+                controller.queue_snap_left();
                 controller.hide_cursor();
             }
-            Some("hl") => {
-                // hl,{color},{start_offset},{end_offset},{strand},{n},{node_id},{seq_start},{seq_end},...
-                if parts.len() < 6 {
-                    return Err(format!("Invalid hl op (too short): {op}"));
-                }
-                let color = parse_op_color(parts[1])?;
-                let start_offset = parts[2]
-                    .parse::<usize>()
-                    .map_err(|err| format!("Invalid hl start_offset in '{op}': {err}"))?;
-                let end_offset = parts[3]
-                    .parse::<usize>()
-                    .map_err(|err| format!("Invalid hl end_offset in '{op}': {err}"))?;
-                let strand = match parts[4] {
-                    "f" => Strand::Forward,
-                    "r" => Strand::Reverse,
-                    _ => Strand::Unknown,
-                };
-                let n = parts[5]
-                    .parse::<usize>()
-                    .map_err(|err| format!("Invalid hl block count in '{op}': {err}"))?;
-                if parts.len() != 6 + n * 3 {
-                    return Err(format!(
-                        "Invalid hl op: expected {} parts for {n} blocks, got {}",
-                        6 + n * 3,
-                        parts.len()
-                    ));
-                }
-                let mut slices = Vec::with_capacity(n);
-                for i in 0..n {
-                    let base = 6 + i * 3;
-                    let node_id = hash_id_from_string(parts[base])
-                        .map_err(|err| format!("Invalid hl node_id[{i}] in '{op}': {err}"))?;
-                    let seq_start = parts[base + 1]
-                        .parse::<i64>()
-                        .map_err(|err| format!("Invalid hl seq_start[{i}] in '{op}': {err}"))?;
-                    let seq_end = parts[base + 2]
-                        .parse::<i64>()
-                        .map_err(|err| format!("Invalid hl seq_end[{i}] in '{op}': {err}"))?;
-                    let block = GraphNode {
-                        node_id,
-                        sequence_start: seq_start,
-                        sequence_end: seq_end,
-                    };
-                    let slice_start = if i == 0 { start_offset } else { 0 };
-                    let slice_end = if i == n - 1 {
-                        end_offset
-                    } else {
-                        block.length() as usize
-                    };
-                    slices.push(GraphNodeSlice {
-                        block,
-                        start: slice_start,
-                        end: slice_end,
-                        strand,
-                    });
-                }
-                let locus = GraphLocus { slices };
-                let style = PathStyle::new(color)
-                    .with_line_style(LineStyle::Bold)
-                    .with_merge_glyphs(true);
-                highlight_match_range(controller, &locus, style);
+            Some("hl") => deferred_hl.push(op),
+            Some("clrhl") => {
+                controller.clear_all_highlights();
+                deferred_hl.clear();
             }
-            Some("clrhl") => controller.clear_all_highlights(),
             Some(other) => return Err(format!("Unknown graph op prefix '{other}'.")),
             None => {}
         }
     }
+
+    for op in deferred_hl {
+        let (locus, color) = parse_hl_op(op)?;
+        let style = PathStyle::new(color)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        highlight_match_range(controller, &locus, style);
+    }
+
     Ok(())
 }
 
