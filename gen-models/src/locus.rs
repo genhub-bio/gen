@@ -11,45 +11,21 @@
 //!
 //! The search algorithm, for example, is a lot easier to understand on Blocks
 //! rather than Nodes. It's output can be used to address graph space and in
-//! the form of a list of BlockSlices: segments from blocks, in the block's
+//! the form of a list of GraphNodeSlices: segments from blocks, in the
 //! coordinate reference frame (left side = 0). But to store graph changes in
 //! the additive model in the database we must convert back to the Node format.
 
 use gen_core::{HashId, Strand};
-use gen_graph::GraphNode;
-use serde::{Deserialize, Serialize};
+pub use gen_graph::GraphNodeSlice;
 
 use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
 
-/// A slice of a single graph block: the block itself plus local start/end byte
-/// offsets within that block's sequence.  Middle blocks in a multi-block locus
-/// span the full block (`start = 0`, `end = block.length()`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BlockSlice {
-    pub block: GraphNode,
-    /// Local start offset within the block's sequence slice (`0..block.length()`).
-    pub start: usize,
-    /// Local end offset, exclusive (`start..=block.length()`).
-    pub end: usize,
-}
-
-impl BlockSlice {
-    pub fn full(block: GraphNode) -> Self {
-        Self {
-            block,
-            start: 0,
-            end: block.length() as usize,
-        }
-    }
-}
-
 /// A region in graph space expressed as an ordered list of block slices.
-/// The strand field specifies the 5'-3' orientation for double stranded DNA.
-///
+/// Each slice carries its own strand, allowing trans-spliced loci where
+/// individual exons may come from opposite strands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphLocus {
-    pub slices: Vec<BlockSlice>,
-    pub strand: Strand,
+    pub slices: Vec<GraphNodeSlice>,
 }
 
 impl GraphLocus {
@@ -66,13 +42,14 @@ impl GraphLocus {
                 .into_bytes();
             let block_start = s.block.sequence_start as usize;
             let text = &full[block_start..block_start + s.block.length() as usize];
-            out.extend_from_slice(&text[s.start..s.end]);
+            let slice_bytes = &text[s.start..s.end];
+            if s.strand == Strand::Reverse {
+                out.extend_from_slice(&reverse_complement(slice_bytes));
+            } else {
+                out.extend_from_slice(slice_bytes);
+            }
         }
 
-        if self.strand == Strand::Reverse {
-            reverse_complement(&out)
-        } else {
-            out
-        }
+        out
     }
 }

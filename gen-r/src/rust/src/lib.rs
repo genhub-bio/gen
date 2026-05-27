@@ -35,12 +35,12 @@ use r#gen::{
 };
 use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
 use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
     errors::OperationError,
-    locus::{BlockSlice, GraphLocus},
+    locus::GraphLocus,
     node::Node,
     operations::{Defaults, OperationFile, OperationInfo},
     traits::Query,
@@ -176,6 +176,27 @@ fn block_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Robj
         sequence_end = sequence_end
     ));
     obj.set_class(&["gen_block"]).unwrap();
+    obj
+}
+
+fn block_slice_record(
+    node_id: HashId,
+    sequence_start: i64,
+    sequence_end: i64,
+    strand: Strand,
+) -> Robj {
+    let strand_str = match strand {
+        Strand::Forward => "forward",
+        Strand::Reverse => "reverse",
+        _ => "unknown",
+    };
+    let mut obj = r!(list!(
+        node_id = node_id.to_string(),
+        sequence_start = sequence_start,
+        sequence_end = sequence_end,
+        strand = strand_str
+    ));
+    obj.set_class(&["gen_block_slice"]).unwrap();
     obj
 }
 
@@ -670,13 +691,14 @@ fn apply_graph_ops(
                     } else {
                         block.length() as usize
                     };
-                    slices.push(BlockSlice {
+                    slices.push(GraphNodeSlice {
                         block,
                         start: slice_start,
                         end: slice_end,
+                        strand,
                     });
                 }
-                let locus = GraphLocus { slices, strand };
+                let locus = GraphLocus { slices };
                 let style = PathStyle::new(color)
                     .with_line_style(LineStyle::Bold)
                     .with_merge_glyphs(true);
@@ -705,44 +727,37 @@ fn parse_sequence_kind_r(s: &str) -> std::result::Result<SequenceKind, String> {
 fn graph_locus_record(locus: &GraphLocus) -> List {
     let first = &locus.slices[0];
     let last = locus.slices.last().unwrap();
-    let strand = match locus.strand {
-        Strand::Forward => "forward",
-        Strand::Reverse => "reverse",
-        _ => "unknown",
-    };
     let start = list!(
-        block = block_record(
+        block = block_slice_record(
             first.block.node_id,
             first.block.sequence_start,
-            first.block.sequence_end
+            first.block.sequence_end,
+            first.strand,
         ),
         offset = first.start as i64
     );
     let end = list!(
-        block = block_record(
+        block = block_slice_record(
             last.block.node_id,
             last.block.sequence_start,
-            last.block.sequence_end
+            last.block.sequence_end,
+            last.strand,
         ),
         offset = last.end as i64
     );
-    let blocks = locus
+    let slices = locus
         .slices
         .iter()
         .map(|s| {
-            block_record(
+            block_slice_record(
                 s.block.node_id,
                 s.block.sequence_start,
                 s.block.sequence_end,
+                s.strand,
             )
         })
         .collect::<Vec<_>>();
-    list!(
-        start = start,
-        end = end,
-        blocks = List::from_values(blocks),
-        strand = strand
-    )
+    list!(start = start, end = end, slices = List::from_values(slices))
 }
 
 /// Open a Gen database context.
@@ -3213,7 +3228,11 @@ impl GenBlockGroup {
         .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))
     }
 
-    fn export_gfa(&self, filename: String, node_max: Nullable<i64>) -> std::result::Result<(), Error> {
+    fn export_gfa(
+        &self,
+        filename: String,
+        node_max: Nullable<i64>,
+    ) -> std::result::Result<(), Error> {
         let conn = self.context.graph().conn();
         gfa_export(
             conn,
@@ -3253,8 +3272,7 @@ impl GenBlockGroup {
         let bytes = index
             .to_bytes_with_header()
             .map_err(|e| Error::Other(format!("Failed to serialize index: {e}")))?;
-        fs::write(&path, bytes)
-            .map_err(|e| Error::Other(format!("Failed to write index: {e}")))
+        fs::write(&path, bytes).map_err(|e| Error::Other(format!("Failed to write index: {e}")))
     }
 
     fn search(&self, query: String, sequence_kind: String) -> std::result::Result<List, Error> {

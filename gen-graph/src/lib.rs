@@ -49,6 +49,31 @@ impl GraphNode {
     }
 }
 
+/// A slice of a single graph block: the block itself plus local start/end byte
+/// offsets within that block's sequence.  Middle blocks in a multi-block locus
+/// span the full block (`start = 0`, `end = block.length()`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GraphNodeSlice {
+    pub block: GraphNode,
+    /// Local start offset within the block's sequence slice (`0..block.length()`).
+    pub start: usize,
+    /// Local end offset, exclusive (`start..=block.length()`).
+    pub end: usize,
+    /// 5'→3' orientation of this slice.
+    pub strand: Strand,
+}
+
+impl GraphNodeSlice {
+    pub fn full(block: GraphNode, strand: Strand) -> Self {
+        Self {
+            block,
+            start: 0,
+            end: block.length() as usize,
+            strand,
+        }
+    }
+}
+
 pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
 pub type OperationGraph = DiGraphMap<HashId, ()>;
 

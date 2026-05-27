@@ -13,7 +13,7 @@ use gen_models::{block_group::BlockGroup, db::DbContext, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
-    block::PyBlock,
+    block::PyGraphNode,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
 };
@@ -162,7 +162,7 @@ impl PyBlockGroup {
     ///
     /// Returns a list of `GraphLocus` objects. Each locus exposes:
     ///   - `.start()` / `.end()` → `GraphPos` (node + byte offset)
-    ///   - `.blocks` → `list[Block]`
+    ///   - `.slices` → `list[NodeSlice]`
     ///
     /// Parameters
     /// ----------
@@ -290,11 +290,11 @@ impl PyBlockGroup {
         let nodes = PyDict::new(py);
         for node in graph.nodes() {
             let node_dict = PyDict::new(py);
-            node_dict.set_item("node_id", node.node_id)?;
+            node_dict.set_item("parent_node_id", node.node_id)?;
             node_dict.set_item("sequence_start", node.sequence_start)?;
             node_dict.set_item("sequence_end", node.sequence_end)?;
             nodes.set_item(
-                PyBlock::new(node.node_id, node.sequence_start, node.sequence_end),
+                PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end),
                 node_dict,
             )?;
         }
@@ -315,8 +315,8 @@ impl PyBlockGroup {
                 .collect();
             edges.set_item(
                 (
-                    PyBlock::new(src.node_id, src.sequence_start, src.sequence_end),
-                    PyBlock::new(dst.node_id, dst.sequence_start, dst.sequence_end),
+                    PyGraphNode::new(src.node_id, src.sequence_start, src.sequence_end),
+                    PyGraphNode::new(dst.node_id, dst.sequence_start, dst.sequence_end),
                 ),
                 weights?,
             )?;
@@ -338,12 +338,12 @@ impl PyBlockGroup {
             let mut node_map: HashMap<GraphNode, usize> = HashMap::new();
             for node in graph.nodes() {
                 let node_data = PyDict::new(py);
-                node_data.set_item("node_id", node.node_id)?;
+                node_data.set_item("parent_node_id", node.node_id)?;
                 node_data.set_item("sequence_start", node.sequence_start)?;
                 node_data.set_item("sequence_end", node.sequence_end)?;
                 node_data.set_item(
                     "key",
-                    PyBlock::new(node.node_id, node.sequence_start, node.sequence_end),
+                    PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end),
                 )?;
                 let index: usize = py_digraph
                     .call_method1("add_node", (node_data,))?
@@ -381,14 +381,14 @@ impl PyBlockGroup {
             let nx_digraph = networkx.getattr("DiGraph")?.call0()?;
             for node in graph.nodes() {
                 let node_data = PyDict::new(py);
-                node_data.set_item("node_id", node.node_id)?;
+                node_data.set_item("parent_node_id", node.node_id)?;
                 node_data.set_item("sequence_start", node.sequence_start)?;
                 node_data.set_item("sequence_end", node.sequence_end)?;
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("attr_dict", node_data)?;
                 nx_digraph.call_method(
                     "add_node",
-                    (PyBlock::new(
+                    (PyGraphNode::new(
                         node.node_id,
                         node.sequence_start,
                         node.sequence_end,
@@ -414,8 +414,8 @@ impl PyBlockGroup {
                 nx_digraph.call_method(
                     "add_edge",
                     (
-                        PyBlock::new(src.node_id, src.sequence_start, src.sequence_end),
-                        PyBlock::new(dst.node_id, dst.sequence_start, dst.sequence_end),
+                        PyGraphNode::new(src.node_id, src.sequence_start, src.sequence_end),
+                        PyGraphNode::new(dst.node_id, dst.sequence_start, dst.sequence_end),
                     ),
                     Some(&kwargs),
                 )?;

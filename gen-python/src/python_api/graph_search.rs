@@ -4,12 +4,12 @@ use r#gen::{
         AnnotationSegment, AnnotationSpan, annotation_span_from_graph_locus,
     },
 };
-use gen_core::{HashId, Strand};
+use gen_core::HashId;
 use gen_graph::GraphNode;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
-use super::block::PyBlock;
+use super::block::{PyGraphNode, PyGraphNodeSlice};
 
 /// A position in the graph: a specific node plus a byte offset within that
 /// node's local text (`0..node.length()`).
@@ -34,9 +34,9 @@ impl PyGraphPos {
 impl PyGraphPos {
     /// The graph node this position is inside.
     #[getter]
-    fn block(&self) -> PyBlock {
+    fn block(&self) -> PyGraphNode {
         let n = self.inner.block;
-        PyBlock::new(n.node_id, n.sequence_start, n.sequence_end)
+        PyGraphNode::new(n.node_id, n.sequence_start, n.sequence_end)
     }
 
     /// Byte offset within the node's local text (`0..node.length()`).
@@ -92,35 +92,17 @@ impl PyGraphLocus {
         PyGraphPos::new(s.block, s.end)
     }
 
-    /// Ordered sequence of blocks that span this locus.
+    /// Ordered sequence of block slices that span this locus.
     ///
-    /// Each `PyBlock` carries `(node_id, sequence_start, sequence_end)`.
-    /// Note that `node_id` alone is **not** unique — multiple blocks can be
-    /// carved from the same graph node.  Use all three fields together to
-    /// uniquely identify a block.
+    /// Each `NodeSlice` carries the underlying block, local byte offsets
+    /// within that block, and the strand for that slice.
     #[getter]
-    fn blocks(&self) -> Vec<PyBlock> {
+    fn slices(&self) -> Vec<PyGraphNodeSlice> {
         self.inner
             .slices
             .iter()
-            .map(|s| {
-                PyBlock::new(
-                    s.block.node_id,
-                    s.block.sequence_start,
-                    s.block.sequence_end,
-                )
-            })
+            .map(|s| PyGraphNodeSlice::from_slice(*s))
             .collect()
-    }
-
-    /// Strand of the matched sequence: `"forward"`, `"reverse"`, or `"unknown"`.
-    #[getter]
-    fn strand(&self) -> &str {
-        match self.inner.strand {
-            Strand::Forward => "forward",
-            Strand::Reverse => "reverse",
-            _ => "unknown",
-        }
     }
 
     fn __repr__(&self) -> String {
@@ -128,13 +110,8 @@ impl PyGraphLocus {
         let last = self.inner.slices.last().unwrap();
         let sh = format!("{}", first.block.node_id);
         let eh = format!("{}", last.block.node_id);
-        let strand = match self.inner.strand {
-            Strand::Forward => "+",
-            Strand::Reverse => "-",
-            _ => ".",
-        };
         format!(
-            "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks, strand={})",
+            "GraphLocus({}[{}..{}]+{} → {}[{}..{}]+{}, {} blocks)",
             &sh[..8],
             first.block.sequence_start,
             first.block.sequence_end,
@@ -144,7 +121,6 @@ impl PyGraphLocus {
             last.block.sequence_end,
             last.end,
             self.inner.slices.len(),
-            strand,
         )
     }
 }

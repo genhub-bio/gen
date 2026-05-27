@@ -64,7 +64,7 @@ impl PyRepository {
     ///   - `matches` is a list of `GraphLocus` objects. Each locus exposes:
     ///       - `.start()` / `.end()` → `GraphPos` (node + byte offset) — pass
     ///         directly to `widget.go_to()`
-    ///       - `.blocks` → `list[Block]`
+    ///       - `.slices` → `list[NodeSlice]`
     ///
     /// If `bgs` is None or empty, searches all block groups.
     /// If a seed index was previously built with `build_index()`, it is loaded

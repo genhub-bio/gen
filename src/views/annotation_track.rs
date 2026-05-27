@@ -4,8 +4,8 @@ use std::{
 };
 
 use gen_core::{HashId, Strand, is_end_node, is_start_node};
-use gen_graph::GenGraph;
-use gen_models::locus::{BlockSlice, GraphLocus};
+use gen_graph::{GenGraph, GraphNodeSlice};
+use gen_models::locus::GraphLocus;
 use gen_tui::{
     GraphController, ViewportState, VisualDetail, WorldRect, plotter::NodeSizer,
     theme::current_theme,
@@ -49,7 +49,7 @@ pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> Annot
             node_id: s.block.node_id,
             start: s.block.sequence_start + s.start as i64,
             end: s.block.sequence_start + s.end as i64,
-            strand: locus.strand,
+            strand: s.strand,
         })
         .collect();
     AnnotationSpan {
@@ -66,22 +66,23 @@ pub fn graph_locus_from_annotation_span(
     if span.segments.is_empty() {
         return None;
     }
-    let strand = span.segments.first()?.strand;
     let node_map: HashMap<_, _> = graph.node_identifiers().map(|n| (n.node_id, n)).collect();
-    let slices: Option<Vec<BlockSlice>> = span
+    let slices: Option<Vec<GraphNodeSlice>> = span
         .segments
         .iter()
         .map(|seg| {
             let block = *node_map.get(&seg.node_id)?;
             let start = (seg.start - block.sequence_start).max(0) as usize;
             let end = (seg.end - block.sequence_start).max(0) as usize;
-            Some(BlockSlice { block, start, end })
+            Some(GraphNodeSlice {
+                block,
+                start,
+                end,
+                strand: seg.strand,
+            })
         })
         .collect();
-    Some(GraphLocus {
-        slices: slices?,
-        strand,
-    })
+    Some(GraphLocus { slices: slices? })
 }
 
 impl AnnotationTrack {
@@ -801,12 +802,12 @@ mod tests {
     fn annotation_span_from_graph_locus_preserves_name_and_coordinates() {
         let node = make_node("n1", 100, 200);
         let locus = GraphLocus {
-            slices: vec![BlockSlice {
+            slices: vec![GraphNodeSlice {
                 block: node,
                 start: 5,
                 end: 15,
+                strand: Strand::Forward,
             }],
-            strand: Strand::Forward,
         };
         let span = annotation_span_from_graph_locus(&locus, "my_gene");
         assert_eq!(span.name, "my_gene");
@@ -823,12 +824,12 @@ mod tests {
         let node = make_node("n1", 100, 200);
         let graph = make_graph(&[node]);
         let locus = GraphLocus {
-            slices: vec![BlockSlice {
+            slices: vec![GraphNodeSlice {
                 block: node,
                 start: 5,
                 end: 15,
+                strand: Strand::Forward,
             }],
-            strand: Strand::Forward,
         };
         let span = annotation_span_from_graph_locus(&locus, "");
         let recovered = graph_locus_from_annotation_span(&span, &graph).unwrap();
@@ -836,7 +837,7 @@ mod tests {
         assert_eq!(recovered.slices[0].block, node);
         assert_eq!(recovered.slices[0].start, 5);
         assert_eq!(recovered.slices[0].end, 15);
-        assert_eq!(recovered.strand, Strand::Forward);
+        assert_eq!(recovered.slices[0].strand, Strand::Forward);
     }
 
     #[test]
@@ -855,12 +856,12 @@ mod tests {
         let node = make_node("n1", 0, 100);
         let graph = make_graph(&[]); // node not in graph
         let locus = GraphLocus {
-            slices: vec![BlockSlice {
+            slices: vec![GraphNodeSlice {
                 block: node,
                 start: 0,
                 end: 10,
+                strand: Strand::Forward,
             }],
-            strand: Strand::Forward,
         };
         let span = annotation_span_from_graph_locus(&locus, "");
         assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
