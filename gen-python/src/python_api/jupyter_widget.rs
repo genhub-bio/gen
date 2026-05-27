@@ -21,13 +21,10 @@ use r#gen::{
         inline_label_placement::draw_label_near_pos,
     },
 };
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode, project_path};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice, project_path};
 use gen_models::{
-    annotations::AnnotationError,
-    block_group::BlockGroup,
-    db::GraphConnection,
-    locus::{BlockSlice, GraphLocus},
+    annotations::AnnotationError, block_group::BlockGroup, db::GraphConnection, locus::GraphLocus,
 };
 use gen_tui::{
     LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
@@ -227,19 +224,15 @@ fn locus_from_span_and_pos_map(
             let node = *node_by_id.get(&seg.node_id)?;
             let start = (seg.start - node.sequence_start).max(0) as usize;
             let end = (seg.end - node.sequence_start).max(0) as usize;
-            Some(BlockSlice {
+            Some(GraphNodeSlice {
                 block: node,
                 start,
                 end,
+                strand: seg.strand,
             })
         })
         .collect();
-    let strand = span
-        .segments
-        .first()
-        .map(|s| s.strand)
-        .unwrap_or(Strand::Unknown);
-    GraphLocus { slices, strand }
+    GraphLocus { slices }
 }
 
 /// Internal graph controller for the Jupyter notebook widget.
