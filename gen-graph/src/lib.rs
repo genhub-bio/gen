@@ -24,7 +24,7 @@ use petgraph::{
 use serde::{Deserialize, Serialize};
 
 pub mod traits;
-pub use traits::MergeGraph;
+pub use traits::{FromNodeIntervalTree, MergeGraph};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct GraphNode {
@@ -60,6 +60,12 @@ pub struct GraphEdge {
     pub chromosome_index: i64,
     pub phased: i64,
     pub created_on: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
+pub struct GraphNodePosition {
+    pub graph_node: GraphNode,
+    pub offset: i64,
 }
 
 // #[derive(Debug)]

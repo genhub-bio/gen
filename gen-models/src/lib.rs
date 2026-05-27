@@ -14,6 +14,7 @@ pub mod files;
 #[allow(clippy::all)]
 pub mod generated;
 pub use generated::gen_models_capnp;
+pub mod graph;
 pub mod lineage;
 pub mod locus;
 pub mod manifest;

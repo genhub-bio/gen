@@ -1,7 +1,16 @@
-use crate::GenGraph;
+use std::collections::HashMap;
+
+use gen_core::{HashId, NodeIntervalBlock, calculate_hash};
+use intervaltree::IntervalTree;
+
+use crate::{GenGraph, GraphEdge, GraphNode};
 
 pub trait MergeGraph {
     fn merge_graph(&mut self, other: &GenGraph);
+}
+
+pub trait FromNodeIntervalTree {
+    fn from_node_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> GenGraph;
 }
 
 impl MergeGraph for GenGraph {
@@ -24,14 +33,205 @@ impl MergeGraph for GenGraph {
     }
 }
 
+impl FromNodeIntervalTree for GenGraph {
+    fn from_node_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> GenGraph {
+        let mut graph = GenGraph::new();
+        let blocks = tree
+            .iter_sorted()
+            .map(|element| element.value)
+            .collect::<Vec<_>>();
+
+        for block in &blocks {
+            graph.add_node(GraphNode {
+                node_id: block.node_id,
+                sequence_start: block.sequence_start,
+                sequence_end: block.sequence_end,
+            });
+        }
+
+        let mut blocks_by_start: HashMap<i64, Vec<NodeIntervalBlock>> = HashMap::new();
+        for block in &blocks {
+            blocks_by_start.entry(block.start).or_default().push(*block);
+        }
+
+        for source in &blocks {
+            if let Some(targets) = blocks_by_start.get(&source.end) {
+                for target in targets {
+                    let source_node = GraphNode {
+                        node_id: source.node_id,
+                        sequence_start: source.sequence_start,
+                        sequence_end: source.sequence_end,
+                    };
+                    let target_node = GraphNode {
+                        node_id: target.node_id,
+                        sequence_start: target.sequence_start,
+                        sequence_end: target.sequence_end,
+                    };
+                    let graph_edge = GraphEdge {
+                        edge_id: HashId(calculate_hash(&format!(
+                            "interval-tree-edge:{source_node}:{target_node}"
+                        ))),
+                        source_strand: source.strand,
+                        target_strand: target.strand,
+                        chromosome_index: 0,
+                        phased: 0,
+                        created_on: 0,
+                    };
+
+                    if let Some(edges) = graph.edge_weight_mut(source_node, target_node) {
+                        if !edges.contains(&graph_edge) {
+                            edges.push(graph_edge);
+                        }
+                    } else {
+                        graph.add_edge(source_node, target_node, vec![graph_edge]);
+                    }
+                }
+            }
+        }
+
+        graph
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use gen_core::{HashId, Strand};
+    use gen_core::{HashId, NodeIntervalBlock, Strand};
 
     use super::*;
     use crate::{GraphEdge, GraphNode};
+
+    #[test]
+    fn builds_gen_graph_from_node_interval_tree() {
+        let first = HashId::convert_str("interval-node-1");
+        let second = HashId::convert_str("interval-node-2");
+        let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
+            (
+                0..3,
+                NodeIntervalBlock {
+                    node_id: first,
+                    start: 0,
+                    end: 3,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                    strand: Strand::Forward,
+                },
+            ),
+            (
+                3..6,
+                NodeIntervalBlock {
+                    node_id: second,
+                    start: 3,
+                    end: 6,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                    strand: Strand::Forward,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let graph = GenGraph::from_node_interval_tree(&tree);
+        let first_node = GraphNode {
+            node_id: first,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let second_node = GraphNode {
+            node_id: second,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+
+        assert!(graph.contains_node(first_node));
+        assert!(graph.contains_node(second_node));
+        assert!(graph.contains_edge(first_node, second_node));
+    }
+
+    #[test]
+    fn builds_all_boundary_edges_for_parallel_interval_blocks() {
+        let left_a = HashId::convert_str("interval-left-a");
+        let left_b = HashId::convert_str("interval-left-b");
+        let right_a = HashId::convert_str("interval-right-a");
+        let right_b = HashId::convert_str("interval-right-b");
+        let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
+            (
+                0..3,
+                NodeIntervalBlock {
+                    node_id: left_a,
+                    start: 0,
+                    end: 3,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                    strand: Strand::Forward,
+                },
+            ),
+            (
+                0..3,
+                NodeIntervalBlock {
+                    node_id: left_b,
+                    start: 0,
+                    end: 3,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                    strand: Strand::Forward,
+                },
+            ),
+            (
+                3..6,
+                NodeIntervalBlock {
+                    node_id: right_a,
+                    start: 3,
+                    end: 6,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                    strand: Strand::Forward,
+                },
+            ),
+            (
+                3..6,
+                NodeIntervalBlock {
+                    node_id: right_b,
+                    start: 3,
+                    end: 6,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                    strand: Strand::Forward,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let graph = GenGraph::from_node_interval_tree(&tree);
+        let left_a = GraphNode {
+            node_id: left_a,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let left_b = GraphNode {
+            node_id: left_b,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let right_a = GraphNode {
+            node_id: right_a,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let right_b = GraphNode {
+            node_id: right_b,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+
+        assert!(graph.contains_edge(left_a, right_a));
+        assert!(graph.contains_edge(left_a, right_b));
+        assert!(graph.contains_edge(left_b, right_a));
+        assert!(graph.contains_edge(left_b, right_b));
+    }
 
     #[test]
     fn merges_gen_graphs_and_preserves_distinct_edges() {
