@@ -94,16 +94,28 @@ impl PyRepository {
         })
     }
 
-    #[pyo3(signature = (filename, genotype=None, sample=None, parent_samples=None, in_place=false, collection=None))]
+    #[pyo3(signature = (filename, reference=None, genotype=None, sample=None, in_place=false, collection=None))]
     fn update_with_vcf(
         &self,
         filename: String,
+        reference: Option<Bound<'_, PyAny>>,
         genotype: Option<String>,
         sample: Option<String>,
-        parent_samples: Option<Vec<String>>,
         in_place: bool,
         collection: Option<String>,
     ) -> PyResult<String> {
+        let parent_samples = match reference {
+            None => vec![],
+            Some(ref obj) => {
+                if let Ok(s) = obj.extract::<String>() {
+                    vec![s]
+                } else {
+                    obj.extract::<Vec<String>>().map_err(|_| {
+                        PyRuntimeError::new_err("reference must be a string or list of strings")
+                    })?
+                }
+            }
+        };
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_vcf(
@@ -112,7 +124,7 @@ impl PyRepository {
                 &collection,
                 genotype.clone().unwrap_or_default(),
                 sample.as_deref(),
-                parent_samples.unwrap_or_default(),
+                parent_samples.clone(),
                 in_place,
             )
             .map(|_| format!("Updated from '{}'.", filename))
