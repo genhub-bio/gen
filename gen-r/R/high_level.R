@@ -305,6 +305,12 @@ print.gen_plot <- function(x, ...) {
   invisible(x)
 }
 
+knit_print.gen_plot <- function(x, ...) {
+  json <- x$render_frame(x$cols, x$rows)
+  w <- .genplot_widget(json)
+  knitr::knit_print(w$.get_htmlwidget(), ...)
+}
+
 methods::setOldClass("gen_plot")
 methods::setMethod("show", "gen_plot", function(object) print(object))
 

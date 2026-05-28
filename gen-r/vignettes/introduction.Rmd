@@ -139,12 +139,13 @@ p_gg$go_to(hits[[1]]$matches[[1]])
 p_gg
 ```
 
-The viewer centres on the first BsaI site, which sits at the boundary
-of the new Golden Gate MCS. Both paths are visible: the wild-type MCS
-and the new Golden Gate site diverge at position 395 and reconverge 57
-bp later (original) or 46 bp later (new design).
+The viewer centres on the first BsaI site, which sits at the boundary of
+the new Golden Gate MCS. Both paths are visible: the wild-type MCS and
+the new Golden Gate site diverge at position 395 and reconverge 57 bp
+later (original) or 46 bp later (new design).
 
-Three hits. To understand why, run the same search against the wild-type:
+Three hits. To understand why, run the same search against the
+wild-type:
 
 ```{r search-wt}
 hits_wt <- repo$search("GGTCTC", bgs = list(bg_wt))
@@ -154,11 +155,11 @@ cat("BsaI sites in wild-type:", wt_count, "\n")   # 1
 
 The wild-type already carries one BsaI site — on the reverse strand at
 position 1765, inside the **bla** coding sequence. The design added
-exactly two new sites (3 − 1 = 2), so the flanking Golden Gate sites
-are present and correctly oriented. The pre-existing site is the
-problem: if left in place it will be cut alongside the intended assembly
-sites, fragmenting the AmpR cassette. It needs to be silently mutated
-out before the construct goes to synthesis.
+exactly two new sites (3 − 1 = 2), so the flanking Golden Gate sites are
+present and correctly oriented. The pre-existing site is the problem: if
+left in place it will be cut alongside the intended assembly sites,
+fragmenting the AmpR cassette. It needs to be silently mutated out
+before the construct goes to synthesis.
 
 The `search()` method also accepts degenerate IUPAC codes, so you can
 query by recognition sequence directly without pre-computing all
@@ -183,10 +184,10 @@ Each entry in the `matches` list is a locus record with `start`, `end`,
 the viewport on it, and to `highlight_match` to colour it on the canvas.
 
 The convenience method `go_to()` accepts both search match loci and
-annotation records returned by `list_annotations()`.  Annotations from
+annotation records returned by `list_annotations()`. Annotations from
 one sample can be used to navigate a plot of a different sample — this
 is safe and stable because annotations are stored as references to graph
-nodes, not as linear sequence coordinates.  Nodes are shared across
+nodes, not as linear sequence coordinates. Nodes are shared across
 samples in the same repository, so an annotation created for the "wt"
 sample points to exactly the same graph nodes that appear in the
 "gg_design" or "sequenced" graphs.
@@ -320,8 +321,9 @@ repo$import_reference_fasta("hg38.fa", reference = "hg38")
 #### GenBank updates and export
 
 `update_with_genbank()` applies sequence edits and annotation changes
-encoded in a GenBank file to an existing sample. Set `create_missing =
-TRUE` to auto-create block groups for features not yet in the database:
+encoded in a GenBank file to an existing sample. Set
+`create_missing = TRUE` to auto-create block groups for features not yet
+in the database:
 
 ```{r update-genbank, eval=FALSE}
 repo$update_with_genbank(
@@ -359,11 +361,10 @@ import_bioconductor(seqs, sample = "constructs", repo = repo)
 #### Genomic regions (GRanges)
 
 `import_granges()` imports a list of genomic intervals as block groups.
-Coordinates follow Bioconductor convention (1-based, closed
-\[start, end\]) and are converted to 0-based half-open storage
-internally. Each unique reference sequence is stored once as a shared
-node, so overlapping regions over the same chromosome do not duplicate
-sequence data.
+Coordinates follow Bioconductor convention (1-based, closed start-end)
+and are converted to 0-based half-open storage internally. Each unique
+reference sequence is stored once as a shared node, so overlapping
+regions over the same chromosome do not duplicate sequence data.
 
 ```{r import-granges, eval=FALSE}
 library(GenomicRanges)
