@@ -8,7 +8,7 @@
 export const TEXT_SIZE = 14;
 export const CELL_SIZE = Math.round(TEXT_SIZE / 0.875);
 export const BOX_SCALE = 1.15;
-export const FONT_FAMILY = "monospace";
+export const FONT_FAMILY = "Menlo, Monaco, Courier New, monospace";
 export const BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`;
 export const TEXT_FONT = `${TEXT_SIZE}px ${FONT_FAMILY}`;
 
