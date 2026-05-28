@@ -1,6 +1,8 @@
 ---
 title: "Introduction to genr: design, track, and discover"
-output: rmarkdown::html_vignette
+output:
+  rmarkdown::html_document:
+    self_contained: true
 vignette: >
   %\VignetteEncoding{UTF-8}
   %\VignetteIndexEntry{Introduction to genr: design, track, and discover}
@@ -117,15 +119,6 @@ diverges through the new MCS nodes.
 bg_gg <- Filter(function(x) x$sample_name == "gg_design", repo$get_block_groups())[[1]]
 ```
 
-```{r plot-gg}
-p_gg <- repo$plot(bg_gg)
-p_gg
-```
-
-Zoom into the MCS region to see both paths: the wild-type MCS and the
-new Golden Gate site diverge at position 395 and reconverge 57 bp later
-(original) or 46 bp later (new design).
-
 ### Confirm the BsaI sites with search
 
 Before synthesis, we verify the Golden Gate sites landed correctly by
@@ -139,6 +132,17 @@ the reverse complement as well as the forward sequence.
 hits <- repo$search("GGTCTC", bgs = list(bg_gg))
 cat("BsaI sites found:", length(hits[[1]]$matches), "\n")
 ```
+
+```{r plot-gg}
+p_gg <- repo$plot(bg_gg)
+p_gg$go_to(hits[[1]]$matches[[1]])
+p_gg
+```
+
+The viewer centres on the first BsaI site, which sits at the boundary
+of the new Golden Gate MCS. Both paths are visible: the wild-type MCS
+and the new Golden Gate site diverge at position 395 and reconverge 57
+bp later (original) or 46 bp later (new design).
 
 Three hits. To understand why, run the same search against the wild-type:
 
@@ -177,6 +181,15 @@ always use a full scan regardless.
 Each entry in the `matches` list is a locus record with `start`, `end`,
 `blocks`, and `strand`. Pass a locus directly to `goto_match` to centre
 the viewport on it, and to `highlight_match` to colour it on the canvas.
+
+The convenience method `go_to()` accepts both search match loci and
+annotation records returned by `list_annotations()`.  Annotations from
+one sample can be used to navigate a plot of a different sample — this
+is safe and stable because annotations are stored as references to graph
+nodes, not as linear sequence coordinates.  Nodes are shared across
+samples in the same repository, so an annotation created for the "wt"
+sample points to exactly the same graph nodes that appear in the
+"gg_design" or "sequenced" graphs.
 
 ```{r highlight-bsai}
 matches <- hits[[1]]$matches

@@ -27,6 +27,7 @@ FEATURES             Location/Qualifiers
                      CSDAA"
      misc_feature    396..452
                      /gene="lacZalpha"
+                     /label=MCS
                      /note="multiple cloning site (EcoRI-HindIII)"
      -10_signal      complement(514..519)
                      /note="Plac promoter (drives lacZalpha;
