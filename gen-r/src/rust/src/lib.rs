@@ -781,7 +781,29 @@ fn graph_locus_record(locus: &GraphLocus) -> List {
             )
         })
         .collect::<Vec<_>>();
-    list!(start = start, end = end, slices = List::from_values(slices))
+    let strand = {
+        let mut iter = locus.slices.iter().map(|s| s.strand);
+        match iter.next() {
+            None => "unknown",
+            Some(first) => {
+                if iter.all(|s| s == first) {
+                    match first {
+                        Strand::Forward => "+",
+                        Strand::Reverse => "-",
+                        _ => ".",
+                    }
+                } else {
+                    "mixed"
+                }
+            }
+        }
+    };
+    list!(
+        start = start,
+        end = end,
+        slices = List::from_values(slices),
+        strand = strand
+    )
 }
 
 /// Open a Gen database context.

@@ -1,7 +1,7 @@
 // Generated from js/index.ts by `npm run build-r` / `make r-widget`. Edit TypeScript sources, not this file.
 
 // js/grid.ts
-var CELL_SIZE = Math.round(16), BOX_SCALE = 1.15, FONT_FAMILY = "monospace", BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`, TEXT_FONT = `14px ${FONT_FAMILY}`;
+var CELL_SIZE = Math.round(16), BOX_SCALE = 1.15, FONT_FAMILY = "Menlo, Monaco, Courier New, monospace", BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`, TEXT_FONT = `14px ${FONT_FAMILY}`;
 function cellFont(size, cell) {
   let style = cell.bold && cell.italic ? "bold italic" : cell.bold ? "bold" : cell.italic ? "italic" : "";
   return style ? `${style} ${size}px ${FONT_FAMILY}` : `${size}px ${FONT_FAMILY}`;

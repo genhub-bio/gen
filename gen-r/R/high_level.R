@@ -257,11 +257,11 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   }
 
   ctrl$highlight_match <- function(match_locus, color = "yellow") {
-    blocks <- match_locus$blocks
+    blocks <- match_locus$slices
     n <- length(blocks)
     start_offset <- match_locus$start$offset
     end_offset <- match_locus$end$offset
-    strand_code <- switch(match_locus$strand, forward = "f", reverse = "r", "u")
+    strand_code <- switch(match_locus$strand, "+" = "f", "-" = "r", "u")
     block_parts <- paste(
       sapply(blocks, function(b) {
         sprintf("%s,%d,%d", b$node_id, as.integer(b$sequence_start), as.integer(b$sequence_end))
