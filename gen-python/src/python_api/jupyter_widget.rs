@@ -574,6 +574,7 @@ impl PyGraphController {
         self.controller.go_to_node(domain_idx, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
+        self.reapply_highlights();
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.

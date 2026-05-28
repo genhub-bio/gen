@@ -209,7 +209,7 @@ impl AnnotationTrack {
                 let Some(mut segments) = segments_by_annotation.get(idx).cloned() else {
                     continue;
                 };
-                segments.sort_by_key(|s| s.start_x());
+                segments.sort_by_key(|s| s.node_x1);
                 let mut prev_end: Option<i64> = None;
                 for seg in &segments {
                     let x1 = seg.start_x();
