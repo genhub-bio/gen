@@ -11,7 +11,7 @@ editor_options:
 ---
 
 ```{r, include = FALSE}
-knitr::opts_chunk$set(eval = FALSE)
+knitr::opts_chunk$set(eval = TRUE)
 ```
 
 Gen is a sequence version control system built around a graph database.
@@ -280,7 +280,7 @@ initialised with `gen init` (or the R equivalent).
 GFA (Graphical Fragment Assembly) files encode sequence graphs directly.
 Import a `.gfa` file as a new sample:
 
-```{r import-gfa}
+```{r import-gfa, eval=FALSE}
 repo$import_gfa("assembly.gfa", sample = "assembly")
 ```
 
@@ -288,7 +288,7 @@ Export any sample back to GFA. The optional `node_max` argument splits
 nodes longer than the given length, useful for tools that expect bounded
 node sizes:
 
-```{r export-gfa}
+```{r export-gfa, eval=FALSE}
 repo$export_gfa("output.gfa", sample = "assembly", node_max = 1000L)
 ```
 
@@ -300,7 +300,7 @@ right starting point when you plan to call variants relative to an
 external aligner's reference: subsequent `update_with_vcf()` calls can
 name this sample in the `reference` argument without ambiguity.
 
-```{r import-ref-fasta}
+```{r import-ref-fasta, eval=FALSE}
 repo$import_reference_fasta("hg38.fa", reference = "hg38")
 ```
 
@@ -310,7 +310,7 @@ repo$import_reference_fasta("hg38.fa", reference = "hg38")
 encoded in a GenBank file to an existing sample. Set `create_missing =
 TRUE` to auto-create block groups for features not yet in the database:
 
-```{r update-genbank}
+```{r update-genbank, eval=FALSE}
 repo$update_with_genbank(
   "corrected_annotation.gb",
   sample         = "wt",
@@ -320,7 +320,7 @@ repo$update_with_genbank(
 
 Export any sample's annotations and sequence to GenBank format:
 
-```{r export-genbank}
+```{r export-genbank, eval=FALSE}
 repo$export_genbank("pUC19_gg_design.gb", sample = "gg_design")
 ```
 
@@ -333,7 +333,7 @@ repo$export_genbank("pUC19_gg_design.gb", sample = "gg_design")
 group without writing an intermediate FASTA file. Pass `repo` to target
 an existing workspace; omit it to use the current working directory.
 
-```{r import-bioc}
+```{r import-bioc, eval=FALSE}
 library(Biostrings)
 
 seqs <- DNAStringSet(c(
@@ -352,7 +352,7 @@ internally. Each unique reference sequence is stored once as a shared
 node, so overlapping regions over the same chromosome do not duplicate
 sequence data.
 
-```{r import-granges}
+```{r import-granges, eval=FALSE}
 library(GenomicRanges)
 library(Biostrings)
 
@@ -381,7 +381,7 @@ per column becomes a path through the resulting graph.
 The example below designs an expression cassette with three promoters,
 three RBS variants, and two CDSes — 18 unique combinations:
 
-```{r import-library}
+```{r import-library, eval=FALSE}
 upstream <- c(upstream = "AATTCGGATCCAAGCTT")
 
 promoters <- c(
@@ -426,7 +426,7 @@ a region with a set of combinatorial variants. The `path_name` argument
 selects the region using the same `"<name>:<start>-<end>"` format as
 other update functions:
 
-```{r update-library}
+```{r update-library, eval=FALSE}
 repo$update_with_library(
   sample          = "gg_design",
   new_sample_name = "gg_tagged",
@@ -445,7 +445,7 @@ repo$update_with_library(
 of an existing one. The `region` argument uses `"<name>:<start>-<end>"`
 (0-based half-open) or just `"<name>"` for the full sequence:
 
-```{r derive-subgraph}
+```{r derive-subgraph, eval=FALSE}
 repo$derive_subgraph(
   sample     = "gg_design",
   new_sample = "mcs_region",
@@ -456,7 +456,7 @@ repo$derive_subgraph(
 Block groups expose `subgraph()` as a shorthand that returns the new
 block group immediately:
 
-```{r bg-subgraph}
+```{r bg-subgraph, eval=FALSE}
 mcs_bg <- bg_gg$subgraph("mcs_v2", start = 390L, end = 460L)
 repo$plot(mcs_bg)
 ```
@@ -468,7 +468,7 @@ them as a list of block groups. Supply `chunk_size` for uniform splits
 or `breakpoints` (an integer vector of positions) for explicit cut
 points:
 
-```{r derive-chunks}
+```{r derive-chunks, eval=FALSE}
 chunks <- bg_gg$chunks("gg_500bp_chunks", chunk_size = 500L)
 cat("Chunks created:", length(chunks), "\n")
 ```
@@ -476,7 +476,7 @@ cat("Chunks created:", length(chunks), "\n")
 `repo$stitch()` reverses the operation, concatenating a list of
 same-sample block groups end-to-end into a new block group:
 
-```{r stitch}
+```{r stitch, eval=FALSE}
 reassembled <- repo$stitch(
   bgs        = chunks,
   new_sample = "gg_reassembled",
@@ -494,7 +494,7 @@ Any `gen_plot` can display additional annotation panels below the
 sequence graph. Add a GFF3 or BED file as a named track — the `sample`
 argument selects which sample's path defines the coordinate space:
 
-```{r add-track-file}
+```{r add-track-file, eval=FALSE}
 p_gg$add_track_file("features.gff3", name = "Features", sample = "gg_design")
 p_gg
 ```
@@ -502,7 +502,7 @@ p_gg
 Annotation groups stored in the database (created automatically on
 GenBank import) can be added by group name:
 
-```{r add-track-group}
+```{r add-track-group, eval=FALSE}
 p_gg$add_track_group("GenBank annotations")
 p_gg
 ```
@@ -510,7 +510,7 @@ p_gg
 `clear_tracks()` removes all track panels without affecting the viewport
 or highlights:
 
-```{r clear-tracks}
+```{r clear-tracks, eval=FALSE}
 p_gg$clear_tracks()
 p_gg
 ```

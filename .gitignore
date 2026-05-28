@@ -37,6 +37,9 @@ rust-analyzer.json
 # R bindings (library crate — lock not committed)
 gen-r/src/rust/Cargo.lock
 
+# R vignette build artifacts
+gen-r/vignettes/*.html
+
 # Python bindings
 **/__pycache__/
 gen-python/python/gen/*.so
