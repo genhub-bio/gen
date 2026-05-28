@@ -25,6 +25,8 @@ DEFAULT_ROWS = 12
 
 _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
 
+# All live widget instances, so that module-level helpers can operate on them.
+
 
 class GenGraphWidget(anywidget.AnyWidget):
     """Jupyter widget that displays a Gen graph using the native Rust renderer.
@@ -80,27 +82,26 @@ class GenGraphWidget(anywidget.AnyWidget):
     # ── Display ───────────────────────────────────────────────────────────────
 
     def _ipython_display_(self, **kwargs):
-        """Display the widget and store a handle so freeze() can replace it."""
-        from IPython.display import display, HTML
+        """Clone the controller and display an independent widget in this cell.
 
-        if self._frozen and self._static_png:
-            display(
-                HTML(
-                    f'<img src="{self._static_png}" style="display:block;font-family:monospace" />'
-                )
-            )
-            return
-        # Build the mime bundle manually and pass raw=True to avoid recursion
-        # (display(self, ...) would re-enter this method).
+        Each cell gets its own copy of the graph and computed layouts so that
+        programmatic changes to the original widget (in another cell) do not
+        affect previously displayed outputs.  Mouse interaction and canvas
+        buttons work on the per-cell clone.
+        """
+        from IPython.display import display
+
+        cloned_ctrl = self._controller.clone_controller()
+        snapshot = GenGraphWidget(cloned_ctrl, cols=self.cols, rows=self.rows)
         data = {
-            "text/plain": repr(self),
+            "text/plain": repr(snapshot),
             "application/vnd.jupyter.widget-view+json": {
                 "version_major": 2,
                 "version_minor": 0,
-                "model_id": self._model_id,
+                "model_id": snapshot._model_id,
             },
         }
-        self._display_handle = display(data, raw=True, display_id=True)
+        snapshot._display_handle = display(data, raw=True, display_id=True)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -121,16 +122,40 @@ class GenGraphWidget(anywidget.AnyWidget):
         msg_type = msg.get("type")
 
         if msg_type == "snapshot":
-            self._static_png = msg.get("data", "")
+            data_url = msg.get("data", "")
+            self._static_png = data_url
+            if self._display_handle is not None and data_url.startswith(
+                "data:image/png;base64,"
+            ):
+                b64 = data_url.split(",", 1)[1]
+                self._display_handle.update(
+                    {
+                        "application/vnd.jupyter.widget-view+json": {
+                            "version_major": 2,
+                            "version_minor": 0,
+                            "model_id": self._model_id,
+                        },
+                        "image/png": b64,
+                        "text/plain": repr(self),
+                    },
+                    raw=True,
+                )
+            return
+
+        if msg_type == "freeze":
+            data_url = msg.get("data", "")
+            self._static_png = data_url
+            self._frozen = True
             if self._display_handle is not None:
                 from IPython.display import HTML
 
+                w, h = msg.get("width"), msg.get("height")
+                size = f";width:{w}px;height:{h}px" if w and h else ""
                 self._display_handle.update(
                     HTML(
-                        f'<img src="{self._static_png}" style="display:block;font-family:monospace" />'
+                        f'<img src="{data_url}" style="display:block;font-family:monospace{size}" />'
                     )
                 )
-                self._display_handle = None
             return
 
         if msg_type == "mouse_click":
@@ -175,17 +200,6 @@ class GenGraphWidget(anywidget.AnyWidget):
             return
         self._controller.move_by(dx, dy)
         self._render()
-
-    def freeze(self) -> None:
-        """Capture current canvas as static PNG, disable interactivity.
-
-        After calling this the widget becomes a static snapshot.  The canvas
-        border indicator is hidden and all interaction methods become no-ops.
-        The captured PNG appears in the cell output as an ``<img>`` tag — it
-        updates in-place once the frontend responds with the snapshot.
-        """
-        self._frozen = True
-        self.send({"type": "freeze"})
 
     def go_to(self, target) -> None:
         """Instantly move the camera to a graph position, locus, or annotation.

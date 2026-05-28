@@ -47,6 +47,7 @@ impl Default for PartitionConfig {
 ///     - Stored as Vec<(NodeIndex<u32>, NodeIndex<u32>, EdgeIndex<u32>)> where NodeIndex values
 ///       are domain indices that can be converted using the NodeIndexable trait
 /// - `metrics` contains a Vec of Fenwick trees for widths and rise, plus origin coordinates for each scale (indexed by VisualDetail::as_index()).
+#[derive(Clone)]
 pub struct PartitionTable<G>
 where
     G: GraphBase,
@@ -70,7 +71,7 @@ where
 /// - `rise` is a Fenwick tree that stores the vertical offset of each partition after layout.
 /// - `anchor_partition_idx` designates which partition's origin serves as the world coordinate system origin.
 ///   This allows coordinates to remain stable when new partitions are loaded to the left.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UnifiedLayout {
     // TODO: rename "widths" to "run" so it matches its meaning
     // (run is to width like rise is to height)

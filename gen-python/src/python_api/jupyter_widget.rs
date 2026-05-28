@@ -236,8 +236,8 @@ fn locus_from_span_and_pos_map(
     GraphLocus { slices }
 }
 
-/// A span annotated onto the graph canvas — either a named inline annotation
-/// (track is Some) or an unnamed highlight (track is None, span.name is "").
+/// A span annotated onto the graph canvas, with or without a label (highlight), optionally associated with a specific track.
+#[derive(Clone)]
 struct GraphOverlay {
     span: AnnotationSpan,
     track: Option<String>,
@@ -258,6 +258,7 @@ struct GraphOverlay {
 /// `!Send`, so we store only the DB path and open a fresh connection per operation
 /// instead of holding a live handle.
 #[pyclass]
+#[derive(Clone)]
 pub struct PyGraphController {
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
@@ -374,6 +375,11 @@ impl PyGraphController {
 
 #[pymethods]
 impl PyGraphController {
+    /// Deep-clone this controller (graph topology + computed layouts + view state).
+    fn clone_controller(&self) -> Self {
+        self.clone()
+    }
+
     /// Create a `GraphController` from a `Repository` and a `PyBlockGroup`.
     #[classmethod]
     fn from_block_group(

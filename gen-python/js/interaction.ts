@@ -12,11 +12,11 @@ export function attachInteraction(
   grid: GridMetrics,
   getNodeCells: () => Set<string>,
   isFrozen: () => boolean,
-): void {
+): () => void {
   const { cellW, cellH } = grid;
 
   canvas.addEventListener("mousemove", (e) => {
-    if (isFrozen()) return;
+    if (isFrozen()) { canvas.style.cursor = "default"; return; }
     if (pointerDown) return;
     const rect = canvas.getBoundingClientRect();
     const col = Math.floor((e.clientX - rect.left) / cellW);
@@ -44,7 +44,7 @@ export function attachInteraction(
     e.preventDefault();
   });
 
-  window.addEventListener("mousemove", (e) => {
+  const onWindowMouseMove = (e: MouseEvent) => {
     if (!pointerDown) return;
     const totalDx = e.clientX - dragStartX;
     const totalDy = e.clientY - dragStartY;
@@ -65,9 +65,9 @@ export function attachInteraction(
     }
     lastDragX = e.clientX;
     lastDragY = e.clientY;
-  });
+  };
 
-  window.addEventListener("mouseup", (e) => {
+  const onWindowMouseUp = (e: MouseEvent) => {
     if (!pointerDown || e.button !== 0) return;
     if (!isDragging) {
       const rect = canvas.getBoundingClientRect();
@@ -78,5 +78,13 @@ export function attachInteraction(
     pointerDown = false;
     isDragging = false;
     canvas.style.cursor = "grab";
-  });
+  };
+
+  window.addEventListener("mousemove", onWindowMouseMove);
+  window.addEventListener("mouseup", onWindowMouseUp);
+
+  return () => {
+    window.removeEventListener("mousemove", onWindowMouseMove);
+    window.removeEventListener("mouseup", onWindowMouseUp);
+  };
 }
