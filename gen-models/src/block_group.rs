@@ -1155,12 +1155,14 @@ impl BlockGroup {
         changes: &[BlockGroupChange<T>],
         tree_map: Option<&mut HashMap<T, IntervalTree<i64, NodeIntervalBlock>>>,
     ) -> Result<(), BlockGroupError> {
-        let mut plans = Vec::new();
         let mut local_tree_map = HashMap::new();
         let tree_map = match tree_map {
             Some(tree_map) => tree_map,
             None => &mut local_tree_map,
         };
+        let mut new_augmented_edges_by_block_group =
+            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
+        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
         for change in changes {
             if !tree_map.contains_key(&change.intervaltree_source) {
                 tree_map.insert(
@@ -1169,30 +1171,7 @@ impl BlockGroup {
                 );
             }
             let tree = tree_map.get(&change.intervaltree_source).unwrap();
-            plans.push(change.plan_edges_with_tree(tree)?);
-        }
-        Self::persist_insert_change_plans(conn, plans)
-    }
-
-    pub fn insert_planned_changes<C: BlockGroupChangePlan>(
-        conn: &GraphConnection,
-        changes: &[C],
-    ) -> Result<(), BlockGroupError> {
-        let plans = changes
-            .iter()
-            .map(|change| change.plan_edges(conn))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::persist_insert_change_plans(conn, plans)
-    }
-
-    fn persist_insert_change_plans(
-        conn: &GraphConnection,
-        plans: Vec<EdgeChangePlan>,
-    ) -> Result<(), BlockGroupError> {
-        let mut new_augmented_edges_by_block_group =
-            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
-        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
-        for plan in plans {
+            let plan = change.plan_edges_with_tree(tree)?;
             new_augmented_edges_by_block_group
                 .entry(plan.block_group_id)
                 .and_modify(|new_edge_data| new_edge_data.extend(plan.block_group_edges.clone()))
@@ -1273,13 +1252,28 @@ impl BlockGroup {
         Ok(())
     }
 
-    #[allow(clippy::ptr_arg)]
-    #[allow(clippy::needless_late_init)]
     pub fn insert_change<C: BlockGroupChangePlan>(
         conn: &GraphConnection,
         change: &C,
     ) -> Result<(), BlockGroupError> {
-        Self::persist_insert_change_plans(conn, vec![change.plan_edges(conn)?])
+        let plan = change.plan_edges(conn)?;
+        let mut new_augmented_edges_by_block_group = HashMap::new();
+        new_augmented_edges_by_block_group.insert(plan.block_group_id, plan.block_group_edges);
+        let mut new_accession_edges = HashMap::new();
+        if let Some(accession_update) = plan.accession_path_update {
+            new_accession_edges.insert(
+                (
+                    accession_update.block_group_id,
+                    accession_update.accession_name,
+                ),
+                accession_update.edges,
+            );
+        }
+        Self::persist_insert_changes(
+            conn,
+            new_augmented_edges_by_block_group,
+            new_accession_edges,
+        )
     }
 
     pub fn intervaltree_for(
