@@ -22,7 +22,9 @@ use r#gen::{
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
     },
     views::{
-        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+        annotation_groups::{
+            AnnotationGroupEntry, AnnotationGroupOrigin, load_annotation_group_entries,
+        },
         annotation_track::AnnotationTrack,
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
@@ -1068,7 +1070,11 @@ fn import_genbank(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name_opt = nullable_string_to_option(collection);
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
     let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
@@ -1076,7 +1082,7 @@ fn import_genbank(
     match r#gen::imports::genbank::import_genbank(
         &context,
         &mut reader,
-        collection_name_opt.as_deref(),
+        &*collection_name,
         &sample,
         OperationInfo {
             files: vec![
@@ -2065,6 +2071,24 @@ fn repo_clear_index(
 }
 
 #[extendr]
+fn repo_get_annotation_group_names(
+    db_path: String,
+    block_group_id: String,
+) -> std::result::Result<Vec<String>, Error> {
+    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
+    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+    let bg = BlockGroup::get_by_id(&conn, &bg_id)
+        .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
+    let entries = load_annotation_group_entries(&conn, &bg);
+    let mut seen = HashSet::new();
+    Ok(entries
+        .into_iter()
+        .filter(|e| seen.insert(e.name.clone()))
+        .map(|e| e.name)
+        .collect())
+}
+
+#[extendr]
 fn repo_bg_subgraph(
     workspace_path: String,
     db_path: String,
@@ -2594,13 +2618,17 @@ impl GenRepository {
         sample: String,
         collection: Nullable<String>,
     ) -> std::result::Result<String, Error> {
-        let collection_name_opt = nullable_string_to_option(collection);
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
         let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
         begin_transactions(&self.context).map_err(Error::Other)?;
         match r#gen::imports::genbank::import_genbank(
             &self.context,
             &mut reader,
-            collection_name_opt.as_deref(),
+            &*collection_name,
             &sample,
             OperationInfo {
                 files: vec![
@@ -3609,6 +3637,7 @@ extendr_module! {
     fn repo_build_index;
     fn repo_search;
     fn repo_clear_index;
+    fn repo_get_annotation_group_names;
     fn repo_bg_subgraph;
     fn repo_bg_chunks;
     fn repo_bg_export_fasta;
