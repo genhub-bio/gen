@@ -7,7 +7,8 @@ use std::{
 use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::{
-        BlockGroup, BlockGroupChange, BlockGroupData, BlockGroupTreeSource, PathCache, PathChange,
+        BlockGroup, BlockGroupChange, BlockGroupData, BlockGroupTreeSource, ChangeCache, PathCache,
+        PathChange,
     },
     db::{DbContext, GraphConnection},
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
@@ -605,8 +606,8 @@ pub fn update_with_vcf(
     ));
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
-    let mut path_tree_cache = HashMap::new();
-    let mut block_group_tree_cache = HashMap::new();
+    let mut path_tree_cache = ChangeCache::Intervaltree(HashMap::new());
+    let mut block_group_tree_cache = ChangeCache::Intervaltree(HashMap::new());
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(1000) {
             if in_place {

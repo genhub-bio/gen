@@ -202,9 +202,68 @@ pub trait BlockGroupChangePlan {
     fn plan_edges(&self, conn: &GraphConnection) -> Result<EdgeChangePlan, BlockGroupError>;
 }
 
+pub trait CacheableChangePlan<C> {
+    fn plan_edges_with_cache(
+        &self,
+        conn: &GraphConnection,
+        cache: Option<&mut C>,
+    ) -> Result<EdgeChangePlan, BlockGroupError>;
+}
+
+pub struct NoCache;
+
+pub enum ChangeCache<T: IntervalTreeSource + Clone + Eq + Hash> {
+    Intervaltree(IntervaltreeCache<T>),
+}
+
+impl CacheableChangePlan<NoCache> for ResolvedRegionChange {
+    fn plan_edges_with_cache(
+        &self,
+        conn: &GraphConnection,
+        _cache: Option<&mut NoCache>,
+    ) -> Result<EdgeChangePlan, BlockGroupError> {
+        self.plan_edges(conn)
+    }
+}
+
+impl<T: IntervalTreeSource> CacheableChangePlan<NoCache> for BlockGroupChange<T> {
+    fn plan_edges_with_cache(
+        &self,
+        conn: &GraphConnection,
+        _cache: Option<&mut NoCache>,
+    ) -> Result<EdgeChangePlan, BlockGroupError> {
+        self.plan_edges(conn)
+    }
+}
+
+impl<T: IntervalTreeSource + Clone + Eq + Hash> CacheableChangePlan<ChangeCache<T>>
+    for BlockGroupChange<T>
+{
+    fn plan_edges_with_cache(
+        &self,
+        conn: &GraphConnection,
+        cache: Option<&mut ChangeCache<T>>,
+    ) -> Result<EdgeChangePlan, BlockGroupError> {
+        match cache {
+            Some(ChangeCache::Intervaltree(tree_map)) => {
+                if !tree_map.contains_key(&self.intervaltree_source) {
+                    tree_map.insert(
+                        self.intervaltree_source.clone(),
+                        self.intervaltree_source.intervaltree(conn)?,
+                    );
+                }
+                let tree = tree_map.get(&self.intervaltree_source).unwrap();
+                self.plan_edges_with_tree(tree)
+            }
+            None => self.plan_edges(conn),
+        }
+    }
+}
+
 pub type PathChange = BlockGroupChange<Path>;
 pub type AccessionChange = BlockGroupChange<Accession>;
 pub type AnnotationChange = BlockGroupChange<AccessionAnnotation>;
+pub type IntervaltreeCache<T> = HashMap<T, IntervalTree<i64, NodeIntervalBlock>>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BlockGroupTreeSource {
@@ -1150,28 +1209,16 @@ impl BlockGroup {
         Ok(accession)
     }
 
-    pub fn insert_changes<T: IntervalTreeSource + Clone + Eq + Hash>(
+    pub fn insert_changes<C, P: CacheableChangePlan<C>>(
         conn: &GraphConnection,
-        changes: &[BlockGroupChange<T>],
-        tree_map: Option<&mut HashMap<T, IntervalTree<i64, NodeIntervalBlock>>>,
+        changes: &[P],
+        mut cache: Option<&mut C>,
     ) -> Result<(), BlockGroupError> {
-        let mut local_tree_map = HashMap::new();
-        let tree_map = match tree_map {
-            Some(tree_map) => tree_map,
-            None => &mut local_tree_map,
-        };
         let mut new_augmented_edges_by_block_group =
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
         let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
         for change in changes {
-            if !tree_map.contains_key(&change.intervaltree_source) {
-                tree_map.insert(
-                    change.intervaltree_source.clone(),
-                    change.intervaltree_source.intervaltree(conn)?,
-                );
-            }
-            let tree = tree_map.get(&change.intervaltree_source).unwrap();
-            let plan = change.plan_edges_with_tree(tree)?;
+            let plan = change.plan_edges_with_cache(conn, cache.as_deref_mut())?;
             new_augmented_edges_by_block_group
                 .entry(plan.block_group_id)
                 .and_modify(|new_edge_data| new_edge_data.extend(plan.block_group_edges.clone()))
@@ -1252,28 +1299,11 @@ impl BlockGroup {
         Ok(())
     }
 
-    pub fn insert_change<C: BlockGroupChangePlan>(
+    pub fn insert_change<C: CacheableChangePlan<NoCache>>(
         conn: &GraphConnection,
         change: &C,
     ) -> Result<(), BlockGroupError> {
-        let plan = change.plan_edges(conn)?;
-        let mut new_augmented_edges_by_block_group = HashMap::new();
-        new_augmented_edges_by_block_group.insert(plan.block_group_id, plan.block_group_edges);
-        let mut new_accession_edges = HashMap::new();
-        if let Some(accession_update) = plan.accession_path_update {
-            new_accession_edges.insert(
-                (
-                    accession_update.block_group_id,
-                    accession_update.accession_name,
-                ),
-                accession_update.edges,
-            );
-        }
-        Self::persist_insert_changes(
-            conn,
-            new_augmented_edges_by_block_group,
-            new_accession_edges,
-        )
+        Self::insert_changes::<NoCache, _>(conn, std::slice::from_ref(change), None)
     }
 
     pub fn intervaltree_for(
