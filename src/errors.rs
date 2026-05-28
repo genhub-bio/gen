@@ -1,7 +1,10 @@
 use std::io::Error as IOError;
 
 use gen_models::{
-    errors::{BlockGroupError, NodeError, OperationError, PathError, QueryError, SequenceError},
+    errors::{
+        BlockGroupError, NodeError, OperationError, PathError, QueryError, SampleError,
+        SequenceError,
+    },
     region::GenRegionError,
 };
 use thiserror::Error;
@@ -27,6 +30,8 @@ pub enum SequenceUpdateError {
     PathError(#[from] PathError),
     #[error("Block group creation error: {0}")]
     BlockGroupError(#[from] BlockGroupError),
+    #[error("Sample creation error: {0}")]
+    SampleError(#[from] SampleError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
     #[error("Missing segment '{0}' in GFA input")]

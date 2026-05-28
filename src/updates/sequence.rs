@@ -46,13 +46,12 @@ pub fn update_with_sequence(
             ));
         };
 
-    let _new_sample = Sample::get_or_create(
+    let _new_sample = Sample::get_or_create_child(
         conn,
-        gen_models::sample::NewSample {
-            name: new_sample_name,
-            ..Default::default()
-        },
-    );
+        collection_name,
+        new_sample_name,
+        vec![parent_sample_name.to_string()],
+    )?;
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
     let mut target_block_groups = vec![];
@@ -195,6 +194,8 @@ pub fn update_with_sequence(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
+    use gen_models::sample_lineage::SampleLineage;
+
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
@@ -248,6 +249,10 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_groups[0].id, false),
             HashSet::from_iter(expected_sequences),
+        );
+        assert_eq!(
+            SampleLineage::get_parents(conn, "child sample"),
+            vec![Sample::DEFAULT_NAME.to_string()],
         );
     }
 
