@@ -14,6 +14,8 @@ pub mod update;
 pub enum Commands {
     Init {},
     /// Clone a GenHub repository
+    ///
+    /// Example: gen clone https://www.genhub.bio/api/repos/david-genhub-bio/addgene-plasmid-122028-genbank-diff
     #[command(arg_required_else_help(true))]
     Clone {
         /// The GenHub repository URL to clone
