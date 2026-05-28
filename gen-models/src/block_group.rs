@@ -31,9 +31,11 @@ use crate::{
         SequenceError,
     },
     gen_models_capnp::block_group,
+    graph::GraphPositionAnchor,
     node::Node,
     path::{Path, PathData},
     path_edge::PathEdge,
+    region::ResolvedGenRegion,
     sample::Sample,
     traits::*,
 };
@@ -172,6 +174,34 @@ pub struct BlockGroupChange<T: IntervalTreeSource> {
     pub preserve_edge: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct AccessionPathUpdate {
+    pub block_group_id: HashId,
+    pub accession_name: String,
+    pub edges: Vec<AugmentedEdgeData>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EdgeChangePlan {
+    pub block_group_id: HashId,
+    pub block_group_edges: Vec<AugmentedEdgeData>,
+    pub accession_path_update: Option<AccessionPathUpdate>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedRegionChange {
+    pub region: ResolvedGenRegion,
+    pub block: PathBlock,
+    pub chromosome_index: i64,
+    pub phased: i64,
+    pub preserve_edge: bool,
+    pub path_accession: Option<String>,
+}
+
+pub trait BlockGroupChangePlan {
+    fn plan_edges(&self, conn: &GraphConnection) -> Result<EdgeChangePlan, BlockGroupError>;
+}
+
 pub type PathChange = BlockGroupChange<Path>;
 pub type AccessionChange = BlockGroupChange<Accession>;
 pub type AnnotationChange = BlockGroupChange<AccessionAnnotation>;
@@ -227,6 +257,367 @@ impl IntervalTreeSource for BlockGroupTreeSource {
             self.remove_ambiguous_positions,
         ))
     }
+}
+
+impl<T: IntervalTreeSource> BlockGroupChange<T> {
+    fn plan_edges_with_tree(
+        &self,
+        tree: &IntervalTree<i64, NodeIntervalBlock>,
+    ) -> Result<EdgeChangePlan, BlockGroupError> {
+        let start_blocks: Vec<&NodeIntervalBlock> =
+            tree.query_point(self.start).map(|x| &x.value).collect();
+        assert_eq!(start_blocks.len(), 1);
+        // NOTE: This may not be used but needs to be initialized here instead of inside the if
+        // statement that uses it, so that the borrow checker is happy
+        let previous_start_blocks: Vec<&NodeIntervalBlock> =
+            tree.query_point(self.start - 1).map(|x| &x.value).collect();
+        assert_eq!(previous_start_blocks.len(), 1);
+        let start_block = if start_blocks[0].start == self.start {
+            // First part of this block will be replaced/deleted, need to get previous block to add
+            // edge including it
+            previous_start_blocks[0]
+        } else {
+            start_blocks[0]
+        };
+
+        // Ensure the change is within the path bounds. The logic here is a bit backwards, where
+        // we check if the start is before the start block's end and the end is before the end
+        // block's start. This is because the terminal blocks start and end at the bounds of the
+        // interval tree. So while it's ok to have a start/end block be the start/end block (for
+        // changes at the extremes, it's not ok for the change to start beyond the current
+        // boundaries.
+        if is_start_node(start_block.node_id) && self.start < start_block.end {
+            return Err(BlockGroupError::ChangeOutOfBounds(format!(
+                "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
+                pos = self.start,
+                path_pos = start_block.end
+            )));
+        }
+        let end_blocks: Vec<&NodeIntervalBlock> =
+            tree.query_point(self.end).map(|x| &x.value).collect();
+        assert_eq!(end_blocks.len(), 1);
+        let end_block = end_blocks[0];
+
+        if is_end_node(end_block.node_id) && self.end > end_block.start {
+            return Err(BlockGroupError::ChangeOutOfBounds(format!(
+                "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
+                pos = self.end,
+                path_pos = end_block.start
+            )));
+        }
+
+        let mut new_edges = vec![];
+
+        if self.block.sequence_start == self.block.sequence_end {
+            // Deletion
+            let source_coordinate = self.start - start_block.start + start_block.sequence_start;
+            let target_coordinate = self.end - end_block.start + end_block.sequence_start;
+            let mut aug_edges = vec![];
+            let new_edge = EdgeData {
+                source_node_id: start_block.node_id,
+                source_coordinate,
+                source_strand: Strand::Forward,
+                target_node_id: end_block.node_id,
+                target_coordinate,
+                target_strand: Strand::Forward,
+            };
+            aug_edges.push(AugmentedEdgeData {
+                edge_data: new_edge,
+                chromosome_index: self.chromosome_index,
+                phased: self.phased,
+            });
+
+            // NOTE: If the deletion is happening at the very beginning of a path, we need to add
+            // an edge from the dedicated start node to the end of the deletion, to indicate it's
+            // another start point in the block group DAG.
+            if self.start == 0 {
+                let target_coordinate = self.end - end_block.start + end_block.sequence_start;
+                let new_beginning_edge = EdgeData {
+                    source_node_id: PATH_START_NODE_ID,
+                    source_coordinate: 0,
+                    source_strand: Strand::Forward,
+                    target_node_id: end_block.node_id,
+                    target_coordinate,
+                    target_strand: Strand::Forward,
+                };
+                aug_edges.push(AugmentedEdgeData {
+                    edge_data: new_beginning_edge,
+                    chromosome_index: self.chromosome_index,
+                    phased: self.phased,
+                });
+                if !is_terminal(end_block.node_id) {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: end_block.node_id,
+                            source_coordinate: target_coordinate,
+                            source_strand: Strand::Forward,
+                            target_node_id: end_block.node_id,
+                            target_coordinate,
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: if self.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
+                        phased: 0,
+                    });
+                }
+            } else {
+                if !is_terminal(start_block.node_id) {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: start_block.node_id,
+                            source_coordinate,
+                            source_strand: Strand::Forward,
+                            target_node_id: start_block.node_id,
+                            target_coordinate: source_coordinate,
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: if self.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
+                        phased: 0,
+                    });
+                };
+                if !is_terminal(end_block.node_id) {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: end_block.node_id,
+                            source_coordinate: target_coordinate,
+                            source_strand: Strand::Forward,
+                            target_node_id: end_block.node_id,
+                            target_coordinate,
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: if self.preserve_edge {
+                            0
+                        } else {
+                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                        },
+                        phased: 0,
+                    });
+                }
+            }
+            new_edges.extend(aug_edges);
+            // NOTE: If the deletion is happening at the very end of a path, we might add an edge
+            // from the beginning of the deletion to the dedicated end node, but in practice it
+            // doesn't affect sequence readouts, so it may not be worth it.
+        } else {
+            // Insertion/replacement
+            let insertion_start_coordinate =
+                self.start - start_block.start + start_block.sequence_start;
+            let new_start_edge = EdgeData {
+                source_node_id: start_block.node_id,
+                source_coordinate: insertion_start_coordinate,
+                source_strand: Strand::Forward,
+                target_node_id: self.block.node_id,
+                target_coordinate: self.block.sequence_start,
+                target_strand: Strand::Forward,
+            };
+            let new_augmented_start_edge = AugmentedEdgeData {
+                edge_data: new_start_edge,
+                chromosome_index: self.chromosome_index,
+                phased: self.phased,
+            };
+            let insertion_end_coordinate = self.end - end_block.start + end_block.sequence_start;
+            let new_end_edge = EdgeData {
+                source_node_id: self.block.node_id,
+                source_coordinate: self.block.sequence_end,
+                source_strand: Strand::Forward,
+                target_node_id: end_block.node_id,
+                target_coordinate: insertion_end_coordinate,
+                target_strand: Strand::Forward,
+            };
+            let new_augmented_end_edge = AugmentedEdgeData {
+                edge_data: new_end_edge,
+                chromosome_index: self.chromosome_index,
+                phased: self.phased,
+            };
+
+            if self.start == 0 {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: PATH_START_NODE_ID,
+                        source_coordinate: 0,
+                        source_strand: Strand::Forward,
+                        target_node_id: self.block.node_id,
+                        target_coordinate: self.block.sequence_start,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: self.chromosome_index,
+                    phased: 0,
+                });
+            }
+
+            if !is_terminal(start_block.node_id) {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: start_block.node_id,
+                        source_coordinate: insertion_start_coordinate,
+                        source_strand: Strand::Forward,
+                        target_node_id: start_block.node_id,
+                        target_coordinate: insertion_start_coordinate,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: if self.preserve_edge {
+                        0
+                    } else {
+                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                    },
+                    phased: 0,
+                });
+            }
+            if !is_terminal(end_block.node_id) {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: end_block.node_id,
+                        source_coordinate: insertion_end_coordinate,
+                        source_strand: Strand::Forward,
+                        target_node_id: end_block.node_id,
+                        target_coordinate: insertion_end_coordinate,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: if self.preserve_edge {
+                        0
+                    } else {
+                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                    },
+                    phased: 0,
+                });
+            }
+
+            new_edges.push(new_augmented_start_edge);
+            new_edges.push(new_augmented_end_edge);
+        }
+
+        Ok(EdgeChangePlan {
+            block_group_id: self.block_group_id,
+            accession_path_update: self.path_accession.as_ref().map(|accession_name| {
+                AccessionPathUpdate {
+                    block_group_id: self.block_group_id,
+                    accession_name: accession_name.clone(),
+                    edges: new_edges.clone(),
+                }
+            }),
+            block_group_edges: new_edges,
+        })
+    }
+}
+
+impl<T: IntervalTreeSource> BlockGroupChangePlan for BlockGroupChange<T> {
+    fn plan_edges(&self, conn: &GraphConnection) -> Result<EdgeChangePlan, BlockGroupError> {
+        let tree = self.intervaltree_source.intervaltree(conn)?;
+        self.plan_edges_with_tree(&tree)
+    }
+}
+
+impl BlockGroupChangePlan for ResolvedRegionChange {
+    fn plan_edges(&self, _conn: &GraphConnection) -> Result<EdgeChangePlan, BlockGroupError> {
+        let mut new_edges = vec![];
+        let preserve_chromosome_index = if self.preserve_edge {
+            0
+        } else {
+            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+        };
+
+        for anchor in self
+            .region
+            .start_anchors
+            .iter()
+            .chain(self.region.end_anchors.iter())
+        {
+            let node_id = anchor_node_id(anchor)?;
+            if !is_terminal(node_id) {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: node_id,
+                        source_coordinate: anchor.coordinate,
+                        source_strand: Strand::Forward,
+                        target_node_id: node_id,
+                        target_coordinate: anchor.coordinate,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: preserve_chromosome_index,
+                    phased: 0,
+                });
+            }
+        }
+
+        if self.block.sequence_start == self.block.sequence_end {
+            for start_anchor in &self.region.start_anchors {
+                for end_anchor in &self.region.end_anchors {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: anchor_node_id(start_anchor)?,
+                            source_coordinate: start_anchor.coordinate,
+                            source_strand: Strand::Forward,
+                            target_node_id: anchor_node_id(end_anchor)?,
+                            target_coordinate: end_anchor.coordinate,
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: self.chromosome_index,
+                        phased: self.phased,
+                    });
+                }
+            }
+        } else {
+            for start_anchor in &self.region.start_anchors {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: anchor_node_id(start_anchor)?,
+                        source_coordinate: start_anchor.coordinate,
+                        source_strand: Strand::Forward,
+                        target_node_id: self.block.node_id,
+                        target_coordinate: self.block.sequence_start,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: self.chromosome_index,
+                    phased: self.phased,
+                });
+            }
+
+            for end_anchor in &self.region.end_anchors {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: self.block.node_id,
+                        source_coordinate: self.block.sequence_end,
+                        source_strand: Strand::Forward,
+                        target_node_id: anchor_node_id(end_anchor)?,
+                        target_coordinate: end_anchor.coordinate,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: self.chromosome_index,
+                    phased: self.phased,
+                });
+            }
+        }
+
+        new_edges.sort();
+        new_edges.dedup();
+
+        Ok(EdgeChangePlan {
+            block_group_id: self.region.block_group.id,
+            accession_path_update: self.path_accession.as_ref().map(|accession_name| {
+                AccessionPathUpdate {
+                    block_group_id: self.region.block_group.id,
+                    accession_name: accession_name.clone(),
+                    edges: new_edges.clone(),
+                }
+            }),
+            block_group_edges: new_edges,
+        })
+    }
+}
+
+fn anchor_node_id(anchor: &GraphPositionAnchor) -> Result<HashId, BlockGroupError> {
+    anchor.node_id.ok_or_else(|| {
+        BlockGroupError::ChangeOutOfBounds(
+            "Graph position anchor is missing a node id.".to_string(),
+        )
+    })
 }
 
 pub struct PathCache<'a> {
@@ -764,9 +1155,7 @@ impl BlockGroup {
         changes: &[BlockGroupChange<T>],
         tree_map: Option<&mut HashMap<T, IntervalTree<i64, NodeIntervalBlock>>>,
     ) -> Result<(), BlockGroupError> {
-        let mut new_augmented_edges_by_block_group =
-            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
-        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
+        let mut plans = Vec::new();
         let mut local_tree_map = HashMap::new();
         let tree_map = match tree_map {
             Some(tree_map) => tree_map,
@@ -780,18 +1169,44 @@ impl BlockGroup {
                 );
             }
             let tree = tree_map.get(&change.intervaltree_source).unwrap();
-            let new_augmented_edges = BlockGroup::set_up_new_edges(change, tree)?;
+            plans.push(change.plan_edges_with_tree(tree)?);
+        }
+        Self::persist_insert_change_plans(conn, plans)
+    }
+
+    pub fn insert_planned_changes<C: BlockGroupChangePlan>(
+        conn: &GraphConnection,
+        changes: &[C],
+    ) -> Result<(), BlockGroupError> {
+        let plans = changes
+            .iter()
+            .map(|change| change.plan_edges(conn))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::persist_insert_change_plans(conn, plans)
+    }
+
+    fn persist_insert_change_plans(
+        conn: &GraphConnection,
+        plans: Vec<EdgeChangePlan>,
+    ) -> Result<(), BlockGroupError> {
+        let mut new_augmented_edges_by_block_group =
+            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
+        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
+        for plan in plans {
             new_augmented_edges_by_block_group
-                .entry(change.block_group_id)
-                .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
-                .or_insert_with(|| new_augmented_edges.clone());
-            if let Some(accession) = &change.path_accession {
+                .entry(plan.block_group_id)
+                .and_modify(|new_edge_data| new_edge_data.extend(plan.block_group_edges.clone()))
+                .or_insert_with(|| plan.block_group_edges.clone());
+            if let Some(accession_update) = plan.accession_path_update {
                 new_accession_edges
-                    .entry((change.block_group_id, accession.clone()))
+                    .entry((
+                        accession_update.block_group_id,
+                        accession_update.accession_name,
+                    ))
                     .and_modify(|new_edge_data: &mut Vec<AugmentedEdgeData>| {
-                        new_edge_data.extend(new_augmented_edges.clone())
+                        new_edge_data.extend(accession_update.edges.clone())
                     })
-                    .or_insert_with(|| new_augmented_edges.clone());
+                    .or_insert(accession_update.edges);
             }
         }
         Self::persist_insert_changes(
@@ -860,265 +1275,11 @@ impl BlockGroup {
 
     #[allow(clippy::ptr_arg)]
     #[allow(clippy::needless_late_init)]
-    pub fn insert_change<T: IntervalTreeSource>(
+    pub fn insert_change<C: BlockGroupChangePlan>(
         conn: &GraphConnection,
-        change: &BlockGroupChange<T>,
+        change: &C,
     ) -> Result<(), BlockGroupError> {
-        let tree = change.intervaltree_source.intervaltree(conn)?;
-        let new_augmented_edges = BlockGroup::set_up_new_edges(change, &tree)?;
-        let mut new_augmented_edges_by_block_group = HashMap::new();
-        new_augmented_edges_by_block_group
-            .insert(change.block_group_id, new_augmented_edges.clone());
-        let mut new_accession_edges = HashMap::new();
-        if let Some(accession) = &change.path_accession {
-            new_accession_edges.insert(
-                (change.block_group_id, accession.clone()),
-                new_augmented_edges,
-            );
-        }
-        Self::persist_insert_changes(
-            conn,
-            new_augmented_edges_by_block_group,
-            new_accession_edges,
-        )
-    }
-
-    fn set_up_new_edges<T: IntervalTreeSource>(
-        change: &BlockGroupChange<T>,
-        tree: &IntervalTree<i64, NodeIntervalBlock>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let start_blocks: Vec<&NodeIntervalBlock> =
-            tree.query_point(change.start).map(|x| &x.value).collect();
-        assert_eq!(start_blocks.len(), 1);
-        // NOTE: This may not be used but needs to be initialized here instead of inside the if
-        // statement that uses it, so that the borrow checker is happy
-        let previous_start_blocks: Vec<&NodeIntervalBlock> = tree
-            .query_point(change.start - 1)
-            .map(|x| &x.value)
-            .collect();
-        assert_eq!(previous_start_blocks.len(), 1);
-        let start_block = if start_blocks[0].start == change.start {
-            // First part of this block will be replaced/deleted, need to get previous block to add
-            // edge including it
-            previous_start_blocks[0]
-        } else {
-            start_blocks[0]
-        };
-
-        // Ensure the change is within the path bounds. The logic here is a bit backwards, where
-        // we check if the start is before the start block's end and the end is before the end
-        // block's start. This is because the terminal blocks start and end at the bounds of the
-        // interval tree. So while it's ok to have a start/end block be the start/end block (for
-        // changes at the extremes, it's not ok for the change to start beyond the current
-        // boundaries.
-        if is_start_node(start_block.node_id) && change.start < start_block.end {
-            return Err(BlockGroupError::ChangeOutOfBounds(format!(
-                "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
-                pos = change.start,
-                path_pos = start_block.end
-            )));
-        }
-        let end_blocks: Vec<&NodeIntervalBlock> =
-            tree.query_point(change.end).map(|x| &x.value).collect();
-        assert_eq!(end_blocks.len(), 1);
-        let end_block = end_blocks[0];
-
-        if is_end_node(end_block.node_id) && change.end > end_block.start {
-            return Err(BlockGroupError::ChangeOutOfBounds(format!(
-                "Invalid change specified. Coordinate {pos} is before start of path range ({path_pos}).",
-                pos = change.end,
-                path_pos = end_block.start
-            )));
-        }
-
-        let mut new_edges = vec![];
-
-        if change.block.sequence_start == change.block.sequence_end {
-            // Deletion
-            let source_coordinate = change.start - start_block.start + start_block.sequence_start;
-            let target_coordinate = change.end - end_block.start + end_block.sequence_start;
-            let mut aug_edges = vec![];
-            let new_edge = EdgeData {
-                source_node_id: start_block.node_id,
-                source_coordinate,
-                source_strand: Strand::Forward,
-                target_node_id: end_block.node_id,
-                target_coordinate,
-                target_strand: Strand::Forward,
-            };
-            aug_edges.push(AugmentedEdgeData {
-                edge_data: new_edge,
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            });
-
-            // NOTE: If the deletion is happening at the very beginning of a path, we need to add
-            // an edge from the dedicated start node to the end of the deletion, to indicate it's
-            // another start point in the block group DAG.
-            if change.start == 0 {
-                let target_coordinate = change.end - end_block.start + end_block.sequence_start;
-                let new_beginning_edge = EdgeData {
-                    source_node_id: PATH_START_NODE_ID,
-                    source_coordinate: 0,
-                    source_strand: Strand::Forward,
-                    target_node_id: end_block.node_id,
-                    target_coordinate,
-                    target_strand: Strand::Forward,
-                };
-                aug_edges.push(AugmentedEdgeData {
-                    edge_data: new_beginning_edge,
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-                if !is_terminal(end_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: end_block.node_id,
-                            source_coordinate: target_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: end_block.node_id,
-                            target_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
-                        phased: 0,
-                    });
-                }
-            } else {
-                if !is_terminal(start_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: start_block.node_id,
-                            source_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: start_block.node_id,
-                            target_coordinate: source_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
-                        phased: 0,
-                    });
-                };
-                if !is_terminal(end_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: end_block.node_id,
-                            source_coordinate: target_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: end_block.node_id,
-                            target_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
-                        phased: 0,
-                    });
-                }
-            }
-            new_edges.extend(aug_edges);
-            // NOTE: If the deletion is happening at the very end of a path, we might add an edge
-            // from the beginning of the deletion to the dedicated end node, but in practice it
-            // doesn't affect sequence readouts, so it may not be worth it.
-        } else {
-            // Insertion/replacement
-            let insertion_start_coordinate =
-                change.start - start_block.start + start_block.sequence_start;
-            let new_start_edge = EdgeData {
-                source_node_id: start_block.node_id,
-                source_coordinate: insertion_start_coordinate,
-                source_strand: Strand::Forward,
-                target_node_id: change.block.node_id,
-                target_coordinate: change.block.sequence_start,
-                target_strand: Strand::Forward,
-            };
-            let new_augmented_start_edge = AugmentedEdgeData {
-                edge_data: new_start_edge,
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            };
-            let insertion_end_coordinate = change.end - end_block.start + end_block.sequence_start;
-            let new_end_edge = EdgeData {
-                source_node_id: change.block.node_id,
-                source_coordinate: change.block.sequence_end,
-                source_strand: Strand::Forward,
-                target_node_id: end_block.node_id,
-                target_coordinate: insertion_end_coordinate,
-                target_strand: Strand::Forward,
-            };
-            let new_augmented_end_edge = AugmentedEdgeData {
-                edge_data: new_end_edge,
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            };
-
-            if change.start == 0 {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: PATH_START_NODE_ID,
-                        source_coordinate: 0,
-                        source_strand: Strand::Forward,
-                        target_node_id: change.block.node_id,
-                        target_coordinate: change.block.sequence_start,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: 0,
-                });
-            }
-
-            if !is_terminal(start_block.node_id) {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: start_block.node_id,
-                        source_coordinate: insertion_start_coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: start_block.node_id,
-                        target_coordinate: insertion_start_coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: if change.preserve_edge {
-                        0
-                    } else {
-                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    },
-                    phased: 0,
-                });
-            }
-            if !is_terminal(end_block.node_id) {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: end_block.node_id,
-                        source_coordinate: insertion_end_coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: end_block.node_id,
-                        target_coordinate: insertion_end_coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: if change.preserve_edge {
-                        0
-                    } else {
-                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    },
-                    phased: 0,
-                });
-            }
-
-            new_edges.push(new_augmented_start_edge);
-            new_edges.push(new_augmented_end_edge);
-        }
-
-        Ok(new_edges)
+        Self::persist_insert_change_plans(conn, vec![change.plan_edges(conn)?])
     }
 
     pub fn intervaltree_for(
@@ -1432,6 +1593,7 @@ mod tests {
         annotations::Annotation as ModelAnnotation,
         collection::Collection,
         node::Node,
+        region::{Region, resolve_annotation},
         sample::{NewSample, Sample},
         sequence::Sequence,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
@@ -2269,6 +2431,62 @@ mod tests {
             HashSet::from_iter(vec![
                 "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
                 "AAAAAAAAAATTTTTCCCCCGGGGGGGGGG".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn insert_resolved_annotation_change_can_extend_before_accession() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
+        let mut path_cache = PathCache::new(&conn);
+        let accession =
+            BlockGroup::add_accession(&conn, &path, "test-accession", 10, 30, &mut path_cache)
+                .unwrap();
+        ModelAnnotation::get_or_create(&conn, "gene-1", "track-1", &accession.id, None).unwrap();
+        let insert_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("NNNN")
+            .save(&conn)
+            .unwrap();
+        let insert_node_id = Node::create(
+            &conn,
+            &insert_sequence.hash,
+            &HashId::convert_str("resolved-annotation-insert-node"),
+        )
+        .unwrap();
+        let insert = PathBlock {
+            node_id: insert_node_id,
+            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
+            sequence_start: 0,
+            sequence_end: 4,
+            path_start: -5,
+            path_end: 5,
+            strand: Strand::Forward,
+        };
+        let region = resolve_annotation(
+            &Region::parse("gene-1:-5-5").unwrap(),
+            &conn,
+            "test",
+            "test",
+        )
+        .unwrap();
+        let change = ResolvedRegionChange {
+            region,
+            block: insert,
+            chromosome_index: 1,
+            phased: 0,
+            preserve_edge: true,
+            path_accession: None,
+        };
+
+        BlockGroup::insert_change(&conn, &change).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        assert_eq!(
+            all_sequences,
+            HashSet::from_iter(vec![
+                "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                "AAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
             ])
         );
     }
