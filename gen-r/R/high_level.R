@@ -177,7 +177,10 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   ctrl$block_group_id <- if (inherits(block_group_id, "gen_hash_id")) block_group_id$hash_id else as.character(block_group_id)
   ctrl$detail <- detail
   ctrl$ops <- character()
-  ctrl$track_specs <- list()
+  ctrl$track_specs <- tryCatch({
+    group_names <- repo_get_annotation_group_names(db_path, ctrl$block_group_id)
+    lapply(group_names, function(n) list(type = "group", name = n))
+  }, error = function(e) list())
   ctrl$rows <- rows %||% 24L
   ctrl$cols <- cols %||% 80L
 

@@ -65,6 +65,8 @@ repo_search <- function(db_path, gen_dir, query, block_group_ids, sequence_kind)
 
 repo_clear_index <- function(gen_dir, block_group_ids) .Call("wrap__repo_clear_index", gen_dir, block_group_ids, PACKAGE = "genr")
 
+repo_get_annotation_group_names <- function(db_path, block_group_id) .Call("wrap__repo_get_annotation_group_names", db_path, block_group_id, PACKAGE = "genr")
+
 repo_bg_subgraph <- function(workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, start, end, backbone) .Call("wrap__repo_bg_subgraph", workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, start, end, backbone, PACKAGE = "genr")
 
 repo_bg_chunks <- function(workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone) .Call("wrap__repo_bg_chunks", workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone, PACKAGE = "genr")

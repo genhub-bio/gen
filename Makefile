@@ -42,6 +42,8 @@ r:
 	cd gen-r && $(if $(filter Darwin,$(shell uname -s)),MACOSX_DEPLOYMENT_TARGET=11.0) Rscript tools/regenerate-wrappers.R
 	Rscript -e "roxygen2::roxygenise('gen-r')"
 	$(if $(filter Darwin,$(shell uname -s)),MACOSX_DEPLOYMENT_TARGET=11.0) R CMD INSTALL gen-r
+	Rscript -e "for (pkg in c('knitr','rmarkdown')) if (!requireNamespace(pkg, quietly=TRUE)) install.packages(pkg, repos='https://cloud.r-project.org', quiet=TRUE)"
+	Rscript -e "tools::buildVignettes(dir='gen-r', tangle=FALSE)"
 release-check-js:
 	cd gen-python && npm ci && npm run check && npm run build-jupyter
 	@echo "Verifying committed jupyter_widget.js/.map match build output..."
