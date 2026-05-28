@@ -30,6 +30,8 @@ export interface GridMetrics {
   boxDrawY: number;
   textX: number;
   textBaseline: number;
+  textSize: number;
+  cellSize: number;
 }
 
 export function cellFont(size: number, cell: Pick<Cell, "bold" | "italic">): string {
@@ -54,19 +56,23 @@ export function isBoxLike(ch: string): boolean {
   );
 }
 
-export function makeGridMetrics(ctx: CanvasRenderingContext2D): GridMetrics {
-  const block = measure(ctx, BOX_FONT, "\u2588");
+export function makeGridMetrics(ctx: CanvasRenderingContext2D, scale = 1): GridMetrics {
+  const textSize = TEXT_SIZE * scale;
+  const cellSize = Math.round(textSize / 0.875);
+  const boxFont = `${cellSize}px ${FONT_FAMILY}`;
+  const textFont = `${textSize}px ${FONT_FAMILY}`;
+  const block = measure(ctx, boxFont, "\u2588");
   const cellW = Math.ceil(block.actualBoundingBoxLeft + block.actualBoundingBoxRight);
   const cellH = Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent);
   const boxDrawX = block.actualBoundingBoxLeft;
   const boxDrawY = block.actualBoundingBoxAscent;
-  const textProbe = measure(ctx, TEXT_FONT, "Mg");
-  const textMono = measure(ctx, TEXT_FONT, "M");
+  const textProbe = measure(ctx, textFont, "Mg");
+  const textMono = measure(ctx, textFont, "M");
   const textAscent =
     textProbe.emHeightAscent ?? textProbe.fontBoundingBoxAscent ?? textProbe.actualBoundingBoxAscent;
   const textDescent =
     textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent;
   const textX = Math.round((cellW - textMono.width) / 2);
   const textBaseline = Math.round((cellH + textAscent - textDescent) / 2) + 1;
-  return { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline };
+  return { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline, textSize, cellSize };
 }

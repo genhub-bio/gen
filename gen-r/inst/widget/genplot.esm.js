@@ -16,9 +16,9 @@ function isBoxLike(ch) {
   cp >= 9600 && cp <= 9631 || // block elements
   cp >= 10240 && cp <= 10495;
 }
-function makeGridMetrics(ctx) {
-  let block = measure(ctx, BOX_FONT, "\u2588"), cellW = Math.ceil(block.actualBoundingBoxLeft + block.actualBoundingBoxRight), cellH = Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent), boxDrawX = block.actualBoundingBoxLeft, boxDrawY = block.actualBoundingBoxAscent, textProbe = measure(ctx, TEXT_FONT, "Mg"), textMono = measure(ctx, TEXT_FONT, "M"), textAscent = textProbe.emHeightAscent ?? textProbe.fontBoundingBoxAscent ?? textProbe.actualBoundingBoxAscent, textDescent = textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent, textX = Math.round((cellW - textMono.width) / 2), textBaseline = Math.round((cellH + textAscent - textDescent) / 2) + 1;
-  return { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline };
+function makeGridMetrics(ctx, scale = 1) {
+  let textSize = 14 * scale, cellSize = Math.round(textSize / 0.875), boxFont = `${cellSize}px ${FONT_FAMILY}`, textFont = `${textSize}px ${FONT_FAMILY}`, block = measure(ctx, boxFont, "\u2588"), cellW = Math.ceil(block.actualBoundingBoxLeft + block.actualBoundingBoxRight), cellH = Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent), boxDrawX = block.actualBoundingBoxLeft, boxDrawY = block.actualBoundingBoxAscent, textProbe = measure(ctx, textFont, "Mg"), textMono = measure(ctx, textFont, "M"), textAscent = textProbe.emHeightAscent ?? textProbe.fontBoundingBoxAscent ?? textProbe.actualBoundingBoxAscent, textDescent = textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent, textX = Math.round((cellW - textMono.width) / 2), textBaseline = Math.round((cellH + textAscent - textDescent) / 2) + 1;
+  return { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline, textSize, cellSize };
 }
 
 // js/glyphs.ts
@@ -103,7 +103,7 @@ function drawSplitGlyph(ctx, heavyCp, lightCp, px, py, cellW, cellH, boxDrawX, b
 function paintFrame(ctx, canvas, grid, frame) {
   let nodeCells = /* @__PURE__ */ new Set();
   if (!frame?.cells) return nodeCells;
-  let { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline } = grid, { cols, rows, cells, neutral_fg = "#cdd6f4", neutral_bg = "#1e1e2e" } = frame;
+  let { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline, textSize, cellSize } = grid, { cols, rows, cells, neutral_fg = "#cdd6f4", neutral_bg = "#1e1e2e" } = frame;
   canvas.width = cols * cellW, canvas.height = rows * cellH, ctx.fillStyle = neutral_bg, ctx.fillRect(0, 0, canvas.width, canvas.height), ctx.textAlign = "left", ctx.textBaseline = "alphabetic";
   for (let cell of cells) {
     let { x: c, y: r, text } = cell, fg = cell.fg ?? neutral_fg, bg = cell.bg ?? neutral_bg, px = c * cellW, py = r * cellH;
@@ -116,9 +116,9 @@ function paintFrame(ctx, canvas, grid, frame) {
     bg !== neutral_bg && (ctx.fillStyle = bg, ctx.fillRect(px, py, cellW, cellH));
     let split = GLYPH_SPLIT.get(cp);
     if (split !== void 0) {
-      let [heavyCp, lightCp] = split, boxFont = cellFont(CELL_SIZE, { bold: !1, italic: !!cell.italic });
+      let [heavyCp, lightCp] = split, boxFont = cellFont(cellSize, { bold: !1, italic: !!cell.italic });
       drawSplitGlyph(ctx, heavyCp, lightCp, px, py, cellW, cellH, boxDrawX, boxDrawY, fg, neutral_fg, boxFont);
-    } else isBoxLike(text) ? (ctx.fillStyle = fg, ctx.font = cellFont(CELL_SIZE, cell), ctx.save(), ctx.beginPath(), ctx.rect(px, py, cellW, cellH), ctx.clip(), ctx.translate(px + cellW / 2, py + cellH / 2), ctx.scale(BOX_SCALE, BOX_SCALE), ctx.fillText(text, boxDrawX - cellW / 2, boxDrawY - cellH / 2), ctx.restore()) : (ctx.fillStyle = fg, ctx.font = cellFont(14, cell), ctx.fillText(text, px + textX, py + textBaseline));
+    } else isBoxLike(text) ? (ctx.fillStyle = fg, ctx.font = cellFont(cellSize, cell), ctx.save(), ctx.beginPath(), ctx.rect(px, py, cellW, cellH), ctx.clip(), ctx.translate(px + cellW / 2, py + cellH / 2), ctx.scale(BOX_SCALE, BOX_SCALE), ctx.fillText(text, boxDrawX - cellW / 2, boxDrawY - cellH / 2), ctx.restore()) : (ctx.fillStyle = fg, ctx.font = cellFont(textSize, cell), ctx.fillText(text, px + textX, py + textBaseline));
     if (cell.underline) {
       ctx.fillStyle = fg;
       let underlineY = Math.min(py + cellH - 1, py + textBaseline + 1);
@@ -133,9 +133,10 @@ function render({ model, el }) {
   let scratchCtx = document.createElement("canvas").getContext("2d"), grid = makeGridMetrics(scratchCtx), wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   let canvas = document.createElement("canvas");
-  canvas.style.cssText = "display: block; cursor: default; border: 2px solid #45475a;", wrapper.appendChild(canvas), el.appendChild(wrapper);
+  canvas.style.cssText = "display: block; cursor: default; box-shadow: inset 0 0 0 2px #45475a;", wrapper.appendChild(canvas), el.appendChild(wrapper);
   let ctx = canvas.getContext("2d");
-  paintFrame(ctx, canvas, grid, model.get("frame"));
+  if (paintFrame(ctx, canvas, grid, model.get("frame")), 0)
+    var captureHiRes, sendSnapshot, scheduleSnapshot, repaint, doFreeze;
 }
 var index_default = { render };
 export {

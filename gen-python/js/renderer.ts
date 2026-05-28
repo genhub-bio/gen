@@ -1,4 +1,4 @@
-import { CELL_SIZE, TEXT_SIZE, BOX_SCALE, cellFont, isBoxLike, Cell, GridMetrics } from "./grid";
+import { BOX_SCALE, cellFont, isBoxLike, Cell, GridMetrics } from "./grid";
 import { GLYPH_SPLIT, NODE_GLYPH_CP } from "./glyphs";
 
 export interface Frame {
@@ -75,7 +75,7 @@ export function paintFrame(
   const nodeCells = new Set<string>();
   if (!frame?.cells) return nodeCells;
 
-  const { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline } = grid;
+  const { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline, textSize, cellSize } = grid;
   const { cols, rows, cells, neutral_fg = "#cdd6f4", neutral_bg = "#1e1e2e" } = frame;
 
   canvas.width = cols * cellW;
@@ -118,12 +118,12 @@ export function paintFrame(
     if (split !== undefined) {
       // Mixed/pure-heavy box char: decompose into heavy + light sub-glyphs.
       const [heavyCp, lightCp] = split;
-      const boxFont = cellFont(CELL_SIZE, { bold: false, italic: !!cell.italic });
+      const boxFont = cellFont(cellSize, { bold: false, italic: !!cell.italic });
       drawSplitGlyph(ctx, heavyCp, lightCp, px, py, cellW, cellH, boxDrawX, boxDrawY, fg, neutral_fg, boxFont);
     } else if (isBoxLike(text)) {
       // Plain box-drawing / block element: render at BOX_SCALE in cell fg.
       ctx.fillStyle = fg;
-      ctx.font = cellFont(CELL_SIZE, cell);
+      ctx.font = cellFont(cellSize, cell);
       ctx.save();
       ctx.beginPath();
       ctx.rect(px, py, cellW, cellH);
@@ -135,7 +135,7 @@ export function paintFrame(
     } else {
       // Regular text cell.
       ctx.fillStyle = fg;
-      ctx.font = cellFont(TEXT_SIZE, cell);
+      ctx.font = cellFont(textSize, cell);
       ctx.fillText(text, px + textX, py + textBaseline);
     }
 

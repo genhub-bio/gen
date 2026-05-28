@@ -43,6 +43,7 @@ impl Default for ControllerConfig {
 /// - Manages the sliding window cache of rendered partitions
 /// - Provides coordinate conversion between local and world space
 /// - Handles scale (level of detail) changes and layout computation
+#[derive(Clone)]
 pub struct PartitionController<G, S>
 where
     G: GraphBase,
