@@ -2,12 +2,15 @@ use std::str;
 
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, PathChange},
+    block_group::{BlockGroup, PathChange, ResolvedRegionChange},
     db::DbContext,
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
-    region::{GenRegionError, Region, resolve_path},
+    region::{
+        GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind, resolve_annotation,
+        resolve_path,
+    },
     sample::Sample,
     sequence::Sequence,
     traits::*,
@@ -33,7 +36,14 @@ pub fn update_with_sequence(
         match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
             Ok(region) => region,
             Err(GenRegionError::NotFound(_)) => {
-                return Err(GenRegionError::NotFound(region_name.to_string()).into());
+                match resolve_annotation(&parsed_region, conn, collection_name, parent_sample_name)
+                {
+                    Ok(region) => region,
+                    Err(GenRegionError::NotFound(_)) => {
+                        return Err(GenRegionError::NotFound(region_name.to_string()).into());
+                    }
+                    Err(err) => return Err(err.into()),
+                }
             }
             Err(err) => return Err(err.into()),
         };
@@ -74,8 +84,18 @@ pub fn update_with_sequence(
         return Err(GenRegionError::NotFound(region_name.to_string()).into());
     }
 
+    let update_from_annotation = resolved_region.kind == ResolvedRegionKind::Annotation;
+    if !matches!(
+        resolved_region.kind,
+        ResolvedRegionKind::Path | ResolvedRegionKind::Annotation
+    ) {
+        return Err(SequenceUpdateError::UnsupportedRegionType(format!(
+            "{:?}",
+            resolved_region.kind
+        )));
+    }
+
     for target_block_group in &target_block_groups {
-        let path = BlockGroup::get_current_path(conn, &target_block_group.id);
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
@@ -88,19 +108,15 @@ pub fn update_with_sequence(
                 strand: Strand::Forward,
             };
 
-            let path_change = PathChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: path.clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block: path_block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-
-            BlockGroup::insert_change(conn, &path_change).unwrap();
+            insert_sequence_change(
+                conn,
+                target_block_group,
+                &resolved_region,
+                path_block,
+                start_coordinate,
+                end_coordinate,
+                update_from_annotation,
+            )?;
             node_id
         } else {
             let seq = Sequence::new()
@@ -111,8 +127,8 @@ pub fn update_with_sequence(
                 conn,
                 &seq.hash,
                 &HashId::convert_str(&format!(
-                    "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                    path_id = path.id,
+                    "{target_id}:{ref_start}-{ref_end}->{sequence_hash}",
+                    target_id = target_block_group.id,
                     ref_start = 0,
                     ref_end = seq.length,
                     sequence_hash = seq.hash
@@ -129,23 +145,20 @@ pub fn update_with_sequence(
                 strand: Strand::Forward,
             };
 
-            let path_change = PathChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: path.clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block: path_block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-
-            BlockGroup::insert_change(conn, &path_change).unwrap();
+            insert_sequence_change(
+                conn,
+                target_block_group,
+                &resolved_region,
+                path_block,
+                start_coordinate,
+                end_coordinate,
+                update_from_annotation,
+            )?;
             node_id
         };
 
-        if !disable_reference_path_update {
+        if !disable_reference_path_update && !update_from_annotation {
+            let path = BlockGroup::get_current_path(conn, &target_block_group.id);
             if node_id == HashId::convert_str("") {
                 let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
             } else {
@@ -191,9 +204,50 @@ pub fn update_with_sequence(
     Ok(op)
 }
 
+fn insert_sequence_change(
+    conn: &gen_models::db::GraphConnection,
+    target_block_group: &gen_models::block_group::BlockGroup,
+    resolved_region: &ResolvedGenRegion,
+    path_block: PathBlock,
+    start_coordinate: i64,
+    end_coordinate: i64,
+    update_from_annotation: bool,
+) -> Result<(), SequenceUpdateError> {
+    if update_from_annotation {
+        let mut target_region = resolved_region.clone();
+        target_region.block_group = target_block_group.clone();
+        let change = ResolvedRegionChange {
+            region: target_region,
+            block: path_block,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: true,
+            path_accession: None,
+        };
+        BlockGroup::insert_change(conn, &change)?;
+    } else {
+        let path = BlockGroup::get_current_path(conn, &target_block_group.id);
+        let path_change = PathChange {
+            block_group_id: target_block_group.id,
+            intervaltree_source: path,
+            path_accession: None,
+            start: start_coordinate,
+            end: end_coordinate,
+            block: path_block,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: true,
+        };
+        BlockGroup::insert_change(conn, &path_change)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
+
+    use gen_models::{annotations::Annotation, block_group::PathCache, path::Path};
 
     use super::*;
     use crate::{
@@ -301,6 +355,120 @@ mod tests {
         assert_eq!(
             other_path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_update_with_annotation_without_paths() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, &collection, Sample::DEFAULT_NAME);
+        let path = BlockGroup::get_current_path(conn, &block_group.id);
+        let mut path_cache = PathCache::new(conn);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "feature-accession", 2, 5, &mut path_cache)
+                .unwrap();
+        Annotation::get_or_create(conn, "feature", "features", &accession.id, None).unwrap();
+        Path::delete(conn, &path.name, &block_group.id);
+
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "feature:0-1",
+            "GG",
+            false,
+        )
+        .unwrap();
+
+        let child_block_group = get_sample_bg(conn, &collection, "child sample");
+        assert!(
+            Path::query(
+                conn,
+                "select * from paths where block_group_id = ?1",
+                params![child_block_group.id],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &child_block_group.id, false),
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATGGGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_update_with_annotation_negative_index_without_paths() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, &collection, Sample::DEFAULT_NAME);
+        let path = BlockGroup::get_current_path(conn, &block_group.id);
+        let mut path_cache = PathCache::new(conn);
+        let accession =
+            BlockGroup::add_accession(conn, &path, "feature-accession", 2, 5, &mut path_cache)
+                .unwrap();
+        Annotation::get_or_create(conn, "feature", "features", &accession.id, None).unwrap();
+        Path::delete(conn, &path.name, &block_group.id);
+
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "feature:-1-1",
+            "GG",
+            false,
+        )
+        .unwrap();
+
+        let child_block_group = get_sample_bg(conn, &collection, "child sample");
+        assert!(
+            Path::query(
+                conn,
+                "select * from paths where block_group_id = ?1",
+                params![child_block_group.id],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &child_block_group.id, false),
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "AGGGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            ])
         );
     }
 

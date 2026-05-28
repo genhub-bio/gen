@@ -1,6 +1,6 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    NodeIntervalBlock,
+    NodeIntervalBlock, is_terminal,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
 use gen_graph::{FromNodeIntervalTree, GenGraph};
@@ -14,11 +14,12 @@ use crate::{
     db::GraphConnection,
     errors::PathError,
     graph::{GraphPositionAnchor, GraphTraversalError, SqlGraphTraversal},
+    node::Node,
     path::Path,
     traits::Query,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResolvedGenRegion {
     pub block_group: BlockGroup,
     pub path: Option<Path>,
@@ -289,7 +290,7 @@ fn resolve_target(
         &target.intervaltree,
         start,
         target.feature_length,
-        AnchorBias::Previous,
+        AnchorBias::Current,
         target.allow_out_of_bounds,
         region,
     )?;
@@ -392,6 +393,12 @@ fn resolve_graph_anchors(
         });
     }
 
+    if let Some(anchors) =
+        resolve_same_node_out_of_bounds(conn, tree, coordinate, boundary_coordinate, boundary_bias)?
+    {
+        return Ok(anchors);
+    }
+
     let graph = GenGraph::from_node_interval_tree(tree);
     let mut traversal = SqlGraphTraversal::new(conn, graph);
     let mut anchors = Vec::new();
@@ -417,6 +424,48 @@ fn resolve_graph_anchors(
     }
 }
 
+fn resolve_same_node_out_of_bounds(
+    conn: &GraphConnection,
+    tree: &IntervalTree<i64, NodeIntervalBlock>,
+    coordinate: i64,
+    boundary_coordinate: i64,
+    boundary_bias: AnchorBias,
+) -> Result<Option<Vec<GraphPositionAnchor>>, GenRegionError> {
+    let boundary_blocks = blocks_for_coordinate(tree, boundary_coordinate, boundary_bias)
+        .into_iter()
+        .filter(|block| !is_terminal(block.node_id))
+        .collect::<Vec<_>>();
+    if boundary_blocks.is_empty() {
+        return Ok(None);
+    }
+
+    let node_ids = boundary_blocks
+        .iter()
+        .map(|block| block.node_id)
+        .collect::<Vec<_>>();
+    let node_lengths = Node::query_nodes_length(conn, &node_ids).map_err(|error| {
+        GenRegionError::GraphTraversal(GraphTraversalError::DatabaseError(error.to_string()))
+    })?;
+    let mut anchors = Vec::new();
+    for block in boundary_blocks {
+        let projected_coordinate = coordinate - block.start + block.sequence_start;
+        if (0..=*node_lengths.get(&block.node_id).unwrap_or(&-1)).contains(&projected_coordinate) {
+            anchors.push(GraphPositionAnchor {
+                coordinate: projected_coordinate,
+                node_id: Some(block.node_id),
+            });
+        }
+    }
+    anchors.sort_by_key(|anchor| (anchor.node_id, anchor.coordinate));
+    anchors.dedup();
+
+    if anchors.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(anchors))
+    }
+}
+
 fn resolve_intervaltree_anchors(
     tree: &IntervalTree<i64, NodeIntervalBlock>,
     coordinate: i64,
@@ -426,7 +475,11 @@ fn resolve_intervaltree_anchors(
     blocks
         .into_iter()
         .map(|block| GraphPositionAnchor {
-            coordinate: coordinate - block.start + block.sequence_start,
+            coordinate: if is_terminal(block.node_id) {
+                0
+            } else {
+                coordinate - block.start + block.sequence_start
+            },
             node_id: Some(block.node_id),
         })
         .collect()
