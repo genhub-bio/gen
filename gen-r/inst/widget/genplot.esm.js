@@ -130,7 +130,9 @@ function paintFrame(ctx, canvas, grid, frame) {
 
 // js/index.ts
 function render({ model, el }) {
-  let scratchCtx = document.createElement("canvas").getContext("2d"), grid = makeGridMetrics(scratchCtx), wrapper = document.createElement("div");
+  let scratchCtx = document.createElement("canvas").getContext("2d"), grid = makeGridMetrics(scratchCtx);
+  el.style.overflowX = "auto";
+  let wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   let canvas = document.createElement("canvas");
   canvas.style.cssText = "display: block; cursor: default; box-shadow: inset 0 0 0 2px #45475a;", wrapper.appendChild(canvas), el.appendChild(wrapper);
