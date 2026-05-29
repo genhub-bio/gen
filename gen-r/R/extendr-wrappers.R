@@ -1,48 +1,3 @@
-#' Open a Gen database context.
-db_context <- function(workspace_path, db_path) .Call("wrap__db_context", workspace_path, db_path, PACKAGE = "genr")
-
-import_fasta <- function(workspace_path, db_path, filename, sample, shallow, collection) .Call("wrap__import_fasta", workspace_path, db_path, filename, sample, shallow, collection, PACKAGE = "genr")
-
-import_reference_fasta <- function(workspace_path, db_path, filename, reference, shallow, collection) .Call("wrap__import_reference_fasta", workspace_path, db_path, filename, reference, shallow, collection, PACKAGE = "genr")
-
-import_sequences <- function(workspace_path, db_path, names, sequences, sample, collection) .Call("wrap__import_sequences", workspace_path, db_path, names, sequences, sample, collection, PACKAGE = "genr")
-
-import_genomic_regions <- function(workspace_path, db_path, seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection) .Call("wrap__import_genomic_regions", workspace_path, db_path, seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection, PACKAGE = "genr")
-
-import_gfa <- function(workspace_path, db_path, filename, sample, collection) .Call("wrap__import_gfa", workspace_path, db_path, filename, sample, collection, PACKAGE = "genr")
-
-import_genbank <- function(workspace_path, db_path, filename, sample, collection) .Call("wrap__import_genbank", workspace_path, db_path, filename, sample, collection, PACKAGE = "genr")
-
-import_library_files <- function(workspace_path, db_path, library_name, parts, library, sample, collection) .Call("wrap__import_library_files", workspace_path, db_path, library_name, parts, library, sample, collection, PACKAGE = "genr")
-
-import_library <- function(workspace_path, db_path, library_name, parts_list, sample, collection) .Call("wrap__import_library", workspace_path, db_path, library_name, parts_list, sample, collection, PACKAGE = "genr")
-
-update_with_fasta <- function(workspace_path, db_path, filename, sample, new_sample, region_name, collection) .Call("wrap__update_with_fasta", workspace_path, db_path, filename, sample, new_sample, region_name, collection, PACKAGE = "genr")
-
-update_with_gfa <- function(workspace_path, db_path, filename, sample, new_sample, collection) .Call("wrap__update_with_gfa", workspace_path, db_path, filename, sample, new_sample, collection, PACKAGE = "genr")
-
-update_with_gaf <- function(workspace_path, db_path, filename, csv, sample, parent_sample, collection) .Call("wrap__update_with_gaf", workspace_path, db_path, filename, csv, sample, parent_sample, collection, PACKAGE = "genr")
-
-update_with_vcf <- function(workspace_path, db_path, filename, genotype, sample, reference, in_place, collection) .Call("wrap__update_with_vcf", workspace_path, db_path, filename, genotype, sample, reference, in_place, collection, PACKAGE = "genr")
-
-update_with_genbank <- function(workspace_path, db_path, filename, sample, create_missing, collection) .Call("wrap__update_with_genbank", workspace_path, db_path, filename, sample, create_missing, collection, PACKAGE = "genr")
-
-update_with_library_files <- function(workspace_path, db_path, sample, new_sample, path_name, library, parts, collection) .Call("wrap__update_with_library_files", workspace_path, db_path, sample, new_sample, path_name, library, parts, collection, PACKAGE = "genr")
-
-update_with_library <- function(workspace_path, db_path, sample, new_sample_name, path_name, parts_list, collection) .Call("wrap__update_with_library", workspace_path, db_path, sample, new_sample_name, path_name, parts_list, collection, PACKAGE = "genr")
-
-update_with_sequence <- function(workspace_path, db_path, sequence, sample, new_sample, region_name, no_reference_path_update, collection) .Call("wrap__update_with_sequence", workspace_path, db_path, sequence, sample, new_sample, region_name, no_reference_path_update, collection, PACKAGE = "genr")
-
-export_fasta <- function(workspace_path, db_path, filename, sample, collection) .Call("wrap__export_fasta", workspace_path, db_path, filename, sample, collection, PACKAGE = "genr")
-
-export_gfa <- function(workspace_path, db_path, filename, sample, node_max, collection) .Call("wrap__export_gfa", workspace_path, db_path, filename, sample, node_max, collection, PACKAGE = "genr")
-
-export_genbank <- function(workspace_path, db_path, filename, sample, collection) .Call("wrap__export_genbank", workspace_path, db_path, filename, sample, collection, PACKAGE = "genr")
-
-derive_chunks <- function(workspace_path, db_path, sample, new_sample, region, backbone, breakpoints, chunk_size, collection) .Call("wrap__derive_chunks", workspace_path, db_path, sample, new_sample, region, backbone, breakpoints, chunk_size, collection, PACKAGE = "genr")
-
-derive_subgraph <- function(workspace_path, db_path, sample, new_sample, region, backbone, collection) .Call("wrap__derive_subgraph", workspace_path, db_path, sample, new_sample, region, backbone, collection, PACKAGE = "genr")
-
 repo_execute <- function(db_path, query) .Call("wrap__repo_execute", db_path, query, PACKAGE = "genr")
 
 repo_query <- function(db_path, query) .Call("wrap__repo_query", db_path, query, PACKAGE = "genr")
@@ -186,6 +141,8 @@ SequenceGraph$build_index <- function(sequence_kind, k) .Call("wrap__SequenceGra
 SequenceGraph$search <- function(query, sequence_kind) .Call("wrap__SequenceGraph__search", self, query, sequence_kind, PACKAGE = "genr")
 
 SequenceGraph$clear_index <- function() .Call("wrap__SequenceGraph__clear_index", self, PACKAGE = "genr")
+
+SequenceGraph$get_node_sequence <- function(node_id, sequence_start, sequence_end) .Call("wrap__SequenceGraph__get_node_sequence", self, node_id, sequence_start, sequence_end, PACKAGE = "genr")
 
 SequenceGraph$subgraph <- function(new_sample, start, end, backbone) .Call("wrap__SequenceGraph__subgraph", self, new_sample, start, end, backbone, PACKAGE = "genr")
 
