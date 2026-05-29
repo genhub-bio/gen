@@ -161,7 +161,7 @@ fn hash_id_from_string(value: &str) -> std::result::Result<HashId, String> {
     HashId::try_from(value.to_string()).map_err(|err| format!("Invalid hash id '{value}': {err}"))
 }
 
-fn block_group_record(block_group: BlockGroup, db_path: Option<&str>) -> List {
+fn sequence_graph_record(block_group: BlockGroup, db_path: Option<&str>) -> List {
     list!(
         id = block_group.id.to_string(),
         collection_name = block_group.collection_name,
@@ -416,7 +416,7 @@ enum TrackSpec {
 fn load_tracks_from_specs(
     conn: &GraphConnection,
     controller: &GraphController<GenGraph, GenGraphNodeSizer>,
-    block_group_id: &HashId,
+    sequence_graph_id: &HashId,
     tracks_json: &str,
 ) -> Vec<AnnotationTrack> {
     let specs: Vec<TrackSpec> = match serde_json::from_str(tracks_json) {
@@ -439,12 +439,12 @@ fn load_tracks_from_specs(
     for spec in specs {
         match spec {
             TrackSpec::Group { name } => {
-                if let Some(bg) = BlockGroup::get_by_id(conn, block_group_id).ok() {
+                if let Some(bg) = BlockGroup::get_by_id(conn, sequence_graph_id).ok() {
                     let entry = AnnotationGroupEntry {
                         id: name.clone(),
                         name: name.clone(),
                         sample_name: bg.sample_name.clone(),
-                        source_block_group_id: *block_group_id,
+                        source_block_group_id: *sequence_graph_id,
                         origin: AnnotationGroupOrigin::CurrentSample,
                     };
                     let request = AnnotationGroupTrackRequest {
@@ -462,7 +462,7 @@ fn load_tracks_from_specs(
                 let display_name = name.as_deref().unwrap_or(&path);
                 tracks.push(load_annotation_file_as_track(
                     conn,
-                    block_group_id,
+                    sequence_graph_id,
                     &path,
                     display_name,
                     sample.as_deref(),
@@ -476,7 +476,7 @@ fn load_tracks_from_specs(
 
 fn load_annotation_file_as_track(
     conn: &GraphConnection,
-    block_group_id: &HashId,
+    sequence_graph_id: &HashId,
     file_path: &str,
     display_name: &str,
     sample: Option<&str>,
@@ -489,7 +489,7 @@ fn load_annotation_file_as_track(
         .unwrap_or("")
         .to_lowercase();
 
-    if let (Some(sample_name), Ok(bg)) = (sample, BlockGroup::get_by_id(conn, block_group_id)) {
+    if let (Some(sample_name), Ok(bg)) = (sample, BlockGroup::get_by_id(conn, sequence_graph_id)) {
         let mut buffer: Vec<u8> = Vec::new();
         let translated = match ext.as_str() {
             "gff" | "gff3" => File::open(file_path)
@@ -1767,26 +1767,26 @@ fn repo_query(db_path: String, query: String) -> std::result::Result<List, Error
 }
 
 #[extendr]
-fn repo_get_block_group_by_id(db_path: String, id: String) -> std::result::Result<List, Error> {
+fn repo_get_sequence_graph_by_id(db_path: String, id: String) -> std::result::Result<List, Error> {
     let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
     let block_group =
         BlockGroup::get_by_id(&conn, &hash_id_from_string(&id).map_err(Error::Other)?)
             .map_err(|err| Error::Other(err.to_string()))?;
-    Ok(block_group_record(block_group, Some(&db_path)))
+    Ok(sequence_graph_record(block_group, Some(&db_path)))
 }
 
 #[extendr]
-fn repo_get_block_groups(db_path: String) -> std::result::Result<List, Error> {
+fn repo_get_sequence_graphs(db_path: String) -> std::result::Result<List, Error> {
     let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
     let values = BlockGroup::all(&conn)
         .into_iter()
-        .map(|bg| block_group_record(bg, Some(&db_path)))
+        .map(|bg| sequence_graph_record(bg, Some(&db_path)))
         .collect::<Vec<_>>();
     Ok(List::from_values(values))
 }
 
 #[extendr]
-fn repo_get_block_groups_by_collection(
+fn repo_get_sequence_graphs_by_collection(
     db_path: String,
     collection_name: String,
 ) -> std::result::Result<List, Error> {
@@ -1797,7 +1797,7 @@ fn repo_get_block_groups_by_collection(
         rusqlite::params![collection_name],
     )
     .into_iter()
-    .map(|bg| block_group_record(bg, Some(&db_path)))
+    .map(|bg| sequence_graph_record(bg, Some(&db_path)))
     .collect::<Vec<_>>();
     Ok(List::from_values(values))
 }
@@ -1805,10 +1805,10 @@ fn repo_get_block_groups_by_collection(
 #[extendr]
 fn repo_block_group_to_dict(
     db_path: String,
-    block_group_id: String,
+    sequence_graph_id: String,
 ) -> std::result::Result<List, Error> {
     let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
-    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+    let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
     let graph = BlockGroup::get_graph(&conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
 
     let nodes = graph
@@ -1853,7 +1853,7 @@ fn repo_block_group_to_dict(
 }
 
 #[extendr]
-fn repo_get_block_sequence(
+fn repo_get_node_sequence(
     db_path: String,
     node_id: String,
     sequence_start: i64,
@@ -1901,7 +1901,7 @@ fn repo_stitch(
     )
     .into_iter()
     .next()
-    .map(|bg| block_group_record(bg, Some(&db_path)))
+    .map(|bg| sequence_graph_record(bg, Some(&db_path)))
     .ok_or_else(|| Error::Other("Stitched block group not found after creation".to_string()))
 }
 
@@ -1909,7 +1909,7 @@ fn repo_stitch(
 fn repo_build_index(
     db_path: String,
     gen_dir: String,
-    block_group_ids: Vec<String>,
+    sequence_graph_ids: Vec<String>,
     sequence_kind: String,
     k: i32,
 ) -> std::result::Result<(), Error> {
@@ -1920,10 +1920,10 @@ fn repo_build_index(
     fs::create_dir_all(&index_dir)
         .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
 
-    let bgs: Vec<_> = if block_group_ids.is_empty() {
+    let bgs: Vec<_> = if sequence_graph_ids.is_empty() {
         BlockGroup::all(&conn)
     } else {
-        block_group_ids
+        sequence_graph_ids
             .iter()
             .filter_map(|id| hash_id_from_string(id).ok())
             .filter_map(|id| BlockGroup::get_by_id(&conn, &id).ok())
@@ -1949,16 +1949,16 @@ fn repo_search(
     db_path: String,
     gen_dir: String,
     query: String,
-    block_group_ids: Vec<String>,
+    sequence_graph_ids: Vec<String>,
     sequence_kind: String,
 ) -> std::result::Result<List, Error> {
     let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
     let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
 
-    let bgs: Vec<_> = if block_group_ids.is_empty() {
+    let bgs: Vec<_> = if sequence_graph_ids.is_empty() {
         BlockGroup::all(&conn)
     } else {
-        block_group_ids
+        sequence_graph_ids
             .iter()
             .filter_map(|id| hash_id_from_string(id).ok())
             .filter_map(|id| BlockGroup::get_by_id(&conn, &id).ok())
@@ -1989,7 +1989,7 @@ fn repo_search(
         if !matches.is_empty() {
             let locus_records = matches.iter().map(graph_locus_record).collect::<Vec<_>>();
             results.push(list!(
-                block_group = block_group_record(bg, Some(&db_path)),
+                sequence_graph = sequence_graph_record(bg, Some(&db_path)),
                 matches = List::from_values(locus_records)
             ));
         }
@@ -2001,14 +2001,14 @@ fn repo_search(
 #[extendr]
 fn repo_clear_index(
     gen_dir: String,
-    block_group_ids: Vec<String>,
+    sequence_graph_ids: Vec<String>,
 ) -> std::result::Result<(), Error> {
     let index_dir = PathBuf::from(&gen_dir).join("search_index");
     if !index_dir.exists() {
         return Ok(());
     }
 
-    if block_group_ids.is_empty() {
+    if sequence_graph_ids.is_empty() {
         for entry in fs::read_dir(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to read index dir: {e}")))?
         {
@@ -2019,7 +2019,7 @@ fn repo_clear_index(
             }
         }
     } else {
-        for id in &block_group_ids {
+        for id in &sequence_graph_ids {
             let path = index_dir.join(format!("{id}.bin"));
             if path.exists() {
                 fs::remove_file(&path)
@@ -2064,7 +2064,7 @@ fn repo_bg_subgraph(
     )
     .into_iter()
     .next()
-    .map(|bg| block_group_record(bg, Some(&db_path)))
+    .map(|bg| sequence_graph_record(bg, Some(&db_path)))
     .ok_or_else(|| Error::Other("Derived subgraph not found after creation".to_string()))
 }
 
@@ -2111,7 +2111,7 @@ fn repo_bg_chunks(
     )
     .into_iter()
     .filter(|bg| bg.name == bg_name || bg.name.starts_with(&prefix))
-    .map(|bg| block_group_record(bg, Some(&db_path)))
+    .map(|bg| sequence_graph_record(bg, Some(&db_path)))
     .collect::<Vec<_>>();
 
     Ok(List::from_values(matching))
@@ -2174,17 +2174,17 @@ fn repo_bg_export_genbank(
 
 #[extendr]
 #[derive(Clone)]
-struct GenRepository {
+struct Repository {
     context: GenDbContext,
 }
 
 // DbContext uses Rc internally; R is single-threaded so this is safe.
-unsafe impl Send for GenRepository {}
-unsafe impl Sync for GenRepository {}
+unsafe impl Send for Repository {}
+unsafe impl Sync for Repository {}
 
 #[extendr]
-impl GenRepository {
-    fn new(path: Nullable<String>) -> std::result::Result<GenRepository, Error> {
+impl Repository {
+    fn new(path: Nullable<String>) -> std::result::Result<Repository, Error> {
         let workspace = match nullable_string_to_option(path) {
             Some(p) => Workspace::new(p),
             None => Workspace::from_current_dir(),
@@ -2203,7 +2203,7 @@ impl GenRepository {
                 db_path.display()
             ))
         })?;
-        Ok(GenRepository {
+        Ok(Repository {
             context: GenDbContext::new(workspace, graph_conn, ops_conn),
         })
     }
@@ -2245,23 +2245,23 @@ impl GenRepository {
         query_rows(self.context.graph().conn(), &query).map_err(Error::Other)
     }
 
-    fn get_block_group_by_id(&self, id: String) -> std::result::Result<GenBlockGroup, Error> {
+    fn get_sequence_graph_by_id(&self, id: String) -> std::result::Result<SequenceGraph, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
-        Ok(self.into_gen_block_group(bg))
+        Ok(self.into_sequence_graph(bg))
     }
 
-    fn get_block_groups(&self) -> std::result::Result<List, Error> {
+    fn get_sequence_graphs(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
         let values = BlockGroup::all(conn)
             .into_iter()
-            .map(|bg| r!(self.into_gen_block_group(bg)))
+            .map(|bg| r!(self.into_sequence_graph(bg)))
             .collect::<Vec<_>>();
         Ok(List::from_values(values))
     }
 
-    fn get_block_groups_by_collection(
+    fn get_sequence_graphs_by_collection(
         &self,
         collection_name: String,
     ) -> std::result::Result<List, Error> {
@@ -2272,14 +2272,14 @@ impl GenRepository {
             rusqlite::params![collection_name],
         )
         .into_iter()
-        .map(|bg| r!(self.into_gen_block_group(bg)))
+        .map(|bg| r!(self.into_sequence_graph(bg)))
         .collect::<Vec<_>>();
         Ok(List::from_values(values))
     }
 
-    fn block_group_to_dict(&self, block_group_id: String) -> std::result::Result<List, Error> {
+    fn block_group_to_dict(&self, sequence_graph_id: String) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
 
         let nodes = graph
@@ -2323,7 +2323,7 @@ impl GenRepository {
         ))
     }
 
-    fn get_block_sequence(
+    fn get_node_sequence(
         &self,
         node_id: String,
         sequence_start: i64,
@@ -3058,7 +3058,7 @@ impl GenRepository {
         new_sample: String,
         new_region: String,
         regions: String,
-    ) -> std::result::Result<GenBlockGroup, Error> {
+    ) -> std::result::Result<SequenceGraph, Error> {
         make_stitch_operation(
             &self.context,
             Some(collection_name.clone()),
@@ -3072,13 +3072,13 @@ impl GenRepository {
         BlockGroup::query(conn, "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3", rusqlite::params![collection_name, new_sample, new_region])
             .into_iter()
             .next()
-            .map(|bg| self.into_gen_block_group(bg))
+            .map(|bg| self.into_sequence_graph(bg))
             .ok_or_else(|| Error::Other("Stitched block group not found after creation".to_string()))
     }
 
     fn build_index(
         &self,
-        block_group_ids: Vec<String>,
+        sequence_graph_ids: Vec<String>,
         sequence_kind: String,
         k: i32,
     ) -> std::result::Result<(), Error> {
@@ -3092,10 +3092,10 @@ impl GenRepository {
             .join("search_index");
         fs::create_dir_all(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
-        let bgs: Vec<_> = if block_group_ids.is_empty() {
+        let bgs: Vec<_> = if sequence_graph_ids.is_empty() {
             BlockGroup::all(conn)
         } else {
-            block_group_ids
+            sequence_graph_ids
                 .iter()
                 .filter_map(|id| hash_id_from_string(id).ok())
                 .filter_map(|id| BlockGroup::get_by_id(conn, &id).ok())
@@ -3119,15 +3119,15 @@ impl GenRepository {
     fn search(
         &self,
         query: String,
-        block_group_ids: Vec<String>,
+        sequence_graph_ids: Vec<String>,
         sequence_kind: String,
     ) -> std::result::Result<List, Error> {
         let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
         let conn = self.context.graph().conn();
-        let bgs: Vec<_> = if block_group_ids.is_empty() {
+        let bgs: Vec<_> = if sequence_graph_ids.is_empty() {
             BlockGroup::all(conn)
         } else {
-            block_group_ids
+            sequence_graph_ids
                 .iter()
                 .filter_map(|id| hash_id_from_string(id).ok())
                 .filter_map(|id| BlockGroup::get_by_id(conn, &id).ok())
@@ -3156,9 +3156,9 @@ impl GenRepository {
             };
             if !matches.is_empty() {
                 let locus_records = matches.iter().map(graph_locus_record).collect::<Vec<_>>();
-                let gen_bg = self.into_gen_block_group(bg);
+                let gen_bg = self.into_sequence_graph(bg);
                 results.push(list!(
-                    block_group = r!(gen_bg),
+                    sequence_graph = r!(gen_bg),
                     matches = List::from_values(locus_records)
                 ));
             }
@@ -3166,7 +3166,7 @@ impl GenRepository {
         Ok(List::from_values(results))
     }
 
-    fn clear_index(&self, block_group_ids: Vec<String>) -> std::result::Result<(), Error> {
+    fn clear_index(&self, sequence_graph_ids: Vec<String>) -> std::result::Result<(), Error> {
         let index_dir = self
             .context
             .workspace()
@@ -3175,7 +3175,7 @@ impl GenRepository {
         if !index_dir.exists() {
             return Ok(());
         }
-        if block_group_ids.is_empty() {
+        if sequence_graph_ids.is_empty() {
             for entry in fs::read_dir(&index_dir)
                 .map_err(|e| Error::Other(format!("Failed to read index dir: {e}")))?
             {
@@ -3187,7 +3187,7 @@ impl GenRepository {
                 }
             }
         } else {
-            for id in &block_group_ids {
+            for id in &sequence_graph_ids {
                 let path = index_dir.join(format!("{id}.bin"));
                 if path.exists() {
                     fs::remove_file(&path)
@@ -3248,10 +3248,10 @@ impl GenRepository {
 
     fn get_annotation_group_names(
         &self,
-        block_group_id: String,
+        sequence_graph_id: String,
     ) -> std::result::Result<Vec<String>, Error> {
         let conn = self.context.graph().conn();
-        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
         let entries = load_annotation_group_entries(conn, &bg);
@@ -3263,9 +3263,9 @@ impl GenRepository {
             .collect())
     }
 
-    fn list_annotations(&self, block_group_id: String) -> std::result::Result<List, Error> {
+    fn list_annotations(&self, sequence_graph_id: String) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
         let graph = BlockGroup::get_graph(conn, &bg_id);
@@ -3306,7 +3306,7 @@ impl GenRepository {
 
     fn render_frame(
         &self,
-        block_group_id: String,
+        sequence_graph_id: String,
         detail: String,
         cols: i32,
         rows: i32,
@@ -3314,7 +3314,7 @@ impl GenRepository {
         tracks_json: String,
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
-        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let graph = BlockGroup::get_graph(conn, &bg_id);
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
@@ -3343,14 +3343,14 @@ impl GenRepository {
 
     fn handle_click(
         &self,
-        block_group_id: String,
+        sequence_graph_id: String,
         detail: String,
         ops: String,
         col: i32,
         row: i32,
     ) -> std::result::Result<bool, Error> {
         let conn = self.context.graph().conn();
-        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let graph = BlockGroup::get_graph(conn, &bg_id);
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
@@ -3361,9 +3361,9 @@ impl GenRepository {
     }
 }
 
-impl GenRepository {
-    fn into_gen_block_group(&self, bg: BlockGroup) -> GenBlockGroup {
-        GenBlockGroup {
+impl Repository {
+    fn into_sequence_graph(&self, bg: BlockGroup) -> SequenceGraph {
+        SequenceGraph {
             context: self.context.clone(),
             id: bg.id,
             collection_name: bg.collection_name,
@@ -3373,11 +3373,11 @@ impl GenRepository {
     }
 }
 
-// --- GenBlockGroup ---
+// --- SequenceGraph ---
 
 #[extendr]
 #[derive(Clone)]
-struct GenBlockGroup {
+struct SequenceGraph {
     context: GenDbContext,
     id: HashId,
     collection_name: String,
@@ -3386,11 +3386,11 @@ struct GenBlockGroup {
 }
 
 // DbContext uses Rc internally; R is single-threaded so this is safe.
-unsafe impl Send for GenBlockGroup {}
-unsafe impl Sync for GenBlockGroup {}
+unsafe impl Send for SequenceGraph {}
+unsafe impl Sync for SequenceGraph {}
 
 #[extendr]
-impl GenBlockGroup {
+impl SequenceGraph {
     fn id(&self) -> String {
         self.id.to_string()
     }
@@ -3536,7 +3536,7 @@ impl GenBlockGroup {
         start: i64,
         end: i64,
         backbone: Nullable<String>,
-    ) -> std::result::Result<GenBlockGroup, Error> {
+    ) -> std::result::Result<SequenceGraph, Error> {
         let region = format!("{}:{start}-{end}", self.name);
         derive_subgraph_operation(
             &self.context,
@@ -3555,7 +3555,7 @@ impl GenBlockGroup {
         )
         .into_iter()
         .next()
-        .map(|bg| GenBlockGroup {
+        .map(|bg| SequenceGraph {
             context: self.context.clone(),
             id: bg.id,
             collection_name: bg.collection_name,
@@ -3597,7 +3597,7 @@ impl GenBlockGroup {
         .into_iter()
         .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
         .map(|bg| {
-            r!(GenBlockGroup {
+            r!(SequenceGraph {
                 context: self.context.clone(),
                 id: bg.id,
                 collection_name: bg.collection_name,
@@ -3609,7 +3609,7 @@ impl GenBlockGroup {
         Ok(List::from_values(gen_bgs))
     }
 
-    fn block_group_to_dict(&self) -> std::result::Result<List, Error> {
+    fn to_dict(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
         let graph =
             BlockGroup::get_graph(conn, &self.id).map_err(|e| Error::Other(e.to_string()))?;
@@ -3658,8 +3658,8 @@ impl GenBlockGroup {
 
 extendr_module! {
     mod genr;
-    impl GenRepository;
-    impl GenBlockGroup;
+    impl Repository;
+    impl SequenceGraph;
     fn db_context;
     fn import_fasta;
     fn import_reference_fasta;
@@ -3684,11 +3684,11 @@ extendr_module! {
     fn derive_subgraph;
     fn repo_execute;
     fn repo_query;
-    fn repo_get_block_group_by_id;
-    fn repo_get_block_groups;
-    fn repo_get_block_groups_by_collection;
+    fn repo_get_sequence_graph_by_id;
+    fn repo_get_sequence_graphs;
+    fn repo_get_sequence_graphs_by_collection;
     fn repo_block_group_to_dict;
-    fn repo_get_block_sequence;
+    fn repo_get_node_sequence;
     fn repo_stitch;
     fn repo_build_index;
     fn repo_search;

@@ -18,6 +18,6 @@ A \code{gen_block} list.
 }
 \description{
 A block identifies a contiguous byte range within a graph node.
-Pass the result to \code{repo$get_block_sequence()} to retrieve the
+Pass the result to \code{repo$get_node_sequence()} to retrieve the
 underlying sequence.
 }

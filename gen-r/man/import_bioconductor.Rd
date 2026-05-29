@@ -13,7 +13,7 @@ import_bioconductor(
 }
 \arguments{
 \item{sequences}{A named character vector, \code{DNAStringSet},
-\code{AAStringSet}, or any \code{XStringSet}.  Names become block group
+\code{AAStringSet}, or any \code{XStringSet}.  Names become sequence graph
 names and must all be non-empty.}
 
 \item{sample}{Character. Sample name (default \code{"sample"}).}
@@ -29,7 +29,7 @@ Invisible \code{NULL}.
 }
 \description{
 Accepts a \code{DNAStringSet}, \code{AAStringSet}, or any named character
-vector.  Each named entry becomes one block group.  No intermediate FASTA
+vector.  Each named entry becomes one sequence graph.  No intermediate FASTA
 file is written to disk.
 }
 \examples{

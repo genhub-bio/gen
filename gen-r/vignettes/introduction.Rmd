@@ -62,7 +62,7 @@ repo$import_genbank(gbk_path, sample = "wt")
 List the block groups in the repository to confirm the import:
 
 ```{r list-bgs}
-bgs <- repo$get_block_groups()
+bgs <- repo$get_sequence_graphs()
 bg_wt <- bgs[[1]]
 cat("Block group:", bg_wt$name, "| sample:", bg_wt$sample_name, "\n")
 ```
@@ -127,7 +127,7 @@ diverges through the new MCS nodes.
 ## Inspect the design
 
 ```{r get-gg-bg}
-bg_gg <- Filter(function(x) x$sample_name == "gg_design", repo$get_block_groups())[[1]]
+bg_gg <- Filter(function(x) x$sample_name == "gg_design", repo$get_sequence_graphs())[[1]]
 ```
 
 ### Confirm the BsaI sites with search
@@ -245,7 +245,7 @@ repo$update_with_vcf(
 Plot the sequenced sample:
 
 ```{r get-sequenced-bg}
-bg_seq <- Filter(function(x) x$sample_name == "sequenced", repo$get_block_groups())[[1]]
+bg_seq <- Filter(function(x) x$sample_name == "sequenced", repo$get_sequence_graphs())[[1]]
 ```
 
 ```{r plot-sequenced}
@@ -434,7 +434,7 @@ repo$import_library(
   sample       = "design-v1"
 )
 
-cassette_bgs <- Filter(function(x) x$name == "expression-cassette", repo$get_block_groups())
+cassette_bgs <- Filter(function(x) x$name == "expression-cassette", repo$get_sequence_graphs())
 repo$plot(cassette_bgs[[1]])
 ```
 
@@ -511,7 +511,7 @@ reassembled <- repo$stitch(
 
 `repo$derive_chunks()` is the lower-level counterpart that creates
 chunks in-place (returning a status string); retrieve the results
-afterwards with `repo$get_block_groups()` filtered by name.
+afterwards with `repo$get_sequence_graphs()` filtered by name.
 
 ### Annotation tracks
 

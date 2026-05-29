@@ -227,7 +227,7 @@ test_that("graph operation bindings work", {
     region = "m123", breakpoints = c(10L, 20L)
   ), silent = TRUE))
 
-  groups <- repo$get_block_groups()
+  groups <- repo$get_sequence_graphs()
   expect_true(length(groups) >= 1)
 
   expect_binding_result(try(repo$derive_subgraph(
@@ -235,7 +235,7 @@ test_that("graph operation bindings work", {
     region = "m123:3-12"
   ), silent = TRUE))
 
-  chunks <- Filter(function(bg) bg$sample_name == "chunked", repo$get_block_groups())
+  chunks <- Filter(function(bg) bg$sample_name == "chunked", repo$get_sequence_graphs())
   expect_binding_result(try(repo$stitch(
     bgs = chunks, new_sample = "stitched", new_region = "m123.stitched"
   ), silent = TRUE))
@@ -245,11 +245,11 @@ test_that("repository inspection and graph controller work", {
   repo <- setup_repository()
   repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
 
-  groups <- repo$get_block_groups()
+  groups <- repo$get_sequence_graphs()
   expect_length(groups, 1)
-  expect_s3_class(groups[[1]], "gen_block_group")
+  expect_s3_class(groups[[1]], "gen_sequence_graph")
 
-  group_by_id <- repo$get_block_group_by_id(groups[[1]]$id)
+  group_by_id <- repo$get_sequence_graph_by_id(groups[[1]]$id)
   expect_equal(group_by_id$name, groups[[1]]$name)
 
   rows <- repo$query("SELECT name FROM block_groups ORDER BY name")
@@ -259,15 +259,15 @@ test_that("repository inspection and graph controller work", {
   repo$execute("INSERT INTO r_binding_smoke (id) VALUES (1)")
   expect_equal(repo$query("SELECT id FROM r_binding_smoke")[[1]][[1]], 1)
 
-  graph_dict <- repo$block_group_to_dict(groups[[1]])
+  graph_dict <- groups[[1]]$.inner$to_dict()
   expect_true(length(graph_dict$nodes) >= 1)
   expect_true(length(graph_dict$edges) >= 1)
 
   node <- graph_dict$nodes[[1]]
   key <- Block(node$node_id, node$sequence_start, node$sequence_end)
   expect_equal(
-    repo$get_block_sequence(key),
-    genr:::repo_get_block_sequence(repo$db_path, node$node_id, node$sequence_start, node$sequence_end)
+    repo$get_node_sequence(key),
+    genr:::repo_get_node_sequence(repo$db_path, node$node_id, node$sequence_start, node$sequence_end)
   )
 
   controller <- repo$plot(groups[[1]], rows = 12, cols = 40)
@@ -296,17 +296,17 @@ test_that("low-level internal bindings are accessible via :::", {
   genr:::repo_execute(db_path, "INSERT INTO low_level_smoke (id) VALUES (7)")
   expect_equal(genr:::repo_query(db_path, "SELECT id FROM low_level_smoke")[[1]][[1]], 7)
 
-  groups <- genr:::repo_get_block_groups(db_path)
+  groups <- genr:::repo_get_sequence_graphs(db_path)
   expect_length(groups, 1)
 
-  fetched <- genr:::repo_get_block_group_by_id(db_path, groups[[1]]$id)
+  fetched <- genr:::repo_get_sequence_graph_by_id(db_path, groups[[1]]$id)
   expect_equal(fetched$name, "m123")
 
   graph_dict <- genr:::repo_block_group_to_dict(db_path, groups[[1]]$id)
   expect_true(length(graph_dict$nodes) >= 1)
 
   node <- graph_dict$nodes[[1]]
-  expect_true(nzchar(genr:::repo_get_block_sequence(
+  expect_true(nzchar(genr:::repo_get_node_sequence(
     db_path, node$node_id, node$sequence_start, node$sequence_end
   )))
 

@@ -60,7 +60,7 @@ genome <- DNAStringSet(c(
   chr2 = "TTGCTTGCTTGCTTGC"
 ))
 
-# Regions of interest — names become block group names
+# Regions of interest — names become sequence graph names
 gr <- GRanges(
   seqnames = c("chr1", "chr1", "chr2"),
   ranges   = IRanges(start = c(1, 9, 5), end = c(8, 16, 12)),
