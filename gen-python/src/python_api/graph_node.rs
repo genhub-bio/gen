@@ -67,6 +67,12 @@ impl PyGraphNode {
             Ok(false)
         }
     }
+
+    /// Length of this node's sequence in bytes.
+    #[getter]
+    fn length(&self) -> i64 {
+        self.sequence_end - self.sequence_start
+    }
 }
 
 /// A slice of a single graph block with local byte offsets and strand.

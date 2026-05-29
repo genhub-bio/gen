@@ -9,7 +9,7 @@ use r#gen::{
     graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
 };
 use gen_graph::GraphNode;
-use gen_models::{block_group::BlockGroup, db::DbContext, sample::Sample};
+use gen_models::{block_group::BlockGroup, db::DbContext, node::Node, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
@@ -285,21 +285,38 @@ impl PySequenceGraph {
         Ok(())
     }
 
+    /// Return the sequence for a graph node.
+    ///
+    /// Parameters
+    /// ----------
+    /// node : Node
+    ///     A ``Node`` obtained from ``to_dict()["nodes"]``, ``search()`` results,
+    ///     or any other API that returns graph nodes.
+    ///
+    /// Raises ``RuntimeError`` if this sequence graph was not created via a
+    /// ``Repository``.
+    fn get_node_sequence(&self, node: &PyGraphNode) -> PyResult<String> {
+        let conn = self.require_context("get_node_sequence()")?.graph().conn();
+        let sequences = Node::get_sequences_by_node_ids(conn, &[node.node_id]);
+        let sequence = sequences.get(&node.node_id).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Node with id {:?} not found",
+                node.node_id
+            ))
+        })?;
+        Ok(sequence
+            .get_sequence(node.sequence_start, node.sequence_end)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?)
+    }
+
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_dict()")?.graph().conn();
         let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
         let dict = PyDict::new(py);
-        let nodes = PyDict::new(py);
-        for node in graph.nodes() {
-            let node_dict = PyDict::new(py);
-            node_dict.set_item("parent_node_id", node.node_id)?;
-            node_dict.set_item("sequence_start", node.sequence_start)?;
-            node_dict.set_item("sequence_end", node.sequence_end)?;
-            nodes.set_item(
-                PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end),
-                node_dict,
-            )?;
-        }
+        let nodes: Vec<PyGraphNode> = graph
+            .nodes()
+            .map(|node| PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end))
+            .collect();
         dict.set_item("nodes", nodes)?;
         let edges = PyDict::new(py);
         for (src, dst, edge_weights) in graph.all_edges() {
@@ -340,9 +357,6 @@ impl PySequenceGraph {
             let mut node_map: HashMap<GraphNode, usize> = HashMap::new();
             for node in graph.nodes() {
                 let node_data = PyDict::new(py);
-                node_data.set_item("parent_node_id", node.node_id)?;
-                node_data.set_item("sequence_start", node.sequence_start)?;
-                node_data.set_item("sequence_end", node.sequence_end)?;
                 node_data.set_item(
                     "key",
                     PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end),
@@ -382,12 +396,6 @@ impl PySequenceGraph {
             })?;
             let nx_digraph = networkx.getattr("DiGraph")?.call0()?;
             for node in graph.nodes() {
-                let node_data = PyDict::new(py);
-                node_data.set_item("parent_node_id", node.node_id)?;
-                node_data.set_item("sequence_start", node.sequence_start)?;
-                node_data.set_item("sequence_end", node.sequence_end)?;
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("attr_dict", node_data)?;
                 nx_digraph.call_method(
                     "add_node",
                     (PyGraphNode::new(
@@ -395,7 +403,7 @@ impl PySequenceGraph {
                         node.sequence_start,
                         node.sequence_end,
                     ),),
-                    Some(&kwargs),
+                    None,
                 )?;
             }
             for (src, dst, edge_weights) in graph.all_edges() {
