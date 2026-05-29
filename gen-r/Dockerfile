@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     libuv1-dev \
     pkg-config \
+    pandoc \
     r-base \
     r-base-dev \
     && rm -rf /var/lib/apt/lists/*
