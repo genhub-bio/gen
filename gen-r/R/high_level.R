@@ -123,6 +123,11 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 
   bg$search <- function(query, sequence_kind = "dna") gen_bg$search(query, sequence_kind)
 
+  bg$get_node_sequence <- function(node) {
+    node_id_str <- if (inherits(node$node_id, "gen_hash_id")) node$node_id$hash_id else node$node_id
+    gen_bg$get_node_sequence(node_id_str, as.integer(node$sequence_start), as.integer(node$sequence_end))
+  }
+
   bg$clear_index <- function() gen_bg$clear_index()
 
   bg$subgraph <- function(new_sample, start, end, backbone = NULL) {

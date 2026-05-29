@@ -3540,6 +3540,23 @@ impl SequenceGraph {
         Ok(())
     }
 
+    fn get_node_sequence(
+        &self,
+        node_id: String,
+        sequence_start: i64,
+        sequence_end: i64,
+    ) -> std::result::Result<String, Error> {
+        let conn = self.context.graph().conn();
+        let nid = hash_id_from_string(&node_id).map_err(Error::Other)?;
+        let sequences = Node::get_sequences_by_node_ids(conn, &[nid]);
+        let seq = sequences
+            .get(&nid)
+            .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
+        Ok(seq
+            .get_sequence(sequence_start, sequence_end)
+            .map_err(|e| Error::Other(e.to_string()))?)
+    }
+
     fn subgraph(
         &self,
         new_sample: String,

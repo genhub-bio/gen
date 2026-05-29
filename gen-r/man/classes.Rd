@@ -64,7 +64,8 @@ Graph nodes (\code{gen_node}) are obtained directly from
 \code{export_fasta(filename)}, \code{export_gfa(filename, node_max = NULL)},
 \code{export_genbank(filename)},
 \code{build_index(sequence_kind = "dna", k = 16L)},
-\code{search(query, sequence_kind = "dna")}, \code{clear_index()},
+\code{search(query, sequence_kind = "dna")}, \code{get_node_sequence(node)},
+\code{clear_index()},
 \code{subgraph(new_sample, start, end, backbone = NULL)}, and
 \code{chunks(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL)}.
 
