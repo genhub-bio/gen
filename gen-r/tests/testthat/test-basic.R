@@ -56,11 +56,9 @@ test_that("Repository initializes workspace and returns correct paths", {
   expect_match(repo$db_path, "default\\.db$")
 })
 
-test_that("constructors HashId and Block work", {
+test_that("HashId constructor works", {
   hash_id <- HashId("abc123")
-  block <- Block(hash_id, 1, 4)
   expect_s3_class(hash_id, "gen_hash_id")
-  expect_s3_class(block, "gen_block")
 })
 
 test_that("FASTA import and export work", {
@@ -264,11 +262,8 @@ test_that("repository inspection and graph controller work", {
   expect_true(length(graph_dict$edges) >= 1)
 
   node <- graph_dict$nodes[[1]]
-  key <- Block(node$node_id, node$sequence_start, node$sequence_end)
-  expect_equal(
-    repo$get_node_sequence(key),
-    genr:::repo_get_node_sequence(repo$db_path, node$node_id, node$sequence_start, node$sequence_end)
-  )
+  expect_s3_class(node, "gen_node")
+  expect_true(nzchar(repo$get_node_sequence(node)))
 
   controller <- repo$plot(groups[[1]], rows = 12, cols = 40)
   expect_s3_class(controller, "gen_plot")

@@ -171,34 +171,55 @@ fn sequence_graph_record(block_group: BlockGroup, db_path: Option<&str>) -> List
     )
 }
 
-fn block_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Robj {
+fn node_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Robj {
     let mut obj = r!(list!(
         node_id = node_id.to_string(),
         sequence_start = sequence_start,
         sequence_end = sequence_end
     ));
-    obj.set_class(&["gen_block"]).unwrap();
+    obj.set_class(&["gen_node"]).unwrap();
     obj
 }
 
-fn block_slice_record(
+fn strand_str(strand: Strand) -> &'static str {
+    match strand {
+        Strand::Forward => "+",
+        Strand::Reverse => "-",
+        _ => ".",
+    }
+}
+
+fn node_slice_record(
     node_id: HashId,
     sequence_start: i64,
     sequence_end: i64,
+    relative_start: usize,
+    relative_end: usize,
     strand: Strand,
 ) -> Robj {
-    let strand_str = match strand {
-        Strand::Forward => "forward",
-        Strand::Reverse => "reverse",
-        _ => "unknown",
-    };
     let mut obj = r!(list!(
-        node_id = node_id.to_string(),
-        sequence_start = sequence_start,
-        sequence_end = sequence_end,
-        strand = strand_str
+        node = node_record(node_id, sequence_start, sequence_end),
+        start = relative_start as i64,
+        end = relative_end as i64,
+        strand = strand_str(strand)
     ));
-    obj.set_class(&["gen_block_slice"]).unwrap();
+    obj.set_class(&["gen_node_slice"]).unwrap();
+    obj
+}
+
+fn position_record(
+    node_id: HashId,
+    sequence_start: i64,
+    sequence_end: i64,
+    offset: usize,
+    strand: Strand,
+) -> Robj {
+    let mut obj = r!(list!(
+        node = node_record(node_id, sequence_start, sequence_end),
+        offset = offset as i64,
+        strand = strand_str(strand)
+    ));
+    obj.set_class(&["gen_position"]).unwrap();
     obj
 }
 
@@ -741,62 +762,58 @@ fn parse_sequence_kind_r(s: &str) -> std::result::Result<SequenceKind, String> {
     }
 }
 
-fn graph_locus_record(locus: &GraphLocus) -> List {
+fn graph_locus_record(locus: &GraphLocus) -> Robj {
     let first = &locus.slices[0];
     let last = locus.slices.last().unwrap();
-    let start = list!(
-        block = block_slice_record(
-            first.block.node_id,
-            first.block.sequence_start,
-            first.block.sequence_end,
-            first.strand,
-        ),
-        offset = first.start as i64
+    let start = position_record(
+        first.block.node_id,
+        first.block.sequence_start,
+        first.block.sequence_end,
+        first.start,
+        first.strand,
     );
-    let end = list!(
-        block = block_slice_record(
-            last.block.node_id,
-            last.block.sequence_start,
-            last.block.sequence_end,
-            last.strand,
-        ),
-        offset = last.end as i64
+    let end = position_record(
+        last.block.node_id,
+        last.block.sequence_start,
+        last.block.sequence_end,
+        last.end,
+        last.strand,
     );
     let slices = locus
         .slices
         .iter()
         .map(|s| {
-            block_slice_record(
+            node_slice_record(
                 s.block.node_id,
                 s.block.sequence_start,
                 s.block.sequence_end,
+                s.start,
+                s.end,
                 s.strand,
             )
         })
         .collect::<Vec<_>>();
-    let strand = {
+    let overall_strand = {
         let mut iter = locus.slices.iter().map(|s| s.strand);
         match iter.next() {
-            None => "unknown",
+            None => ".",
             Some(first) => {
                 if iter.all(|s| s == first) {
-                    match first {
-                        Strand::Forward => "+",
-                        Strand::Reverse => "-",
-                        _ => ".",
-                    }
+                    strand_str(first)
                 } else {
                     "mixed"
                 }
             }
         }
     };
-    list!(
+    let mut obj = r!(list!(
         start = start,
         end = end,
         slices = List::from_values(slices),
-        strand = strand
-    )
+        strand = overall_strand
+    ));
+    obj.set_class(&["gen_locus"]).unwrap();
+    obj
 }
 
 /// Open a Gen database context.
@@ -1813,14 +1830,7 @@ fn repo_block_group_to_dict(
 
     let nodes = graph
         .nodes()
-        .map(|node| {
-            list!(
-                key = block_record(node.node_id, node.sequence_start, node.sequence_end),
-                node_id = node.node_id.to_string(),
-                sequence_start = node.sequence_start,
-                sequence_end = node.sequence_end
-            )
-        })
+        .map(|node| node_record(node.node_id, node.sequence_start, node.sequence_end))
         .collect::<Vec<_>>();
 
     let edges = graph
@@ -1839,8 +1849,8 @@ fn repo_block_group_to_dict(
                 })
                 .collect::<Vec<_>>();
             list!(
-                source = block_record(src.node_id, src.sequence_start, src.sequence_end),
-                target = block_record(dst.node_id, dst.sequence_start, dst.sequence_end),
+                source = node_record(src.node_id, src.sequence_start, src.sequence_end),
+                target = node_record(dst.node_id, dst.sequence_start, dst.sequence_end),
                 weights = List::from_values(weights)
             )
         })
@@ -2286,7 +2296,7 @@ impl Repository {
             .nodes()
             .map(|node| {
                 list!(
-                    key = block_record(node.node_id, node.sequence_start, node.sequence_end),
+                    key = node_record(node.node_id, node.sequence_start, node.sequence_end),
                     node_id = node.node_id.to_string(),
                     sequence_start = node.sequence_start,
                     sequence_end = node.sequence_end
@@ -2310,8 +2320,8 @@ impl Repository {
                     })
                     .collect::<Vec<_>>();
                 list!(
-                    source = block_record(src.node_id, src.sequence_start, src.sequence_end),
-                    target = block_record(dst.node_id, dst.sequence_start, dst.sequence_end),
+                    source = node_record(src.node_id, src.sequence_start, src.sequence_end),
+                    target = node_record(dst.node_id, dst.sequence_start, dst.sequence_end),
                     weights = List::from_values(weights)
                 )
             })
@@ -3618,7 +3628,7 @@ impl SequenceGraph {
             .nodes()
             .map(|node| {
                 list!(
-                    key = block_record(node.node_id, node.sequence_start, node.sequence_end),
+                    key = node_record(node.node_id, node.sequence_start, node.sequence_end),
                     node_id = node.node_id.to_string(),
                     sequence_start = node.sequence_start,
                     sequence_end = node.sequence_end
@@ -3642,8 +3652,8 @@ impl SequenceGraph {
                     })
                     .collect::<Vec<_>>();
                 list!(
-                    source = block_record(src.node_id, src.sequence_start, src.sequence_end),
-                    target = block_record(dst.node_id, dst.sequence_start, dst.sequence_end),
+                    source = node_record(src.node_id, src.sequence_start, src.sequence_end),
+                    target = node_record(dst.node_id, dst.sequence_start, dst.sequence_end),
                     weights = List::from_values(weights)
                 )
             })

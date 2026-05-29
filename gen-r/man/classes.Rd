@@ -1,13 +1,10 @@
 \name{HashId}
 \alias{HashId}
-\alias{Block}
 \alias{GenPlot}
 \alias{Repository}
 \title{Constructors for Gen R Objects}
 \usage{
 HashId(hash_id)
-
-Block(node_id, sequence_start, sequence_end)
 
 GenPlot(
   db_path,
@@ -22,12 +19,6 @@ Repository(path = NULL)
 \arguments{
   \item{hash_id}{Hash identifier string.}
 
-  \item{node_id}{Node identifier string or a \code{gen_hash_id} object.}
-
-  \item{sequence_start}{Start offset within a node sequence.}
-
-  \item{sequence_end}{End offset within a node sequence.}
-
   \item{db_path}{Path to a Gen SQLite database.}
 
   \item{block_group_id}{Block group hash ID string or \code{gen_hash_id} object.}
@@ -41,16 +32,20 @@ Repository(path = NULL)
   \item{path}{Optional workspace or \code{.gen} directory path for \code{Repository()}.}
 }
 \value{
-\code{HashId()} and \code{Block()} return lightweight S3 objects.
+\code{HashId()} returns a lightweight \code{gen_hash_id} S3 object.
 \code{GenPlot()} and \code{Repository()} return environment-backed
 helper objects with methods attached as fields.
 }
 \description{
 These constructors provide the main R-side object model for \pkg{genr}.
-\code{HashId()} and \code{Block()} are small value objects.
+\code{HashId()} is a small value object wrapping a hash string.
 \code{Repository()} opens a Gen workspace and exposes database and
-block-group helper methods. \code{GenPlot()} exposes stateful
-rendering and navigation methods for a single block group.
+sequence-graph helper methods. \code{GenPlot()} exposes stateful
+rendering and navigation methods for a single sequence graph.
+
+Graph nodes (\code{gen_node}) are obtained directly from
+\code{graph_dict$nodes[[i]]$key} and passed to
+\code{repo$get_node_sequence()}.
 }
 \details{
 \code{Repository()} exposes the methods \code{execute(query)},
@@ -58,7 +53,7 @@ rendering and navigation methods for a single block group.
 \code{get_block_groups_by_collection(collection_name)},
 \code{block_group_to_dict(block_group)},
 \code{plot(block_group, rows = NULL, cols = NULL, detail = "normal")},
-\code{get_block_sequence(block)},
+\code{get_node_sequence(node)},
 \code{stitch(bgs, new_sample, new_region)},
 \code{build_index(bgs = NULL, sequence_kind = "dna", k = 16L)},
 \code{search(query, bgs = NULL, sequence_kind = "dna")}, and
@@ -80,7 +75,6 @@ rendering and navigation methods for a single block group.
 \examples{
 \dontrun{
 id <- HashId("abc123")
-key <- Block(id, 1, 4)
 
 repo <- Repository()
 groups <- repo$get_block_groups()
@@ -88,6 +82,9 @@ groups <- repo$get_block_groups()
 if (length(groups) > 0) {
   ctrl <- repo$plot(groups[[1]], rows = 12, cols = 40)
   ctrl$render_frame(40, 12)
+
+  graph_dict <- groups[[1]]$.inner$to_dict()
+  node_seq <- repo$get_node_sequence(graph_dict$nodes[[1]]$key)
 }
 }
 }

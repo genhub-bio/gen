@@ -23,5 +23,5 @@ rendering block groups through \code{GenPlot()}.
 \code{zoom_in}, \code{zoom_out}, \code{handle_click}, and \code{move_by}.
 }
 \seealso{
-\code{\link{HashId}}, \code{\link{Block}}, \code{\link{derive_chunks}}
+\code{\link{HashId}}, \code{\link{derive_chunks}}
 }

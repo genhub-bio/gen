@@ -32,21 +32,20 @@ A \code{gen_repository} environment with the following methods:
 \item{\code{get_sequence_graphs()}}{Return a list of all sequence graphs.}
 \item{\code{get_sequence_graph_by_id(id)}}{Return a sequence graph by its \code{HashId}.}
 \item{\code{get_sequence_graphs_by_collection(collection)}}{Return sequence graphs in a collection.}
-\item{\code{get_node_sequence(block)}}{Return the sequence string for a \code{Block}.}
+\item{\code{get_node_sequence(node)}}{Return the sequence string for a \code{gen_node} (use \code{node$key} from graph dict nodes).}
 \item{\code{plot(sequence_graph, rows, cols, detail)}}{Return a \code{gen_plot} for a sequence graph.}
 \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate a list of sequence graphs end-to-end into a new sequence graph.}
 \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection=NULL)}}{Derive a subgraph sequence graph.}
 \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection=NULL)}}{Split a sequence graph into chunks.}
 \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
 \item{\code{search(query, bgs = NULL, sequence_kind = "dna")}}{Search for exact sequence occurrences across sequence graphs.
-Returns a list, one entry per sequence graph that has at least one hit.  Each entry is a list with:
-\code{sequence_graph} (a \code{gen_sequence_graph}) and \code{matches} (a list of locus records).
-Each locus record has fields \code{start}, \code{end}, \code{blocks}, and \code{strand}.
-\code{start$block} is the first \code{gen_block} of the match; \code{start$offset} is the byte offset within that block's local sequence where the match begins (\code{0} = block start).
-\code{end$block} is the last \code{gen_block}; \code{end$offset} is the exclusive end offset within that block's local sequence.
-\code{blocks} is a list of every \code{gen_block} spanned by the match; middle blocks are fully covered.
-\code{strand} is one of \code{"forward"}, \code{"reverse"}, or \code{"unknown"}.
-Pass a match locus directly to \code{plot$goto_match()} or \code{plot$highlight_match()}.}
+Returns a list, one entry per sequence graph that has at least one hit.  Each entry has:
+\code{sequence_graph} (\code{gen_sequence_graph}) and \code{matches} (list of \code{gen_locus}).
+Each \code{gen_locus}: \code{start} (\code{gen_position}), \code{end} (\code{gen_position}),
+\code{slices} (list of \code{gen_node_slice}), \code{strand}.
+\code{gen_position}: \code{node} (\code{gen_node}), \code{offset} (relative to node sequence), \code{strand}.
+\code{gen_node_slice}: \code{node} (\code{gen_node}), \code{start}/\code{end} (relative to node sequence), \code{strand}.
+Pass a locus directly to \code{plot$goto_match()} or \code{plot$highlight_match()}.}
 \item{\code{clear_index(bgs)}}{Remove cached search index files.}
 \item{\code{execute(query)}}{Run a raw SQL statement against the graph database.}
 \item{\code{query(query)}}{Run a raw SQL query and return results as a list of rows.}

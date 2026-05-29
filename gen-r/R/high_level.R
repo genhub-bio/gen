@@ -17,28 +17,30 @@ HashId <- function(hash_id) {
   structure(list(hash_id = as.character(hash_id)), class = "gen_hash_id")
 }
 
-#' Construct a Block
-#'
-#' A block identifies a contiguous byte range within a graph node.
-#' Pass the result to \code{repo$get_node_sequence()} to retrieve the
-#' underlying sequence.
-#'
-#' @param node_id Character or \code{gen_hash_id}. Node identifier.
-#' @param sequence_start Integer. Start byte offset (inclusive).
-#' @param sequence_end Integer. End byte offset (exclusive).
-#' @return A \code{gen_block} list.
 #' @export
-Block <- function(node_id, sequence_start, sequence_end) {
-  structure(
-    list(
-      node_id = if (inherits(node_id, "gen_hash_id")) node_id else HashId(node_id),
-      sequence_start = as.integer(sequence_start),
-      sequence_end = as.integer(sequence_end)
-    ),
-    class = "gen_block"
-  )
+print.gen_node <- function(x, ...) {
+  len <- x$sequence_end - x$sequence_start
+  cat(sprintf("<Node [%d bp]>\n", len))
+  invisible(x)
 }
 
+#' @export
+print.gen_node_slice <- function(x, ...) {
+  cat(sprintf("<NodeSlice [%d..%d] %s>\n", x$start, x$end, x$strand))
+  invisible(x)
+}
+
+#' @export
+print.gen_position <- function(x, ...) {
+  cat(sprintf("<Position offset=%d %s>\n", x$offset, x$strand))
+  invisible(x)
+}
+
+#' @export
+print.gen_locus <- function(x, ...) {
+  cat(sprintf("<Locus %d slice(s) %s>\n", length(x$slices), x$strand))
+  invisible(x)
+}
 
 # Extract the genome string from a sequence container.
 # Supported: BSgenome, DNAStringSet (with metadata$genome set), FaFile, TwoBitFile.
@@ -247,28 +249,29 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
 
   ctrl$goto_match <- function(match_locus) {
     ctrl$detail <- "full"
-    block <- match_locus$start$block
-    offset <- match_locus$start$offset
-    node_len <- block$sequence_end - block$sequence_start
+    pos <- match_locus$start
+    node <- pos$node
+    offset <- pos$offset
+    node_len <- node$sequence_end - node$sequence_start
     frac_x <- if (node_len > 1L) offset / (node_len - 1L) else 0.5
     frac_x <- max(0.0, min(1.0, frac_x))
     ctrl$ops <- c(ctrl$ops, sprintf("goto,%s,%d,%d,%.6f",
-      block$node_id,
-      as.integer(block$sequence_start),
-      as.integer(block$sequence_end),
+      node$node_id,
+      as.integer(node$sequence_start),
+      as.integer(node$sequence_end),
       frac_x))
     invisible(ctrl)
   }
 
   ctrl$highlight_match <- function(match_locus, color = "yellow") {
-    blocks <- match_locus$slices
-    n <- length(blocks)
+    slices <- match_locus$slices
+    n <- length(slices)
     start_offset <- match_locus$start$offset
     end_offset <- match_locus$end$offset
     strand_code <- switch(match_locus$strand, "+" = "f", "-" = "r", "u")
     block_parts <- paste(
-      sapply(blocks, function(b) {
-        sprintf("%s,%d,%d", b$node_id, as.integer(b$sequence_start), as.integer(b$sequence_end))
+      sapply(slices, function(s) {
+        sprintf("%s,%d,%d", s$node$node_id, as.integer(s$node$sequence_start), as.integer(s$node$sequence_end))
       }),
       collapse = ","
     )
@@ -545,21 +548,20 @@ import_granges <- function(regions, sequences, sample = "sample", collection = N
 #'     \item{\code{get_sequence_graphs()}}{Return a list of all sequence graphs.}
 #'     \item{\code{get_sequence_graph_by_id(id)}}{Return a sequence graph by its \code{HashId}.}
 #'     \item{\code{get_sequence_graphs_by_collection(collection)}}{Return sequence graphs in a collection.}
-#'     \item{\code{get_node_sequence(block)}}{Return the sequence string for a \code{Block}.}
+#'     \item{\code{get_node_sequence(node)}}{Return the sequence string for a \code{gen_node} (use \code{node$key} from graph dict nodes).}
 #'     \item{\code{plot(sequence_graph, rows, cols, detail)}}{Return a \code{gen_plot} for a sequence graph.}
 #'     \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate a list of sequence graphs end-to-end into a new sequence graph.}
 #'     \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection=NULL)}}{Derive a subgraph sequence graph.}
 #'     \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection=NULL)}}{Split a sequence graph into chunks.}
 #'     \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
 #'     \item{\code{search(query, bgs = NULL, sequence_kind = "dna")}}{Search for exact sequence occurrences across sequence graphs.
-#'       Returns a list, one entry per sequence graph that has at least one hit.  Each entry is a list with:
-#'       \code{sequence_graph} (a \code{gen_sequence_graph}) and \code{matches} (a list of locus records).
-#'       Each locus record has fields \code{start}, \code{end}, \code{blocks}, and \code{strand}.
-#'       \code{start$block} is the first \code{gen_block} of the match; \code{start$offset} is the byte offset within that block's local sequence where the match begins (\code{0} = block start).
-#'       \code{end$block} is the last \code{gen_block}; \code{end$offset} is the exclusive end offset within that block's local sequence.
-#'       \code{blocks} is a list of every \code{gen_block} spanned by the match; middle blocks are fully covered.
-#'       \code{strand} is one of \code{"forward"}, \code{"reverse"}, or \code{"unknown"}.
-#'       Pass a match locus directly to \code{plot$goto_match()} or \code{plot$highlight_match()}.}
+#'       Returns a list, one entry per sequence graph that has at least one hit.  Each entry has:
+#'       \code{sequence_graph} (\code{gen_sequence_graph}) and \code{matches} (list of \code{gen_locus}).
+#'       Each \code{gen_locus}: \code{start} (\code{gen_position}), \code{end} (\code{gen_position}),
+#'       \code{slices} (list of \code{gen_node_slice}), \code{strand}.
+#'       \code{gen_position}: \code{node} (\code{gen_node}), \code{offset} (relative to node sequence), \code{strand}.
+#'       \code{gen_node_slice}: \code{node} (\code{gen_node}), \code{start}/\code{end} (relative to node sequence), \code{strand}.
+#'       Pass a locus directly to \code{plot$goto_match()} or \code{plot$highlight_match()}.}
 #'     \item{\code{clear_index(bgs)}}{Remove cached search index files.}
 #'     \item{\code{execute(query)}}{Run a raw SQL statement against the graph database.}
 #'     \item{\code{query(query)}}{Run a raw SQL query and return results as a list of rows.}
@@ -595,11 +597,12 @@ Repository <- function(path = NULL) {
     GenPlot(repo$db_path, sequence_graph$id$hash_id, detail = detail, rows = rows, cols = cols)
   }
 
-  repo$get_node_sequence <- function(block) {
+  repo$get_node_sequence <- function(node) {
+    node_id_str <- if (inherits(node$node_id, "gen_hash_id")) node$node_id$hash_id else node$node_id
     inner$get_node_sequence(
-      block$node_id$hash_id,
-      as.integer(block$sequence_start),
-      as.integer(block$sequence_end)
+      node_id_str,
+      as.integer(node$sequence_start),
+      as.integer(node$sequence_end)
     )
   }
 

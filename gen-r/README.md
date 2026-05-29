@@ -68,7 +68,7 @@ Bioconductor `DNAStringSet` / `GRanges` objects.
 | `get_block_groups()` | All block groups in the database |
 | `get_block_groups_by_collection(collection)` | Block groups in one collection |
 | `get_block_group_by_id(id)` | Block group by `HashId` |
-| `get_block_sequence(block)` | Sequence string for a `Block` |
+| `get_node_sequence(node)` | Sequence string for a graph node (`node$key` from graph dict) |
 | `search(query, bgs, sequence_kind)` | K-mer search across block groups |
 | `build_index(bgs, sequence_kind, k)` | Build search index |
 | `clear_index(bgs)` | Remove cached index files |
