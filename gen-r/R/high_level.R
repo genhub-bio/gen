@@ -154,7 +154,7 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #' @param detail Character. Level of node detail: \code{"normal"} (default) or
 #'   \code{"compressed"}.
 #' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
-#' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 80).
+#' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 72).
 #' @return A \code{gen_plot} environment with methods:
 #'   \describe{
 #'     \item{\code{zoom_in()}}{Step one zoom level in. Returns self invisibly.}
@@ -184,7 +184,7 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
     lapply(group_names, function(n) list(type = "group", name = n))
   }, error = function(e) list())
   ctrl$rows <- rows %||% 24L
-  ctrl$cols <- cols %||% 80L
+  ctrl$cols <- cols %||% 72L
 
   ctrl$set_detail <- function(detail) {
     ctrl$detail <- detail
