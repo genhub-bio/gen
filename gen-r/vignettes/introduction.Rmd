@@ -64,7 +64,7 @@ List the block groups in the repository to confirm the import:
 ```{r list-bgs}
 bgs <- repo$get_sequence_graphs()
 bg_wt <- bgs[[1]]
-cat("Block group:", bg_wt$name(), "| sample:", bg_wt$sample_name(), "\n")
+cat("Sequence graph:", bg_wt$name(), "| sample:", bg_wt$sample_name(), "\n")
 ```
 
 ## Visualise the reference
@@ -478,8 +478,8 @@ repo$derive_subgraph(
 )
 ```
 
-Block groups expose `subgraph()` as a shorthand that returns the new
-block group immediately:
+Sequence graphs expose `subgraph()` as a shorthand that returns the new
+sequence graph immediately:
 
 ```{r bg-subgraph, eval=FALSE}
 mcs_bg <- bg_gg$subgraph("mcs_v2", 390L, 460L, NULL)

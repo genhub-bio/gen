@@ -8,7 +8,7 @@ HashId(hash_id)
 
 GenPlot(
   db_path,
-  block_group_id,
+  sequence_graph_id,
   detail = "normal",
   rows = NULL,
   cols = NULL
@@ -21,7 +21,7 @@ Repository(path = NULL)
 
   \item{db_path}{Path to a Gen SQLite database.}
 
-  \item{block_group_id}{Block group hash ID string or \code{gen_hash_id} object.}
+  \item{sequence_graph_id}{Sequence graph hash ID string or \code{gen_hash_id} object.}
 
   \item{detail}{Graph detail level: \code{"normal"}, \code{"full"}, or \code{"minimal"}.}
 
@@ -44,22 +44,21 @@ sequence-graph helper methods. \code{GenPlot()} exposes stateful
 rendering and navigation methods for a single sequence graph.
 
 Graph nodes (\code{gen_node}) are obtained directly from
-\code{graph_dict$nodes[[i]]$key} and passed to
+\code{to_dict()$nodes[[i]]$key} and passed to
 \code{repo$get_node_sequence()}.
 }
 \details{
 \code{Repository()} exposes the methods \code{execute(query)},
-\code{query(query)}, \code{get_block_group_by_id(id)}, \code{get_block_groups()},
-\code{get_block_groups_by_collection(collection_name)},
-\code{block_group_to_dict(block_group)},
-\code{plot(block_group, rows = NULL, cols = NULL, detail = "normal")},
+\code{query(query)}, \code{get_sequence_graph_by_id(id)}, \code{get_sequence_graphs()},
+\code{get_sequence_graphs_by_collection(collection_name)},
+\code{block_group_to_dict(sequence_graph_id)},
 \code{get_node_sequence(node)},
-\code{stitch(bgs, new_sample, new_region)},
-\code{build_index(bgs = NULL, sequence_kind = "dna", k = 16L)},
-\code{search(query, bgs = NULL, sequence_kind = "dna")}, and
-\code{clear_index(bgs = NULL)}.
+\code{stitch(sgs, new_sample, new_region)},
+\code{build_index(sgs = NULL, sequence_kind = "dna", k = 16L)},
+\code{search(query, sgs = NULL, sequence_kind = "dna")}, and
+\code{clear_index(sgs = NULL)}.
 
-\code{BlockGroup} objects expose the methods
+\code{SequenceGraph} objects expose the methods
 \code{plot(rows = NULL, cols = NULL, detail = "normal")},
 \code{export_fasta(filename)}, \code{export_gfa(filename, node_max = NULL)},
 \code{export_genbank(filename)},
@@ -78,13 +77,12 @@ Graph nodes (\code{gen_node}) are obtained directly from
 id <- HashId("abc123")
 
 repo <- Repository()
-groups <- repo$get_block_groups()
+graphs <- repo$get_sequence_graphs()
 
-if (length(groups) > 0) {
-  ctrl <- repo$plot(groups[[1]], rows = 12, cols = 40)
-  ctrl$render_frame(40, 12)
+if (length(graphs) > 0) {
+  p <- plot(graphs[[1]])
 
-  graph_dict <- groups[[1]]$.inner$to_dict()
+  graph_dict <- graphs[[1]]$to_dict()
   node_seq <- repo$get_node_sequence(graph_dict$nodes[[1]]$key)
 }
 }

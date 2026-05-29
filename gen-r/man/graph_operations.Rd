@@ -75,8 +75,8 @@ repo$derive_chunks(
 
 # Stitch the chunks back together
 chunks <- Filter(
-  function(bg) bg$sample_name == "chunked",
-  repo$get_block_groups()
+  function(sg) sg$sample_name() == "chunked",
+  repo$get_sequence_graphs()
 )
 repo$stitch(chunks, new_sample = "stitched", new_region = "chr1.stitched")
 }

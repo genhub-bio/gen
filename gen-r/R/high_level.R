@@ -320,7 +320,7 @@ import_bioconductor <- function(sequences, sample = "sample", collection = NULL,
 #'
 #' Each reference sequence is stored once as a node (identified by sequence
 #' hash), so overlapping or repeated imports of the same chromosome do not
-#' duplicate stored sequence data.  Each region then becomes a BlockGroup
+#' duplicate stored sequence data.  Each region then becomes a SequenceGraph
 #' whose edges slice into that shared node at \code{[start, end)}.
 #'
 #' Coordinates follow Bioconductor convention on input (1-based, closed
