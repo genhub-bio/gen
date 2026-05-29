@@ -71,13 +71,24 @@ cat("Block group:", bg_wt$name, "| sample:", bg_wt$sample_name, "\n")
 
 ```{r plot-wt}
 p <- repo$plot(bg_wt)
+
+# Navigate to the MCS — annotated features are first-class, so you can
+# jump directly to any named feature rather than specifying coordinates.
+annotations <- p$list_annotations()
+mcs <- Filter(function(a) grepl("MCS|misc_feature|multiple.cloning", a$name, ignore.case = TRUE), annotations)
+if (length(mcs) > 0) p$go_to(mcs[[1]])
+
 p
 ```
 
-The viewer renders a pannable, zoomable canvas of the sequence graph. At
-this stage the graph for the wild-type sample is a single linear path.
-Annotations from the GenBank file (lacZα, bla, the MCS) appear as tracks
-above the sequence.
+The viewer renders a static snapshot of the sequence graph. Annotations
+from the GenBank file (lacZα, bla, the MCS) appear as coloured tracks
+below the sequence. `list_annotations()` returns all named features in
+the database; passing one to `go_to()` centres the viewport on that
+feature — no coordinate look-up required.
+
+For a fully interactive, pannable, zoomable view, run `gen view` from
+the command line in the same workspace.
 
 ## Design a Golden Gate conversion
 

@@ -4,7 +4,7 @@
 var TEXT_SIZE = 14;
 var CELL_SIZE = Math.round(TEXT_SIZE / 0.875);
 var BOX_SCALE = 1.15;
-var FONT_FAMILY = "monospace";
+var FONT_FAMILY = "Menlo, Monaco, Courier New, monospace";
 var BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`;
 var TEXT_FONT = `${TEXT_SIZE}px ${FONT_FAMILY}`;
 function cellFont(size, cell) {
@@ -290,6 +290,7 @@ function render({ model, el }) {
   const scratch = document.createElement("canvas");
   const scratchCtx = scratch.getContext("2d");
   const grid = makeGridMetrics(scratchCtx);
+  el.style.overflowX = "auto";
   const wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   const canvas = document.createElement("canvas");

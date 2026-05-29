@@ -16,7 +16,7 @@ GenPlot(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL)
 
 \item{rows}{Integer or \code{NULL}. Canvas height in terminal rows (default 24).}
 
-\item{cols}{Integer or \code{NULL}. Canvas width in terminal columns (default 80).}
+\item{cols}{Integer or \code{NULL}. Canvas width in terminal columns (default 72).}
 }
 \value{
 A \code{gen_plot} environment with methods:
