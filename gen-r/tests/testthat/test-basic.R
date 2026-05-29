@@ -246,31 +246,27 @@ test_that("repository inspection and graph controller work", {
   expect_match(via_plot$render_frame(30, 10), "\"cols\":30")
 })
 
-test_that("low-level internal bindings are accessible via :::", {
+test_that("raw SQL execute/query and sequence graph object API work", {
   repo <- setup_repository()
   repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
-  db_path <- repo$db_path
 
-  genr:::repo_execute(db_path, "CREATE TABLE IF NOT EXISTS low_level_smoke (id INTEGER)")
-  genr:::repo_execute(db_path, "INSERT INTO low_level_smoke (id) VALUES (7)")
-  expect_equal(genr:::repo_query(db_path, "SELECT id FROM low_level_smoke")[[1]][[1]], 7)
+  repo$execute("CREATE TABLE IF NOT EXISTS low_level_smoke (id INTEGER)")
+  repo$execute("INSERT INTO low_level_smoke (id) VALUES (7)")
+  expect_equal(repo$query("SELECT id FROM low_level_smoke")[[1]][[1]], 7)
 
-  groups <- genr:::repo_get_sequence_graphs(db_path)
+  groups <- repo$get_sequence_graphs()
   expect_length(groups, 1)
 
-  fetched <- genr:::repo_get_sequence_graph_by_id(db_path, groups[[1]]$id)
-  expect_equal(fetched$name, "m123")
+  sg <- groups[[1]]
+  expect_equal(sg$name(), "m123")
 
-  sg <- repo$get_sequence_graph_by_id(groups[[1]]$id)
   graph_dict <- sg$to_dict()
   expect_true(length(graph_dict$nodes) >= 1)
 
   node <- graph_dict$nodes[[1]]
-  expect_true(nzchar(genr:::repo_get_node_sequence(
-    db_path, node$node_id, node$sequence_start, node$sequence_end
-  )))
+  expect_true(nzchar(repo$get_node_sequence(node$node_id, node$sequence_start, node$sequence_end)))
 
-  frame_json <- repo$render_frame(groups[[1]]$id, "normal", 40L, 12L, "", "[]")
+  frame_json <- repo$render_frame(sg$id(), "normal", 40L, 12L, "", "[]")
   expect_match(frame_json, "\"cells\"")
-  expect_type(repo$handle_click(groups[[1]]$id, "normal", "", 1L, 1L), "logical")
+  expect_type(repo$handle_click(sg$id(), "normal", "", 1L, 1L), "logical")
 })

@@ -1,33 +1,3 @@
-repo_execute <- function(db_path, query) .Call("wrap__repo_execute", db_path, query, PACKAGE = "genr")
-
-repo_query <- function(db_path, query) .Call("wrap__repo_query", db_path, query, PACKAGE = "genr")
-
-repo_get_sequence_graph_by_id <- function(db_path, id) .Call("wrap__repo_get_sequence_graph_by_id", db_path, id, PACKAGE = "genr")
-
-repo_get_sequence_graphs <- function(db_path) .Call("wrap__repo_get_sequence_graphs", db_path, PACKAGE = "genr")
-
-repo_get_sequence_graphs_by_collection <- function(db_path, collection_name) .Call("wrap__repo_get_sequence_graphs_by_collection", db_path, collection_name, PACKAGE = "genr")
-
-repo_get_node_sequence <- function(db_path, node_id, sequence_start, sequence_end) .Call("wrap__repo_get_node_sequence", db_path, node_id, sequence_start, sequence_end, PACKAGE = "genr")
-
-repo_stitch <- function(workspace_path, db_path, collection_name, sample_name, new_sample, new_region, regions) .Call("wrap__repo_stitch", workspace_path, db_path, collection_name, sample_name, new_sample, new_region, regions, PACKAGE = "genr")
-
-repo_build_index <- function(db_path, gen_dir, sequence_graph_ids, sequence_kind, k) .Call("wrap__repo_build_index", db_path, gen_dir, sequence_graph_ids, sequence_kind, k, PACKAGE = "genr")
-
-repo_search <- function(db_path, gen_dir, query, sequence_graph_ids, sequence_kind) .Call("wrap__repo_search", db_path, gen_dir, query, sequence_graph_ids, sequence_kind, PACKAGE = "genr")
-
-repo_clear_index <- function(gen_dir, sequence_graph_ids) .Call("wrap__repo_clear_index", gen_dir, sequence_graph_ids, PACKAGE = "genr")
-
-repo_bg_subgraph <- function(workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, start, end, backbone) .Call("wrap__repo_bg_subgraph", workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, start, end, backbone, PACKAGE = "genr")
-
-repo_bg_chunks <- function(workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone) .Call("wrap__repo_bg_chunks", workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone, PACKAGE = "genr")
-
-repo_bg_export_fasta <- function(db_path, collection_name, sample_name, filename) .Call("wrap__repo_bg_export_fasta", db_path, collection_name, sample_name, filename, PACKAGE = "genr")
-
-repo_bg_export_gfa <- function(db_path, collection_name, sample_name, filename, node_max) .Call("wrap__repo_bg_export_gfa", db_path, collection_name, sample_name, filename, node_max, PACKAGE = "genr")
-
-repo_bg_export_genbank <- function(db_path, collection_name, sample_name, filename) .Call("wrap__repo_bg_export_genbank", db_path, collection_name, sample_name, filename, PACKAGE = "genr")
-
 Repository <- new.env(parent = emptyenv())
 
 Repository$new <- function(path) .Call("wrap__Repository__new", path, PACKAGE = "genr")
