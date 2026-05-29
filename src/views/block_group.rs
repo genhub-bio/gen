@@ -183,7 +183,7 @@ pub fn view_block_group(
 ) -> Result<(), Box<dyn Error>> {
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
-    let _ = progress_bar.println("Loading block group");
+    let _ = progress_bar.println("Loading sequence graph");
 
     // Get the node object corresponding to the position given by the user
     let origin = if let Some(position_str) = position {
@@ -218,7 +218,7 @@ pub fn view_block_group(
 
         if block_group.is_err() {
             panic!(
-                "No block group found with name {:?} and sample {:?} in collection {} ",
+                "No sequence graph found with name {:?} and sample {:?} in collection {} ",
                 name,
                 sample_name.clone(),
                 collection_name
@@ -250,7 +250,7 @@ pub fn view_block_group(
             Ok(bg) => bg,
             Err(err) => {
                 // TODO: Handle these with messages instead of panic'ing
-                panic!("Failed to load block group {bg_id}: {err}");
+                panic!("Failed to load sequence graph {bg_id}: {err}");
             }
         });
 
@@ -404,7 +404,7 @@ pub fn view_block_group(
                                         Ok(highlighting_enabled) => {
                                             if highlighting_enabled {
                                                 info!(
-                                                    "Path highlighting enabled for block group {}",
+                                                    "Path highlighting enabled for sequence graph {}",
                                                     block_group_id
                                                 );
                                             } else {
@@ -416,7 +416,7 @@ pub fn view_block_group(
                                         }
                                     }
                                 } else {
-                                    warn!("No block group selected for path highlighting");
+                                    warn!("No sequence graph selected for path highlighting");
                                 }
                             }
                             _ => {
@@ -1118,7 +1118,10 @@ pub fn view_block_group(
                 Ok(bg) => bg,
                 Err(err) => {
                     // TODO: Handle these with messages instead of panic'ing
-                    panic!("Failed to load block group {}: {err}", new_block_group_id);
+                    panic!(
+                        "Failed to load sequence graph {}: {err}",
+                        new_block_group_id
+                    );
                 }
             };
 

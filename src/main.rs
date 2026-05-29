@@ -211,7 +211,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(_) => {
                         eprintln!(
-                            "No block group found with name {:?} and sample {:?} in collection {}",
+                            "No sequence graph found with name {:?} and sample {:?} in collection {}",
                             name, sample_name, collection_name
                         );
                     }

@@ -281,7 +281,7 @@ pub enum Commands {
         #[arg(short, long)]
         sample: Option<String>,
     },
-    /// Search for an exact sequence across all block groups
+    /// Search for an exact sequence across all sequence graphs
     ///
     /// Each match is reported with a blocks column formatted as [hash:start-end, ...],
     /// where hash is a 12-character node hash prefix from the original node the block

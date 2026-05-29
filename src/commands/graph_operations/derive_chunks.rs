@@ -132,7 +132,7 @@ pub fn derive_chunks_operation(
     }
 
     let summary_str = format!(
-        " {}: {} new derived block group(s)",
+        " {}: {} new derived sequence graph(s)",
         new_sample_name, chunk_range_length,
     );
 
