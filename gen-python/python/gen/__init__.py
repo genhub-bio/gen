@@ -13,31 +13,31 @@ except PackageNotFoundError:
 # Directly from Rust
 from .gen import (
     Annotation,
-    BlockGroup,
     HashId,
+    Locus,
     Node,
     NodeSlice,
-    GraphPos,
-    GraphLocus,
-    SequencePart,
+    Position,
     Repository,
+    SequenceGraph,
+    SequencePart,
 )
 
 # Jupyter widget — only available with `pip install gen[jupyter]`
 try:
-    from .jupyter_widget import GenGraphWidget
+    from .jupyter_widget import GraphWidget
 except ImportError:
-    GenGraphWidget = None
+    GraphWidget = None
 
 __all__ = [
     "Annotation",
-    "BlockGroup",
-    "GenGraphWidget",
-    "GraphLocus",
-    "GraphPos",
+    "GraphWidget",
     "HashId",
+    "Locus",
     "Node",
     "NodeSlice",
+    "Position",
     "Repository",
+    "SequenceGraph",
     "SequencePart",
 ]

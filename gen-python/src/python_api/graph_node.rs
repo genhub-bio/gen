@@ -85,7 +85,7 @@ impl PyGraphNodeSlice {
 #[pymethods]
 impl PyGraphNodeSlice {
     #[getter]
-    fn block(&self) -> PyGraphNode {
+    fn node(&self) -> PyGraphNode {
         PyGraphNode::new(
             self.inner.block.node_id,
             self.inner.block.sequence_start,

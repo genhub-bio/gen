@@ -6,7 +6,7 @@ use gen_models::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;
-use crate::python_api::block_group::PyBlockGroup;
+use crate::python_api::block_group::PySequenceGraph;
 
 #[pymethods]
 impl PyRepository {
@@ -107,10 +107,10 @@ impl PyRepository {
     #[pyo3(signature = (bgs, new_sample, new_region))]
     fn stitch(
         &self,
-        bgs: Vec<PyBlockGroup>,
+        bgs: Vec<PySequenceGraph>,
         new_sample: String,
         new_region: String,
-    ) -> PyResult<PyBlockGroup> {
+    ) -> PyResult<PySequenceGraph> {
         if bgs.is_empty() {
             return Err(PyRuntimeError::new_err(
                 "stitch() requires at least one block group",
