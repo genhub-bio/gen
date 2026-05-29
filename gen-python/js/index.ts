@@ -21,6 +21,8 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
   const scratchCtx = scratch.getContext("2d")!;
   const grid = makeGridMetrics(scratchCtx);
 
+  el.style.overflowX = "auto";
+
   const wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
 

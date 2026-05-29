@@ -22,8 +22,10 @@ use r#gen::{
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
     },
     views::{
-        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
-        annotation_track::AnnotationTrack,
+        annotation_groups::{
+            AnnotationGroupEntry, AnnotationGroupOrigin, load_annotation_group_entries,
+        },
+        annotation_track::{AnnotationTrack, graph_locus_from_annotation_span},
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
@@ -699,6 +701,9 @@ fn apply_graph_ops(
                     sequence_start: seq_start,
                     sequence_end: seq_end,
                 };
+                if !controller.graph().contains_node(node) {
+                    continue;
+                }
                 controller.set_detail_level(VisualDetail::Full);
                 if let Ok((partition_idx, _)) = controller
                     .partition_controller
@@ -779,7 +784,29 @@ fn graph_locus_record(locus: &GraphLocus) -> List {
             )
         })
         .collect::<Vec<_>>();
-    list!(start = start, end = end, slices = List::from_values(slices))
+    let strand = {
+        let mut iter = locus.slices.iter().map(|s| s.strand);
+        match iter.next() {
+            None => "unknown",
+            Some(first) => {
+                if iter.all(|s| s == first) {
+                    match first {
+                        Strand::Forward => "+",
+                        Strand::Reverse => "-",
+                        _ => ".",
+                    }
+                } else {
+                    "mixed"
+                }
+            }
+        }
+    };
+    list!(
+        start = start,
+        end = end,
+        slices = List::from_values(slices),
+        strand = strand
+    )
 }
 
 /// Open a Gen database context.
@@ -1068,7 +1095,11 @@ fn import_genbank(
         nullable_string_to_option(db_path),
     )
     .map_err(Error::Other)?;
-    let collection_name_opt = nullable_string_to_option(collection);
+    let collection_name = resolve_collection_name(
+        context.operations().conn(),
+        nullable_string_to_option(collection),
+    )
+    .map_err(Error::Other)?;
     let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
 
     begin_transactions(&context).map_err(Error::Other)?;
@@ -1076,7 +1107,7 @@ fn import_genbank(
     match r#gen::imports::genbank::import_genbank(
         &context,
         &mut reader,
-        collection_name_opt.as_deref(),
+        &*collection_name,
         &sample,
         OperationInfo {
             files: vec![
@@ -2063,6 +2094,68 @@ fn repo_clear_index(
 }
 
 #[extendr]
+fn repo_get_annotation_group_names(
+    db_path: String,
+    block_group_id: String,
+) -> std::result::Result<Vec<String>, Error> {
+    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
+    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+    let bg = BlockGroup::get_by_id(&conn, &bg_id)
+        .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
+    let entries = load_annotation_group_entries(&conn, &bg);
+    let mut seen = HashSet::new();
+    Ok(entries
+        .into_iter()
+        .filter(|e| seen.insert(e.name.clone()))
+        .map(|e| e.name)
+        .collect())
+}
+
+#[extendr]
+fn repo_list_annotations(
+    db_path: String,
+    block_group_id: String,
+) -> std::result::Result<List, Error> {
+    let (conn, graph) = block_group_graph(&db_path, &block_group_id).map_err(Error::Other)?;
+    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+    let bg = BlockGroup::get_by_id(&conn, &bg_id)
+        .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
+
+    let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = graph
+        .nodes()
+        .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+        .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
+        .collect();
+
+    let entries = load_annotation_group_entries(&conn, &bg);
+    let mut seen = HashSet::new();
+    let mut result: Vec<Robj> = Vec::new();
+
+    for entry in &entries {
+        if !seen.insert(entry.name.clone()) {
+            continue;
+        }
+        let Ok(spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn: &conn,
+            current_block_group: &bg,
+            entry,
+            visible_ranges_by_node: &node_ranges,
+        }) else {
+            continue;
+        };
+        for span in &spans {
+            let Some(locus) = graph_locus_from_annotation_span(span, &graph) else {
+                continue;
+            };
+            let locus_rec = graph_locus_record(&locus);
+            result.push(list!(name = span.name.as_str(), locus = locus_rec).into());
+        }
+    }
+
+    Ok(List::from_values(result))
+}
+
+#[extendr]
 fn repo_bg_subgraph(
     workspace_path: String,
     db_path: String,
@@ -2592,13 +2685,17 @@ impl GenRepository {
         sample: String,
         collection: Nullable<String>,
     ) -> std::result::Result<String, Error> {
-        let collection_name_opt = nullable_string_to_option(collection);
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
         let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
         begin_transactions(&self.context).map_err(Error::Other)?;
         match r#gen::imports::genbank::import_genbank(
             &self.context,
             &mut reader,
-            collection_name_opt.as_deref(),
+            &*collection_name,
             &sample,
             OperationInfo {
                 files: vec![
@@ -3602,6 +3699,8 @@ extendr_module! {
     fn repo_build_index;
     fn repo_search;
     fn repo_clear_index;
+    fn repo_get_annotation_group_names;
+    fn repo_list_annotations;
     fn repo_bg_subgraph;
     fn repo_bg_chunks;
     fn repo_bg_export_fasta;

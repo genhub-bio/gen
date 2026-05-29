@@ -4,7 +4,7 @@
 var TEXT_SIZE = 14;
 var CELL_SIZE = Math.round(TEXT_SIZE / 0.875);
 var BOX_SCALE = 1.15;
-var FONT_FAMILY = "monospace";
+var FONT_FAMILY = "Menlo, Monaco, Courier New, monospace";
 var BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`;
 var TEXT_FONT = `${TEXT_SIZE}px ${FONT_FAMILY}`;
 function cellFont(size, cell) {
@@ -31,13 +31,15 @@ function makeGridMetrics(ctx, scale = 1) {
   const textFont = `${textSize}px ${FONT_FAMILY}`;
   const block = measure(ctx, boxFont, "\u2588");
   const cellW = Math.ceil(block.actualBoundingBoxLeft + block.actualBoundingBoxRight);
-  const cellH = Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent);
   const boxDrawX = block.actualBoundingBoxLeft;
   const boxDrawY = block.actualBoundingBoxAscent;
   const textProbe = measure(ctx, textFont, "Mg");
   const textMono = measure(ctx, textFont, "M");
   const textAscent = textProbe.emHeightAscent ?? textProbe.fontBoundingBoxAscent ?? textProbe.actualBoundingBoxAscent;
-  const textDescent = textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent;
+  const rawDescent = textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent;
+  const textDescent = Math.max(rawDescent, textSize * 0.25);
+  const textHeight = Math.ceil(textAscent + textDescent);
+  const cellH = Math.max(Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent), textHeight);
   const textX = Math.round((cellW - textMono.width) / 2);
   const textBaseline = Math.round((cellH + textAscent - textDescent) / 2) + 1;
   return { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline, textSize, cellSize };
@@ -288,6 +290,7 @@ function render({ model, el }) {
   const scratch = document.createElement("canvas");
   const scratchCtx = scratch.getContext("2d");
   const grid = makeGridMetrics(scratchCtx);
+  el.style.overflowX = "auto";
   const wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   const canvas = document.createElement("canvas");

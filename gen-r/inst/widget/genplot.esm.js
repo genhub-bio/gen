@@ -1,7 +1,7 @@
 // Generated from js/index.ts by `npm run build-r` / `make r-widget`. Edit TypeScript sources, not this file.
 
 // js/grid.ts
-var CELL_SIZE = Math.round(16), BOX_SCALE = 1.15, FONT_FAMILY = "monospace", BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`, TEXT_FONT = `14px ${FONT_FAMILY}`;
+var CELL_SIZE = Math.round(16), BOX_SCALE = 1.15, FONT_FAMILY = "Menlo, Monaco, Courier New, monospace", BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`, TEXT_FONT = `14px ${FONT_FAMILY}`;
 function cellFont(size, cell) {
   let style = cell.bold && cell.italic ? "bold italic" : cell.bold ? "bold" : cell.italic ? "italic" : "";
   return style ? `${style} ${size}px ${FONT_FAMILY}` : `${size}px ${FONT_FAMILY}`;
@@ -17,7 +17,7 @@ function isBoxLike(ch) {
   cp >= 10240 && cp <= 10495;
 }
 function makeGridMetrics(ctx, scale = 1) {
-  let textSize = 14 * scale, cellSize = Math.round(textSize / 0.875), boxFont = `${cellSize}px ${FONT_FAMILY}`, textFont = `${textSize}px ${FONT_FAMILY}`, block = measure(ctx, boxFont, "\u2588"), cellW = Math.ceil(block.actualBoundingBoxLeft + block.actualBoundingBoxRight), cellH = Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent), boxDrawX = block.actualBoundingBoxLeft, boxDrawY = block.actualBoundingBoxAscent, textProbe = measure(ctx, textFont, "Mg"), textMono = measure(ctx, textFont, "M"), textAscent = textProbe.emHeightAscent ?? textProbe.fontBoundingBoxAscent ?? textProbe.actualBoundingBoxAscent, textDescent = textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent, textX = Math.round((cellW - textMono.width) / 2), textBaseline = Math.round((cellH + textAscent - textDescent) / 2) + 1;
+  let textSize = 14 * scale, cellSize = Math.round(textSize / 0.875), boxFont = `${cellSize}px ${FONT_FAMILY}`, textFont = `${textSize}px ${FONT_FAMILY}`, block = measure(ctx, boxFont, "\u2588"), cellW = Math.ceil(block.actualBoundingBoxLeft + block.actualBoundingBoxRight), boxDrawX = block.actualBoundingBoxLeft, boxDrawY = block.actualBoundingBoxAscent, textProbe = measure(ctx, textFont, "Mg"), textMono = measure(ctx, textFont, "M"), textAscent = textProbe.emHeightAscent ?? textProbe.fontBoundingBoxAscent ?? textProbe.actualBoundingBoxAscent, rawDescent = textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent, textDescent = Math.max(rawDescent, textSize * 0.25), textHeight = Math.ceil(textAscent + textDescent), cellH = Math.max(Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent), textHeight), textX = Math.round((cellW - textMono.width) / 2), textBaseline = Math.round((cellH + textAscent - textDescent) / 2) + 1;
   return { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline, textSize, cellSize };
 }
 
@@ -130,7 +130,9 @@ function paintFrame(ctx, canvas, grid, frame) {
 
 // js/index.ts
 function render({ model, el }) {
-  let scratchCtx = document.createElement("canvas").getContext("2d"), grid = makeGridMetrics(scratchCtx), wrapper = document.createElement("div");
+  let scratchCtx = document.createElement("canvas").getContext("2d"), grid = makeGridMetrics(scratchCtx);
+  el.style.overflowX = "auto";
+  let wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   let canvas = document.createElement("canvas");
   canvas.style.cssText = "display: block; cursor: default; box-shadow: inset 0 0 0 2px #45475a;", wrapper.appendChild(canvas), el.appendChild(wrapper);

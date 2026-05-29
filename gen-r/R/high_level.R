@@ -154,7 +154,7 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #' @param detail Character. Level of node detail: \code{"normal"} (default) or
 #'   \code{"compressed"}.
 #' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
-#' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 80).
+#' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 72).
 #' @return A \code{gen_plot} environment with methods:
 #'   \describe{
 #'     \item{\code{zoom_in()}}{Step one zoom level in. Returns self invisibly.}
@@ -169,6 +169,8 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
 #'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
 #'     \item{\code{clear_tracks()}}{Remove all annotation track panels. Returns self invisibly.}
+#'     \item{\code{list_annotations()}}{Return a list of annotation records from the database. Each record has \code{name} and \code{locus} fields.}
+#'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 #'   }
 #' @export
 GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL) {
@@ -177,9 +179,12 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   ctrl$block_group_id <- if (inherits(block_group_id, "gen_hash_id")) block_group_id$hash_id else as.character(block_group_id)
   ctrl$detail <- detail
   ctrl$ops <- character()
-  ctrl$track_specs <- list()
+  ctrl$track_specs <- tryCatch({
+    group_names <- repo_get_annotation_group_names(db_path, ctrl$block_group_id)
+    lapply(group_names, function(n) list(type = "group", name = n))
+  }, error = function(e) list())
   ctrl$rows <- rows %||% 24L
-  ctrl$cols <- cols %||% 80L
+  ctrl$cols <- cols %||% 72L
 
   ctrl$set_detail <- function(detail) {
     ctrl$detail <- detail
@@ -254,11 +259,11 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   }
 
   ctrl$highlight_match <- function(match_locus, color = "yellow") {
-    blocks <- match_locus$blocks
+    blocks <- match_locus$slices
     n <- length(blocks)
     start_offset <- match_locus$start$offset
     end_offset <- match_locus$end$offset
-    strand_code <- switch(match_locus$strand, forward = "f", reverse = "r", "u")
+    strand_code <- switch(match_locus$strand, "+" = "f", "-" = "r", "u")
     block_parts <- paste(
       sapply(blocks, function(b) {
         sprintf("%s,%d,%d", b$node_id, as.integer(b$sequence_start), as.integer(b$sequence_end))
@@ -280,6 +285,14 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
     invisible(ctrl)
   }
 
+  ctrl$list_annotations <- function() {
+    repo_list_annotations(ctrl$db_path, ctrl$block_group_id)
+  }
+
+  ctrl$go_to <- function(x) {
+    ctrl$goto_match(if (!is.null(x$locus)) x$locus else x)
+  }
+
   class(ctrl) <- "gen_plot"
   ctrl
 }
@@ -290,6 +303,12 @@ print.gen_plot <- function(x, ...) {
   w <- .genplot_widget(json)
   print(w)
   invisible(x)
+}
+
+knit_print.gen_plot <- function(x, ...) {
+  json <- x$render_frame(x$cols, x$rows)
+  w <- .genplot_widget(json)
+  knitr::knit_print(w$.get_htmlwidget(), ...)
 }
 
 methods::setOldClass("gen_plot")

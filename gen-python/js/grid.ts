@@ -8,7 +8,7 @@
 export const TEXT_SIZE = 14;
 export const CELL_SIZE = Math.round(TEXT_SIZE / 0.875);
 export const BOX_SCALE = 1.15;
-export const FONT_FAMILY = "monospace";
+export const FONT_FAMILY = "Menlo, Monaco, Courier New, monospace";
 export const BOX_FONT = `${CELL_SIZE}px ${FONT_FAMILY}`;
 export const TEXT_FONT = `${TEXT_SIZE}px ${FONT_FAMILY}`;
 
@@ -63,15 +63,17 @@ export function makeGridMetrics(ctx: CanvasRenderingContext2D, scale = 1): GridM
   const textFont = `${textSize}px ${FONT_FAMILY}`;
   const block = measure(ctx, boxFont, "\u2588");
   const cellW = Math.ceil(block.actualBoundingBoxLeft + block.actualBoundingBoxRight);
-  const cellH = Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent);
   const boxDrawX = block.actualBoundingBoxLeft;
   const boxDrawY = block.actualBoundingBoxAscent;
   const textProbe = measure(ctx, textFont, "Mg");
   const textMono = measure(ctx, textFont, "M");
   const textAscent =
     textProbe.emHeightAscent ?? textProbe.fontBoundingBoxAscent ?? textProbe.actualBoundingBoxAscent;
-  const textDescent =
+  const rawDescent =
     textProbe.emHeightDescent ?? textProbe.fontBoundingBoxDescent ?? textProbe.actualBoundingBoxDescent;
+  const textDescent = Math.max(rawDescent, textSize * 0.25);
+  const textHeight = Math.ceil(textAscent + textDescent);
+  const cellH = Math.max(Math.ceil(block.actualBoundingBoxAscent + block.actualBoundingBoxDescent), textHeight);
   const textX = Math.round((cellW - textMono.width) / 2);
   const textBaseline = Math.round((cellH + textAscent - textDescent) / 2) + 1;
   return { cellW, cellH, boxDrawX, boxDrawY, textX, textBaseline, textSize, cellSize };

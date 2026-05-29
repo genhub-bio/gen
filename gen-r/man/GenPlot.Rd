@@ -16,7 +16,7 @@ GenPlot(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL)
 
 \item{rows}{Integer or \code{NULL}. Canvas height in terminal rows (default 24).}
 
-\item{cols}{Integer or \code{NULL}. Canvas width in terminal columns (default 80).}
+\item{cols}{Integer or \code{NULL}. Canvas width in terminal columns (default 72).}
 }
 \value{
 A \code{gen_plot} environment with methods:
@@ -33,6 +33,8 @@ A \code{gen_plot} environment with methods:
 \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
 \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
 \item{\code{clear_tracks()}}{Remove all annotation track panels. Returns self invisibly.}
+\item{\code{list_annotations()}}{Return a list of annotation records from the database. Each record has \code{name} and \code{locus} fields.}
+\item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 }
 }
 \description{
