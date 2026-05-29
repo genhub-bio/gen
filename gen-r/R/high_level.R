@@ -178,12 +178,12 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #' @export
 GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL) {
   ctrl <- new.env(parent = emptyenv())
-  ctrl$db_path <- db_path
+  ctrl$repo <- GenRepository$new(dirname(dirname(db_path)))
   ctrl$block_group_id <- if (inherits(block_group_id, "gen_hash_id")) block_group_id$hash_id else as.character(block_group_id)
   ctrl$detail <- detail
   ctrl$ops <- character()
   ctrl$track_specs <- tryCatch({
-    group_names <- repo_get_annotation_group_names(db_path, ctrl$block_group_id)
+    group_names <- ctrl$repo$get_annotation_group_names(ctrl$block_group_id)
     lapply(group_names, function(n) list(type = "group", name = n))
   }, error = function(e) list())
   ctrl$rows <- rows %||% 24L
@@ -197,7 +197,7 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   ctrl$render_frame <- function(cols = ctrl$cols, rows = ctrl$rows) {
     ctrl$cols <- cols
     ctrl$rows <- rows
-    graph_render_frame(ctrl$db_path, ctrl$block_group_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE))
+    ctrl$repo$render_frame(ctrl$block_group_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE))
   }
 
   ctrl$add_track_group <- function(group) {
@@ -227,8 +227,7 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   }
 
   ctrl$handle_click <- function(col, row) {
-    clicked <- graph_handle_click(
-      ctrl$db_path,
+    clicked <- ctrl$repo$handle_click(
       ctrl$block_group_id,
       ctrl$detail,
       paste(ctrl$ops, collapse = ";"),
@@ -289,7 +288,7 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   }
 
   ctrl$list_annotations <- function() {
-    repo_list_annotations(ctrl$db_path, ctrl$block_group_id)
+    ctrl$repo$list_annotations(ctrl$block_group_id)
   }
 
   ctrl$go_to <- function(x) {

@@ -553,16 +553,6 @@ fn visual_detail(detail: &str) -> std::result::Result<VisualDetail, String> {
     }
 }
 
-fn block_group_graph(
-    db_path: &str,
-    block_group_id: &str,
-) -> std::result::Result<(GraphConnection, GenGraph), String> {
-    let conn = open_repo_connection(db_path)?;
-    let bg_id = hash_id_from_string(block_group_id)?;
-    let graph = BlockGroup::get_graph(&conn, &bg_id).map_err(|e| e.to_string())?;
-    Ok((conn, graph))
-}
-
 fn parse_op_color(s: &str) -> std::result::Result<ratatui::style::Color, String> {
     use ratatui::style::Color;
     match s {
@@ -1881,61 +1871,6 @@ fn repo_get_block_sequence(
 }
 
 #[extendr]
-fn graph_render_frame(
-    db_path: String,
-    block_group_id: String,
-    detail: String,
-    cols: i32,
-    rows: i32,
-    ops: String,
-    tracks_json: String,
-) -> std::result::Result<String, Error> {
-    let (conn, graph) = block_group_graph(&db_path, &block_group_id).map_err(Error::Other)?;
-    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
-    let node_sizer = GenGraphNodeSizer;
-    let mut controller = GraphController::new(graph, node_sizer);
-    controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
-    controller.hide_cursor();
-    apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
-
-    let area = Rect::new(0, 0, cols as u16, rows as u16);
-    let mut buf = Buffer::empty(area);
-    let renderer = GenGraphNodeRenderer::new(&conn);
-    GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
-
-    let tracks = load_tracks_from_specs(&conn, &controller, &bg_id, &tracks_json);
-    let mut remaining = area;
-    for track in tracks.iter().rev() {
-        let height = track.draw(&mut buf, remaining, &controller);
-        if height == 0 {
-            break;
-        }
-        remaining.height = remaining.height.saturating_sub(height);
-    }
-
-    serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))
-        .map_err(|err| Error::Other(err.to_string()))
-}
-
-#[extendr]
-fn graph_handle_click(
-    db_path: String,
-    block_group_id: String,
-    detail: String,
-    ops: String,
-    col: i32,
-    row: i32,
-) -> std::result::Result<bool, Error> {
-    let (_conn, graph) = block_group_graph(&db_path, &block_group_id).map_err(Error::Other)?;
-    let node_sizer = GenGraphNodeSizer;
-    let mut controller = GraphController::new(graph, node_sizer);
-    controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
-    controller.hide_cursor();
-    apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
-    Ok(controller.handle_click(col as u16, row as u16))
-}
-
-#[extendr]
 fn repo_stitch(
     workspace_path: String,
     db_path: String,
@@ -2093,68 +2028,6 @@ fn repo_clear_index(
         }
     }
     Ok(())
-}
-
-#[extendr]
-fn repo_get_annotation_group_names(
-    db_path: String,
-    block_group_id: String,
-) -> std::result::Result<Vec<String>, Error> {
-    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
-    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
-    let bg = BlockGroup::get_by_id(&conn, &bg_id)
-        .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
-    let entries = load_annotation_group_entries(&conn, &bg);
-    let mut seen = HashSet::new();
-    Ok(entries
-        .into_iter()
-        .filter(|e| seen.insert(e.name.clone()))
-        .map(|e| e.name)
-        .collect())
-}
-
-#[extendr]
-fn repo_list_annotations(
-    db_path: String,
-    block_group_id: String,
-) -> std::result::Result<List, Error> {
-    let (conn, graph) = block_group_graph(&db_path, &block_group_id).map_err(Error::Other)?;
-    let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
-    let bg = BlockGroup::get_by_id(&conn, &bg_id)
-        .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
-
-    let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = graph
-        .nodes()
-        .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
-        .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
-        .collect();
-
-    let entries = load_annotation_group_entries(&conn, &bg);
-    let mut seen = HashSet::new();
-    let mut result: Vec<Robj> = Vec::new();
-
-    for entry in &entries {
-        if !seen.insert(entry.name.clone()) {
-            continue;
-        }
-        let Ok(spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
-            conn: &conn,
-            current_block_group: &bg,
-            entry,
-            visible_ranges_by_node: &node_ranges,
-        }) else {
-            continue;
-        };
-        for span in &spans {
-            let Some(locus) = graph_locus_from_annotation_span(span, &graph) else {
-                continue;
-            };
-            let locus_rec = graph_locus_record(&locus);
-            result.push(list!(name = span.name.as_str(), locus = locus_rec).into());
-        }
-    }
-
-    Ok(List::from_values(result))
 }
 
 #[extendr]
@@ -3372,6 +3245,120 @@ impl GenRepository {
         .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
         Ok("Derived chunks.".to_string())
     }
+
+    fn get_annotation_group_names(
+        &self,
+        block_group_id: String,
+    ) -> std::result::Result<Vec<String>, Error> {
+        let conn = self.context.graph().conn();
+        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let bg = BlockGroup::get_by_id(conn, &bg_id)
+            .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
+        let entries = load_annotation_group_entries(conn, &bg);
+        let mut seen = HashSet::new();
+        Ok(entries
+            .into_iter()
+            .filter(|e| seen.insert(e.name.clone()))
+            .map(|e| e.name)
+            .collect())
+    }
+
+    fn list_annotations(&self, block_group_id: String) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let bg = BlockGroup::get_by_id(conn, &bg_id)
+            .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
+        let graph = BlockGroup::get_graph(conn, &bg_id);
+
+        let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = graph
+            .nodes()
+            .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+            .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
+            .collect();
+
+        let entries = load_annotation_group_entries(conn, &bg);
+        let mut seen = HashSet::new();
+        let mut result: Vec<Robj> = Vec::new();
+
+        for entry in &entries {
+            if !seen.insert(entry.name.clone()) {
+                continue;
+            }
+            let Ok(spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
+                conn,
+                current_block_group: &bg,
+                entry,
+                visible_ranges_by_node: &node_ranges,
+            }) else {
+                continue;
+            };
+            for span in &spans {
+                let Some(locus) = graph_locus_from_annotation_span(span, &graph) else {
+                    continue;
+                };
+                let locus_rec = graph_locus_record(&locus);
+                result.push(list!(name = span.name.as_str(), locus = locus_rec).into());
+            }
+        }
+
+        Ok(List::from_values(result))
+    }
+
+    fn render_frame(
+        &self,
+        block_group_id: String,
+        detail: String,
+        cols: i32,
+        rows: i32,
+        ops: String,
+        tracks_json: String,
+    ) -> std::result::Result<String, Error> {
+        let conn = self.context.graph().conn();
+        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let node_sizer = GenGraphNodeSizer;
+        let mut controller = GraphController::new(graph, node_sizer);
+        controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
+        controller.hide_cursor();
+        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
+
+        let area = Rect::new(0, 0, cols as u16, rows as u16);
+        let mut buf = Buffer::empty(area);
+        let renderer = GenGraphNodeRenderer::new(conn);
+        GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
+
+        let tracks = load_tracks_from_specs(conn, &controller, &bg_id, &tracks_json);
+        let mut remaining = area;
+        for track in tracks.iter().rev() {
+            let height = track.draw(&mut buf, remaining, &controller);
+            if height == 0 {
+                break;
+            }
+            remaining.height = remaining.height.saturating_sub(height);
+        }
+
+        serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))
+            .map_err(|err| Error::Other(err.to_string()))
+    }
+
+    fn handle_click(
+        &self,
+        block_group_id: String,
+        detail: String,
+        ops: String,
+        col: i32,
+        row: i32,
+    ) -> std::result::Result<bool, Error> {
+        let conn = self.context.graph().conn();
+        let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
+        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let node_sizer = GenGraphNodeSizer;
+        let mut controller = GraphController::new(graph, node_sizer);
+        controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
+        controller.hide_cursor();
+        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
+        Ok(controller.handle_click(col as u16, row as u16))
+    }
 }
 
 impl GenRepository {
@@ -3706,13 +3693,9 @@ extendr_module! {
     fn repo_build_index;
     fn repo_search;
     fn repo_clear_index;
-    fn repo_get_annotation_group_names;
-    fn repo_list_annotations;
     fn repo_bg_subgraph;
     fn repo_bg_chunks;
     fn repo_bg_export_fasta;
     fn repo_bg_export_gfa;
     fn repo_bg_export_genbank;
-    fn graph_render_frame;
-    fn graph_handle_click;
 }

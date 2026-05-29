@@ -65,10 +65,6 @@ repo_search <- function(db_path, gen_dir, query, block_group_ids, sequence_kind)
 
 repo_clear_index <- function(gen_dir, block_group_ids) .Call("wrap__repo_clear_index", gen_dir, block_group_ids, PACKAGE = "genr")
 
-repo_get_annotation_group_names <- function(db_path, block_group_id) .Call("wrap__repo_get_annotation_group_names", db_path, block_group_id, PACKAGE = "genr")
-
-repo_list_annotations <- function(db_path, block_group_id) .Call("wrap__repo_list_annotations", db_path, block_group_id, PACKAGE = "genr")
-
 repo_bg_subgraph <- function(workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, start, end, backbone) .Call("wrap__repo_bg_subgraph", workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, start, end, backbone, PACKAGE = "genr")
 
 repo_bg_chunks <- function(workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone) .Call("wrap__repo_bg_chunks", workspace_path, db_path, collection_name, sample_name, bg_name, new_sample, breakpoints, chunk_size, backbone, PACKAGE = "genr")
@@ -78,10 +74,6 @@ repo_bg_export_fasta <- function(db_path, collection_name, sample_name, filename
 repo_bg_export_gfa <- function(db_path, collection_name, sample_name, filename, node_max) .Call("wrap__repo_bg_export_gfa", db_path, collection_name, sample_name, filename, node_max, PACKAGE = "genr")
 
 repo_bg_export_genbank <- function(db_path, collection_name, sample_name, filename) .Call("wrap__repo_bg_export_genbank", db_path, collection_name, sample_name, filename, PACKAGE = "genr")
-
-graph_render_frame <- function(db_path, block_group_id, detail, cols, rows, ops, tracks_json) .Call("wrap__graph_render_frame", db_path, block_group_id, detail, cols, rows, ops, tracks_json, PACKAGE = "genr")
-
-graph_handle_click <- function(db_path, block_group_id, detail, ops, col, row) .Call("wrap__graph_handle_click", db_path, block_group_id, detail, ops, col, row, PACKAGE = "genr")
 
 GenRepository <- new.env(parent = emptyenv())
 
@@ -154,6 +146,14 @@ GenRepository$clear_index <- function(block_group_ids) .Call("wrap__GenRepositor
 GenRepository$derive_subgraph <- function(collection, sample, new_sample, region, backbone) .Call("wrap__GenRepository__derive_subgraph", self, collection, sample, new_sample, region, backbone, PACKAGE = "genr")
 
 GenRepository$derive_chunks <- function(collection, sample, new_sample, region, backbone, breakpoints, chunk_size) .Call("wrap__GenRepository__derive_chunks", self, collection, sample, new_sample, region, backbone, breakpoints, chunk_size, PACKAGE = "genr")
+
+GenRepository$get_annotation_group_names <- function(block_group_id) .Call("wrap__GenRepository__get_annotation_group_names", self, block_group_id, PACKAGE = "genr")
+
+GenRepository$list_annotations <- function(block_group_id) .Call("wrap__GenRepository__list_annotations", self, block_group_id, PACKAGE = "genr")
+
+GenRepository$render_frame <- function(block_group_id, detail, cols, rows, ops, tracks_json) .Call("wrap__GenRepository__render_frame", self, block_group_id, detail, cols, rows, ops, tracks_json, PACKAGE = "genr")
+
+GenRepository$handle_click <- function(block_group_id, detail, ops, col, row) .Call("wrap__GenRepository__handle_click", self, block_group_id, detail, ops, col, row, PACKAGE = "genr")
 
 #' @export
 `$.GenRepository` <- function (self, name) { func <- GenRepository[[name]]; environment(func) <- environment(); func }

@@ -310,7 +310,7 @@ test_that("low-level internal bindings are accessible via :::", {
     db_path, node$node_id, node$sequence_start, node$sequence_end
   )))
 
-  frame_json <- genr:::graph_render_frame(db_path, groups[[1]]$id, "normal", 40L, 12L, "", "[]")
+  frame_json <- repo$.inner$render_frame(groups[[1]]$id, "normal", 40L, 12L, "", "[]")
   expect_match(frame_json, "\"cells\"")
-  expect_type(genr:::graph_handle_click(db_path, groups[[1]]$id, "normal", "", 1L, 1L), "logical")
+  expect_type(repo$.inner$handle_click(groups[[1]]$id, "normal", "", 1L, 1L), "logical")
 })
