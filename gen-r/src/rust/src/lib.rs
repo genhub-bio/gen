@@ -867,49 +867,6 @@ fn repo_get_sequence_graphs_by_collection(
 }
 
 #[extendr]
-fn repo_block_group_to_dict(
-    db_path: String,
-    sequence_graph_id: String,
-) -> std::result::Result<List, Error> {
-    let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
-    let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-    let graph = BlockGroup::get_graph(&conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
-
-    let nodes = graph
-        .nodes()
-        .map(|node| node_record(node.node_id, node.sequence_start, node.sequence_end))
-        .collect::<Vec<_>>();
-
-    let edges = graph
-        .all_edges()
-        .map(|(src, dst, edge_weights)| {
-            let weights = edge_weights
-                .iter()
-                .map(|weight| {
-                    list!(
-                        edge_id = weight.edge_id.to_string(),
-                        source_strand = weight.source_strand.to_string(),
-                        target_strand = weight.target_strand.to_string(),
-                        chromosome_index = weight.chromosome_index,
-                        phased = weight.phased
-                    )
-                })
-                .collect::<Vec<_>>();
-            list!(
-                source = node_record(src.node_id, src.sequence_start, src.sequence_end),
-                target = node_record(dst.node_id, dst.sequence_start, dst.sequence_end),
-                weights = List::from_values(weights)
-            )
-        })
-        .collect::<Vec<_>>();
-
-    Ok(list!(
-        nodes = List::from_values(nodes),
-        edges = List::from_values(edges)
-    ))
-}
-
-#[extendr]
 fn repo_get_node_sequence(
     db_path: String,
     node_id: String,
@@ -1332,52 +1289,6 @@ impl Repository {
         .map(|bg| r!(self.into_sequence_graph(bg)))
         .collect::<Vec<_>>();
         Ok(List::from_values(values))
-    }
-
-    fn block_group_to_dict(&self, sequence_graph_id: String) -> std::result::Result<List, Error> {
-        let conn = self.context.graph().conn();
-        let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
-
-        let nodes = graph
-            .nodes()
-            .map(|node| {
-                list!(
-                    key = node_record(node.node_id, node.sequence_start, node.sequence_end),
-                    node_id = node.node_id.to_string(),
-                    sequence_start = node.sequence_start,
-                    sequence_end = node.sequence_end
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let edges = graph
-            .all_edges()
-            .map(|(src, dst, edge_weights)| {
-                let weights = edge_weights
-                    .iter()
-                    .map(|weight| {
-                        list!(
-                            edge_id = weight.edge_id.to_string(),
-                            source_strand = weight.source_strand.to_string(),
-                            target_strand = weight.target_strand.to_string(),
-                            chromosome_index = weight.chromosome_index,
-                            phased = weight.phased
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                list!(
-                    source = node_record(src.node_id, src.sequence_start, src.sequence_end),
-                    target = node_record(dst.node_id, dst.sequence_start, dst.sequence_end),
-                    weights = List::from_values(weights)
-                )
-            })
-            .collect::<Vec<_>>();
-
-        Ok(list!(
-            nodes = List::from_values(nodes),
-            edges = List::from_values(edges)
-        ))
     }
 
     fn get_node_sequence(
@@ -2739,7 +2650,6 @@ extendr_module! {
     fn repo_get_sequence_graph_by_id;
     fn repo_get_sequence_graphs;
     fn repo_get_sequence_graphs_by_collection;
-    fn repo_block_group_to_dict;
     fn repo_get_node_sequence;
     fn repo_stitch;
     fn repo_build_index;

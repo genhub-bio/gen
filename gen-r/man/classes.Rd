@@ -51,7 +51,6 @@ Graph nodes (\code{gen_node}) are obtained directly from
 \code{Repository()} exposes the methods \code{execute(query)},
 \code{query(query)}, \code{get_sequence_graph_by_id(id)}, \code{get_sequence_graphs()},
 \code{get_sequence_graphs_by_collection(collection_name)},
-\code{block_group_to_dict(sequence_graph_id)},
 \code{get_node_sequence(node)},
 \code{stitch(sgs, new_sample, new_region)},
 \code{build_index(sgs = NULL, sequence_kind = "dna", k = 16L)},

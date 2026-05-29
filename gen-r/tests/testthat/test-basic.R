@@ -261,7 +261,8 @@ test_that("low-level internal bindings are accessible via :::", {
   fetched <- genr:::repo_get_sequence_graph_by_id(db_path, groups[[1]]$id)
   expect_equal(fetched$name, "m123")
 
-  graph_dict <- genr:::repo_block_group_to_dict(db_path, groups[[1]]$id)
+  sg <- repo$get_sequence_graph_by_id(groups[[1]]$id)
+  graph_dict <- sg$to_dict()
   expect_true(length(graph_dict$nodes) >= 1)
 
   node <- graph_dict$nodes[[1]]

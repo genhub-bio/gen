@@ -8,8 +8,6 @@ repo_get_sequence_graphs <- function(db_path) .Call("wrap__repo_get_sequence_gra
 
 repo_get_sequence_graphs_by_collection <- function(db_path, collection_name) .Call("wrap__repo_get_sequence_graphs_by_collection", db_path, collection_name, PACKAGE = "genr")
 
-repo_block_group_to_dict <- function(db_path, sequence_graph_id) .Call("wrap__repo_block_group_to_dict", db_path, sequence_graph_id, PACKAGE = "genr")
-
 repo_get_node_sequence <- function(db_path, node_id, sequence_start, sequence_end) .Call("wrap__repo_get_node_sequence", db_path, node_id, sequence_start, sequence_end, PACKAGE = "genr")
 
 repo_stitch <- function(workspace_path, db_path, collection_name, sample_name, new_sample, new_region, regions) .Call("wrap__repo_stitch", workspace_path, db_path, collection_name, sample_name, new_sample, new_region, regions, PACKAGE = "genr")
@@ -47,8 +45,6 @@ Repository$get_sequence_graph_by_id <- function(id) .Call("wrap__Repository__get
 Repository$get_sequence_graphs <- function() .Call("wrap__Repository__get_sequence_graphs", self, PACKAGE = "genr")
 
 Repository$get_sequence_graphs_by_collection <- function(collection_name) .Call("wrap__Repository__get_sequence_graphs_by_collection", self, collection_name, PACKAGE = "genr")
-
-Repository$block_group_to_dict <- function(sequence_graph_id) .Call("wrap__Repository__block_group_to_dict", self, sequence_graph_id, PACKAGE = "genr")
 
 Repository$get_node_sequence <- function(node_id, sequence_start, sequence_end) .Call("wrap__Repository__get_node_sequence", self, node_id, sequence_start, sequence_end, PACKAGE = "genr")
 

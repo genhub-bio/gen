@@ -9,7 +9,7 @@ rendering sequence graphs through \code{GenPlot()}.
 \code{Repository()} returns an environment with at least these fields:
 \code{gen_dir}, \code{db_path}, \code{execute}, \code{query},
 \code{get_sequence_graph_by_id}, \code{get_sequence_graphs},
-\code{get_sequence_graphs_by_collection}, \code{block_group_to_dict},
+\code{get_sequence_graphs_by_collection},
 \code{get_node_sequence}, \code{stitch},
 \code{build_index}, \code{search}, and \code{clear_index}.
 
