@@ -8,7 +8,7 @@ use std::{
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
-    is_end_node, is_start_node,
+    calculate_hash, is_end_node, is_start_node,
 };
 use interavl::IntervalTree as IT2;
 use intervaltree::IntervalTree;
@@ -22,6 +22,7 @@ use petgraph::{
     },
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub mod traits;
 pub use traits::MergeGraph;
@@ -85,6 +86,20 @@ pub struct GraphEdge {
     pub chromosome_index: i64,
     pub phased: i64,
     pub created_on: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
+pub struct GraphNodePosition {
+    pub graph_node: GraphNode,
+    pub offset: i64,
+}
+
+#[derive(Debug, Error)]
+pub enum GraphError {
+    #[error("Distance {0} exceeds graph boundaries")]
+    OutOfBounds(i64),
+    #[error("No reachable position found from anchor")]
+    NoPath,
 }
 
 // #[derive(Debug)]
@@ -409,6 +424,54 @@ pub fn flatten_to_interval_tree(
         })
         .collect();
     tree
+}
+
+pub fn graph_from_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> GenGraph {
+    let mut graph = GenGraph::new();
+    let mut blocks: Vec<&NodeIntervalBlock> = tree
+        .iter()
+        .map(|item| &item.value)
+        .filter(|b| b.node_id != PATH_START_NODE_ID && b.node_id != PATH_END_NODE_ID)
+        .collect();
+    blocks.sort_by_key(|b| b.start);
+
+    for block in &blocks {
+        graph.add_node(GraphNode {
+            node_id: block.node_id,
+            sequence_start: block.sequence_start,
+            sequence_end: block.sequence_end,
+        });
+    }
+
+    for window in blocks.windows(2) {
+        let source = &window[0];
+        let target = &window[1];
+        let source_node = GraphNode {
+            node_id: source.node_id,
+            sequence_start: source.sequence_start,
+            sequence_end: source.sequence_end,
+        };
+        let target_node = GraphNode {
+            node_id: target.node_id,
+            sequence_start: target.sequence_start,
+            sequence_end: target.sequence_end,
+        };
+        let edge_id = HashId(calculate_hash(&format!(
+            "{}:{}->{}:{}",
+            source.node_id, source.sequence_end, target.node_id, target.sequence_start
+        )));
+        let graph_edge = GraphEdge {
+            edge_id,
+            source_strand: source.strand,
+            target_strand: target.strand,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 0,
+        };
+        graph.add_edge(source_node, target_node, vec![graph_edge]);
+    }
+
+    graph
 }
 
 pub fn project_path(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<(GraphNode, Strand)> {

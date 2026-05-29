@@ -1,5 +1,9 @@
 pub use gen_core::region::Region;
-use gen_core::region::{RegionParseError, RegionResolutionError, RegionResolver};
+use gen_core::{
+    NodeIntervalBlock,
+    region::{RegionParseError, RegionResolutionError, RegionResolver},
+};
+use intervaltree::IntervalTree;
 use thiserror::Error;
 
 use crate::{
@@ -249,7 +253,7 @@ fn resolve_target(
         RegionTargetKind::Path | RegionTargetKind::BlockGroup => {
             start < 0 || end > target.feature_length
         }
-        RegionTargetKind::Annotation | RegionTargetKind::Accession => end > target.feature_length,
+        RegionTargetKind::Annotation | RegionTargetKind::Accession => false,
     };
 
     if out_of_bounds {
@@ -321,9 +325,7 @@ impl ResolvedGenRegion {
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
                 start < 0 || end > self.feature_length
             }
-            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {
-                end > self.feature_length
-            }
+            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => false,
         };
 
         if out_of_bounds {
@@ -340,6 +342,38 @@ impl ResolvedGenRegion {
         }
 
         Ok((start, end))
+    }
+
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, GenRegionError> {
+        match self.kind {
+            ResolvedRegionKind::Path => {
+                let path = self
+                    .path
+                    .as_ref()
+                    .ok_or_else(|| GenRegionError::NotFound("No path for region".to_string()))?;
+                Ok(path.intervaltree(conn)?)
+            }
+            ResolvedRegionKind::Annotation => {
+                let accession = self.accession.as_ref().ok_or_else(|| {
+                    GenRegionError::NotFound("No accession for annotation".to_string())
+                })?;
+                Ok(accession.intervaltree(conn)?)
+            }
+            ResolvedRegionKind::Accession => {
+                let accession = self.accession.as_ref().ok_or_else(|| {
+                    GenRegionError::NotFound("No accession for region".to_string())
+                })?;
+                Ok(accession.intervaltree(conn)?)
+            }
+            ResolvedRegionKind::BlockGroup => Ok(BlockGroup::intervaltree_for(
+                conn,
+                &self.block_group.id,
+                false,
+            )),
+        }
     }
 }
 

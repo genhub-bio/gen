@@ -13,6 +13,7 @@ pub mod file_types;
 pub mod files;
 #[allow(clippy::all)]
 pub mod generated;
+pub mod graph;
 pub use generated::gen_models_capnp;
 pub mod lineage;
 pub mod locus;
