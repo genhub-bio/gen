@@ -1881,6 +1881,99 @@ mod tests {
     }
 
     #[test]
+    fn test_get_graph_branched_graph() {
+        // Branched graph: {AAA,GGG} → TTT → {CCC,ATC}
+        // TTT has 2 incoming edges and 2 outgoing edges.
+        // All sequences are length 3.
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "branched",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seq_aaa = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAA")
+            .save(&conn)
+            .unwrap();
+        let seq_ggg = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GGG")
+            .save(&conn)
+            .unwrap();
+        let seq_ttt = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("TTT")
+            .save(&conn)
+            .unwrap();
+        let seq_ccc = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCC")
+            .save(&conn)
+            .unwrap();
+        let seq_atc = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("ATC")
+            .save(&conn)
+            .unwrap();
+
+        let n_aaa = Node::create(&conn, &seq_aaa.hash, &HashId::convert_str("node-aaa")).unwrap();
+        let n_ggg = Node::create(&conn, &seq_ggg.hash, &HashId::convert_str("node-ggg")).unwrap();
+        let n_ttt = Node::create(&conn, &seq_ttt.hash, &HashId::convert_str("node-ttt")).unwrap();
+        let n_ccc = Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
+        let n_atc = Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
+
+        // Edges: AAA→TTT, GGG→TTT, TTT→CCC, TTT→ATC
+        let e_aaa_ttt =
+            Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+        let e_ggg_ttt =
+            Edge::create(&conn, n_ggg, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+        let e_ttt_ccc =
+            Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
+        let e_ttt_atc =
+            Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
+
+        let block_group_edges = vec![e_aaa_ttt, e_ggg_ttt, e_ttt_ccc, e_ttt_atc]
+            .iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id: bg.id,
+                edge_id: edge_id.id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+
+        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+        let graph = BlockGroup::get_graph(&conn, &bg.id);
+        dbg!(&graph);
+
+        // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
+        // 2 terminal blocks: START, END
+        // Total: 7
+        assert_eq!(
+            graph.nodes().len(),
+            7,
+            "expected 7 blocks (5 nodes + 2 terminals), got {}",
+            graph.nodes().len()
+        );
+    }
+
+    #[test]
     fn test_blockgroup_merge_from_multiple_parents_preserves_paths_and_accessions() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test").unwrap();

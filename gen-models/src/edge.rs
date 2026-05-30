@@ -332,6 +332,20 @@ impl Edge {
             .collect::<Vec<i64>>()
     }
 
+    fn get_block_intervals(
+        source_edges: Option<&Vec<&Edge>>,
+        target_edges: Option<&Vec<&Edge>>,
+        sequence_length: i64,
+    ) -> Vec<(i64, i64)> {
+        let mut block_boundaries = Edge::get_block_boundaries(source_edges, target_edges);
+        block_boundaries.push(0);
+        block_boundaries.push(sequence_length);
+        block_boundaries.sort();
+        block_boundaries.dedup();
+
+        block_boundaries.into_iter().tuple_windows().collect()
+    }
+
     pub fn blocks_from_edges(conn: &GraphConnection, edges: &[AugmentedEdge]) -> Vec<GroupBlock> {
         let mut node_ids = IndexSet::new();
         let mut edges_by_source_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();
@@ -367,25 +381,14 @@ impl Edge {
             .iter()
             .sorted_by_key(|(_node_id, seq)| seq.hash)
         {
-            let block_boundaries = Edge::get_block_boundaries(
+            let block_intervals = Edge::get_block_intervals(
                 edges_by_source_node_id.get(node_id),
                 edges_by_target_node_id.get(node_id),
+                sequence.length,
             );
 
-            if !block_boundaries.is_empty() {
-                for (start, end) in block_boundaries.clone().into_iter().tuple_windows() {
-                    let block = GroupBlock::new(block_index, *node_id, sequence, start, end);
-                    blocks.push(block);
-                    block_index += 1;
-                }
-            } else {
-                blocks.push(GroupBlock::new(
-                    block_index,
-                    *node_id,
-                    sequence,
-                    0,
-                    sequence.length,
-                ));
+            for (start, end) in block_intervals {
+                blocks.push(GroupBlock::new(block_index, *node_id, sequence, start, end));
                 block_index += 1;
             }
         }
@@ -636,6 +639,148 @@ mod tests {
             let edge = Edge::get_by_id(conn, id).unwrap();
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
+    }
+
+    #[test]
+    fn test_blocks_from_edges_branched_graph() {
+        // Branched graph: {AAA,GGG} → TTT → {CCC,ATC}
+        // TTT has 2 incoming edges and 2 outgoing edges.
+        // All sequences are length 3.
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let _bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "branched",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seq_aaa = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAA")
+            .save(&conn)
+            .unwrap();
+        let seq_ggg = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GGG")
+            .save(&conn)
+            .unwrap();
+        let seq_ttt = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("TTT")
+            .save(&conn)
+            .unwrap();
+        let seq_ccc = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCC")
+            .save(&conn)
+            .unwrap();
+        let seq_atc = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("ATC")
+            .save(&conn)
+            .unwrap();
+
+        let n_aaa = Node::create(&conn, &seq_aaa.hash, &HashId::convert_str("node-aaa")).unwrap();
+        let n_ggg = Node::create(&conn, &seq_ggg.hash, &HashId::convert_str("node-ggg")).unwrap();
+        let n_ttt = Node::create(&conn, &seq_ttt.hash, &HashId::convert_str("node-ttt")).unwrap();
+        let n_ccc = Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
+        let n_atc = Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
+
+        // Edges: AAA→TTT, GGG→TTT, TTT→CCC, TTT→ATC
+        let e_aaa_ttt =
+            Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+        let e_ggg_ttt =
+            Edge::create(&conn, n_ggg, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+        let e_ttt_ccc =
+            Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
+        let e_ttt_atc =
+            Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
+
+        let augmented_edges = vec![
+            AugmentedEdge {
+                edge: e_aaa_ttt,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+            AugmentedEdge {
+                edge: e_ggg_ttt,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+            AugmentedEdge {
+                edge: e_ttt_ccc,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+            AugmentedEdge {
+                edge: e_ttt_atc,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+        ];
+
+        let blocks = Edge::blocks_from_edges(&conn, &augmented_edges);
+
+        // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
+        // 2 terminal blocks: START, END
+        // Total: 7
+        assert_eq!(
+            blocks.len(),
+            7,
+            "expected 7 blocks (5 nodes + 2 terminals), got {}",
+            blocks.len()
+        );
+
+        // Verify all 5 non-terminal nodes have blocks
+        let block_node_ids: Vec<HashId> = blocks
+            .iter()
+            .filter(|b| {
+                b.node_id != gen_core::PATH_START_NODE_ID && b.node_id != gen_core::PATH_END_NODE_ID
+            })
+            .map(|b| b.node_id)
+            .collect();
+        assert!(block_node_ids.contains(&n_aaa), "AAA block missing");
+        assert!(block_node_ids.contains(&n_ggg), "GGG block missing");
+        assert!(block_node_ids.contains(&n_ttt), "TTT block missing");
+        assert!(block_node_ids.contains(&n_ccc), "CCC block missing");
+        assert!(block_node_ids.contains(&n_atc), "ATC block missing");
+
+        // Verify TTT block has correct boundaries (0..3)
+        let ttt_block = blocks.iter().find(|b| b.node_id == n_ttt).unwrap();
+        assert_eq!(ttt_block.start, 0, "TTT block start should be 0");
+        assert_eq!(ttt_block.end, 3, "TTT block end should be 3");
+
+        // Verify AAA block has correct boundaries (0..3)
+        let aaa_block = blocks.iter().find(|b| b.node_id == n_aaa).unwrap();
+        assert_eq!(aaa_block.start, 0, "AAA block start should be 0");
+        assert_eq!(aaa_block.end, 3, "AAA block end should be 3");
+
+        // Verify CCC block has correct boundaries (0..3)
+        let ccc_block = blocks.iter().find(|b| b.node_id == n_ccc).unwrap();
+        assert_eq!(ccc_block.start, 0, "CCC block start should be 0");
+        assert_eq!(ccc_block.end, 3, "CCC block end should be 3");
+
+        // Verify ATC block has correct boundaries (0..3)
+        let atc_block = blocks.iter().find(|b| b.node_id == n_atc).unwrap();
+        assert_eq!(atc_block.start, 0, "ATC block start should be 0");
+        assert_eq!(atc_block.end, 3, "ATC block end should be 3");
     }
 
     #[test]
