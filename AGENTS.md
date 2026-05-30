@@ -38,7 +38,7 @@ The repository is a Cargo workspace. The root crate provides the `gen` CLI and c
 
 These are extremely important details about data models.
 
-- Nodes represent a sequence stored in the Database. A GraphNode represents all or part of a Node. `sequence_start` and `sequence_end` are python-indexed slices of the Sequence a node points at. For example, the sequence "AAATTT", the `GraphNode { ..., sequence_start: 3, sequence_end: 5}` would represent "TT".
+- Nodes represent a sequence stored in the Database. A GraphNode represents all or part of a Node. `sequence_start` and `sequence_end` are python-indexed slices of the Sequence a node points at. For example, the sequence "AAATTT", the `GraphNode { ..., sequence_start: 3, sequence_end: 5}` would represent "TT". Thus, `sequence_start` and `sequence_end` are NOT coordinates in graph space. `sequence_end` - `sequence_start` can be used to derive the length of a node however.
 
 ## Rust Conventions
 
