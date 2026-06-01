@@ -6,9 +6,10 @@ use intervaltree::IntervalTree;
 use petgraph::Direction;
 
 use crate::{
+    block_group::BlockGroup,
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
-    edge::{Edge, GroupBlock},
+    edge::Edge,
 };
 
 pub struct ResolvedGraph {
@@ -23,7 +24,8 @@ pub fn expand(
     block_group_id: &HashId,
     node_id: HashId,
 ) -> bool {
-    let edges_1hop = Edge::query_by_block_group_and_node(conn, block_group_id, node_id);
+    let edges_1hop = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id])
+        .unwrap_or_default();
 
     let mut neighbor_ids: Vec<HashId> = edges_1hop
         .iter()
@@ -34,9 +36,10 @@ pub fn expand(
     neighbor_ids.dedup();
 
     let mut all_edges = edges_1hop;
-    for neighbor_id in &neighbor_ids {
+    if !neighbor_ids.is_empty() {
         let neighbor_edges =
-            Edge::query_by_block_group_and_node(conn, block_group_id, *neighbor_id);
+            Edge::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids)
+                .unwrap_or_default();
         for ae in neighbor_edges {
             if !all_edges
                 .iter()
@@ -61,18 +64,10 @@ pub fn expand(
         return false;
     }
 
-    let all_blocks = Edge::blocks_from_edges(conn, &new_edges);
-
-    let new_blocks: Vec<GroupBlock> = all_blocks
-        .into_iter()
-        .filter(|b| !is_terminal(b.node_id))
-        .collect();
-
-    if new_blocks.is_empty() {
-        return false;
-    }
-
-    let (fragment, _) = Edge::build_graph(&new_edges, &new_blocks);
+    let fragment = match BlockGroup::get_graph_from_edges(conn, block_group_id, &new_edges) {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
     graph.merge_graph(&fragment);
     true
 }

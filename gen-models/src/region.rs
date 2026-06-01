@@ -372,7 +372,7 @@ impl ResolvedGenRegion {
                 conn,
                 &self.block_group.id,
                 false,
-            )),
+            )?),
         }
     }
 
@@ -845,6 +845,57 @@ mod tests {
                 start,
                 end,
             }
+        }
+
+        /// Creates a branched graph: {AAA,GGG} → TTT → {CCC,ATC}
+        /// Path: AAA→TTT→CCC (positions 0..9)
+        fn setup_branched_graph() -> (crate::db::GraphConnection, HashId) {
+            let conn = get_connection(None).unwrap();
+            Collection::get_or_create(&conn, "test").unwrap();
+            Sample::get_or_create(&conn, NewSample { name: "test", ..Default::default() }).unwrap();
+            let bg = BlockGroup::create(
+                &conn,
+                NewBlockGroup {
+                    collection_name: "test",
+                    sample_name: "test",
+                    name: "branched",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let seq_aaa = Sequence::new().sequence_type("DNA").sequence("AAA").save(&conn).unwrap();
+            let seq_ggg = Sequence::new().sequence_type("DNA").sequence("GGG").save(&conn).unwrap();
+            let seq_ttt = Sequence::new().sequence_type("DNA").sequence("TTT").save(&conn).unwrap();
+            let seq_ccc = Sequence::new().sequence_type("DNA").sequence("CCC").save(&conn).unwrap();
+            let seq_atc = Sequence::new().sequence_type("DNA").sequence("ATC").save(&conn).unwrap();
+
+            let n_aaa = Node::create(&conn, &seq_aaa.hash, &HashId::convert_str("node-aaa")).unwrap();
+            let n_ggg = Node::create(&conn, &seq_ggg.hash, &HashId::convert_str("node-ggg")).unwrap();
+            let n_ttt = Node::create(&conn, &seq_ttt.hash, &HashId::convert_str("node-ttt")).unwrap();
+            let n_ccc = Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
+            let n_atc = Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
+
+            let e_start = Edge::create(&conn, PATH_START_NODE_ID, -1, Strand::Forward, n_aaa, 0, Strand::Forward).unwrap();
+            let e_aaa_ttt = Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+            let e_ttt_ccc = Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
+            let e_ccc_end = Edge::create(&conn, n_ccc, 3, Strand::Forward, PATH_END_NODE_ID, 0, Strand::Forward).unwrap();
+            let e_ggg_ttt = Edge::create(&conn, n_ggg, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+            let e_ttt_atc = Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
+
+            BlockGroupEdge::bulk_create(
+                &conn,
+                &[
+                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_start.id, chromosome_index: 0, phased: 0 },
+                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_aaa_ttt.id, chromosome_index: 0, phased: 0 },
+                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ttt_ccc.id, chromosome_index: 0, phased: 0 },
+                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ccc_end.id, chromosome_index: 0, phased: 0 },
+                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ggg_ttt.id, chromosome_index: 0, phased: 0 },
+                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ttt_atc.id, chromosome_index: 0, phased: 0 },
+                ],
+            );
+
+            (conn, bg.id)
         }
 
         #[test]
