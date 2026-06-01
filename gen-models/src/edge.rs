@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group_edge::AugmentedEdge,
+    block_group_edge::{AugmentedEdge, BlockGroupEdge},
     db::GraphConnection,
     errors::NodeError,
     gen_models_capnp::edge,
@@ -310,6 +310,7 @@ impl Edge {
         }
     }
 
+    #[cfg(test)]
     fn get_block_boundaries(
         source_edges: Option<&Vec<&Edge>>,
         target_edges: Option<&Vec<&Edge>>,
@@ -332,40 +333,67 @@ impl Edge {
             .collect::<Vec<i64>>()
     }
 
-    fn get_block_intervals(
-        source_edges: Option<&Vec<&Edge>>,
-        target_edges: Option<&Vec<&Edge>>,
-        sequence_length: i64,
-    ) -> Vec<(i64, i64)> {
-        let mut block_boundaries = Edge::get_block_boundaries(source_edges, target_edges);
-        block_boundaries.push(0);
-        block_boundaries.push(sequence_length);
-        block_boundaries.sort();
-        block_boundaries.dedup();
+    fn get_block_intervals(starts: &HashSet<i64>, ends: &HashSet<i64>) -> Vec<(i64, i64)> {
+        let coordinates = starts.union(ends).sorted().copied().collect::<Vec<_>>();
+        if coordinates.len() < 2 {
+            panic!("Cannot build blocks from starts {starts:?} and ends {ends:?}");
+        }
 
-        block_boundaries.into_iter().tuple_windows().collect()
+        coordinates.into_iter().tuple_windows().collect()
     }
 
-    pub fn blocks_from_edges(conn: &GraphConnection, edges: &[AugmentedEdge]) -> Vec<GroupBlock> {
+    pub fn blocks_from_edges(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        edges: &[AugmentedEdge],
+    ) -> Vec<GroupBlock> {
         let mut node_ids = IndexSet::new();
-        let mut edges_by_source_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();
-        let mut edges_by_target_node_id: HashMap<HashId, Vec<&Edge>> = HashMap::new();
+        let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
+        let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         for edge in edges.iter().map(|edge| &edge.edge) {
             if !is_start_node(edge.source_node_id) {
                 node_ids.insert(edge.source_node_id);
+                ends_by_node_id
+                    .entry(edge.source_node_id)
+                    .or_default()
+                    .insert(edge.source_coordinate);
             }
-            edges_by_source_node_id
-                .entry(edge.source_node_id)
-                .and_modify(|edges| edges.push(edge))
-                .or_insert(vec![edge]);
 
             if !is_end_node(edge.target_node_id) {
                 node_ids.insert(edge.target_node_id);
+                starts_by_node_id
+                    .entry(edge.target_node_id)
+                    .or_default()
+                    .insert(edge.target_coordinate);
             }
-            edges_by_target_node_id
-                .entry(edge.target_node_id)
-                .and_modify(|edges| edges.push(edge))
-                .or_insert(vec![edge]);
+        }
+
+        let incomplete_node_ids = node_ids
+            .iter()
+            .copied()
+            .filter(|node_id| {
+                starts_by_node_id.get(node_id).map_or(0, HashSet::len)
+                    != ends_by_node_id.get(node_id).map_or(0, HashSet::len)
+            })
+            .collect::<HashSet<_>>();
+        if !incomplete_node_ids.is_empty() {
+            for edge in BlockGroupEdge::edges_for_block_group(conn, block_group_id)
+                .iter()
+                .map(|augmented_edge| &augmented_edge.edge)
+            {
+                if incomplete_node_ids.contains(&edge.source_node_id) {
+                    ends_by_node_id
+                        .entry(edge.source_node_id)
+                        .or_default()
+                        .insert(edge.source_coordinate);
+                }
+                if incomplete_node_ids.contains(&edge.target_node_id) {
+                    starts_by_node_id
+                        .entry(edge.target_node_id)
+                        .or_default()
+                        .insert(edge.target_coordinate);
+                }
+            }
         }
 
         let sequences_by_node_id = Node::get_sequences_by_node_ids(
@@ -381,11 +409,11 @@ impl Edge {
             .iter()
             .sorted_by_key(|(_node_id, seq)| seq.hash)
         {
-            let block_intervals = Edge::get_block_intervals(
-                edges_by_source_node_id.get(node_id),
-                edges_by_target_node_id.get(node_id),
-                sequence.length,
-            );
+            let empty_starts = HashSet::new();
+            let empty_ends = HashSet::new();
+            let starts = starts_by_node_id.get(node_id).unwrap_or(&empty_starts);
+            let ends = ends_by_node_id.get(node_id).unwrap_or(&empty_ends);
+            let block_intervals = Edge::get_block_intervals(starts, ends);
 
             for (start, end) in block_intervals {
                 blocks.push(GroupBlock::new(block_index, *node_id, sequence, start, end));
@@ -510,7 +538,7 @@ mod tests {
     use super::*;
     use crate::{
         block_group::{BlockGroup, PathChange},
-        block_group_edge::BlockGroupEdge,
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         sequence::Sequence,
         test_helpers::{get_connection, setup_block_group},
@@ -656,7 +684,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _bg = BlockGroup::create(
+        let bg = BlockGroup::create(
             &conn,
             crate::block_group::NewBlockGroup {
                 collection_name: "test",
@@ -699,6 +727,26 @@ mod tests {
         let n_ccc = Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
         let n_atc = Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
 
+        let e_start_aaa = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            -1,
+            Strand::Forward,
+            n_aaa,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let e_start_ggg = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            -1,
+            Strand::Forward,
+            n_ggg,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
         // Edges: AAA→TTT, GGG→TTT, TTT→CCC, TTT→ATC
         let e_aaa_ttt =
             Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
@@ -708,6 +756,46 @@ mod tests {
             Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
         let e_ttt_atc =
             Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
+        let e_ccc_end = Edge::create(
+            &conn,
+            n_ccc,
+            3,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            -1,
+            Strand::Forward,
+        )
+        .unwrap();
+        let e_atc_end = Edge::create(
+            &conn,
+            n_atc,
+            3,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            -1,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        let block_group_edges = [
+            e_start_aaa.clone(),
+            e_start_ggg.clone(),
+            e_aaa_ttt.clone(),
+            e_ggg_ttt.clone(),
+            e_ttt_ccc.clone(),
+            e_ttt_atc.clone(),
+            e_ccc_end.clone(),
+            e_atc_end.clone(),
+        ]
+        .iter()
+        .map(|edge| BlockGroupEdgeData {
+            block_group_id: bg.id,
+            edge_id: edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        })
+        .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
 
         let augmented_edges = vec![
             AugmentedEdge {
@@ -736,7 +824,7 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &augmented_edges);
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges);
 
         // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
         // 2 terminal blocks: START, END
@@ -781,6 +869,98 @@ mod tests {
         let atc_block = blocks.iter().find(|b| b.node_id == n_atc).unwrap();
         assert_eq!(atc_block.start, 0, "ATC block start should be 0");
         assert_eq!(atc_block.end, 3, "ATC block end should be 3");
+    }
+
+    #[test]
+    fn test_blocks_from_edges_uses_edge_coordinates_not_backing_sequence_length() {
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "slice",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let backing_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAATTT")
+            .save(&conn)
+            .unwrap();
+        let node_id =
+            Node::create(&conn, &backing_sequence.hash, &HashId::convert_str("slice")).unwrap();
+
+        let into_slice = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            -1,
+            Strand::Forward,
+            node_id,
+            3,
+            Strand::Forward,
+        )
+        .unwrap();
+        let out_of_slice = Edge::create(
+            &conn,
+            node_id,
+            4,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            -1,
+            Strand::Forward,
+        )
+        .unwrap();
+        let block_group_edges = [into_slice.clone(), out_of_slice.clone()]
+            .iter()
+            .map(|edge| BlockGroupEdgeData {
+                block_group_id: bg.id,
+                edge_id: edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+
+        let augmented_edges = vec![
+            AugmentedEdge {
+                edge: into_slice,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+            AugmentedEdge {
+                edge: out_of_slice,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+        ];
+
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges);
+        let node_blocks = blocks
+            .iter()
+            .filter(|block| block.node_id == node_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            node_blocks.len(),
+            1,
+            "expected one edge-delimited block, got {node_blocks:?}"
+        );
+        assert_eq!(node_blocks[0].start, 3);
+        assert_eq!(node_blocks[0].end, 4);
     }
 
     #[test]
@@ -873,7 +1053,7 @@ mod tests {
         let (block_group_id, path) = setup_block_group(&conn);
 
         let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
-        let blocks = Edge::blocks_from_edges(&conn, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges);
 
         // 4 actual sequences: 10-length ones of all A, all T, all C, all G
         // 2 terminal node blocks (start/end)
@@ -910,7 +1090,7 @@ mod tests {
         BlockGroup::insert_change(&conn, &change).unwrap();
         let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
 
-        let blocks = Edge::blocks_from_edges(&conn, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges);
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence
@@ -921,7 +1101,7 @@ mod tests {
 
         // Confirm that ordering doesn't matter
         edges.reverse();
-        let blocks = Edge::blocks_from_edges(&conn, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges);
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence

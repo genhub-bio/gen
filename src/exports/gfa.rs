@@ -61,14 +61,21 @@ pub fn export_gfa(
             sample_name: sample_name.to_string(),
         });
     }
+    let mut blocks = vec![];
+    let mut seen_blocks = HashSet::new();
     for block_group in sample_block_groups {
         let block_group_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        for mut block in Edge::blocks_from_edges(conn, &block_group.id, &block_group_edges) {
+            if seen_blocks.insert((block.node_id, block.start, block.end)) {
+                block.id = blocks.len() as i64;
+                blocks.push(block);
+            }
+        }
         edge_set.extend(block_group_edges);
     }
 
     let edges = edge_set.into_iter().collect::<Vec<_>>();
 
-    let mut blocks = Edge::blocks_from_edges(conn, &edges);
     blocks.sort_by(|a, b| a.node_id.cmp(&b.node_id));
 
     let (gen_graph, _edges_by_node_pair) = Edge::build_graph(&edges, &blocks);
