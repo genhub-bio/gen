@@ -17,11 +17,18 @@ knitr::opts_chunk$set(eval = TRUE)
 ```
 
 Gen is a sequence version control system built around a graph database.
-Rather than storing sequences as flat strings, Gen stores them as a
-sequence graph where every sample is a named path through that graph.
-Edits branch the graph rather than overwriting it, so every version of a
-sequence coexists in the same database and their differences are always
-queryable.
+Rather than storing a sequence as a flat string, Gen breaks it into
+nodes, each holding a short subsequence, connected by edges into a
+graph. A path through that graph reconstructs a full sequence. When a
+change is recorded, Gen adds new nodes and edges to represent the
+altered subsequence and the new junctions around it. A path can then
+take an alternative route through the new nodes, or skip nodes entirely
+in the case of a deletion. Changes can be naturally occurring or
+deliberately engineered. What makes this especially powerful is that the
+graph does not just capture changes over time: it can represent the full
+set of expected or observed variants across haplotypes, design libraries,
+or a pangenome, all coexisting in one database with their differences
+always queryable.
 
 This vignette walks through a concrete lab scenario that shows where
 that design pays off: you design an edit, apply it, confirm it with
