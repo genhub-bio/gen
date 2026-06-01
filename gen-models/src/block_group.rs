@@ -708,7 +708,8 @@ impl BlockGroup {
             tree.query_point(start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
         let start_block = start_blocks[0];
-        let end_blocks: Vec<&NodeIntervalBlock> = tree.query_point(end).map(|x| &x.value).collect();
+        let end_blocks: Vec<&NodeIntervalBlock> =
+            tree.query_point(end - 1).map(|x| &x.value).collect();
         assert_eq!(end_blocks.len(), 1);
         let end_block = end_blocks[0];
         let start_edge = AccessionEdgeData {

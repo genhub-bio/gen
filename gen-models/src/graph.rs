@@ -6,10 +6,7 @@ use intervaltree::IntervalTree;
 use petgraph::Direction;
 
 use crate::{
-    block_group::BlockGroup,
-    block_group_edge::AugmentedEdge,
-    db::GraphConnection,
-    edge::Edge,
+    block_group::BlockGroup, block_group_edge::AugmentedEdge, db::GraphConnection, edge::Edge,
 };
 
 pub struct ResolvedGraph {
@@ -24,8 +21,8 @@ pub fn expand(
     block_group_id: &HashId,
     node_id: HashId,
 ) -> bool {
-    let edges_1hop = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id])
-        .unwrap_or_default();
+    let edges_1hop =
+        Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id]).unwrap_or_default();
 
     let mut neighbor_ids: Vec<HashId> = edges_1hop
         .iter()
@@ -37,9 +34,8 @@ pub fn expand(
 
     let mut all_edges = edges_1hop;
     if !neighbor_ids.is_empty() {
-        let neighbor_edges =
-            Edge::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids)
-                .unwrap_or_default();
+        let neighbor_edges = Edge::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids)
+            .unwrap_or_default();
         for ae in neighbor_edges {
             if !all_edges
                 .iter()
@@ -82,6 +78,22 @@ pub fn find_offset(
         return Ok(vec![*anchor]);
     }
 
+    match find_offset_with_optional_expansion(graph, anchor, distance, false, &mut expand) {
+        Ok(results) => Ok(results),
+        Err(GraphError::OutOfBounds(_)) => {
+            find_offset_with_optional_expansion(graph, anchor, distance, true, &mut expand)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn find_offset_with_optional_expansion(
+    graph: &mut GenGraph,
+    anchor: &GraphNodePosition,
+    distance: i64,
+    expand_through_existing_paths: bool,
+    expand: &mut impl FnMut(&mut GenGraph, HashId) -> bool,
+) -> Result<Vec<GraphNodePosition>, GraphError> {
     let forward = distance > 0;
     let mut queue = VecDeque::new();
     let mut visited = HashSet::new();
@@ -113,7 +125,9 @@ pub fn find_offset(
                 .neighbors_directed(node, Direction::Outgoing)
                 .collect();
 
-            if neighbors.is_empty() && expand(graph, node.node_id) {
+            if (neighbors.is_empty() || expand_through_existing_paths)
+                && expand(graph, node.node_id)
+            {
                 neighbors = graph
                     .neighbors_directed(node, Direction::Outgoing)
                     .collect();
@@ -145,7 +159,9 @@ pub fn find_offset(
                 .neighbors_directed(node, Direction::Incoming)
                 .collect();
 
-            if neighbors.is_empty() && expand(graph, node.node_id) {
+            if (neighbors.is_empty() || expand_through_existing_paths)
+                && expand(graph, node.node_id)
+            {
                 neighbors = graph
                     .neighbors_directed(node, Direction::Incoming)
                     .collect();
@@ -267,7 +283,7 @@ impl ResolvedGraph {
 #[cfg(test)]
 mod tests {
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-    use gen_graph::graph_from_interval_tree;
+    use gen_graph::{GraphEdge, graph_from_interval_tree};
 
     use super::*;
     use crate::{
@@ -464,6 +480,55 @@ mod tests {
         assert!(
             result.is_ok(),
             "find_offset(7) should expand to Z: {:?}",
+            result.err()
+        );
+        let positions = result.unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(
+            positions[0].graph_node.node_id,
+            HashId::convert_str("node-z")
+        );
+        assert_eq!(positions[0].offset, 2);
+    }
+
+    #[test]
+    fn test_find_offset_forward_expands_after_existing_paths_fail() {
+        let (conn, bg_id) = setup_subset_graph();
+        let mut graph = GenGraph::new();
+
+        let y_node = GraphNode {
+            node_id: HashId::convert_str("node-y"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let dead_end = GraphNode {
+            node_id: HashId::convert_str("dead-end"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        graph.add_edge(
+            y_node,
+            dead_end,
+            vec![GraphEdge {
+                edge_id: HashId::convert_str("edge-y-dead"),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            }],
+        );
+        let anchor = GraphNodePosition {
+            graph_node: y_node,
+            offset: 0,
+        };
+
+        let result = find_offset(&mut graph, &anchor, 7, |g, nid| {
+            expand(&conn, g, &bg_id, nid)
+        });
+        assert!(
+            result.is_ok(),
+            "find_offset(7) should expand from Y after the existing path fails: {:?}",
             result.err()
         );
         let positions = result.unwrap();

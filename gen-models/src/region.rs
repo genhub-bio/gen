@@ -391,13 +391,11 @@ impl ResolvedGenRegion {
         let interval_tree = self
             .intervaltree(conn)
             .map_err(|_| gen_graph::GraphError::NoPath)?;
+        dbg!("t is", &interval_tree);
 
         let filtered: Vec<(std::ops::Range<i64>, gen_core::NodeIntervalBlock)> = interval_tree
             .iter()
-            .filter(|item| {
-                !gen_core::is_terminal(item.value.node_id)
-                    && item.value.sequence_start < item.value.sequence_end
-            })
+            .filter(|item| !gen_core::is_terminal(item.value.node_id))
             .map(|item| (item.range.clone(), item.value))
             .collect();
         let tree: intervaltree::IntervalTree<i64, gen_core::NodeIntervalBlock> =
@@ -852,7 +850,14 @@ mod tests {
         fn setup_branched_graph() -> (crate::db::GraphConnection, HashId) {
             let conn = get_connection(None).unwrap();
             Collection::get_or_create(&conn, "test").unwrap();
-            Sample::get_or_create(&conn, NewSample { name: "test", ..Default::default() }).unwrap();
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: "test",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             let bg = BlockGroup::create(
                 &conn,
                 NewBlockGroup {
@@ -864,34 +869,143 @@ mod tests {
             )
             .unwrap();
 
-            let seq_aaa = Sequence::new().sequence_type("DNA").sequence("AAA").save(&conn).unwrap();
-            let seq_ggg = Sequence::new().sequence_type("DNA").sequence("GGG").save(&conn).unwrap();
-            let seq_ttt = Sequence::new().sequence_type("DNA").sequence("TTT").save(&conn).unwrap();
-            let seq_ccc = Sequence::new().sequence_type("DNA").sequence("CCC").save(&conn).unwrap();
-            let seq_atc = Sequence::new().sequence_type("DNA").sequence("ATC").save(&conn).unwrap();
+            let seq_aaa = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("AAA")
+                .save(&conn)
+                .unwrap();
+            let seq_ggg = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("GGG")
+                .save(&conn)
+                .unwrap();
+            let seq_ttt = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("TTT")
+                .save(&conn)
+                .unwrap();
+            let seq_ccc = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("CCC")
+                .save(&conn)
+                .unwrap();
+            let seq_atc = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("ATC")
+                .save(&conn)
+                .unwrap();
 
-            let n_aaa = Node::create(&conn, &seq_aaa.hash, &HashId::convert_str("node-aaa")).unwrap();
-            let n_ggg = Node::create(&conn, &seq_ggg.hash, &HashId::convert_str("node-ggg")).unwrap();
-            let n_ttt = Node::create(&conn, &seq_ttt.hash, &HashId::convert_str("node-ttt")).unwrap();
-            let n_ccc = Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
-            let n_atc = Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
+            let n_aaa =
+                Node::create(&conn, &seq_aaa.hash, &HashId::convert_str("node-aaa")).unwrap();
+            let n_ggg =
+                Node::create(&conn, &seq_ggg.hash, &HashId::convert_str("node-ggg")).unwrap();
+            let n_ttt =
+                Node::create(&conn, &seq_ttt.hash, &HashId::convert_str("node-ttt")).unwrap();
+            let n_ccc =
+                Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
+            let n_atc =
+                Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
 
-            let e_start = Edge::create(&conn, PATH_START_NODE_ID, -1, Strand::Forward, n_aaa, 0, Strand::Forward).unwrap();
-            let e_aaa_ttt = Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
-            let e_ttt_ccc = Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
-            let e_ccc_end = Edge::create(&conn, n_ccc, 3, Strand::Forward, PATH_END_NODE_ID, 0, Strand::Forward).unwrap();
-            let e_ggg_ttt = Edge::create(&conn, n_ggg, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
-            let e_ttt_atc = Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
+            let e_start = Edge::create(
+                &conn,
+                PATH_START_NODE_ID,
+                -1,
+                Strand::Forward,
+                n_aaa,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_ggg_start = Edge::create(
+                &conn,
+                PATH_START_NODE_ID,
+                -1,
+                Strand::Forward,
+                n_ggg,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_aaa_ttt =
+                Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+            let e_ttt_ccc =
+                Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
+            let e_ccc_end = Edge::create(
+                &conn,
+                n_ccc,
+                3,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_atc_end = Edge::create(
+                &conn,
+                n_atc,
+                3,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_ggg_ttt =
+                Edge::create(&conn, n_ggg, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+            let e_ttt_atc =
+                Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
 
             BlockGroupEdge::bulk_create(
                 &conn,
                 &[
-                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_start.id, chromosome_index: 0, phased: 0 },
-                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_aaa_ttt.id, chromosome_index: 0, phased: 0 },
-                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ttt_ccc.id, chromosome_index: 0, phased: 0 },
-                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ccc_end.id, chromosome_index: 0, phased: 0 },
-                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ggg_ttt.id, chromosome_index: 0, phased: 0 },
-                    BlockGroupEdgeData { block_group_id: bg.id, edge_id: e_ttt_atc.id, chromosome_index: 0, phased: 0 },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_start.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_ggg_start.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_aaa_ttt.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_ttt_ccc.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_ccc_end.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_atc_end.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_ggg_ttt.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_ttt_atc.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
                 ],
             );
 
@@ -907,7 +1021,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, 2, 2).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-y")
+            );
             assert_eq!(start_pos[0].offset, 4);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
@@ -923,7 +1040,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, 5, 5).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-z")
+            );
             assert_eq!(start_pos[0].offset, 2);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
@@ -939,7 +1059,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, -5, -5).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-x")
+            );
             assert_eq!(start_pos[0].offset, 2);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
@@ -965,7 +1088,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, 12, 12).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-z")
+            );
             assert_eq!(start_pos[0].offset, 2);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
@@ -981,7 +1107,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, -14, -14).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-x")
+            );
             assert_eq!(start_pos[0].offset, 0);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
@@ -997,7 +1126,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, 1, 1).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-y")
+            );
             assert_eq!(start_pos[0].offset, 3);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
@@ -1013,7 +1145,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, 5, 5).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-z")
+            );
             assert_eq!(start_pos[0].offset, 3);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
@@ -1029,7 +1164,10 @@ mod tests {
 
             let (start_pos, end_pos) = region.find_graph_positions(&conn, -4, -4).unwrap();
             assert_eq!(start_pos.len(), 1);
-            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(
+                start_pos[0].graph_node.node_id,
+                HashId::convert_str("node-x")
+            );
             assert_eq!(start_pos[0].offset, 2);
             assert_eq!(end_pos.len(), 1);
             assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
