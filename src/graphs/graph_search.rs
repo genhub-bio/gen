@@ -252,26 +252,16 @@ impl GenGraphMatcher {
         }
 
         let matcher = self.sequence_kind.matcher_for_query(query);
-        let mut out = self.find_all_query_orientation(query, matcher);
 
         if self.sequence_kind == SequenceKind::Dna {
-            for m in out.iter_mut() {
-                for s in m.slices.iter_mut() {
-                    s.strand = Strand::Forward;
-                }
-            }
+            let mut out = self.find_all_query_orientation(query, matcher, Strand::Forward);
             let rc = reverse_complement(query);
             let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
-            let rc_matches = self.find_all_query_orientation(&rc, rc_matcher);
-            for mut m in rc_matches {
-                for s in m.slices.iter_mut() {
-                    s.strand = Strand::Reverse;
-                }
-                out.push(m);
-            }
+            out.append(&mut self.find_all_query_orientation(&rc, rc_matcher, Strand::Reverse));
+            out
+        } else {
+            self.find_all_query_orientation(query, matcher, Strand::Unknown)
         }
-
-        out
     }
 
     /// Returns every match of `query` using a seed index to prune start positions.
@@ -299,25 +289,20 @@ impl GenGraphMatcher {
             |q: u8, g: u8| q == g
         };
 
-        let mut out = self.index_search_one_orientation(seed_index, query, matcher);
-
         if self.sequence_kind == SequenceKind::Dna {
-            for m in out.iter_mut() {
-                for s in m.slices.iter_mut() {
-                    s.strand = Strand::Forward;
-                }
-            }
+            let mut out =
+                self.index_search_one_orientation(seed_index, query, matcher, Strand::Forward);
             let rc = reverse_complement(query);
-            let mut rc_matches = self.index_search_one_orientation(seed_index, &rc, matcher);
-            for m in rc_matches.iter_mut() {
-                for s in m.slices.iter_mut() {
-                    s.strand = Strand::Reverse;
-                }
-            }
-            out.append(&mut rc_matches);
+            out.append(&mut self.index_search_one_orientation(
+                seed_index,
+                &rc,
+                matcher,
+                Strand::Reverse,
+            ));
+            Ok(out)
+        } else {
+            Ok(self.index_search_one_orientation(seed_index, query, matcher, Strand::Unknown))
         }
-
-        Ok(out)
     }
 
     fn index_search_one_orientation(
@@ -325,9 +310,10 @@ impl GenGraphMatcher {
         seed_index: &SeedIndex,
         query: &[u8],
         matcher: fn(u8, u8) -> bool,
+        strand: Strand,
     ) -> Vec<GraphLocus> {
         if query.len() < seed_index.k {
-            return self.find_all_forward(query, matcher);
+            return self.find_all_forward(query, matcher, strand);
         }
 
         let seed: Vec<u8> = if seed_index.normalized {
@@ -345,17 +331,22 @@ impl GenGraphMatcher {
 
         let mut out = Vec::new();
         for &pos in positions {
-            self.collect_matches_from(pos, query, matcher, &mut out);
+            self.collect_matches_from(pos, query, matcher, &mut out, strand);
         }
         out
     }
 
-    fn find_all_forward(&self, query: &[u8], matcher: fn(u8, u8) -> bool) -> Vec<GraphLocus> {
+    fn find_all_forward(
+        &self,
+        query: &[u8],
+        matcher: fn(u8, u8) -> bool,
+        strand: Strand,
+    ) -> Vec<GraphLocus> {
         if query.is_empty() {
             return Vec::new();
         }
 
-        self.find_all_query_orientation(query, matcher)
+        self.find_all_query_orientation(query, matcher, strand)
     }
 
     fn contains_query_orientation(&self, query: &[u8], matcher: fn(u8, u8) -> bool) -> bool {
@@ -368,11 +359,12 @@ impl GenGraphMatcher {
         &self,
         query: &[u8],
         matcher: fn(u8, u8) -> bool,
+        strand: Strand,
     ) -> Vec<GraphLocus> {
         let mut out = Vec::new();
 
         for start in self.all_start_positions() {
-            self.collect_matches_from(start, query, matcher, &mut out);
+            self.collect_matches_from(start, query, matcher, &mut out, strand);
         }
 
         out
@@ -417,6 +409,7 @@ impl GenGraphMatcher {
         query: &[u8],
         matcher: fn(u8, u8) -> bool,
         out: &mut Vec<GraphLocus>,
+        strand: Strand,
     ) {
         #[derive(Clone, Debug)]
         struct TraceState {
@@ -452,7 +445,7 @@ impl GenGraphMatcher {
                         } else {
                             node.length() as usize
                         },
-                        strand: Strand::Unknown,
+                        strand,
                     })
                     .collect();
                 out.push(GraphLocus { slices });
@@ -795,7 +788,7 @@ mod tests {
         GenGraphMatcher::new(conn, graph)
     }
 
-    fn test_ssdna_matcher() -> GenGraphMatcher {
+    fn build_ssdna_matcher() -> GenGraphMatcher {
         let ctx = setup_gen();
         let conn = ctx.graph().conn();
         let _ = Collection::create(conn, "test");
@@ -1021,7 +1014,7 @@ mod tests {
 
     #[test]
     fn seed_index_find_all_with_index_matches_forward_search() {
-        let matcher = test_ssdna_matcher();
+        let matcher = build_ssdna_matcher();
 
         let index = SeedIndex::build(&matcher, 4, true);
         let query = b"AAAAATTTTT";
@@ -1040,7 +1033,7 @@ mod tests {
 
     #[test]
     fn seed_index_short_query_falls_back_to_forward_find_all() {
-        let matcher = test_ssdna_matcher();
+        let matcher = build_ssdna_matcher();
 
         let index = SeedIndex::build(&matcher, 4, true);
         let via_index = matcher.find_all_with_seed_index(&index, b"AA").unwrap();
