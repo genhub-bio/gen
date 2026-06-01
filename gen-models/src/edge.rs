@@ -406,34 +406,56 @@ impl Edge {
                 .insert(edge.target_coordinate);
         }
 
-        let incomplete_node_ids = node_ids
-            .iter()
-            .copied()
-            .filter(|node_id| {
+        let is_incomplete =
+            |node_id: &HashId,
+             starts_by_node_id: &HashMap<HashId, HashSet<i64>>,
+             ends_by_node_id: &HashMap<HashId, HashSet<i64>>| {
                 starts_by_node_id.get(node_id).map_or(0, HashSet::len)
                     != ends_by_node_id.get(node_id).map_or(0, HashSet::len)
-            })
-            .collect::<HashSet<_>>();
-        if !incomplete_node_ids.is_empty() {
-            let incomplete_node_ids = incomplete_node_ids.iter().copied().collect::<Vec<_>>();
+            };
+        let mut queried_node_ids = HashSet::new();
+        let mut incomplete_node_ids = node_ids
+            .iter()
+            .copied()
+            .filter(|node_id| is_incomplete(node_id, &starts_by_node_id, &ends_by_node_id))
+            .collect::<Vec<_>>();
+
+        while !incomplete_node_ids.is_empty() {
+            queried_node_ids.extend(incomplete_node_ids.iter().copied());
+            let mut next_incomplete_node_ids = HashSet::new();
+
             for edge in
                 Edge::edges_for_block_group_nodes(conn, block_group_id, &incomplete_node_ids)
                     .iter()
                     .map(|augmented_edge| &augmented_edge.edge)
             {
-                if incomplete_node_ids.contains(&edge.source_node_id) {
-                    ends_by_node_id
-                        .entry(edge.source_node_id)
-                        .or_default()
-                        .insert(edge.source_coordinate);
+                if !is_terminal(edge.source_node_id) {
+                    node_ids.insert(edge.source_node_id);
                 }
-                if incomplete_node_ids.contains(&edge.target_node_id) {
-                    starts_by_node_id
-                        .entry(edge.target_node_id)
-                        .or_default()
-                        .insert(edge.target_coordinate);
+                ends_by_node_id
+                    .entry(edge.source_node_id)
+                    .or_default()
+                    .insert(edge.source_coordinate);
+
+                if !is_terminal(edge.target_node_id) {
+                    node_ids.insert(edge.target_node_id);
+                }
+                starts_by_node_id
+                    .entry(edge.target_node_id)
+                    .or_default()
+                    .insert(edge.target_coordinate);
+
+                for candidate_node_id in [edge.source_node_id, edge.target_node_id] {
+                    if !is_terminal(candidate_node_id)
+                        && !queried_node_ids.contains(&candidate_node_id)
+                        && is_incomplete(&candidate_node_id, &starts_by_node_id, &ends_by_node_id)
+                    {
+                        next_incomplete_node_ids.insert(candidate_node_id);
+                    }
                 }
             }
+
+            incomplete_node_ids = next_incomplete_node_ids.into_iter().collect();
         }
 
         let sequences_by_node_id = Node::get_sequences_by_node_ids(
@@ -1122,6 +1144,90 @@ mod tests {
         );
         assert_eq!(node_blocks[0].start, 3);
         assert_eq!(node_blocks[0].end, 4);
+    }
+
+    #[test]
+    fn test_blocks_from_edges_resolves_incomplete_nodes_created_by_lookup() {
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "recursive-incomplete",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seq_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAA")
+            .save(&conn)
+            .unwrap();
+        let seq_b = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("BBB")
+            .save(&conn)
+            .unwrap();
+        let seq_c = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCC")
+            .save(&conn)
+            .unwrap();
+        let seq_d = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("DDD")
+            .save(&conn)
+            .unwrap();
+
+        let n_a = Node::create(&conn, &seq_a.hash, &HashId::convert_str("node-a")).unwrap();
+        let n_b = Node::create(&conn, &seq_b.hash, &HashId::convert_str("node-b")).unwrap();
+        let n_c = Node::create(&conn, &seq_c.hash, &HashId::convert_str("node-c")).unwrap();
+        let n_d = Node::create(&conn, &seq_d.hash, &HashId::convert_str("node-d")).unwrap();
+
+        let e_a_b = Edge::create(&conn, n_a, 3, Strand::Forward, n_b, 0, Strand::Forward).unwrap();
+        let e_b_c = Edge::create(&conn, n_b, 3, Strand::Forward, n_c, 0, Strand::Forward).unwrap();
+        let e_c_d = Edge::create(&conn, n_c, 3, Strand::Forward, n_d, 0, Strand::Forward).unwrap();
+
+        let block_group_edges = [e_a_b.clone(), e_b_c.clone(), e_c_d.clone()]
+            .iter()
+            .map(|edge| BlockGroupEdgeData {
+                block_group_id: bg.id,
+                edge_id: edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+
+        let blocks = Edge::blocks_from_edges(
+            &conn,
+            &bg.id,
+            &[AugmentedEdge {
+                edge: e_a_b,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            }],
+        );
+
+        let b_block = blocks.iter().find(|block| block.node_id == n_b).unwrap();
+        assert_eq!(b_block.start, 0);
+        assert_eq!(b_block.end, 3);
+
+        let c_block = blocks.iter().find(|block| block.node_id == n_c).unwrap();
+        assert_eq!(c_block.start, 0);
+        assert_eq!(c_block.end, 3);
     }
 
     #[test]

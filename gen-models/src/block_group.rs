@@ -1948,19 +1948,78 @@ mod tests {
         let e_ttt_atc =
             Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
 
-        let block_group_edges = [e_aaa_ttt, e_ggg_ttt, e_ttt_ccc, e_ttt_atc]
-            .iter()
-            .map(|edge_id| BlockGroupEdgeData {
-                block_group_id: bg.id,
-                edge_id: edge_id.id,
-                chromosome_index: 0,
-                phased: 0,
-            })
-            .collect::<Vec<_>>();
+        let expected_edges = [
+            (
+                GraphNode {
+                    node_id: n_aaa,
+                    sequence_start: 3,
+                    sequence_end: 3,
+                },
+                GraphNode {
+                    node_id: n_ttt,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                },
+                e_aaa_ttt.id,
+            ),
+            (
+                GraphNode {
+                    node_id: n_ggg,
+                    sequence_start: 3,
+                    sequence_end: 3,
+                },
+                GraphNode {
+                    node_id: n_ttt,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                },
+                e_ggg_ttt.id,
+            ),
+            (
+                GraphNode {
+                    node_id: n_ttt,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                },
+                GraphNode {
+                    node_id: n_ccc,
+                    sequence_start: 0,
+                    sequence_end: 0,
+                },
+                e_ttt_ccc.id,
+            ),
+            (
+                GraphNode {
+                    node_id: n_ttt,
+                    sequence_start: 0,
+                    sequence_end: 3,
+                },
+                GraphNode {
+                    node_id: n_atc,
+                    sequence_start: 0,
+                    sequence_end: 0,
+                },
+                e_ttt_atc.id,
+            ),
+        ];
+
+        let block_group_edges = [
+            e_aaa_ttt.clone(),
+            e_ggg_ttt.clone(),
+            e_ttt_ccc.clone(),
+            e_ttt_atc.clone(),
+        ]
+        .iter()
+        .map(|edge_id| BlockGroupEdgeData {
+            block_group_id: bg.id,
+            edge_id: edge_id.id,
+            chromosome_index: 0,
+            phased: 0,
+        })
+        .collect::<Vec<_>>();
 
         BlockGroupEdge::bulk_create(&conn, &block_group_edges);
         let graph = BlockGroup::get_graph(&conn, &bg.id);
-        dbg!(&graph);
 
         // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
         // 2 terminal blocks: START, END
@@ -1971,6 +2030,23 @@ mod tests {
             "expected 7 blocks (5 nodes + 2 terminals), got {}",
             graph.nodes().len()
         );
+
+        assert_eq!(
+            graph.all_edges().count(),
+            expected_edges.len(),
+            "expected exactly the 4 branch edges"
+        );
+        for (source, target, edge_id) in expected_edges {
+            let weights = graph
+                .edge_weight(source, target)
+                .unwrap_or_else(|| panic!("missing graph edge {source:?} -> {target:?}"));
+            assert_eq!(
+                weights.len(),
+                1,
+                "expected a single edge weight for {source:?} -> {target:?}"
+            );
+            assert_eq!(weights[0].edge_id, edge_id);
+        }
     }
 
     #[test]
