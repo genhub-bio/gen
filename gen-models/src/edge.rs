@@ -421,8 +421,13 @@ impl Edge {
             |node_id: &HashId,
              starts_by_node_id: &HashMap<HashId, HashSet<i64>>,
              ends_by_node_id: &HashMap<HashId, HashSet<i64>>| {
-                starts_by_node_id.get(node_id).map_or(0, HashSet::len)
-                    != ends_by_node_id.get(node_id).map_or(0, HashSet::len)
+                let has_starts = starts_by_node_id
+                    .get(node_id)
+                    .is_some_and(|starts| !starts.is_empty());
+                let has_ends = ends_by_node_id
+                    .get(node_id)
+                    .is_some_and(|ends| !ends.is_empty());
+                has_starts != has_ends
             };
         let mut queried_node_ids = HashSet::new();
         let mut incomplete_node_ids = node_ids
@@ -1183,6 +1188,130 @@ mod tests {
         );
         assert_eq!(node_blocks[0].start, 3);
         assert_eq!(node_blocks[0].end, 4);
+    }
+
+    #[test]
+    fn test_blocks_from_edges_does_not_treat_asymmetric_boundaries_as_incomplete() {
+        // It's possible that the passed in set of edges is deliberately incomplete.
+        // This asserts we do not expand the graph if node information is present.
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "asymmetric",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seq_src = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAA")
+            .save(&conn)
+            .unwrap();
+        let seq_mid = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAACCCGGG")
+            .save(&conn)
+            .unwrap();
+        let seq_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCC")
+            .save(&conn)
+            .unwrap();
+        let seq_b = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GGG")
+            .save(&conn)
+            .unwrap();
+        let seq_extra = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("TTT")
+            .save(&conn)
+            .unwrap();
+
+        let n_src = Node::create(&conn, &seq_src.hash, &HashId::convert_str("node-src")).unwrap();
+        let n_mid = Node::create(&conn, &seq_mid.hash, &HashId::convert_str("node-mid")).unwrap();
+        let n_a = Node::create(&conn, &seq_a.hash, &HashId::convert_str("node-a")).unwrap();
+        let n_b = Node::create(&conn, &seq_b.hash, &HashId::convert_str("node-b")).unwrap();
+        let n_extra =
+            Node::create(&conn, &seq_extra.hash, &HashId::convert_str("node-extra")).unwrap();
+
+        let e_src_mid =
+            Edge::create(&conn, n_src, 3, Strand::Forward, n_mid, 0, Strand::Forward).unwrap();
+        let e_mid_a =
+            Edge::create(&conn, n_mid, 3, Strand::Forward, n_a, 0, Strand::Forward).unwrap();
+        let e_mid_b =
+            Edge::create(&conn, n_mid, 6, Strand::Forward, n_b, 0, Strand::Forward).unwrap();
+        // We exclude this edge from graph construction
+        let e_mid_extra = Edge::create(
+            &conn,
+            n_mid,
+            9,
+            Strand::Forward,
+            n_extra,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        let block_group_edges = [
+            e_src_mid.clone(),
+            e_mid_a.clone(),
+            e_mid_b.clone(),
+            e_mid_extra,
+        ]
+        .iter()
+        .map(|edge| BlockGroupEdgeData {
+            block_group_id: bg.id,
+            edge_id: edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        })
+        .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+
+        let augmented_edges = vec![
+            AugmentedEdge {
+                edge: e_src_mid,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+            AugmentedEdge {
+                edge: e_mid_a,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+            AugmentedEdge {
+                edge: e_mid_b,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+        ];
+
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges).unwrap();
+        let mid_intervals = blocks
+            .iter()
+            .filter(|block| block.node_id == n_mid)
+            .map(|block| (block.start, block.end))
+            .collect::<Vec<_>>();
+
+        assert_eq!(mid_intervals, vec![(0, 3), (3, 6)]);
+        assert!(!blocks.iter().any(|block| block.node_id == n_extra));
     }
 
     #[test]
