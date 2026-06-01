@@ -37,6 +37,7 @@ expect_binding_result <- function(result) {
       is.list(result) ||
       is.logical(result) ||
       is.null(result) ||
+      inherits(result, "gen_block_group") ||
       inherits(result, "try-error")
   )
 }
@@ -223,7 +224,7 @@ test_that("graph operation bindings work", {
 
   expect_binding_result(try(repo$derive_chunks(
     sample = "sample-a", new_sample = "chunked",
-    region = "m123", breakpoints = "10,20"
+    region = "m123", breakpoints = c(10L, 20L)
   ), silent = TRUE))
 
   groups <- repo$get_block_groups()

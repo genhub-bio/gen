@@ -128,6 +128,9 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
   }
 
   bg$chunks <- function(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL) {
+    if (!is.null(breakpoints) && !is.numeric(breakpoints) && !is.integer(breakpoints)) {
+      stop("breakpoints must be a numeric or integer vector, e.g. c(10L, 20L)", call. = FALSE)
+    }
     lapply(
       gen_bg$chunks(
         new_sample,
@@ -704,6 +707,9 @@ Repository <- function(path = NULL) {
   }
 
   repo$derive_chunks <- function(sample, new_sample, region, backbone = NULL, breakpoints = NULL, chunk_size = NULL, collection = NULL) {
+    if (!is.null(breakpoints) && !is.numeric(breakpoints) && !is.integer(breakpoints)) {
+      stop("breakpoints must be a numeric or integer vector, e.g. c(10L, 20L)", call. = FALSE)
+    }
     inner$derive_chunks(collection, sample, new_sample, region, backbone,
                         if (is.null(breakpoints)) integer(0) else as.integer(breakpoints),
                         if (is.null(chunk_size)) NULL else as.integer(chunk_size))
