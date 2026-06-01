@@ -855,6 +855,288 @@ mod tests {
         );
     }
 
+    fn make_block(
+        node_id: &str,
+        start: i64,
+        end: i64,
+        seq_start: i64,
+        seq_end: i64,
+    ) -> (std::ops::Range<i64>, NodeIntervalBlock) {
+        (
+            start..end,
+            NodeIntervalBlock {
+                node_id: HashId::convert_str(node_id),
+                start,
+                end,
+                sequence_start: seq_start,
+                sequence_end: seq_end,
+                strand: Strand::Forward,
+            },
+        )
+    }
+
+    #[test]
+    fn test_graph_from_interval_tree_length_1() {
+        let tree: IntervalTree<i64, NodeIntervalBlock> =
+            vec![make_block("node-a", 0, 5, 0, 5)].into_iter().collect();
+
+        let graph = graph_from_interval_tree(&tree);
+
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+
+        let node = GraphNode {
+            node_id: HashId::convert_str("node-a"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        assert!(graph.contains_node(node));
+    }
+
+    #[test]
+    fn test_graph_from_interval_tree_length_2() {
+        let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
+            make_block("node-a", 0, 5, 0, 5),
+            make_block("node-b", 5, 10, 0, 5),
+        ]
+        .into_iter()
+        .collect();
+
+        let graph = graph_from_interval_tree(&tree);
+
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 1);
+
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("node-a"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("node-b"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        assert!(graph.contains_node(node_a));
+        assert!(graph.contains_node(node_b));
+        assert!(graph.contains_edge(node_a, node_b));
+
+        let neighbors: Vec<_> = graph.neighbors(node_a).collect();
+        assert_eq!(neighbors, vec![node_b]);
+    }
+
+    #[test]
+    fn test_graph_from_interval_tree_length_3() {
+        let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
+            make_block("node-a", 0, 5, 0, 5),
+            make_block("node-b", 5, 10, 0, 5),
+            make_block("node-c", 10, 15, 0, 5),
+        ]
+        .into_iter()
+        .collect();
+
+        let graph = graph_from_interval_tree(&tree);
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("node-a"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("node-b"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let node_c = GraphNode {
+            node_id: HashId::convert_str("node-c"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+
+        assert!(graph.contains_edge(node_a, node_b));
+        assert!(graph.contains_edge(node_b, node_c));
+        assert!(!graph.contains_edge(node_a, node_c));
+
+        let a_neighbors: Vec<_> = graph.neighbors(node_a).collect();
+        assert_eq!(a_neighbors, vec![node_b]);
+
+        let b_incoming: Vec<_> = graph
+            .neighbors_directed(node_b, petgraph::Direction::Incoming)
+            .collect();
+        assert_eq!(b_incoming, vec![node_a]);
+
+        let b_outgoing: Vec<_> = graph
+            .neighbors_directed(node_b, petgraph::Direction::Outgoing)
+            .collect();
+        assert_eq!(b_outgoing, vec![node_c]);
+    }
+
+    #[test]
+    fn test_graph_from_interval_tree_length_4() {
+        let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
+            make_block("node-a", 0, 3, 0, 3),
+            make_block("node-b", 3, 8, 0, 5),
+            make_block("node-c", 8, 11, 0, 3),
+            make_block("node-d", 11, 16, 0, 5),
+        ]
+        .into_iter()
+        .collect();
+
+        let graph = graph_from_interval_tree(&tree);
+
+        assert_eq!(graph.node_count(), 4);
+        assert_eq!(graph.edge_count(), 3);
+
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("node-a"),
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("node-b"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let node_c = GraphNode {
+            node_id: HashId::convert_str("node-c"),
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let node_d = GraphNode {
+            node_id: HashId::convert_str("node-d"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+
+        assert!(graph.contains_edge(node_a, node_b));
+        assert!(graph.contains_edge(node_b, node_c));
+        assert!(graph.contains_edge(node_c, node_d));
+
+        // Verify no cross edges
+        assert!(!graph.contains_edge(node_a, node_c));
+        assert!(!graph.contains_edge(node_a, node_d));
+        assert!(!graph.contains_edge(node_b, node_d));
+
+        // Verify node properties
+        assert_eq!(node_a.length(), 3);
+        assert_eq!(node_b.length(), 5);
+        assert_eq!(node_c.length(), 3);
+        assert_eq!(node_d.length(), 5);
+
+        // Verify linear chain: A only has outgoing to B, D only has incoming from C
+        let a_out: Vec<_> = graph
+            .neighbors_directed(node_a, petgraph::Direction::Outgoing)
+            .collect();
+        assert_eq!(a_out, vec![node_b]);
+
+        let a_in: Vec<_> = graph
+            .neighbors_directed(node_a, petgraph::Direction::Incoming)
+            .collect();
+        assert!(a_in.is_empty());
+
+        let d_out: Vec<_> = graph
+            .neighbors_directed(node_d, petgraph::Direction::Outgoing)
+            .collect();
+        assert!(d_out.is_empty());
+
+        let d_in: Vec<_> = graph
+            .neighbors_directed(node_d, petgraph::Direction::Incoming)
+            .collect();
+        assert_eq!(d_in, vec![node_c]);
+    }
+
+    #[test]
+    fn test_graph_from_interval_tree_with_fragments() {
+        // Nodes can be fragments: different (seq_start, seq_end) for the same node_id
+        let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
+            make_block("node-a", 0, 3, 0, 3),  // full node A
+            make_block("node-b", 3, 6, 0, 3),  // fragment of B (first 3 bases)
+            make_block("node-c", 6, 11, 0, 5), // full node C
+        ]
+        .into_iter()
+        .collect();
+
+        let graph = graph_from_interval_tree(&tree);
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("node-a"),
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("node-b"),
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let node_c = GraphNode {
+            node_id: HashId::convert_str("node-c"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+
+        assert_eq!(node_b.length(), 3);
+        assert!(graph.contains_edge(node_a, node_b));
+        assert!(graph.contains_edge(node_b, node_c));
+    }
+
+    #[test]
+    fn test_graph_from_interval_tree_filters_sentinels() {
+        let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
+            (
+                i64::MIN + 1..0,
+                NodeIntervalBlock {
+                    node_id: PATH_START_NODE_ID,
+                    start: i64::MIN + 1,
+                    end: 0,
+                    sequence_start: 0,
+                    sequence_end: 0,
+                    strand: Strand::Forward,
+                },
+            ),
+            make_block("node-a", 0, 5, 0, 5),
+            make_block("node-b", 5, 10, 0, 5),
+            (
+                10..i64::MAX,
+                NodeIntervalBlock {
+                    node_id: PATH_END_NODE_ID,
+                    start: 10,
+                    end: i64::MAX,
+                    sequence_start: 0,
+                    sequence_end: 0,
+                    strand: Strand::Forward,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let graph = graph_from_interval_tree(&tree);
+
+        // Sentinels should be filtered out
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 1);
+
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("node-a"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("node-b"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        assert!(graph.contains_node(node_a));
+        assert!(graph.contains_node(node_b));
+        assert!(graph.contains_edge(node_a, node_b));
+    }
+
     #[test]
     fn test_finds_all_reachable_nodes() {
         //

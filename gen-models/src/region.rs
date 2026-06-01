@@ -375,6 +375,55 @@ impl ResolvedGenRegion {
             )),
         }
     }
+
+    pub fn find_graph_positions(
+        &self,
+        conn: &GraphConnection,
+        start_offset: i64,
+        end_offset: i64,
+    ) -> Result<
+        (
+            Vec<gen_graph::GraphNodePosition>,
+            Vec<gen_graph::GraphNodePosition>,
+        ),
+        gen_graph::GraphError,
+    > {
+        let interval_tree = self
+            .intervaltree(conn)
+            .map_err(|_| gen_graph::GraphError::NoPath)?;
+
+        let filtered: Vec<(std::ops::Range<i64>, gen_core::NodeIntervalBlock)> = interval_tree
+            .iter()
+            .filter(|item| {
+                !gen_core::is_terminal(item.value.node_id)
+                    && item.value.sequence_start < item.value.sequence_end
+            })
+            .map(|item| (item.range.clone(), item.value))
+            .collect();
+        let tree: intervaltree::IntervalTree<i64, gen_core::NodeIntervalBlock> =
+            filtered.into_iter().collect();
+
+        let mut graph = gen_graph::graph_from_interval_tree(&tree);
+
+        let resolved = crate::graph::ResolvedGraph {
+            graph: graph.clone(),
+            interval_tree: tree,
+            block_group_id: self.block_group.id,
+        };
+        let start_anchor = resolved.resolve_anchor(self.start, conn)?;
+        let end_anchor = resolved.resolve_anchor(self.end, conn)?;
+
+        let start_positions =
+            crate::graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
+                crate::graph::expand(conn, g, &self.block_group.id, nid)
+            })?;
+        let end_positions =
+            crate::graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
+                crate::graph::expand(conn, g, &self.block_group.id, nid)
+            })?;
+
+        Ok((start_positions, end_positions))
+    }
 }
 
 #[cfg(test)]
@@ -605,6 +654,391 @@ mod tests {
             )
             .unwrap();
             assert_eq!((wrap.start, wrap.end), (15, 5));
+        }
+    }
+
+    mod find_graph_positions {
+        use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+
+        use super::*;
+        use crate::{
+            block_group::{BlockGroup, NewBlockGroup, PathCache},
+            block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+            collection::Collection,
+            edge::Edge,
+            node::Node,
+            path::Path,
+            sample::{NewSample, Sample},
+            sequence::Sequence,
+        };
+
+        fn setup_graph() -> (crate::db::GraphConnection, HashId) {
+            let conn = get_connection(None).unwrap();
+            Collection::get_or_create(&conn, "test").unwrap();
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: "test",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let block_group = BlockGroup::create(
+                &conn,
+                NewBlockGroup {
+                    collection_name: "test",
+                    sample_name: "test",
+                    name: "chr1",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let seq_x = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("XXXXX")
+                .save(&conn)
+                .unwrap();
+            let seq_y = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("YYYYY")
+                .save(&conn)
+                .unwrap();
+            let seq_z = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("ZZZZZ")
+                .save(&conn)
+                .unwrap();
+
+            let node_x = Node::create(&conn, &seq_x.hash, &HashId::convert_str("node-x")).unwrap();
+            let node_y = Node::create(&conn, &seq_y.hash, &HashId::convert_str("node-y")).unwrap();
+            let node_z = Node::create(&conn, &seq_z.hash, &HashId::convert_str("node-z")).unwrap();
+
+            let e_start = Edge::create(
+                &conn,
+                PATH_START_NODE_ID,
+                -1,
+                Strand::Forward,
+                node_x,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_xy = Edge::create(
+                &conn,
+                node_x,
+                5,
+                Strand::Forward,
+                node_y,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_yz = Edge::create(
+                &conn,
+                node_y,
+                5,
+                Strand::Forward,
+                node_z,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_end = Edge::create(
+                &conn,
+                node_z,
+                5,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+
+            BlockGroupEdge::bulk_create(
+                &conn,
+                &[
+                    BlockGroupEdgeData {
+                        block_group_id: block_group.id,
+                        edge_id: e_start.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: block_group.id,
+                        edge_id: e_xy.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: block_group.id,
+                        edge_id: e_yz.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: block_group.id,
+                        edge_id: e_end.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                ],
+            );
+
+            (conn, block_group.id)
+        }
+
+        fn create_accession(
+            conn: &crate::db::GraphConnection,
+            block_group_id: HashId,
+            name: &str,
+            start: i64,
+            end: i64,
+        ) -> Accession {
+            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+            let mut by_source: std::collections::HashMap<
+                HashId,
+                &crate::block_group_edge::AugmentedEdge,
+            > = std::collections::HashMap::new();
+            for ae in &edges {
+                by_source.insert(ae.edge.source_node_id, ae);
+            }
+            let mut ordered = vec![];
+            let mut current = Some(PATH_START_NODE_ID);
+            while let Some(src) = current {
+                if let Some(ae) = by_source.get(&src) {
+                    ordered.push(ae.edge.id);
+                    current = if ae.edge.target_node_id == PATH_END_NODE_ID {
+                        None
+                    } else {
+                        Some(ae.edge.target_node_id)
+                    };
+                } else {
+                    break;
+                }
+            }
+            let path = Path::create(conn, name, &block_group_id, &ordered).unwrap();
+            let mut path_cache = PathCache::new(conn);
+            let accession =
+                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            Path::delete(conn, name, &block_group_id);
+            accession
+        }
+
+        fn make_region(
+            bg: BlockGroup,
+            accession: Accession,
+            anchor_start: i64,
+            anchor_end: i64,
+            feature_length: i64,
+            start: i64,
+            end: i64,
+        ) -> ResolvedGenRegion {
+            ResolvedGenRegion {
+                block_group: bg,
+                path: None,
+                accession: Some(accession),
+                kind: ResolvedRegionKind::Accession,
+                anchor_start,
+                anchor_end,
+                feature_length,
+                start,
+                end,
+            }
+        }
+
+        #[test]
+        fn within_node() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "within", 0, 15);
+            let region = make_region(bg, acc, 0, 15, 15, 7, 7);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, 2, 2).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
+            assert_eq!(start_pos[0].offset, 4);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
+            assert_eq!(end_pos[0].offset, 4);
+        }
+
+        #[test]
+        fn forward_across_nodes() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "fwd", 0, 15);
+            let region = make_region(bg, acc, 0, 15, 15, 7, 7);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, 5, 5).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(start_pos[0].offset, 2);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(end_pos[0].offset, 2);
+        }
+
+        #[test]
+        fn backward_across_nodes() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "bwd", 0, 15);
+            let region = make_region(bg, acc, 0, 15, 15, 7, 7);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, -5, -5).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(start_pos[0].offset, 2);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(end_pos[0].offset, 2);
+        }
+
+        #[test]
+        fn out_of_bounds() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "oob", 0, 15);
+            let region = make_region(bg, acc, 0, 15, 15, 7, 7);
+
+            assert!(region.find_graph_positions(&conn, 100, 100).is_err());
+        }
+
+        #[test]
+        fn from_start() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "start", 0, 15);
+            let region = make_region(bg, acc, 0, 15, 15, 0, 0);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, 12, 12).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(start_pos[0].offset, 2);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(end_pos[0].offset, 2);
+        }
+
+        #[test]
+        fn from_end() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "end", 0, 15);
+            let region = make_region(bg, acc, 0, 15, 15, 14, 14);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, -14, -14).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(start_pos[0].offset, 0);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(end_pos[0].offset, 0);
+        }
+
+        #[test]
+        fn accession_within() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "acc-within", 5, 10);
+            let region = make_region(bg, acc, 5, 10, 5, 2, 2);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, 1, 1).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
+            assert_eq!(start_pos[0].offset, 3);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-y"));
+            assert_eq!(end_pos[0].offset, 3);
+        }
+
+        #[test]
+        fn accession_forward_expand() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "acc-fwd", 5, 10);
+            let region = make_region(bg, acc, 5, 10, 5, 3, 3);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, 5, 5).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(start_pos[0].offset, 3);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-z"));
+            assert_eq!(end_pos[0].offset, 3);
+        }
+
+        #[test]
+        fn accession_backward_expand() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "acc-bwd", 5, 10);
+            let region = make_region(bg, acc, 5, 10, 5, 1, 1);
+
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, -4, -4).unwrap();
+            assert_eq!(start_pos.len(), 1);
+            assert_eq!(start_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(start_pos[0].offset, 2);
+            assert_eq!(end_pos.len(), 1);
+            assert_eq!(end_pos[0].graph_node.node_id, HashId::convert_str("node-x"));
+            assert_eq!(end_pos[0].offset, 2);
+        }
+
+        #[test]
+        fn accession_out_of_bounds() {
+            let (conn, bg_id) = setup_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let acc = create_accession(&conn, bg_id, "acc-oob", 5, 10);
+            let region = make_region(bg, acc, 5, 10, 5, 2, 2);
+
+            assert!(region.find_graph_positions(&conn, 100, 100).is_err());
+        }
+
+        #[test]
+        fn branched_graph_backward_returns_all_positions() {
+            let (conn, bg_id) = setup_branched_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            // Accession on TTT: path positions 3..6, accession-relative 0..3
+            let acc = create_accession(&conn, bg_id, "branched-bwd", 3, 6);
+            let region = make_region(bg, acc, 3, 6, 3, 0, 0);
+
+            // Backward 3 from TTT offset 0 → should find AAA and GGG at offset 0
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, -3, -3).unwrap();
+            assert_eq!(start_pos.len(), 2);
+            let start_ids: Vec<HashId> = start_pos.iter().map(|p| p.graph_node.node_id).collect();
+            assert!(start_ids.contains(&HashId::convert_str("node-aaa")));
+            assert!(start_ids.contains(&HashId::convert_str("node-ggg")));
+            for pos in &start_pos {
+                assert_eq!(pos.offset, 0);
+            }
+            assert_eq!(end_pos.len(), 2);
+            let end_ids: Vec<HashId> = end_pos.iter().map(|p| p.graph_node.node_id).collect();
+            assert!(end_ids.contains(&HashId::convert_str("node-aaa")));
+            assert!(end_ids.contains(&HashId::convert_str("node-ggg")));
+        }
+
+        #[test]
+        fn branched_graph_forward_returns_all_positions() {
+            let (conn, bg_id) = setup_branched_graph();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            // Accession on TTT: path positions 3..6, accession-relative 0..3
+            let acc = create_accession(&conn, bg_id, "branched-fwd", 3, 6);
+            let region = make_region(bg, acc, 3, 6, 3, 2, 2);
+
+            // Forward 3 from TTT offset 2 → should find CCC and ATC at offset 2
+            let (start_pos, end_pos) = region.find_graph_positions(&conn, 3, 3).unwrap();
+            assert_eq!(start_pos.len(), 2);
+            let start_ids: Vec<HashId> = start_pos.iter().map(|p| p.graph_node.node_id).collect();
+            assert!(start_ids.contains(&HashId::convert_str("node-ccc")));
+            assert!(start_ids.contains(&HashId::convert_str("node-atc")));
+            for pos in &start_pos {
+                assert_eq!(pos.offset, 2);
+            }
+            assert_eq!(end_pos.len(), 2);
+            let end_ids: Vec<HashId> = end_pos.iter().map(|p| p.graph_node.node_id).collect();
+            assert!(end_ids.contains(&HashId::convert_str("node-ccc")));
+            assert!(end_ids.contains(&HashId::convert_str("node-atc")));
         }
     }
 }
