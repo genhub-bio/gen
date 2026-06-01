@@ -23,7 +23,7 @@ CREATE TABLE operations (
 
 CREATE TABLE file_additions (
   id BLOB PRIMARY KEY NOT NULL,
-  file_path TEXT NOT NULL,
+  asset_uri TEXT NOT NULL,
   file_type TEXT NOT NULL,
   checksum BLOB NOT NULL
 ) STRICT;
@@ -32,6 +32,8 @@ CREATE TABLE operation_files (
   id INTEGER PRIMARY KEY NOT NULL,
   operation_hash BLOB NOT NULL,
   file_addition_id BLOB NOT NULL,
+  filename TEXT NOT NULL DEFAULT '',
+  file_path TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(operation_hash) REFERENCES operations(hash),
   FOREIGN KEY(file_addition_id) REFERENCES file_additions(id)
 ) STRICT;
@@ -41,6 +43,17 @@ CREATE TABLE operation_summaries (
   operation_hash BLOB NOT NULL,
   summary TEXT NOT NULL,
   FOREIGN KEY(operation_hash) REFERENCES operations(hash)
+) STRICT;
+
+CREATE TABLE annotation_files (
+  id INTEGER PRIMARY KEY NOT NULL,
+  operation_hash BLOB NOT NULL,
+  file_addition_id BLOB NOT NULL,
+  index_file_addition_id BLOB,
+  name TEXT,
+  FOREIGN KEY(operation_hash) REFERENCES operations(hash),
+  FOREIGN KEY(file_addition_id) REFERENCES file_additions(id),
+  FOREIGN KEY(index_file_addition_id) REFERENCES file_additions(id)
 ) STRICT;
 
 CREATE TABLE remotes (
