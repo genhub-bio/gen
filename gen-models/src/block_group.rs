@@ -35,7 +35,6 @@ use crate::{
     path::{Path, PathData},
     path_edge::PathEdge,
     sample::Sample,
-    sequence::Sequence,
     traits::*,
 };
 
