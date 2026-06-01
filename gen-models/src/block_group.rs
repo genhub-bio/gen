@@ -1884,7 +1884,7 @@ mod tests {
     fn test_get_graph_branched_graph() {
         // Branched graph: {AAA,GGG} → TTT → {CCC,ATC}
         // TTT has 2 incoming edges and 2 outgoing edges.
-        // All sequences are length 3.
+        // There are explicitly no start/end nodes to ensure we can build graphs purely from coordinates
         let conn = get_connection(None).unwrap();
         Collection::get_or_create(&conn, "test").unwrap();
         crate::sample::Sample::get_or_create(
@@ -1938,26 +1938,6 @@ mod tests {
         let n_ccc = Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
         let n_atc = Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
 
-        let e_start_aaa = Edge::create(
-            &conn,
-            PATH_START_NODE_ID,
-            -1,
-            Strand::Forward,
-            n_aaa,
-            0,
-            Strand::Forward,
-        )
-        .unwrap();
-        let e_start_ggg = Edge::create(
-            &conn,
-            PATH_START_NODE_ID,
-            -1,
-            Strand::Forward,
-            n_ggg,
-            0,
-            Strand::Forward,
-        )
-        .unwrap();
         // Edges: AAA→TTT, GGG→TTT, TTT→CCC, TTT→ATC
         let e_aaa_ttt =
             Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
@@ -1967,45 +1947,16 @@ mod tests {
             Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
         let e_ttt_atc =
             Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
-        let e_ccc_end = Edge::create(
-            &conn,
-            n_ccc,
-            3,
-            Strand::Forward,
-            PATH_END_NODE_ID,
-            -1,
-            Strand::Forward,
-        )
-        .unwrap();
-        let e_atc_end = Edge::create(
-            &conn,
-            n_atc,
-            3,
-            Strand::Forward,
-            PATH_END_NODE_ID,
-            -1,
-            Strand::Forward,
-        )
-        .unwrap();
 
-        let block_group_edges = [
-            e_start_aaa,
-            e_start_ggg,
-            e_aaa_ttt,
-            e_ggg_ttt,
-            e_ttt_ccc,
-            e_ttt_atc,
-            e_ccc_end,
-            e_atc_end,
-        ]
-        .iter()
-        .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: bg.id,
-            edge_id: edge_id.id,
-            chromosome_index: 0,
-            phased: 0,
-        })
-        .collect::<Vec<_>>();
+        let block_group_edges = [e_aaa_ttt, e_ggg_ttt, e_ttt_ccc, e_ttt_atc]
+            .iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id: bg.id,
+                edge_id: edge_id.id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
 
         BlockGroupEdge::bulk_create(&conn, &block_group_edges);
         let graph = BlockGroup::get_graph(&conn, &bg.id);

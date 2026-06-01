@@ -1,21 +1,22 @@
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
+    rc::Rc,
 };
 
 use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash, is_end_node,
-    is_start_node, traits::Capnp,
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash, is_terminal,
+    traits::Capnp,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use rusqlite::{Row, params};
+use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group_edge::{AugmentedEdge, BlockGroupEdge},
+    block_group_edge::AugmentedEdge,
     db::GraphConnection,
     errors::NodeError,
     gen_models_capnp::edge,
@@ -310,33 +311,70 @@ impl Edge {
         }
     }
 
-    #[cfg(test)]
-    fn get_block_boundaries(
-        source_edges: Option<&Vec<&Edge>>,
-        target_edges: Option<&Vec<&Edge>>,
-    ) -> Vec<i64> {
-        let mut block_boundary_coordinates = HashSet::new();
-        if let Some(actual_source_edges) = source_edges {
-            for source_edge in actual_source_edges {
-                block_boundary_coordinates.insert(source_edge.source_coordinate);
-            }
-        }
-        if let Some(actual_target_edges) = target_edges {
-            for target_edge in actual_target_edges {
-                block_boundary_coordinates.insert(target_edge.target_coordinate);
-            }
+    pub fn edges_for_block_group_nodes(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_ids: &[HashId],
+    ) -> Vec<AugmentedEdge> {
+        if node_ids.is_empty() {
+            return vec![];
         }
 
-        block_boundary_coordinates
-            .into_iter()
-            .sorted_by(|c1, c2| Ord::cmp(&c1, &c2))
-            .collect::<Vec<i64>>()
+        let mut edges = vec![];
+        let batch_size = max_rows_per_batch(conn, 1);
+        let query = "\
+            SELECT
+                e.id,
+                e.source_node_id,
+                e.source_coordinate,
+                e.source_strand,
+                e.target_node_id,
+                e.target_coordinate,
+                e.target_strand,
+                bge.chromosome_index,
+                bge.phased,
+                bge.created_on
+            FROM block_group_edges bge
+            JOIN edges e ON e.id = bge.edge_id
+            WHERE bge.block_group_id = ?1
+              AND (e.source_node_id IN rarray(?2) OR e.target_node_id IN rarray(?2))
+            ORDER BY bge.created_on DESC;";
+
+        for chunk in node_ids.chunks(batch_size) {
+            let values = chunk.iter().copied().map(Value::from).collect::<Vec<_>>();
+            let mut stmt = conn.prepare_cached(query).unwrap();
+            let rows = stmt
+                .query_map(params![block_group_id, Rc::new(values)], |row| {
+                    Ok(AugmentedEdge {
+                        edge: Edge {
+                            id: row.get(0)?,
+                            source_node_id: row.get(1)?,
+                            source_coordinate: row.get(2)?,
+                            source_strand: row.get(3)?,
+                            target_node_id: row.get(4)?,
+                            target_coordinate: row.get(5)?,
+                            target_strand: row.get(6)?,
+                        },
+                        chromosome_index: row.get(7)?,
+                        phased: row.get(8)?,
+                        created_on: row.get(9)?,
+                    })
+                })
+                .unwrap();
+
+            edges.extend(rows.map(|row| row.unwrap()));
+        }
+
+        edges
     }
 
     fn get_block_intervals(starts: &HashSet<i64>, ends: &HashSet<i64>) -> Vec<(i64, i64)> {
         let coordinates = starts.union(ends).sorted().copied().collect::<Vec<_>>();
-        if coordinates.len() < 2 {
+        if coordinates.is_empty() {
             panic!("Cannot build blocks from starts {starts:?} and ends {ends:?}");
+        }
+        if coordinates.len() == 1 {
+            return vec![(coordinates[0], coordinates[0])];
         }
 
         coordinates.into_iter().tuple_windows().collect()
@@ -351,21 +389,21 @@ impl Edge {
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         for edge in edges.iter().map(|edge| &edge.edge) {
-            if !is_start_node(edge.source_node_id) {
+            if !is_terminal(edge.source_node_id) {
                 node_ids.insert(edge.source_node_id);
-                ends_by_node_id
-                    .entry(edge.source_node_id)
-                    .or_default()
-                    .insert(edge.source_coordinate);
             }
+            ends_by_node_id
+                .entry(edge.source_node_id)
+                .or_default()
+                .insert(edge.source_coordinate);
 
-            if !is_end_node(edge.target_node_id) {
+            if !is_terminal(edge.target_node_id) {
                 node_ids.insert(edge.target_node_id);
-                starts_by_node_id
-                    .entry(edge.target_node_id)
-                    .or_default()
-                    .insert(edge.target_coordinate);
             }
+            starts_by_node_id
+                .entry(edge.target_node_id)
+                .or_default()
+                .insert(edge.target_coordinate);
         }
 
         let incomplete_node_ids = node_ids
@@ -377,9 +415,11 @@ impl Edge {
             })
             .collect::<HashSet<_>>();
         if !incomplete_node_ids.is_empty() {
-            for edge in BlockGroupEdge::edges_for_block_group(conn, block_group_id)
-                .iter()
-                .map(|augmented_edge| &augmented_edge.edge)
+            let incomplete_node_ids = incomplete_node_ids.iter().copied().collect::<Vec<_>>();
+            for edge in
+                Edge::edges_for_block_group_nodes(conn, block_group_id, &incomplete_node_ids)
+                    .iter()
+                    .map(|augmented_edge| &augmented_edge.edge)
             {
                 if incomplete_node_ids.contains(&edge.source_node_id) {
                     ends_by_node_id
@@ -544,6 +584,28 @@ mod tests {
         test_helpers::{get_connection, setup_block_group},
     };
 
+    fn get_block_boundaries(
+        source_edges: Option<&Vec<&Edge>>,
+        target_edges: Option<&Vec<&Edge>>,
+    ) -> Vec<i64> {
+        let mut block_boundary_coordinates = HashSet::new();
+        if let Some(actual_source_edges) = source_edges {
+            for source_edge in actual_source_edges {
+                block_boundary_coordinates.insert(source_edge.source_coordinate);
+            }
+        }
+        if let Some(actual_target_edges) = target_edges {
+            for target_edge in actual_target_edges {
+                block_boundary_coordinates.insert(target_edge.target_coordinate);
+            }
+        }
+
+        block_boundary_coordinates
+            .into_iter()
+            .sorted_by(|c1, c2| Ord::cmp(&c1, &c2))
+            .collect::<Vec<i64>>()
+    }
+
     #[test]
     fn test_bulk_create() {
         let conn = &mut get_connection(None).unwrap();
@@ -667,6 +729,105 @@ mod tests {
             let edge = Edge::get_by_id(conn, id).unwrap();
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
+    }
+
+    #[test]
+    fn test_edges_for_block_group_nodes_filters_by_block_group_and_node_ids() {
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "query-bg",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let other_bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "other-bg",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seq_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAA")
+            .save(&conn)
+            .unwrap();
+        let seq_b = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CCC")
+            .save(&conn)
+            .unwrap();
+        let seq_c = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GGG")
+            .save(&conn)
+            .unwrap();
+        let n_a = Node::create(&conn, &seq_a.hash, &HashId::convert_str("node-a")).unwrap();
+        let n_b = Node::create(&conn, &seq_b.hash, &HashId::convert_str("node-b")).unwrap();
+        let n_c = Node::create(&conn, &seq_c.hash, &HashId::convert_str("node-c")).unwrap();
+
+        let source_match =
+            Edge::create(&conn, n_a, 3, Strand::Forward, n_b, 0, Strand::Forward).unwrap();
+        let target_match =
+            Edge::create(&conn, n_c, 3, Strand::Forward, n_a, 0, Strand::Forward).unwrap();
+        let no_match =
+            Edge::create(&conn, n_b, 3, Strand::Forward, n_c, 0, Strand::Forward).unwrap();
+        let other_bg_match = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            -1,
+            Strand::Forward,
+            n_a,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        let block_group_edges = [source_match.clone(), target_match.clone(), no_match.clone()]
+            .iter()
+            .map(|edge| BlockGroupEdgeData {
+                block_group_id: bg.id,
+                edge_id: edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .chain(std::iter::once(BlockGroupEdgeData {
+                block_group_id: other_bg.id,
+                edge_id: other_bg_match.id,
+                chromosome_index: 0,
+                phased: 0,
+            }))
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+
+        let edges = Edge::edges_for_block_group_nodes(&conn, &bg.id, &[n_a]);
+        let edge_ids = edges
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(edge_ids.len(), 2);
+        assert!(edge_ids.contains(&source_match.id));
+        assert!(edge_ids.contains(&target_match.id));
+        assert!(!edge_ids.contains(&no_match.id));
+        assert!(!edge_ids.contains(&other_bg_match.id));
     }
 
     #[test]
@@ -1151,7 +1312,7 @@ mod tests {
         )
         .unwrap();
 
-        let boundaries = Edge::get_block_boundaries(Some(&vec![&edge1]), Some(&vec![&edge2]));
+        let boundaries = get_block_boundaries(Some(&vec![&edge1]), Some(&vec![&edge2]));
         assert_eq!(boundaries, vec![2, 3]);
     }
 
@@ -1203,9 +1364,9 @@ mod tests {
         )
         .unwrap();
 
-        let outgoing_boundaries = Edge::get_block_boundaries(Some(&vec![&edge1]), None);
+        let outgoing_boundaries = get_block_boundaries(Some(&vec![&edge1]), None);
         assert_eq!(outgoing_boundaries, vec![2]);
-        let incoming_boundaries = Edge::get_block_boundaries(None, Some(&vec![&edge2]));
+        let incoming_boundaries = get_block_boundaries(None, Some(&vec![&edge2]));
         assert_eq!(incoming_boundaries, vec![3]);
     }
 
