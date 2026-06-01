@@ -252,34 +252,24 @@ impl GenGraphMatcher {
         }
 
         let matcher = self.sequence_kind.matcher_for_query(query);
-        let mut out = self.find_all_query_orientation(query, matcher);
 
         if self.sequence_kind == SequenceKind::Dna {
-            for m in out.iter_mut() {
-                for s in m.slices.iter_mut() {
-                    s.strand = Strand::Forward;
-                }
-            }
+            let mut out = self.find_all_query_orientation(query, matcher, Strand::Forward);
             let rc = reverse_complement(query);
             let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
-            let rc_matches = self.find_all_query_orientation(&rc, rc_matcher);
-            for mut m in rc_matches {
-                for s in m.slices.iter_mut() {
-                    s.strand = Strand::Reverse;
-                }
-                out.push(m);
-            }
+            out.append(&mut self.find_all_query_orientation(&rc, rc_matcher, Strand::Reverse));
+            out
+        } else {
+            self.find_all_query_orientation(query, matcher, Strand::Unknown)
         }
-
-        out
     }
 
-    /// Returns every forward-only match using a seed index to prune start positions.
+    /// Returns every match of `query` using a seed index to prune start positions.
     ///
-    /// Does not perform reverse-complement search. Does not expand IUPAC-degenerate
-    /// bases. Returns an error if the query contains degenerate bases, because an
-    /// exact seed lookup would silently miss valid matches.
-    ///
+    /// For `SequenceKind::Dna`, also searches the reverse complement and tags
+    /// results with `Strand::Forward` or `Strand::Reverse`. Does not expand
+    /// IUPAC-degenerate bases. Returns an error if the query contains degenerate
+    /// bases, because an exact seed lookup would silently miss valid matches.
     pub fn find_all_with_seed_index(
         &self,
         seed_index: &SeedIndex,
@@ -299,8 +289,31 @@ impl GenGraphMatcher {
             |q: u8, g: u8| q == g
         };
 
+        if self.sequence_kind == SequenceKind::Dna {
+            let mut out =
+                self.index_search_one_orientation(seed_index, query, matcher, Strand::Forward);
+            let rc = reverse_complement(query);
+            out.append(&mut self.index_search_one_orientation(
+                seed_index,
+                &rc,
+                matcher,
+                Strand::Reverse,
+            ));
+            Ok(out)
+        } else {
+            Ok(self.index_search_one_orientation(seed_index, query, matcher, Strand::Unknown))
+        }
+    }
+
+    fn index_search_one_orientation(
+        &self,
+        seed_index: &SeedIndex,
+        query: &[u8],
+        matcher: fn(u8, u8) -> bool,
+        strand: Strand,
+    ) -> Vec<GraphLocus> {
         if query.len() < seed_index.k {
-            return Ok(self.find_all_forward(query, matcher));
+            return self.find_all_forward(query, matcher, strand);
         }
 
         let seed: Vec<u8> = if seed_index.normalized {
@@ -313,22 +326,27 @@ impl GenGraphMatcher {
         };
 
         let Some(positions) = seed_index.table.get(&seed) else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
 
         let mut out = Vec::new();
         for &pos in positions {
-            self.collect_matches_from(pos, query, matcher, &mut out);
+            self.collect_matches_from(pos, query, matcher, &mut out, strand);
         }
-        Ok(out)
+        out
     }
 
-    fn find_all_forward(&self, query: &[u8], matcher: fn(u8, u8) -> bool) -> Vec<GraphLocus> {
+    fn find_all_forward(
+        &self,
+        query: &[u8],
+        matcher: fn(u8, u8) -> bool,
+        strand: Strand,
+    ) -> Vec<GraphLocus> {
         if query.is_empty() {
             return Vec::new();
         }
 
-        self.find_all_query_orientation(query, matcher)
+        self.find_all_query_orientation(query, matcher, strand)
     }
 
     fn contains_query_orientation(&self, query: &[u8], matcher: fn(u8, u8) -> bool) -> bool {
@@ -341,11 +359,12 @@ impl GenGraphMatcher {
         &self,
         query: &[u8],
         matcher: fn(u8, u8) -> bool,
+        strand: Strand,
     ) -> Vec<GraphLocus> {
         let mut out = Vec::new();
 
         for start in self.all_start_positions() {
-            self.collect_matches_from(start, query, matcher, &mut out);
+            self.collect_matches_from(start, query, matcher, &mut out, strand);
         }
 
         out
@@ -390,6 +409,7 @@ impl GenGraphMatcher {
         query: &[u8],
         matcher: fn(u8, u8) -> bool,
         out: &mut Vec<GraphLocus>,
+        strand: Strand,
     ) {
         #[derive(Clone, Debug)]
         struct TraceState {
@@ -425,7 +445,7 @@ impl GenGraphMatcher {
                         } else {
                             node.length() as usize
                         },
-                        strand: Strand::Unknown,
+                        strand,
                     })
                     .collect();
                 out.push(GraphLocus { slices });
@@ -756,6 +776,9 @@ mod tests {
     use super::*;
     use crate::test_helpers::{setup_block_group, setup_gen};
 
+    // The test graph is a single linear path built by setup_block_group:
+    //   AAAAAAAAAA → TTTTTTTTTT → CCCCCCCCCC → GGGGGGGGGG  (40 bp total)
+
     fn test_matcher() -> GenGraphMatcher {
         let ctx = setup_gen();
         let conn = ctx.graph().conn();
@@ -763,6 +786,15 @@ mod tests {
         let (block_group_id, _path) = setup_block_group(conn);
         let graph = BlockGroup::get_graph(conn, &block_group_id);
         GenGraphMatcher::new(conn, graph)
+    }
+
+    fn build_ssdna_matcher() -> GenGraphMatcher {
+        let ctx = setup_gen();
+        let conn = ctx.graph().conn();
+        let _ = Collection::create(conn, "test");
+        let (block_group_id, _path) = setup_block_group(conn);
+        let graph = BlockGroup::get_graph(conn, &block_group_id);
+        GenGraphMatcher::new_ssdna(conn, graph)
     }
 
     fn test_protein_matcher() -> GenGraphMatcher {
@@ -982,7 +1014,7 @@ mod tests {
 
     #[test]
     fn seed_index_find_all_with_index_matches_forward_search() {
-        let matcher = test_matcher();
+        let matcher = build_ssdna_matcher();
 
         let index = SeedIndex::build(&matcher, 4, true);
         let query = b"AAAAATTTTT";
@@ -1001,7 +1033,7 @@ mod tests {
 
     #[test]
     fn seed_index_short_query_falls_back_to_forward_find_all() {
-        let matcher = test_matcher();
+        let matcher = build_ssdna_matcher();
 
         let index = SeedIndex::build(&matcher, 4, true);
         let via_index = matcher.find_all_with_seed_index(&index, b"AA").unwrap();
@@ -1017,6 +1049,54 @@ mod tests {
             .find_all_with_seed_index(&index, b"ATGN")
             .unwrap_err();
         assert_eq!(err, SeedIndexSearchError::UnsupportedQuery);
+    }
+
+    #[test]
+    fn seed_index_finds_reverse_complement_via_index() {
+        let matcher = test_matcher();
+        let index = SeedIndex::build(&matcher, 4, true);
+
+        // The graph contains AAAAAAAAAA (A node) and TTTTTTTTTT (T node).
+        // Searching AAAAAAAAAA with DNA mode must find both the forward hit (A
+        // node) and the reverse-complement hit (T node, tagged Strand::Reverse).
+        let hits = matcher
+            .find_all_with_seed_index(&index, b"AAAAAAAAAA")
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+
+        let has_forward = hits
+            .iter()
+            .flat_map(|l| l.slices.iter())
+            .any(|s| s.strand == Strand::Forward);
+        let has_reverse = hits
+            .iter()
+            .flat_map(|l| l.slices.iter())
+            .any(|s| s.strand == Strand::Reverse);
+        assert!(has_forward, "expected a forward hit");
+        assert!(has_reverse, "expected a reverse-complement hit");
+    }
+
+    #[test]
+    fn seed_index_short_query_finds_reverse_complement() {
+        let matcher = test_matcher();
+        let index = SeedIndex::build(&matcher, 4, true);
+
+        // Query shorter than k=4 falls back to a full scan, but DNA mode must
+        // still search the RC. "GG" appears 9 times in the G node (forward) and
+        // its RC "CC" appears 9 times in the C node (reverse). Total: 18.
+        let hits = matcher.find_all_with_seed_index(&index, b"GG").unwrap();
+        assert_eq!(hits.len(), 18);
+
+        let has_forward = hits
+            .iter()
+            .flat_map(|l| l.slices.iter())
+            .any(|s| s.strand == Strand::Forward);
+        let has_reverse = hits
+            .iter()
+            .flat_map(|l| l.slices.iter())
+            .any(|s| s.strand == Strand::Reverse);
+        assert!(has_forward, "expected forward hits");
+        assert!(has_reverse, "expected reverse-complement hits");
     }
 
     #[test]
