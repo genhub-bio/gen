@@ -1100,6 +1100,10 @@ mod tests {
 
     #[test]
     fn test_blocks_from_edges_uses_edge_coordinates_not_backing_sequence_length() {
+        // This test ensures we do not use sequence_start or sequence_end to get coordinates by making
+        // a test case where the graph has no nodes that are the sequence length. This was leading to
+        // technically incorrect behavior by adding blocks of [0, sequence_length] when that was just
+        // a happy coincidence it worked
         let conn = get_connection(None).unwrap();
         Collection::get_or_create(&conn, "test").unwrap();
         crate::sample::Sample::get_or_create(
@@ -1316,6 +1320,8 @@ mod tests {
 
     #[test]
     fn test_blocks_from_edges_resolves_incomplete_nodes_created_by_lookup() {
+        // If a node is present as just a source or sink node, ensure we look it up to
+        // accurately add it to the graph.
         let conn = get_connection(None).unwrap();
         Collection::get_or_create(&conn, "test").unwrap();
         crate::sample::Sample::get_or_create(
