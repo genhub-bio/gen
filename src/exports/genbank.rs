@@ -20,7 +20,7 @@ use gen_models::{
     annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
-    errors::{AnnotationError, PathError, SequenceError},
+    errors::{AnnotationError, BlockGroupError, PathError, SequenceError},
     node::Node,
     sample::Sample,
     traits::Query,
@@ -42,6 +42,8 @@ pub enum GenbankExportError {
     Sequence(#[from] SequenceError),
     #[error("Path error while exporting GenBank: {0}")]
     Path(#[from] PathError),
+    #[error("Block group error while exporting GenBank: {0}")]
+    BlockGroup(#[from] BlockGroupError),
 }
 
 fn build_annotation_location(
@@ -286,7 +288,7 @@ pub fn export_genbank(
         export_annotations(conn, &path, &path_blocks, &mut seq, sample_name)?;
 
         // Identify the node traversal corresponding to our path.
-        let graph = BlockGroup::get_graph(conn, &block_group.id);
+        let graph = BlockGroup::get_graph(conn, &block_group.id)?;
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();

@@ -221,11 +221,7 @@ impl IntervalTreeSource for BlockGroupTreeSource {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        Ok(BlockGroup::intervaltree_for(
-            conn,
-            &self.block_group_id,
-            self.remove_ambiguous_positions,
-        ))
+        BlockGroup::intervaltree_for(conn, &self.block_group_id, self.remove_ambiguous_positions)
     }
 }
 
@@ -559,11 +555,14 @@ impl BlockGroup {
         )))
     }
 
-    pub fn get_graph(conn: &GraphConnection, block_group_id: &HashId) -> GenGraph {
+    pub fn get_graph(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+    ) -> Result<GenGraph, BlockGroupError> {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges);
+        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges)?;
         let (graph, _) = Edge::build_graph(&edges, &blocks);
-        graph
+        Ok(graph)
     }
 
     pub fn prune_graph(graph: &mut GenGraph) {
@@ -625,12 +624,12 @@ impl BlockGroup {
         conn: &GraphConnection,
         block_group_id: &HashId,
         _prune: bool,
-    ) -> HashSet<String> {
+    ) -> Result<HashSet<String>, BlockGroupError> {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id)
             .into_iter()
             .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
             .collect::<Vec<_>>();
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges);
+        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges)?;
 
         let (mut graph, _) = Edge::build_graph(&edges, &blocks);
         BlockGroup::prune_graph(&mut graph);
@@ -681,7 +680,7 @@ impl BlockGroup {
             }
         }
 
-        sequences
+        Ok(sequences)
     }
 
     pub fn add_accession(
@@ -1125,11 +1124,11 @@ impl BlockGroup {
         conn: &GraphConnection,
         block_group_id: &HashId,
         remove_ambiguous_positions: bool,
-    ) -> IntervalTree<i64, NodeIntervalBlock> {
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
         // make a tree where every node has a span in the graph.
-        let mut graph = BlockGroup::get_graph(conn, block_group_id);
+        let mut graph = BlockGroup::get_graph(conn, block_group_id)?;
         BlockGroup::prune_graph(&mut graph);
-        flatten_to_interval_tree(&graph, remove_ambiguous_positions)
+        Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
     }
 
     pub fn get_current_path(conn: &GraphConnection, block_group_id: &HashId) -> Path {
@@ -1174,7 +1173,7 @@ impl BlockGroup {
         target_block_group_id: &HashId,
         create_terminal_edges: bool,
     ) -> Result<HashMap<HashId, HashId>, BlockGroupError> {
-        let current_graph = BlockGroup::get_graph(conn, source_block_group_id);
+        let current_graph = BlockGroup::get_graph(conn, source_block_group_id)?;
         let start_node = current_graph
             .nodes()
             .find(|node| {
@@ -1800,15 +1799,15 @@ mod tests {
         );
 
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &child_a.id, false),
+            BlockGroup::get_all_sequences(conn, &child_a.id, false).unwrap(),
             HashSet::from_iter(vec!["AAAA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &child_b.id, false),
+            BlockGroup::get_all_sequences(conn, &child_b.id, false).unwrap(),
             HashSet::from_iter(vec!["CCCC".to_string()])
         );
         assert_eq!(
-            Sample::get_all_sequences(conn, "test", "child", false),
+            Sample::get_all_sequences(conn, "test", "child", false).unwrap(),
             HashSet::from_iter(vec!["AAAA".to_string(), "CCCC".to_string()])
         );
     }
@@ -2019,7 +2018,7 @@ mod tests {
         .collect::<Vec<_>>();
 
         BlockGroupEdge::bulk_create(&conn, &block_group_edges);
-        let graph = BlockGroup::get_graph(&conn, &bg.id);
+        let graph = BlockGroup::get_graph(&conn, &bg.id).unwrap();
 
         // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
         // 2 terminal blocks: START, END
@@ -2378,7 +2377,7 @@ mod tests {
         };
 
         BlockGroup::insert_change(&conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2432,7 +2431,7 @@ mod tests {
         };
 
         BlockGroup::insert_change(&conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2475,7 +2474,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2514,7 +2513,7 @@ mod tests {
         };
         // take out an entire block.
         BlockGroup::insert_change(&conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2559,7 +2558,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2602,7 +2601,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2645,7 +2644,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2688,7 +2687,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2731,7 +2730,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2774,7 +2773,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2817,7 +2816,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2860,7 +2859,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2905,7 +2904,7 @@ mod tests {
 
         // take out an entire block.
         BlockGroup::insert_change(&conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2948,7 +2947,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -2958,7 +2957,7 @@ mod tests {
         );
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3001,7 +3000,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3044,7 +3043,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3087,7 +3086,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3130,7 +3129,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3173,7 +3172,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3216,7 +3215,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3259,7 +3258,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3350,7 +3349,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3393,7 +3392,7 @@ mod tests {
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false);
+        let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3457,8 +3456,8 @@ mod tests {
         };
         BlockGroup::insert_change(conn, &change).unwrap();
 
-        let tree = BlockGroup::intervaltree_for(conn, &block_group_id, false);
-        let tree2 = BlockGroup::intervaltree_for(conn, &block_group_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &block_group_id, false).unwrap();
+        let tree2 = BlockGroup::intervaltree_for(conn, &block_group_id, true).unwrap();
         interval_tree_verify(
             &tree,
             3,
@@ -3509,8 +3508,8 @@ mod tests {
         );
 
         // This blockgroup has a change from positions 7-15 of 4 base pairs -- so any changes after this will be ambiguous
-        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, false);
-        let tree2 = BlockGroup::intervaltree_for(conn, &new_bg_id, true);
+        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, false).unwrap();
+        let tree2 = BlockGroup::intervaltree_for(conn, &new_bg_id, true).unwrap();
         interval_tree_verify(
             &tree,
             3,
@@ -3631,7 +3630,7 @@ mod tests {
         };
         // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAAAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),])
@@ -3684,7 +3683,7 @@ mod tests {
         };
         // take out an entire block.
         BlockGroup::insert_change(conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAAAAAANNNNTCCCCCCCCCCGGGGGGGGGG".to_string(),])
@@ -3743,7 +3742,7 @@ mod tests {
         };
         // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3811,7 +3810,7 @@ mod tests {
         };
         // take out an entire block.
         BlockGroup::insert_change(conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -3877,7 +3876,7 @@ mod tests {
         };
         // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -4048,7 +4047,8 @@ mod tests {
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
             );
 
-            let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false);
+            let all_sequences =
+                BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
             assert_eq!(
                 all_sequences,
                 HashSet::from_iter(vec![
@@ -4081,7 +4081,8 @@ mod tests {
                 true,
             )
             .unwrap();
-            let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
+            let all_sequences2 =
+                BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
             assert_eq!(
                 all_sequences2,
                 HashSet::from_iter(vec!["TTTTTCCCCC".to_string(), "TAAAAAAAAC".to_string(),])
@@ -4267,7 +4268,8 @@ mod tests {
                 "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
             );
 
-            let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false);
+            let all_sequences =
+                BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
             assert_eq!(
                 all_sequences,
                 HashSet::from_iter(vec![
@@ -4302,7 +4304,8 @@ mod tests {
                 true,
             )
             .unwrap();
-            let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
+            let all_sequences2 =
+                BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
             assert_eq!(
                 all_sequences2,
                 HashSet::from_iter(vec![
@@ -4547,7 +4550,8 @@ mod tests {
             ];
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-            let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false);
+            let all_sequences =
+                BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
             assert_eq!(
                 all_sequences,
                 HashSet::from_iter(vec![
@@ -4583,7 +4587,8 @@ mod tests {
                 true,
             )
             .unwrap();
-            let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false);
+            let all_sequences2 =
+                BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
             assert_eq!(
                 all_sequences2,
                 // The deletion is not included in the cloned subgraph since one end of it is

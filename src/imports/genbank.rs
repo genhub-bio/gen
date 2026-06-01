@@ -1236,7 +1236,7 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
+            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1287,7 +1287,7 @@ mod tests {
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false);
+            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1346,7 +1346,8 @@ mod tests {
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion", None),
                 false,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1407,7 +1408,8 @@ mod tests {
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution", None),
                 false,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1454,6 +1456,7 @@ mod tests {
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None),
                 false,
             )
+            .unwrap()
             .iter()
             .map(|s| s.to_lowercase())
             .collect();

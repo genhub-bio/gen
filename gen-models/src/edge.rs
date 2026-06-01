@@ -206,6 +206,11 @@ pub enum EdgeError {
     NodeError(#[from] NodeError),
     #[error("Sequence error: {0}")]
     SequenceError(#[from] SequenceError),
+    #[error("Cannot build blocks from starts {starts:?} and ends {ends:?}")]
+    BlockIntervalError {
+        starts: HashSet<i64>,
+        ends: HashSet<i64>,
+    },
 }
 
 impl Edge {
@@ -315,9 +320,9 @@ impl Edge {
         conn: &GraphConnection,
         block_group_id: &HashId,
         node_ids: &[HashId],
-    ) -> Vec<AugmentedEdge> {
+    ) -> Result<Vec<AugmentedEdge>, EdgeError> {
         if node_ids.is_empty() {
-            return vec![];
+            return Ok(vec![]);
         }
 
         let mut edges = vec![];
@@ -342,49 +347,55 @@ impl Edge {
 
         for chunk in node_ids.chunks(batch_size) {
             let values = chunk.iter().copied().map(Value::from).collect::<Vec<_>>();
-            let mut stmt = conn.prepare_cached(query).unwrap();
-            let rows = stmt
-                .query_map(params![block_group_id, Rc::new(values)], |row| {
-                    Ok(AugmentedEdge {
-                        edge: Edge {
-                            id: row.get(0)?,
-                            source_node_id: row.get(1)?,
-                            source_coordinate: row.get(2)?,
-                            source_strand: row.get(3)?,
-                            target_node_id: row.get(4)?,
-                            target_coordinate: row.get(5)?,
-                            target_strand: row.get(6)?,
-                        },
-                        chromosome_index: row.get(7)?,
-                        phased: row.get(8)?,
-                        created_on: row.get(9)?,
-                    })
+            let mut stmt = conn.prepare_cached(query)?;
+            let rows = stmt.query_map(params![block_group_id, Rc::new(values)], |row| {
+                Ok(AugmentedEdge {
+                    edge: Edge {
+                        id: row.get(0)?,
+                        source_node_id: row.get(1)?,
+                        source_coordinate: row.get(2)?,
+                        source_strand: row.get(3)?,
+                        target_node_id: row.get(4)?,
+                        target_coordinate: row.get(5)?,
+                        target_strand: row.get(6)?,
+                    },
+                    chromosome_index: row.get(7)?,
+                    phased: row.get(8)?,
+                    created_on: row.get(9)?,
                 })
-                .unwrap();
+            })?;
 
-            edges.extend(rows.map(|row| row.unwrap()));
+            for row in rows {
+                edges.push(row?);
+            }
         }
 
-        edges
+        Ok(edges)
     }
 
-    fn get_block_intervals(starts: &HashSet<i64>, ends: &HashSet<i64>) -> Vec<(i64, i64)> {
+    fn get_block_intervals(
+        starts: &HashSet<i64>,
+        ends: &HashSet<i64>,
+    ) -> Result<Vec<(i64, i64)>, EdgeError> {
         let coordinates = starts.union(ends).sorted().copied().collect::<Vec<_>>();
         if coordinates.is_empty() {
-            panic!("Cannot build blocks from starts {starts:?} and ends {ends:?}");
+            return Err(EdgeError::BlockIntervalError {
+                starts: starts.clone(),
+                ends: ends.clone(),
+            });
         }
         if coordinates.len() == 1 {
-            return vec![(coordinates[0], coordinates[0])];
+            return Ok(vec![(coordinates[0], coordinates[0])]);
         }
 
-        coordinates.into_iter().tuple_windows().collect()
+        Ok(coordinates.into_iter().tuple_windows().collect())
     }
 
     pub fn blocks_from_edges(
         conn: &GraphConnection,
         block_group_id: &HashId,
         edges: &[AugmentedEdge],
-    ) -> Vec<GroupBlock> {
+    ) -> Result<Vec<GroupBlock>, EdgeError> {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
@@ -425,7 +436,7 @@ impl Edge {
             let mut next_incomplete_node_ids = HashSet::new();
 
             for edge in
-                Edge::edges_for_block_group_nodes(conn, block_group_id, &incomplete_node_ids)
+                Edge::edges_for_block_group_nodes(conn, block_group_id, &incomplete_node_ids)?
                     .iter()
                     .map(|augmented_edge| &augmented_edge.edge)
             {
@@ -475,7 +486,7 @@ impl Edge {
             let empty_ends = HashSet::new();
             let starts = starts_by_node_id.get(node_id).unwrap_or(&empty_starts);
             let ends = ends_by_node_id.get(node_id).unwrap_or(&empty_ends);
-            let block_intervals = Edge::get_block_intervals(starts, ends);
+            let block_intervals = Edge::get_block_intervals(starts, ends)?;
 
             for (start, end) in block_intervals {
                 blocks.push(GroupBlock::new(block_index, *node_id, sequence, start, end));
@@ -503,7 +514,7 @@ impl Edge {
             0,
         );
         blocks.push(end_block);
-        blocks
+        Ok(blocks)
     }
 
     pub fn build_graph(
@@ -626,6 +637,34 @@ mod tests {
             .into_iter()
             .sorted_by(|c1, c2| Ord::cmp(&c1, &c2))
             .collect::<Vec<i64>>()
+    }
+
+    #[test]
+    fn test_get_block_intervals_splits_sorted_unique_coordinates() {
+        let starts = HashSet::from([5, 0, 5]);
+        let ends = HashSet::from([10, 3]);
+
+        let intervals = Edge::get_block_intervals(&starts, &ends).unwrap();
+
+        assert_eq!(intervals, vec![(0, 3), (3, 5), (5, 10)]);
+    }
+
+    #[test]
+    fn test_get_block_intervals_single_coordinate_creates_anchor_block() {
+        let starts = HashSet::from([3]);
+        let ends = HashSet::new();
+
+        let intervals = Edge::get_block_intervals(&starts, &ends).unwrap();
+
+        assert_eq!(intervals, vec![(3, 3)]);
+    }
+
+    #[test]
+    fn test_get_block_intervals_errors_without_coordinates() {
+        assert!(matches!(
+            Edge::get_block_intervals(&HashSet::new(), &HashSet::new()),
+            Err(EdgeError::BlockIntervalError { .. })
+        ));
     }
 
     #[test]
@@ -839,7 +878,7 @@ mod tests {
             .collect::<Vec<_>>();
         BlockGroupEdge::bulk_create(&conn, &block_group_edges);
 
-        let edges = Edge::edges_for_block_group_nodes(&conn, &bg.id, &[n_a]);
+        let edges = Edge::edges_for_block_group_nodes(&conn, &bg.id, &[n_a]).unwrap();
         let edge_ids = edges
             .iter()
             .map(|augmented_edge| augmented_edge.edge.id)
@@ -1007,7 +1046,7 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges);
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges).unwrap();
 
         // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
         // 2 terminal blocks: START, END
@@ -1131,7 +1170,7 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges);
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges).unwrap();
         let node_blocks = blocks
             .iter()
             .filter(|block| block.node_id == node_id)
@@ -1219,7 +1258,8 @@ mod tests {
                 phased: 0,
                 created_on: 0,
             }],
-        );
+        )
+        .unwrap();
 
         let b_block = blocks.iter().find(|block| block.node_id == n_b).unwrap();
         assert_eq!(b_block.start, 0);
@@ -1320,7 +1360,7 @@ mod tests {
         let (block_group_id, path) = setup_block_group(&conn);
 
         let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges).unwrap();
 
         // 4 actual sequences: 10-length ones of all A, all T, all C, all G
         // 2 terminal node blocks (start/end)
@@ -1357,7 +1397,7 @@ mod tests {
         BlockGroup::insert_change(&conn, &change).unwrap();
         let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
 
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges).unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence
@@ -1368,7 +1408,7 @@ mod tests {
 
         // Confirm that ordering doesn't matter
         edges.reverse();
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges);
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges).unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence

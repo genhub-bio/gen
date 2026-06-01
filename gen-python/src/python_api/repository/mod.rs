@@ -251,7 +251,8 @@ impl PyRepository {
             .path()
             .map(std::path::PathBuf::from)
             .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-        let graph = BlockGroup::get_graph(graph_conn, &block_group.id);
+        let graph =
+            BlockGroup::get_graph(graph_conn, &block_group.id).map_err(block_group_err_to_pyerr)?;
         let mut ctrl = PyGraphController::new(db_path, graph);
         ctrl.block_group_id = Some(block_group.id);
         ctrl.auto_load_annotation_groups(graph_conn);

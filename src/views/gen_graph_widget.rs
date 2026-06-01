@@ -571,7 +571,7 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1");
+        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1").unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);

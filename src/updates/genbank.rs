@@ -388,6 +388,7 @@ mod tests {
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
+                    .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())
                     .collect();
@@ -443,6 +444,7 @@ mod tests {
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
+                    .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())
                     .collect();
@@ -456,6 +458,7 @@ mod tests {
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
             let sequences: HashSet<String> =
                 BlockGroup::get_all_sequences(conn, &block_group_id, false)
+                    .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())
                     .collect();

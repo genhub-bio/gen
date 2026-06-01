@@ -735,17 +735,20 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `G1` genotype has no changes
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "G1").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "G1").id, false)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `foo` is homozygous for the first variant and does not contain the second
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
 
@@ -787,12 +790,14 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `bar` sample has the refrence + a deletion of the C
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "bar").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "bar").id, false)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATGATCGATCGGGAACACACAGAGA".to_string()
@@ -800,7 +805,8 @@ mod tests {
         );
         // `baz` sample has a deletion of CG and an insertion of A
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "baz").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "baz").id, false)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATCAGATCGATCGGGAACACACAGAGA".to_string(),
@@ -844,7 +850,8 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
@@ -852,7 +859,8 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(
                 [
                     "ATCGATCGATAGAGATCGATCGGGAACACACAGAGA",
@@ -936,7 +944,8 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, "unknown").id,
                 false
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(
                 ["ATCGATCGATAGACGATCGATCGGGAACACACAGAGA",]
                     .iter()
@@ -977,7 +986,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false)
+                .unwrap(),
             HashSet::from_iter(
                 ["ATCATCGATCGATCGATCGGGAACACACAGAGA",]
                     .iter()
@@ -1019,7 +1029,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, true)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATCGATCATCATCGATCGGGAACACACAGAGA".to_string()
@@ -1364,19 +1375,23 @@ mod tests {
                 conn,
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 true,
-            ),
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f1").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f1").id, true)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCTCGATCGATCGCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f2").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f2").id, true)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCTGGATCGATCGCGGAATCAGAACACACAGGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f3").id, true),
+            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f3").id, true)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCGGGATCGATCGCTCAGAACACACAGGA".to_string()])
         );
     }
@@ -1427,7 +1442,8 @@ mod tests {
             conn,
             &get_sample_bg(conn, &collection, "child").id,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(
             child_sequences,
             HashSet::from_iter(vec![
@@ -1485,7 +1501,8 @@ mod tests {
             conn,
             &get_sample_bg(conn, &collection, "child").id,
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(
             child_sequences,
             HashSet::from_iter(vec![
