@@ -118,22 +118,36 @@ impl From<gen_models_capnp::FileType> for FileTypes {
 
 impl FileTypes {
     pub fn infer_from_path(path: impl AsRef<Path>) -> Self {
-        let extension = path
+        let extensions = path
             .as_ref()
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase());
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .split('.')
+            .skip(1)
+            .collect::<Vec<_>>();
 
-        match extension.as_deref() {
-            Some("gb") | Some("gbk") | Some("genbank") => FileTypes::GenBank,
-            Some("fa") | Some("fasta") | Some("fna") => FileTypes::Fasta,
-            Some("gfa") => FileTypes::GFA,
-            Some("gaf") => FileTypes::GAF,
-            Some("vcf") => FileTypes::VCF,
-            Some("csv") => FileTypes::CSV,
-            Some("gff") | Some("gff3") => FileTypes::Gff3,
-            Some("bed") => FileTypes::Bed,
-            Some("tbi") => FileTypes::Tabix,
+        for extension in extensions.iter().rev() {
+            let file_type = Self::infer_from_extension(extension);
+            if file_type != FileTypes::None {
+                return file_type;
+            }
+        }
+
+        FileTypes::None
+    }
+
+    pub fn infer_from_extension(extension: &str) -> Self {
+        match extension.to_ascii_lowercase().as_str() {
+            "gb" | "gbk" | "genbank" => FileTypes::GenBank,
+            "fa" | "fasta" | "fna" => FileTypes::Fasta,
+            "gfa" => FileTypes::GFA,
+            "gaf" => FileTypes::GAF,
+            "vcf" => FileTypes::VCF,
+            "csv" => FileTypes::CSV,
+            "gff" | "gff3" => FileTypes::Gff3,
+            "bed" => FileTypes::Bed,
+            "tbi" => FileTypes::Tabix,
             _ => FileTypes::None,
         }
     }
@@ -166,6 +180,23 @@ mod tests {
         assert_eq!(FileTypes::infer_from_path("sample.gb"), FileTypes::GenBank);
         assert_eq!(FileTypes::infer_from_path("sample.GBK"), FileTypes::GenBank);
         assert_eq!(FileTypes::infer_from_path("sample.fa"), FileTypes::Fasta);
+        assert_eq!(FileTypes::infer_from_path("sample.fa.gz"), FileTypes::Fasta);
+        assert_eq!(
+            FileTypes::infer_from_path("sample.fa.bgz"),
+            FileTypes::Fasta
+        );
+        assert_eq!(
+            FileTypes::infer_from_path("https://example.com/assets/sample.fa.gz"),
+            FileTypes::Fasta
+        );
+        assert_eq!(
+            FileTypes::infer_from_path("https://example.com/assets/sample.fa.gz?download=1"),
+            FileTypes::Fasta
+        );
+        assert_eq!(
+            FileTypes::infer_from_path("https://example.com/assets/sample.fa.gz#reference"),
+            FileTypes::Fasta
+        );
         assert_eq!(FileTypes::infer_from_path("sample.gfa"), FileTypes::GFA);
         assert_eq!(FileTypes::infer_from_path("sample.gaf"), FileTypes::GAF);
         assert_eq!(FileTypes::infer_from_path("sample.vcf"), FileTypes::VCF);
