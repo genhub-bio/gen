@@ -13,7 +13,6 @@ use url::{Position, Url};
 
 use crate::{
     errors::{FileAdditionError, FileStoreError},
-    file_types::FileTypes,
     operations::{FileAddition, calculate_reader_checksum},
 };
 
@@ -282,6 +281,27 @@ pub trait AssetUri {
         workspace: &Workspace,
     ) -> Result<(), FileStoreError>;
 
+    fn hashed_filename(&self, checksum: &HashId) -> String {
+        self.asset_filename(checksum)
+    }
+
+    fn suffix(&self) -> Option<String> {
+        let path = if LocalAssetUri::has_uri_scheme(self.uri()) {
+            Url::parse(self.uri()).ok()?.path().to_string()
+        } else {
+            self.uri().to_string()
+        };
+
+        Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|file_name| {
+                file_name
+                    .split_once('.')
+                    .map(|(_, suffix)| suffix.to_string())
+            })
+    }
+
     fn generate_file_addition_id(checksum: &HashId, asset_uri: &str) -> HashId
     where
         Self: Sized,
@@ -290,18 +310,19 @@ pub trait AssetUri {
         HashId(calculate_hash(&combined))
     }
 
-    fn asset_filename(checksum: &HashId, suffix: &str) -> String
-    where
-        Self: Sized,
-    {
-        let suffix = suffix.strip_prefix('.').unwrap_or(suffix);
+    fn asset_filename(&self, checksum: &HashId) -> String {
+        let suffix = self.suffix().unwrap_or_default();
+        let suffix = suffix.strip_prefix('.').unwrap_or(&suffix);
+        if suffix.is_empty() {
+            return checksum.to_string();
+        }
         format!("{checksum}.{suffix}")
     }
 
     fn asset_relative_path(
         workspace: &Workspace,
+        asset_uri: &Self,
         checksum: &HashId,
-        suffix: &str,
     ) -> Result<String, FileAdditionError>
     where
         Self: Sized,
@@ -309,7 +330,7 @@ pub trait AssetUri {
         let repo_root = workspace.repo_root()?;
         let asset_path = workspace
             .asset_dir()?
-            .join(Self::asset_filename(checksum, suffix));
+            .join(asset_uri.asset_filename(checksum));
 
         Ok(asset_path
             .strip_prefix(&repo_root)
@@ -330,6 +351,14 @@ impl dyn AssetUri {
                 LocalAssetUri::new_for_workspace(workspace, uri)
                     .expect("failed to construct local asset uri"),
             ),
+            _ => Box::new(RemoteAssetUri::new(uri)),
+        }
+    }
+
+    pub fn from_uri(uri: &str) -> Box<dyn AssetUri> {
+        let (scheme, _) = uri.split_once("://").unwrap_or(("file", uri));
+        match scheme.to_ascii_lowercase().as_str() {
+            "file" => Box::new(LocalAssetUri::new(uri)),
             _ => Box::new(RemoteAssetUri::new(uri)),
         }
     }
@@ -381,11 +410,8 @@ impl AssetUri for LocalAssetUri {
         checksum: &HashId,
     ) -> Result<String, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
-        let relative_file_path = Self::asset_relative_path(
-            workspace,
-            checksum,
-            &Self::storage_suffix(&source_file_path),
-        )?;
+        let source_asset_uri = Self::new(&source_file_path.to_string_lossy());
+        let relative_file_path = Self::asset_relative_path(workspace, &source_asset_uri, checksum)?;
         Ok(Self::asset_uri(&relative_file_path))
     }
 
@@ -466,17 +492,6 @@ impl LocalAssetUri {
     pub fn path_from_uri(asset_uri: &str) -> Option<String> {
         asset_uri
             .strip_prefix(Self::SCHEME)
-            .map(ToString::to_string)
-    }
-
-    pub fn hashed_filename_from_asset_uri(asset_uri: &str) -> Option<String> {
-        let path = Self::path_from_uri(asset_uri)?;
-        let path = Path::new(&path);
-        if !path.starts_with(".gen/assets") {
-            return None;
-        }
-        path.file_name()
-            .and_then(|name| name.to_str())
             .map(ToString::to_string)
     }
 
@@ -670,8 +685,8 @@ impl LocalAssetUri {
         }
 
         if source_path.is_absolute() {
-            let suffix = Self::storage_suffix(&source_path);
-            return Self::asset_relative_path(workspace, checksum, &suffix);
+            let source_asset_uri = Self::new(&source_path.to_string_lossy());
+            return Self::asset_relative_path(workspace, &source_asset_uri, checksum);
         }
 
         Err(FileAdditionError::FileReadError(io::Error::new(
@@ -681,18 +696,6 @@ impl LocalAssetUri {
                 source_path.display()
             ),
         )))
-    }
-
-    fn storage_suffix(source_path: &Path) -> String {
-        source_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|file_name| {
-                file_name
-                    .split_once('.')
-                    .map(|(_, suffix)| suffix.to_string())
-            })
-            .unwrap_or_else(|| FileTypes::suffix(FileTypes::None))
     }
 
     fn sanitize_relative_path(path: &Path) -> Result<PathBuf, FileAdditionError> {
@@ -748,10 +751,10 @@ impl LocalAssetUri {
         source_path: &Path,
         checksum: &HashId,
     ) -> Result<(), FileAdditionError> {
-        let asset_path = workspace.asset_dir()?.join(Self::asset_filename(
-            checksum,
-            &Self::storage_suffix(source_path),
-        ));
+        let asset_uri = Self::new(&source_path.to_string_lossy());
+        let asset_path = workspace
+            .asset_dir()?
+            .join(asset_uri.asset_filename(checksum));
         if asset_path.exists() {
             return Ok(());
         }
@@ -1117,6 +1120,31 @@ mod tests {
             LocalAssetUri::stored_relative_path(workspace, &outside_path, &checksum).unwrap();
 
         assert_eq!(relative, format!(".gen/assets/{checksum}.fa.unhandled"));
+    }
+
+    #[test]
+    fn stored_relative_path_omits_suffix_for_source_without_suffix() {
+        let context = setup_gen();
+        let workspace = context.workspace();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_path = outside_dir.path().join("sample");
+        fs::write(&outside_path, b"custom contents").unwrap();
+        let checksum = calculate_file_checksum(&outside_path).unwrap();
+
+        let relative =
+            LocalAssetUri::stored_relative_path(workspace, &outside_path, &checksum).unwrap();
+
+        assert_eq!(relative, format!(".gen/assets/{checksum}"));
+    }
+
+    #[test]
+    fn hashed_filename_uses_http_uri_path_suffix() {
+        let checksum = HashId::convert_str("remote");
+        let asset_uri = RemoteAssetUri::new("http://example.com/assets/fasta.fa.gz?download=1");
+
+        let filename = asset_uri.hashed_filename(&checksum);
+
+        assert_eq!(filename, format!("{checksum}.fa.gz"));
     }
 
     #[test]

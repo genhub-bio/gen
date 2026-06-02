@@ -403,9 +403,7 @@ impl OperationFileInfo {
     }
 
     pub fn hashed_filename(&self) -> String {
-        LocalAssetUri::hashed_filename_from_asset_uri(&self.asset_uri).unwrap_or_else(|| {
-            LocalAssetUri::asset_filename(&self.checksum, &FileTypes::suffix(self.file_type))
-        })
+        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }
 }
 
@@ -737,9 +735,7 @@ impl FileAddition {
     }
 
     pub fn hashed_filename(self) -> String {
-        LocalAssetUri::hashed_filename_from_asset_uri(&self.asset_uri).unwrap_or_else(|| {
-            LocalAssetUri::asset_filename(&self.checksum, &FileTypes::suffix(self.file_type))
-        })
+        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }
 }
 
@@ -2734,15 +2730,14 @@ mod tests {
     }
 
     #[test]
-    fn operation_add_file_keeps_compression_suffix_for_asset_path()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn operation_add_file_keeps_compression_suffix_for_asset_path() {
         let context = setup_gen();
         let operation_conn = context.operations().conn();
         let fixture_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/simple.fa.bgz");
-        let outside_dir = tempfile::tempdir()?;
+        let outside_dir = tempfile::tempdir().unwrap();
         let outside_path = outside_dir.path().join("simple.fa.bgz");
-        fs::copy(&fixture_path, &outside_path)?;
+        fs::copy(&fixture_path, &outside_path).unwrap();
         let outside_path_string = outside_path.to_string_lossy().to_string();
 
         let file_addition = FileAddition::get_or_create(
@@ -2752,7 +2747,7 @@ mod tests {
             FileTypes::Fasta,
             None,
         )
-        .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+        .unwrap();
         let operation_hash = HashId(calculate_hash("compressed-file-operation"));
         let operation = Operation::create_without_tracking(
             operation_conn,
@@ -2760,7 +2755,8 @@ mod tests {
             "add-file",
             None,
             None,
-        )?;
+        )
+        .unwrap();
 
         Operation::add_file(
             context.workspace(),
@@ -2770,11 +2766,10 @@ mod tests {
             "simple.fa.bgz",
             &outside_path_string,
         )
-        .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+        .unwrap();
 
         let operation_files =
-            OperationFile::get_files_for_operation(operation_conn, &operation.hash)
-                .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+            OperationFile::get_files_for_operation(operation_conn, &operation.hash).unwrap();
 
         assert_eq!(operation_files[0].filename, "simple.fa.bgz");
         assert_eq!(
@@ -2785,7 +2780,6 @@ mod tests {
             operation_files[0].asset_uri,
             LocalAssetUri::asset_uri(&format!(".gen/assets/{}.fa.bgz", file_addition.checksum)),
         );
-        Ok(())
     }
 
     #[test]
@@ -2929,12 +2923,10 @@ mod tests {
         assert_eq!(addition.asset_uri, asset_uri);
         assert_eq!(addition.file_path(), asset_uri);
         assert!(
-            !context
-                .workspace()
-                .asset_dir()
+            fs::read_dir(context.workspace().asset_dir().unwrap())
                 .unwrap()
-                .join(addition.clone().hashed_filename())
-                .exists()
+                .next()
+                .is_none()
         );
     }
 
