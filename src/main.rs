@@ -183,7 +183,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 match block_group {
                     Ok(bg) => {
                         let block_graph = BlockGroup::get_graph(graph_conn, &bg.id)?;
-                        let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
+                        let current_path = BlockGroup::get_current_path(graph_conn, &bg.id)?;
                         // Use a default height of 10 for now
                         match show_inline_gen_graph_widget(
                             graph_conn,
@@ -791,7 +791,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| {
                     format!("Graph {parsed_graph_name} not found for {formatted_sample_name}")
                 })?;
-            let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
+            let path = BlockGroup::get_current_path(graph_conn, &block_group.id)?;
             let sequence = path.sequence(graph_conn)?;
             if end_coordinate == -1 {
                 end_coordinate = sequence.len() as i64;

@@ -631,7 +631,8 @@ impl PyGraphController {
         let highlight_color = self.resolve_color(color)?;
         let conn = self.open_conn()?;
 
-        let path = BlockGroup::get_current_path(&conn, &block_group_id);
+        let path = BlockGroup::get_current_path(&conn, &block_group_id)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let path_blocks = path.blocks(&conn).unwrap_or_default();
         let projected_path = project_path(self.controller.graph(), &path_blocks);
 
