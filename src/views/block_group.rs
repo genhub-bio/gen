@@ -227,7 +227,7 @@ pub fn view_block_group(
 
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, &block_group.id);
+        block_graph = BlockGroup::get_graph(conn, &block_group.id)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -1111,7 +1111,7 @@ pub fn view_block_group(
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id);
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id)?;
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id) {

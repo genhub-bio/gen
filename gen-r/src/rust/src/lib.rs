@@ -559,7 +559,7 @@ fn block_group_graph(
 ) -> std::result::Result<(GraphConnection, GenGraph), String> {
     let conn = open_repo_connection(db_path)?;
     let bg_id = hash_id_from_string(block_group_id)?;
-    let graph = BlockGroup::get_graph(&conn, &bg_id);
+    let graph = BlockGroup::get_graph(&conn, &bg_id).map_err(|e| e.to_string())?;
     Ok((conn, graph))
 }
 
@@ -1819,7 +1819,7 @@ fn repo_block_group_to_dict(
 ) -> std::result::Result<List, Error> {
     let conn = open_repo_connection(&db_path).map_err(Error::Other)?;
     let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
-    let graph = BlockGroup::get_graph(&conn, &bg_id);
+    let graph = BlockGroup::get_graph(&conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
 
     let nodes = graph
         .nodes()
@@ -1996,7 +1996,8 @@ fn repo_build_index(
     };
 
     for bg in bgs {
-        let graph = BlockGroup::get_graph(&conn, &bg.id);
+        let graph =
+            BlockGroup::get_graph(&conn, &bg.id).map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(&conn, graph, kind);
         let index = SeedIndex::build(&matcher, k as usize, normalized);
         let path = index_dir.join(format!("{}.bin", bg.id));
@@ -2034,7 +2035,8 @@ fn repo_search(
     let mut results = Vec::new();
 
     for bg in bgs {
-        let graph = BlockGroup::get_graph(&conn, &bg.id);
+        let graph =
+            BlockGroup::get_graph(&conn, &bg.id).map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(&conn, graph, kind);
 
         let index_path = index_dir.join(format!("{}.bin", bg.id));
@@ -2405,7 +2407,7 @@ impl GenRepository {
     fn block_group_to_dict(&self, block_group_id: String) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&block_group_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
 
         let nodes = graph
             .nodes()
@@ -3227,7 +3229,8 @@ impl GenRepository {
                 .collect()
         };
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id);
+            let graph =
+                BlockGroup::get_graph(conn, &bg.id).map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index = SeedIndex::build(&matcher, k as usize, normalized);
             let path = index_dir.join(format!("{}.bin", bg.id));
@@ -3265,7 +3268,8 @@ impl GenRepository {
             .join("search_index");
         let mut results = Vec::new();
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id);
+            let graph =
+                BlockGroup::get_graph(conn, &bg.id).map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index_path = index_dir.join(format!("{}.bin", bg.id));
             let index = fs::read(&index_path)
@@ -3488,7 +3492,8 @@ impl GenBlockGroup {
             .join("search_index");
         fs::create_dir_all(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
-        let graph = BlockGroup::get_graph(conn, &self.id);
+        let graph =
+            BlockGroup::get_graph(conn, &self.id).map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index = SeedIndex::build(&matcher, k as usize, normalized);
         let path = index_dir.join(format!("{}.bin", self.id));
@@ -3501,7 +3506,8 @@ impl GenBlockGroup {
     fn search(&self, query: String, sequence_kind: String) -> std::result::Result<List, Error> {
         let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
         let conn = self.context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id);
+        let graph =
+            BlockGroup::get_graph(conn, &self.id).map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index_dir = self
             .context
@@ -3618,7 +3624,8 @@ impl GenBlockGroup {
 
     fn block_group_to_dict(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id);
+        let graph =
+            BlockGroup::get_graph(conn, &self.id).map_err(|e| Error::Other(e.to_string()))?;
 
         let nodes = graph
             .nodes()

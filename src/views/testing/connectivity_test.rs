@@ -41,7 +41,7 @@ mod tests {
         import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
             .expect("GFA import failed");
 
-        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME);
+        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME).unwrap();
 
         // Test with small partitions to force inter-partition edges
         let config = GraphConfig {

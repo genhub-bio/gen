@@ -48,6 +48,7 @@ use crate::python_api::{
     block_group::PyBlockGroup,
     graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
     repository::PyRepository,
+    utils::block_group_err_to_pyerr,
 };
 
 /// Convert a ratatui `Color` to a CSS hex string.
@@ -393,7 +394,7 @@ impl PyGraphController {
             .path()
             .map(PathBuf::from)
             .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(block_group_err_to_pyerr)?;
         let mut ctrl = Self::new(db_path, graph);
         ctrl.block_group_id = Some(bg_id);
         ctrl.auto_load_annotation_groups(conn);
@@ -988,7 +989,8 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("test DB must be file-backed");
         let (bg_id, _) = setup_block_group(graph_handle.conn());
-        let graph = BlockGroup::get_graph(graph_handle.conn(), &bg_id);
+        let graph = BlockGroup::get_graph(graph_handle.conn(), &bg_id)
+            .map_err(crate::python_api::utils::block_group_err_to_pyerr)?;
         let mut ctrl = PyGraphController::new(db_path, graph);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;

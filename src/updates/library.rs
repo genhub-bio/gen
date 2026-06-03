@@ -297,7 +297,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -357,7 +357,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -424,7 +424,7 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences
@@ -476,7 +476,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample");
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -537,7 +537,7 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false);
+        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences

@@ -531,11 +531,11 @@ mod tests {
 
         apply_patch_archive(&target_context, &mut write_stream).unwrap();
         for bg in BlockGroup::query(conn, "select * from block_groups;", params![]).iter() {
-            let seqs = BlockGroup::get_all_sequences(conn, &bg.id, false);
+            let seqs = BlockGroup::get_all_sequences(conn, &bg.id, false).unwrap();
             assert!(!seqs.is_empty());
             assert_eq!(
                 seqs,
-                BlockGroup::get_all_sequences(target_conn, &bg.id, false),
+                BlockGroup::get_all_sequences(target_conn, &bg.id, false).unwrap(),
             );
         }
     }

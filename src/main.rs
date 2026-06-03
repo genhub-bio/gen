@@ -182,7 +182,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
                 match block_group {
                     Ok(bg) => {
-                        let block_graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                        let block_graph = BlockGroup::get_graph(graph_conn, &bg.id)?;
                         let current_path = BlockGroup::get_current_path(graph_conn, &bg.id);
                         // Use a default height of 10 for now
                         match show_inline_gen_graph_widget(
@@ -643,7 +643,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ensure_search_index()
                 .map_err(|_| "No .gen directory found. Run 'gen init' first.")?;
             for bg in block_groups {
-                let graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                let graph = BlockGroup::get_graph(graph_conn, &bg.id)?;
                 let matcher = GenGraphMatcher::new(graph_conn, graph);
                 let index = SeedIndex::build(&matcher, kmer_size, true);
                 let path = index_dir.join(format!("{}.bin", bg.id));
@@ -695,7 +695,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let query_bytes = query.as_bytes();
             println!("sample\tgraph\tblocks\toffset");
             for bg in block_groups {
-                let graph = BlockGroup::get_graph(graph_conn, &bg.id);
+                let graph = BlockGroup::get_graph(graph_conn, &bg.id)?;
                 let matcher = GenGraphMatcher::new(graph_conn, graph);
                 let matches = index_dir
                     .as_ref()
