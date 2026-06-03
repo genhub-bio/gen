@@ -225,6 +225,27 @@ pub struct PyAnnotation {
 
 #[pymethods]
 impl PyAnnotation {
+    /// Return a deferred position request: ``offset`` bases upstream of this annotation's start.
+    ///
+    /// Pass the result directly to ``widget.show()`` to highlight all reachable
+    /// positions without moving the camera.
+    fn __sub__(&self, n: i64) -> PyAnnotationOffset {
+        PyAnnotationOffset {
+            annotation: self.clone(),
+            offset: -n,
+        }
+    }
+
+    /// Return a deferred position request: ``offset`` bases downstream of this annotation's start.
+    ///
+    /// Pass the result directly to ``widget.show()`` to highlight all reachable
+    /// positions without moving the camera.
+    fn __add__(&self, n: i64) -> PyAnnotationOffset {
+        PyAnnotationOffset {
+            annotation: self.clone(),
+            offset: n,
+        }
+    }
     #[new]
     fn new(locus: PyRef<PyGraphLocus>, name: &str) -> Self {
         PyAnnotation {
@@ -274,5 +295,31 @@ impl PyAnnotation {
             hash = hash.wrapping_mul(31).wrapping_add(seg.strand as isize);
         }
         hash
+    }
+}
+
+/// A deferred graph-position request created by ``annotation - n`` or ``annotation + n``.
+///
+/// Holds the source annotation and a signed base-pair offset from the annotation's
+/// start position.  Pass directly to ``widget.show()``; the widget resolves the
+/// positions lazily using its own database connection and highlights them on the
+/// current graph without moving the camera.
+#[pyclass(name = "AnnotationOffset")]
+#[derive(Clone)]
+pub struct PyAnnotationOffset {
+    pub annotation: PyAnnotation,
+    /// Signed offset in base pairs from the annotation's start.
+    /// Negative = upstream, positive = downstream.
+    pub offset: i64,
+}
+
+#[pymethods]
+impl PyAnnotationOffset {
+    fn __repr__(&self) -> String {
+        let sign = if self.offset >= 0 { "+" } else { "" };
+        format!(
+            "AnnotationOffset({:?}, {}{})",
+            self.annotation.inner.name, sign, self.offset
+        )
     }
 }

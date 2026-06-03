@@ -235,13 +235,16 @@ class GenGraphWidget(anywidget.AnyWidget):
         self._render()
 
     def show(self, target, color: str | None = None) -> None:
-        """Navigate to and highlight a graph locus or annotation in one call.
+        """Navigate to and highlight a graph locus, annotation, or offset positions.
 
         Parameters
         ----------
         target:
-            A ``GraphLocus`` returned by ``repo.search()``, or an ``Annotation``
-            object (e.g. from ``widget.list_annotations()``).
+            - A ``GraphLocus`` returned by ``repo.search()``.
+            - An ``Annotation`` object (e.g. from ``widget.list_annotations()``).
+            - An ``AnnotationOffset`` from ``annotation - n`` or ``annotation + n``:
+              highlights all positions reachable *n* bases from the annotation's
+              start without moving the camera.
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -257,12 +260,18 @@ class GenGraphWidget(anywidget.AnyWidget):
 
             records = widget.list_annotations()
             widget.show(records[0])
+
+            # Highlight all positions 500 bp upstream of an annotation
+            widget.show(records[0] - 500)
         """
         if self._frozen:
             return
-        from gen import Annotation  # noqa: PLC0415
+        from gen import Annotation, AnnotationOffset  # noqa: PLC0415
 
-        if isinstance(target, Annotation):
+        if isinstance(target, AnnotationOffset):
+            positions = self._controller.resolve_annotation_offset(target)
+            self._controller.highlight_positions(positions, color)
+        elif isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target)
             self._controller.highlight_annotation_obj(target, color)
         else:

@@ -12,7 +12,7 @@ pub mod utils;
 use crate::python_api::{
     block::{PyGraphNode, PyGraphNodeSlice},
     block_group::PyBlockGroup,
-    graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
+    graph_search::{PyAnnotation, PyAnnotationOffset, PyGraphLocus, PyGraphPos},
     hash_id::PyHashId,
     jupyter_widget::PyGraphController,
     repository::PyRepository,
@@ -32,6 +32,7 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphPos>()?;
     m.add_class::<PyGraphLocus>()?;
     m.add_class::<PyAnnotation>()?;
+    m.add_class::<PyAnnotationOffset>()?;
     m.add_class::<PySequencePart>()?;
     m.add_class::<PyGraphController>()?;
 

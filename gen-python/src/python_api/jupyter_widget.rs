@@ -21,11 +21,16 @@ use r#gen::{
         inline_label_placement::draw_label_near_pos,
     },
 };
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode, GraphNodeSlice, project_path};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
+use gen_graph::{GenGraph, GraphNode, GraphNodePosition, GraphNodeSlice, project_path};
 use gen_models::{
-    annotations::AnnotationError, block_group::BlockGroup, db::GraphConnection, locus::GraphLocus,
+    annotations::AnnotationError,
+    block_group::BlockGroup,
+    db::GraphConnection,
+    graph::{expand as expand_graph, find_offset},
+    locus::GraphLocus,
 };
+use r#gen::graphs::graph_search::GraphPos;
 use gen_tui::{
     LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
     layout::VisualDetail, plotter::PathStyle, theme::current_theme,
@@ -46,7 +51,7 @@ use serde::Serialize;
 
 use crate::python_api::{
     block_group::PyBlockGroup,
-    graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
+    graph_search::{PyAnnotation, PyAnnotationOffset, PyGraphLocus, PyGraphPos},
     repository::PyRepository,
     utils::block_group_err_to_pyerr,
 };
@@ -917,6 +922,85 @@ impl PyGraphController {
         for style in styles_to_clear {
             self.controller.clear_highlight(&style);
         }
+    }
+
+    /// Resolve an ``AnnotationOffset`` (from ``annotation - n`` or ``annotation + n``) to a
+    /// list of graph positions, using this widget's database connection and block group.
+    ///
+    /// The returned positions can be passed to ``highlight_positions``.
+    pub fn resolve_annotation_offset(
+        &self,
+        ao: &PyAnnotationOffset,
+    ) -> PyResult<Vec<PyGraphPos>> {
+        let block_group_id = self.block_group_id.ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "resolve_annotation_offset() requires a block group; obtain the widget via BlockGroup.plot()",
+            )
+        })?;
+        let conn = self.open_conn()?;
+        let slices = &ao.annotation.locus.slices;
+        if slices.is_empty() {
+            return Ok(vec![]);
+        }
+        let slice = &slices[0];
+        let anchor = GraphNodePosition {
+            graph_node: slice.block,
+            offset: slice.start as i64,
+        };
+        let mut graph = self.controller.graph().clone();
+        let positions = find_offset(
+            &mut graph,
+            &anchor,
+            ao.offset,
+            |g, nid| expand_graph(&conn, g, &block_group_id, nid),
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(positions
+            .into_iter()
+            .map(|p| PyGraphPos {
+                inner: GraphPos {
+                    block: p.graph_node,
+                    offset: p.offset.max(0) as usize,
+                },
+            })
+            .collect())
+    }
+
+    /// Highlight a list of graph positions as unlabelled cursor markers.
+    ///
+    /// Each position is rendered as a single-character highlight in one colour.
+    /// The camera does not move.  ``color`` accepts named colours or a CSS hex
+    /// string; when omitted the next unused theme accent colour is chosen.
+    #[pyo3(signature = (positions, color=None))]
+    pub fn highlight_positions(
+        &mut self,
+        positions: Vec<PyRef<PyGraphPos>>,
+        color: Option<&str>,
+    ) -> PyResult<()> {
+        let c = self.resolve_color(color)?;
+        let style = PathStyle::new(c)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(false);
+        for pos in &positions {
+            let block = pos.inner.block;
+            let offset = pos.inner.offset;
+            let end = (offset + 1).min(block.length() as usize);
+            let locus = GraphLocus {
+                slices: vec![GraphNodeSlice {
+                    block,
+                    start: offset,
+                    end,
+                    strand: Strand::Forward,
+                }],
+            };
+            highlight_match_range(&mut self.controller, &locus, style);
+            self.overlays.push(GraphOverlay {
+                span: annotation_span_from_graph_locus(&locus, ""),
+                track: None,
+                style,
+            });
+        }
+        Ok(())
     }
 
     /// Clear all inline annotations (named tracks only; direct highlights are unaffected).
