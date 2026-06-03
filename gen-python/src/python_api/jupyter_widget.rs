@@ -976,10 +976,7 @@ fn load_track_from_file(
 mod tests {
     use r#gen::test_helpers::{setup_block_group, setup_gen_on_disk};
     use gen_models::block_group::BlockGroup;
-    use pyo3::{
-        exceptions::{PyRuntimeError, PyValueError},
-        prelude::*,
-    };
+    use pyo3::{exceptions::PyValueError, prelude::*};
     use serde_json::Value;
 
     use super::{PyGraphController, current_theme};
