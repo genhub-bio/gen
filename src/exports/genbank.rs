@@ -18,7 +18,7 @@ use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, GenBankLocationOperator},
-    block_group::{BlockGroup, BlockGroupError},
+    block_group::BlockGroup,
     db::GraphConnection,
     errors::{AnnotationError, BlockGroupError, PathError, SequenceError},
     node::Node,
