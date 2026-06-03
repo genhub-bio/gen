@@ -410,17 +410,18 @@ pub fn flatten_to_interval_tree(
         }
     }
 
+    let total_length = spans
+        .iter()
+        .filter(|block| block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID)
+        .map(|block| block.end)
+        .max()
+        .unwrap_or(0);
     let tree: IntervalTree<i64, NodeIntervalBlock> = spans
         .iter()
         .filter(|block| !remove_ambiguous_positions || !excluded_nodes.contains(&block.node_id))
         .map(|block| {
-            if block.node_id == PATH_START_NODE_ID {
-                (i64::MIN + 1..0, *block)
-            } else if block.node_id == PATH_END_NODE_ID {
-                (block.end..i64::MAX, *block)
-            } else {
-                (block.start..block.end, *block)
-            }
+            let block = normalize_sentinel_block(block, total_length);
+            (block.start..block.end, block)
         })
         .collect();
     tree
@@ -428,10 +429,16 @@ pub fn flatten_to_interval_tree(
 
 pub fn graph_from_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> GenGraph {
     let mut graph = GenGraph::new();
-    let mut blocks: Vec<&NodeIntervalBlock> = tree
+    let total_length = tree
         .iter()
         .map(|item| &item.value)
-        .filter(|b| b.node_id != PATH_START_NODE_ID && b.node_id != PATH_END_NODE_ID)
+        .filter(|block| block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID)
+        .map(|block| block.end)
+        .max()
+        .unwrap_or(0);
+    let mut blocks: Vec<NodeIntervalBlock> = tree
+        .iter()
+        .map(|item| normalize_sentinel_block(&item.value, total_length))
         .collect();
     blocks.sort_by_key(|b| b.start);
 
@@ -472,6 +479,24 @@ pub fn graph_from_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> 
     }
 
     graph
+}
+
+fn normalize_sentinel_block(block: &NodeIntervalBlock, total_length: i64) -> NodeIntervalBlock {
+    if block.node_id == PATH_START_NODE_ID {
+        NodeIntervalBlock {
+            start: i64::MIN + 1,
+            end: 0,
+            ..*block
+        }
+    } else if block.node_id == PATH_END_NODE_ID {
+        NodeIntervalBlock {
+            start: total_length,
+            end: i64::MAX - 1,
+            ..*block
+        }
+    } else {
+        *block
+    }
 }
 
 pub fn project_path(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<(GraphNode, Strand)> {
@@ -1053,7 +1078,7 @@ mod tests {
         // Nodes can be fragments: different (seq_start, seq_end) for the same node_id
         let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
             make_block("node-a", 0, 3, 0, 3),  // full node A
-            make_block("node-b", 3, 6, 0, 3),  // fragment of B (first 3 bases)
+            make_block("node-b", 3, 5, 1, 3),  // fragment of B (middle bases)
             make_block("node-c", 6, 11, 0, 5), // full node C
         ]
         .into_iter()
@@ -1071,7 +1096,7 @@ mod tests {
         };
         let node_b = GraphNode {
             node_id: HashId::convert_str("node-b"),
-            sequence_start: 0,
+            sequence_start: 1,
             sequence_end: 3,
         };
         let node_c = GraphNode {
@@ -1080,13 +1105,13 @@ mod tests {
             sequence_end: 5,
         };
 
-        assert_eq!(node_b.length(), 3);
+        assert_eq!(node_b.length(), 2);
         assert!(graph.contains_edge(node_a, node_b));
         assert!(graph.contains_edge(node_b, node_c));
     }
 
     #[test]
-    fn test_graph_from_interval_tree_filters_sentinels() {
+    fn test_graph_from_interval_tree_keeps_sentinels() {
         let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
             (
                 i64::MIN + 1..0,
@@ -1102,11 +1127,11 @@ mod tests {
             make_block("node-a", 0, 5, 0, 5),
             make_block("node-b", 5, 10, 0, 5),
             (
-                10..i64::MAX,
+                10..i64::MAX - 1,
                 NodeIntervalBlock {
                     node_id: PATH_END_NODE_ID,
                     start: 10,
-                    end: i64::MAX,
+                    end: i64::MAX - 1,
                     sequence_start: 0,
                     sequence_end: 0,
                     strand: Strand::Forward,
@@ -1118,10 +1143,14 @@ mod tests {
 
         let graph = graph_from_interval_tree(&tree);
 
-        // Sentinels should be filtered out
-        assert_eq!(graph.node_count(), 2);
-        assert_eq!(graph.edge_count(), 1);
+        assert_eq!(graph.node_count(), 4);
+        assert_eq!(graph.edge_count(), 3);
 
+        let start_node = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
         let node_a = GraphNode {
             node_id: HashId::convert_str("node-a"),
             sequence_start: 0,
@@ -1132,9 +1161,79 @@ mod tests {
             sequence_start: 0,
             sequence_end: 5,
         };
+        let end_node = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        assert!(graph.contains_node(start_node));
         assert!(graph.contains_node(node_a));
         assert!(graph.contains_node(node_b));
+        assert!(graph.contains_node(end_node));
+        assert!(graph.contains_edge(start_node, node_a));
         assert!(graph.contains_edge(node_a, node_b));
+        assert!(graph.contains_edge(node_b, end_node));
+    }
+
+    #[test]
+    fn test_flatten_to_interval_tree_normalizes_sentinel_bounds() {
+        let start_node = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("node-a"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let end_node = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            start_node,
+            node_a,
+            vec![GraphEdge {
+                edge_id: HashId::convert_str("edge-start-a"),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            }],
+        );
+        graph.add_edge(
+            node_a,
+            end_node,
+            vec![GraphEdge {
+                edge_id: HashId::convert_str("edge-a-end"),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            }],
+        );
+
+        let tree = flatten_to_interval_tree(&graph, false);
+        let start_block = tree
+            .iter()
+            .map(|item| item.value)
+            .find(|block| block.node_id == PATH_START_NODE_ID)
+            .expect("should contain start sentinel block");
+        let end_block = tree
+            .iter()
+            .map(|item| item.value)
+            .find(|block| block.node_id == PATH_END_NODE_ID)
+            .expect("should contain end sentinel block");
+
+        assert_eq!(start_block.start, i64::MIN + 1);
+        assert_eq!(start_block.end, 0);
+        assert_eq!(end_block.start, 5);
+        assert_eq!(end_block.end, i64::MAX - 1);
     }
 
     #[test]
