@@ -525,7 +525,7 @@ impl BlockGroup {
         )
     }
 
-    fn copy_contents_from(
+    pub fn copy_contents_from(
         &self,
         conn: &GraphConnection,
         source_block_group: &BlockGroup,

@@ -1,9 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::{
-    errors::OperationError,
-    sample::{NewSample, Sample},
-};
+use gen_models::errors::OperationError;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
@@ -19,12 +16,9 @@ pub struct Command {
     /// The name of the collection to store the alignment under
     #[arg(short, long)]
     name: Option<String>,
-    /// A sample name to associate the alignment with
-    #[arg(short, long, conflicts_with = "reference")]
+    /// Override the sample name for all imported alignment rows
+    #[arg(short, long)]
     sample: Option<String>,
-    /// Create or use a reference sample with this name
-    #[arg(long, conflicts_with = "sample")]
-    reference: Option<String>,
 }
 
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
@@ -41,28 +35,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
-    let default_sample = Sample::DEFAULT_NAME.to_string();
-    let (sample_name, is_reference) = match (cmd.sample.as_deref(), cmd.reference.as_deref()) {
-        (Some(sample), None) => (sample, false),
-        (None, Some(reference)) => (reference, true),
-        (None, None) => (default_sample.as_str(), false),
-        (Some(_), Some(_)) => {
-            return Err(anyhow::anyhow!(
-                "--sample and --reference are mutually exclusive"
-            ));
-        }
-    };
-    if is_reference {
-        Sample::get_or_create(
-            conn,
-            NewSample {
-                name: sample_name,
-                is_reference: true,
-            },
-        )?;
-    }
 
-    match import_alignment_aln(context, &cmd.path.clone(), name, sample_name) {
+    match import_alignment_aln(context, &cmd.path.clone(), name, cmd.sample.as_deref()) {
         Ok(_) => {
             println!("Alignment imported.");
             conn.execute("END TRANSACTION;", []).unwrap();

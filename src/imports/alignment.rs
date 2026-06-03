@@ -22,9 +22,11 @@ use gen_models::{
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
-    sample::Sample,
+    sample::{NewSample, Sample},
+    sample_lineage::SampleLineage,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
+    traits::Query as _,
 };
 use gen_parsers::{ClustalwParser, ParseError, ParsedAlignment};
 use noodles::bgzf;
@@ -45,6 +47,8 @@ pub enum AlignmentImportError {
     CollectionError(#[from] CollectionError),
     #[error("Sample creation error: {0}")]
     SampleError(#[from] SampleError),
+    #[error("Sample lineage error: {0}")]
+    SampleLineageError(#[from] rusqlite::Error),
     #[error("Block group write error: {0}")]
     BlockGroupError(#[from] BlockGroupError),
     #[error("Edge write error: {0}")]
@@ -65,7 +69,7 @@ pub fn import_alignment_aln(
     context: &DbContext,
     alignment_path: &String,
     collection_name: &str,
-    sample: &str,
+    sample_override: Option<&str>,
 ) -> Result<Operation, AlignmentImportError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
@@ -86,17 +90,6 @@ pub fn import_alignment_aln(
         Err(CollectionError::Duplicate(collection)) => collection,
         Err(e) => return Err(AlignmentImportError::CollectionError(e)),
     };
-    match Sample::get_or_create(
-        conn,
-        gen_models::sample::NewSample {
-            name: sample,
-            ..Default::default()
-        },
-    ) {
-        Ok(_) => {}
-        Err(SampleError::Duplicate(_)) => {}
-        Err(e) => return Err(AlignmentImportError::SampleError(e)),
-    }
 
     let _ = progress_bar.println("Parsing alignment");
     let bar = progress_bar.add(get_progress_bar(None));
@@ -104,7 +97,7 @@ pub fn import_alignment_aln(
     let mut summary = String::new();
     for alignment in ClustalwParser::new(reader_stream) {
         let alignment = alignment?;
-        persist_alignment(conn, &collection.name, sample, &alignment)?;
+        persist_alignment(conn, &collection.name, &alignment, sample_override)?;
         summary.push_str(&format!(
             " {}: {} aligned sequences.\n",
             alignment.base_name,
@@ -140,24 +133,140 @@ pub fn import_alignment_aln(
 fn persist_alignment(
     conn: &gen_models::db::GraphConnection,
     collection_name: &str,
-    sample: &str,
     alignment: &ParsedAlignment,
+    sample_override: Option<&str>,
 ) -> Result<(), AlignmentImportError> {
-    let block_group = BlockGroup::create(
+    let graph = build_import_graph(conn, collection_name, alignment)?;
+    let sequence_names = parse_alignment_sequence_names(alignment, sample_override);
+    persist_alignment_samples(conn, &sequence_names)?;
+
+    let parent_sequence_name = sequence_names
+        .first()
+        .expect("should contain at least one alignment sequence");
+    let parent_block_group = BlockGroup::create(
         conn,
         NewBlockGroup {
             collection_name,
-            sample_name: sample,
-            name: &alignment.base_name,
+            sample_name: &parent_sequence_name.sample_name,
+            name: &parent_sequence_name.block_group_name,
             ..Default::default()
         },
     )?;
-    let graph = build_import_graph(conn, collection_name, alignment)?;
-    for (index, name) in alignment.sequence_order.iter().enumerate() {
-        let (edge_ids, block_group_edges) =
-            persist_path_edges(conn, &graph, &block_group.id, index as i64)?;
-        BlockGroupEdge::bulk_create(conn, &block_group_edges);
-        Path::create(conn, name, &block_group.id, &edge_ids)?;
+    persist_alignment_path(
+        conn,
+        &graph,
+        &parent_block_group.id,
+        parent_sequence_name,
+        0,
+    )?;
+
+    for (index, sequence_name) in sequence_names.iter().enumerate().skip(1) {
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name,
+                sample_name: &sequence_name.sample_name,
+                name: &sequence_name.block_group_name,
+                parent_block_group_id: Some(&parent_block_group.id),
+                ..Default::default()
+            },
+        )?;
+        block_group.copy_contents_from(conn, &parent_block_group)?;
+        delete_paths_for_block_group(conn, &block_group.id);
+        persist_alignment_path(conn, &graph, &block_group.id, sequence_name, index as i64)?;
+    }
+
+    Ok(())
+}
+
+fn persist_alignment_path(
+    conn: &gen_models::db::GraphConnection,
+    graph: &gen_graph::GenGraph,
+    block_group_id: &HashId,
+    sequence_name: &AlignmentSequenceName,
+    chromosome_index: i64,
+) -> Result<(), AlignmentImportError> {
+    let (edge_ids, block_group_edges) =
+        persist_path_edges(conn, graph, block_group_id, chromosome_index)?;
+    BlockGroupEdge::bulk_create(conn, &block_group_edges);
+    Path::create(conn, &sequence_name.sample_name, block_group_id, &edge_ids)?;
+    Ok(())
+}
+
+fn delete_paths_for_block_group(conn: &gen_models::db::GraphConnection, block_group_id: &HashId) {
+    for path in Path::query(
+        conn,
+        "select * from paths where block_group_id = ?1 order by name;",
+        rusqlite::params![block_group_id],
+    ) {
+        Path::delete(conn, &path.name, block_group_id);
+    }
+}
+
+fn parse_alignment_sequence_names(
+    alignment: &ParsedAlignment,
+    sample_override: Option<&str>,
+) -> Vec<AlignmentSequenceName> {
+    alignment
+        .sequence_order
+        .iter()
+        .map(|name| parse_alignment_sequence_name(name, sample_override))
+        .collect()
+}
+
+fn parse_alignment_sequence_name(
+    name: &str,
+    sample_override: Option<&str>,
+) -> AlignmentSequenceName {
+    if let Some(sample_name) = sample_override {
+        return AlignmentSequenceName {
+            sample_name: sample_name.to_string(),
+            block_group_name: name.to_string(),
+        };
+    }
+
+    match name.split_once('.') {
+        Some((sample_name, block_group_name))
+            if !sample_name.is_empty() && !block_group_name.is_empty() =>
+        {
+            AlignmentSequenceName {
+                sample_name: sample_name.to_string(),
+                block_group_name: block_group_name.to_string(),
+            }
+        }
+        _ => AlignmentSequenceName {
+            sample_name: name.to_string(),
+            block_group_name: name.to_string(),
+        },
+    }
+}
+
+fn persist_alignment_samples(
+    conn: &gen_models::db::GraphConnection,
+    sequence_names: &[AlignmentSequenceName],
+) -> Result<(), AlignmentImportError> {
+    let parent_sample = sequence_names
+        .first()
+        .expect("should contain at least one alignment sequence");
+
+    for name in sequence_names {
+        match Sample::get_or_create(
+            conn,
+            NewSample {
+                name: &name.sample_name,
+                ..Default::default()
+            },
+        ) {
+            Ok(_) => {}
+            Err(SampleError::Duplicate(_)) => {}
+            Err(e) => return Err(AlignmentImportError::SampleError(e)),
+        }
+    }
+
+    for child_sample in sequence_names.iter().skip(1) {
+        if parent_sample.sample_name != child_sample.sample_name {
+            SampleLineage::create(conn, &parent_sample.sample_name, &child_sample.sample_name)?;
+        }
     }
 
     Ok(())
@@ -421,18 +530,26 @@ enum AlignmentRunKind {
     Variant,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct AlignmentSequenceName {
+    sample_name: String,
+    block_group_name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use gen_models::{block_group::BlockGroup, path::Path, sample::Sample, traits::Query as _};
+    use gen_models::{
+        block_group::BlockGroup, path::Path, sample_lineage::SampleLineage, traits::Query as _,
+    };
 
     use crate::{
         imports::alignment::import_alignment_aln, test_helpers::setup_gen, track_database,
     };
 
     #[test]
-    fn imports_aln_alignment_as_block_group_paths() {
+    fn imports_aln_alignment_as_samples_with_base_lineage() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -448,24 +565,185 @@ mod tests {
                 .expect("should have fixture path")
                 .to_string(),
             "test",
-            Sample::DEFAULT_NAME,
+            None,
         )
         .unwrap();
 
-        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "SeqA", None);
-        let paths = Path::query(
+        let base_block_group_id = BlockGroup::get_id("test", "SeqA", "chr1", None);
+        let base_paths = Path::query(
             conn,
             "select * from paths where block_group_id = ?1 order by name;",
-            rusqlite::params![block_group_id],
+            rusqlite::params![base_block_group_id],
         );
         assert_eq!(
-            paths
+            base_paths
                 .iter()
                 .map(|path| path.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["SeqA", "SeqB"]
+            vec!["SeqA"]
         );
-        assert_eq!(paths[0].sequence(conn).unwrap(), "ACGT");
-        assert_eq!(paths[1].sequence(conn).unwrap(), "AGT");
+        assert_eq!(base_paths[0].sequence(conn).unwrap(), "ACGT");
+
+        let child_block_group_id =
+            BlockGroup::get_id("test", "SeqB", "chr1", Some(&base_block_group_id));
+        let child_block_group = BlockGroup::get_by_id(conn, &child_block_group_id).unwrap();
+        assert_eq!(
+            child_block_group.parent_block_group_id,
+            Some(base_block_group_id)
+        );
+        let child_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name;",
+            rusqlite::params![child_block_group_id],
+        );
+        assert_eq!(
+            child_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SeqB"]
+        );
+        assert_eq!(child_paths[0].sequence(conn).unwrap(), "AGT");
+        let second_child_block_group_id =
+            BlockGroup::get_id("test", "SeqC", "chr1", Some(&base_block_group_id));
+        let second_child_block_group =
+            BlockGroup::get_by_id(conn, &second_child_block_group_id).unwrap();
+        assert_eq!(
+            second_child_block_group.parent_block_group_id,
+            Some(base_block_group_id)
+        );
+        let second_child_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name;",
+            rusqlite::params![second_child_block_group_id],
+        );
+        assert_eq!(
+            second_child_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SeqC"]
+        );
+        assert_eq!(second_child_paths[0].sequence(conn).unwrap(), "ACG");
+        assert_eq!(
+            SampleLineage::get_children(conn, "SeqA"),
+            vec!["SeqB", "SeqC"]
+        );
+        assert_eq!(SampleLineage::get_parents(conn, "SeqB"), vec!["SeqA"]);
+        assert_eq!(SampleLineage::get_parents(conn, "SeqC"), vec!["SeqA"]);
+    }
+
+    #[test]
+    fn imports_plain_alignment_names_as_sample_and_block_group_names() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let aln_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/alignments/plain_names.aln");
+
+        import_alignment_aln(
+            &context,
+            &aln_path
+                .to_str()
+                .expect("should have fixture path")
+                .to_string(),
+            "test",
+            None,
+        )
+        .unwrap();
+
+        let base_block_group_id = BlockGroup::get_id("test", "Base", "Base", None);
+        let base_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name;",
+            rusqlite::params![base_block_group_id],
+        );
+        assert_eq!(
+            base_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Base"]
+        );
+
+        let child_block_group_id =
+            BlockGroup::get_id("test", "Child", "Child", Some(&base_block_group_id));
+        let child_block_group = BlockGroup::get_by_id(conn, &child_block_group_id).unwrap();
+        assert_eq!(
+            child_block_group.parent_block_group_id,
+            Some(base_block_group_id)
+        );
+        let child_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name;",
+            rusqlite::params![child_block_group_id],
+        );
+        assert_eq!(
+            child_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Child"]
+        );
+        assert_eq!(SampleLineage::get_children(conn, "Base"), vec!["Child"]);
+    }
+
+    #[test]
+    fn imports_alignment_with_sample_override_and_raw_block_group_names() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let aln_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/alignments/plain_names.aln");
+
+        import_alignment_aln(
+            &context,
+            &aln_path
+                .to_str()
+                .expect("should have fixture path")
+                .to_string(),
+            "test",
+            Some("override"),
+        )
+        .unwrap();
+
+        let base_block_group_id = BlockGroup::get_id("test", "override", "Base", None);
+        let base_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name;",
+            rusqlite::params![base_block_group_id],
+        );
+        assert_eq!(
+            base_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["override"]
+        );
+
+        let child_block_group_id =
+            BlockGroup::get_id("test", "override", "Child", Some(&base_block_group_id));
+        let child_block_group = BlockGroup::get_by_id(conn, &child_block_group_id).unwrap();
+        assert_eq!(
+            child_block_group.parent_block_group_id,
+            Some(base_block_group_id)
+        );
+        let child_paths = Path::query(
+            conn,
+            "select * from paths where block_group_id = ?1 order by name;",
+            rusqlite::params![child_block_group_id],
+        );
+        assert_eq!(
+            child_paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["override"]
+        );
+        assert!(SampleLineage::get_children(conn, "override").is_empty());
     }
 }
