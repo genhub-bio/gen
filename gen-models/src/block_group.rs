@@ -215,15 +215,21 @@ impl ChangeSource for Path {
         change: &BlockGroupChange<Self>,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let local_tree;
-        let tree = match tree {
-            Some(tree) => tree,
-            None => {
-                local_tree = change.intervaltree_source.intervaltree(conn)?;
-                &local_tree
-            }
+        let block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
+        let path_length = change.intervaltree_source.length(conn)?;
+        let region = ResolvedGenRegion {
+            block_group,
+            path: Some(change.intervaltree_source.clone()),
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::Path,
+            anchor_start: 0,
+            anchor_end: path_length,
+            feature_length: path_length,
+            start: change.start,
+            end: change.end,
         };
-        BlockGroup::set_up_new_edges(change, tree)
+        plan_resolved_region_edges(conn, change, region, tree)
     }
 }
 
@@ -256,19 +262,28 @@ impl ChangeSource for Accession {
             start: change.start,
             end: change.end,
         };
-        let region_change = BlockGroupChange {
-            block_group_id: change.block_group_id,
-            intervaltree_source: region,
-            path_accession: change.path_accession.clone(),
-            start: change.start,
-            end: change.end,
-            block: change.block.clone(),
-            chromosome_index: change.chromosome_index,
-            phased: change.phased,
-            preserve_edge: change.preserve_edge,
-        };
-        ResolvedGenRegion::plan_edges(conn, &region_change, tree)
+        plan_resolved_region_edges(conn, change, region, tree)
     }
+}
+
+fn plan_resolved_region_edges<T: IntervalTreeSource>(
+    conn: &GraphConnection,
+    change: &BlockGroupChange<T>,
+    region: ResolvedGenRegion,
+    tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
+) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
+    let region_change = BlockGroupChange {
+        block_group_id: change.block_group_id,
+        intervaltree_source: region,
+        path_accession: change.path_accession.clone(),
+        start: change.start,
+        end: change.end,
+        block: change.block.clone(),
+        chromosome_index: change.chromosome_index,
+        phased: change.phased,
+        preserve_edge: change.preserve_edge,
+    };
+    ResolvedGenRegion::plan_edges(conn, &region_change, tree)
 }
 
 impl ChangeSource for ResolvedGenRegion {
@@ -424,18 +439,21 @@ impl ChangeSource for AccessionAnnotation {
             .ok_or(BlockGroupError::AccessionError(
                 AccessionError::MissingPath(change.intervaltree_source.accession_id),
             ))?;
-        let accession_change = AccessionChange {
-            block_group_id: change.block_group_id,
-            intervaltree_source: accession,
-            path_accession: change.path_accession.clone(),
+        let block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
+        let accession_length = accession.length(conn)?;
+        let region = ResolvedGenRegion {
+            block_group,
+            path: None,
+            accession: Some(accession),
+            annotation: Some(change.intervaltree_source.clone()),
+            kind: ResolvedRegionKind::Annotation,
+            anchor_start: 0,
+            anchor_end: accession_length,
+            feature_length: accession_length,
             start: change.start,
             end: change.end,
-            block: change.block.clone(),
-            chromosome_index: change.chromosome_index,
-            phased: change.phased,
-            preserve_edge: change.preserve_edge,
         };
-        Accession::plan_edges(conn, &accession_change, tree)
+        plan_resolved_region_edges(conn, change, region, tree)
     }
 }
 
