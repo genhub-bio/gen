@@ -88,9 +88,11 @@ pub struct GraphEdge {
     pub created_on: i64,
 }
 
+/// A cursor within a GraphNode
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct GraphNodePosition {
     pub graph_node: GraphNode,
+    /// Distance from sequence_start of graph_node
     pub offset: i64,
 }
 

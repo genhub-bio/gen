@@ -391,7 +391,6 @@ impl ResolvedGenRegion {
         let interval_tree = self
             .intervaltree(conn)
             .map_err(|_| gen_graph::GraphError::NoPath)?;
-        dbg!("t is", &interval_tree);
 
         let filtered: Vec<(std::ops::Range<i64>, gen_core::NodeIntervalBlock)> = interval_tree
             .iter()
