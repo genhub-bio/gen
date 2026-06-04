@@ -18,7 +18,9 @@ use rusqlite::{self, types::Value as SQLValue};
 
 use crate::{
     fasta::FastaError,
-    updates::{InsertChangeData, UpdateChangeSource, insert_update_change, resolve_update_region},
+    updates::{
+        InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
+    },
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -234,7 +236,7 @@ fn insert_fasta_change(
     end_coordinate: i64,
     block: PathBlock,
 ) -> Result<(), FastaError> {
-    let source = UpdateChangeSource::from_region(region, path)?;
+    let source = target_update_region(conn, region, target_block_group_id, path)?;
     let data = InsertChangeData::new(
         target_block_group_id,
         start_coordinate,

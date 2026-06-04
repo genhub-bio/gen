@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::{
     accession::{Accession, AccessionError},
     annotations::{Annotation, AnnotationError},
-    block_group::BlockGroup,
+    block_group::{BlockGroup, BlockGroupError, IntervalTreeSource},
     db::GraphConnection,
     errors::PathError,
     path::Path,
@@ -434,6 +434,16 @@ impl ResolvedGenRegion {
             })?;
 
         Ok((start_positions, end_positions))
+    }
+}
+
+impl IntervalTreeSource for ResolvedGenRegion {
+    fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
+        ResolvedGenRegion::intervaltree(self, conn)
+            .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))
     }
 }
 

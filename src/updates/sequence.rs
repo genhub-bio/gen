@@ -16,7 +16,9 @@ use rusqlite::{self, params};
 
 use crate::{
     errors::SequenceUpdateError,
-    updates::{InsertChangeData, UpdateChangeSource, insert_update_change, resolve_update_region},
+    updates::{
+        InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
+    },
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -185,7 +187,7 @@ fn insert_sequence_change(
     end_coordinate: i64,
     block: PathBlock,
 ) -> Result<(), SequenceUpdateError> {
-    let source = UpdateChangeSource::from_region(region, Some(path))?;
+    let source = target_update_region(conn, region, target_block_group.id, Some(path))?;
     let data = InsertChangeData::new(
         target_block_group.id,
         start_coordinate,

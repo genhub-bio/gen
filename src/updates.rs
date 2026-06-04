@@ -1,8 +1,6 @@
-use gen_core::{HashId, NO_CHROMOSOME_INDEX, NodeIntervalBlock, PathBlock};
+use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock};
 use gen_models::{
-    accession::Accession,
-    annotations::Annotation,
-    block_group::{BlockGroup, BlockGroupChange, ChangeSource, IntervalTreeSource},
+    block_group::{BlockGroup, BlockGroupChange, ChangeSource},
     db::GraphConnection,
     errors::BlockGroupError,
     path::Path,
@@ -11,7 +9,6 @@ use gen_models::{
         resolve_annotation, resolve_path,
     },
 };
-use intervaltree::IntervalTree;
 
 pub mod fasta;
 pub mod gaf;
@@ -42,112 +39,24 @@ pub(crate) fn resolve_update_region(
     resolve_accession(region, conn, collection_name, sample_name)
 }
 
-pub(crate) enum UpdateChangeSource {
-    Path(Path),
-    Accession(Accession),
-    Annotation(Annotation),
-}
-
-impl UpdateChangeSource {
-    pub(crate) fn from_region(
-        region: &ResolvedGenRegion,
-        target_path: Option<&Path>,
-    ) -> Result<Self, GenRegionError> {
-        match region.kind {
-            ResolvedRegionKind::Path => {
-                let path = target_path
-                    .ok_or_else(|| GenRegionError::NotFound("missing target path".to_string()))?;
-                Ok(Self::Path(path.clone()))
-            }
-            ResolvedRegionKind::Accession => {
-                let accession = region
-                    .accession
-                    .as_ref()
-                    .ok_or_else(|| GenRegionError::NotFound(region.block_group.name.clone()))?;
-                Ok(Self::Accession(accession.clone()))
-            }
-            ResolvedRegionKind::Annotation => {
-                let annotation = region
-                    .annotation
-                    .as_ref()
-                    .ok_or_else(|| GenRegionError::NotFound(region.block_group.name.clone()))?;
-                Ok(Self::Annotation(annotation.clone()))
-            }
-            ResolvedRegionKind::BlockGroup => {
-                Err(GenRegionError::NotFound(region.block_group.name.clone()))
-            }
-        }
-    }
-}
-
-impl IntervalTreeSource for UpdateChangeSource {
-    fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        match self {
-            UpdateChangeSource::Path(path) => IntervalTreeSource::intervaltree(path, conn),
-            UpdateChangeSource::Accession(accession) => {
-                IntervalTreeSource::intervaltree(accession, conn)
-            }
-            UpdateChangeSource::Annotation(annotation) => {
-                IntervalTreeSource::intervaltree(annotation, conn)
-            }
-        }
-    }
-}
-
-impl ChangeSource for UpdateChangeSource {
-    fn plan_edges(
-        conn: &GraphConnection,
-        change: &BlockGroupChange<Self>,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<gen_models::block_group_edge::AugmentedEdgeData>, BlockGroupError> {
-        match &change.intervaltree_source {
-            UpdateChangeSource::Path(path) => {
-                let change = BlockGroupChange {
-                    block_group_id: change.block_group_id,
-                    intervaltree_source: path.clone(),
-                    path_accession: change.path_accession.clone(),
-                    start: change.start,
-                    end: change.end,
-                    block: change.block.clone(),
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                    preserve_edge: change.preserve_edge,
-                };
-                Path::plan_edges(conn, &change, tree)
-            }
-            UpdateChangeSource::Accession(accession) => {
-                let change = BlockGroupChange {
-                    block_group_id: change.block_group_id,
-                    intervaltree_source: accession.clone(),
-                    path_accession: change.path_accession.clone(),
-                    start: change.start,
-                    end: change.end,
-                    block: change.block.clone(),
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                    preserve_edge: change.preserve_edge,
-                };
-                Accession::plan_edges(conn, &change, tree)
-            }
-            UpdateChangeSource::Annotation(annotation) => {
-                let change = BlockGroupChange {
-                    block_group_id: change.block_group_id,
-                    intervaltree_source: annotation.clone(),
-                    path_accession: change.path_accession.clone(),
-                    start: change.start,
-                    end: change.end,
-                    block: change.block.clone(),
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                    preserve_edge: change.preserve_edge,
-                };
-                Annotation::plan_edges(conn, &change, tree)
-            }
-        }
-    }
+pub(crate) fn target_update_region(
+    conn: &GraphConnection,
+    region: &ResolvedGenRegion,
+    target_block_group_id: HashId,
+    target_path: Option<&Path>,
+) -> Result<ResolvedGenRegion, GenRegionError> {
+    let mut target_region = region.clone();
+    target_region.block_group = BlockGroup::get_by_id(conn, &target_block_group_id)?;
+    target_region.path = if region.kind == ResolvedRegionKind::Path {
+        Some(
+            target_path
+                .ok_or_else(|| GenRegionError::NotFound("missing target path".to_string()))?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    Ok(target_region)
 }
 
 pub(crate) struct InsertChangeData {

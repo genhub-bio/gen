@@ -242,7 +242,92 @@ impl ChangeSource for Accession {
         change: &BlockGroupChange<Self>,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let (start_positions, end_positions) = accession_change_positions(conn, change, tree)?;
+        let target_block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
+        let accession_length = change.intervaltree_source.length(conn)?;
+        let region = ResolvedGenRegion {
+            block_group: target_block_group,
+            path: None,
+            accession: Some(change.intervaltree_source.clone()),
+            annotation: None,
+            kind: ResolvedRegionKind::Accession,
+            anchor_start: 0,
+            anchor_end: accession_length,
+            feature_length: accession_length,
+            start: change.start,
+            end: change.end,
+        };
+        let region_change = BlockGroupChange {
+            block_group_id: change.block_group_id,
+            intervaltree_source: region,
+            path_accession: change.path_accession.clone(),
+            start: change.start,
+            end: change.end,
+            block: change.block.clone(),
+            chromosome_index: change.chromosome_index,
+            phased: change.phased,
+            preserve_edge: change.preserve_edge,
+        };
+        ResolvedGenRegion::plan_edges(conn, &region_change, tree)
+    }
+}
+
+impl ChangeSource for ResolvedGenRegion {
+    fn plan_edges(
+        conn: &GraphConnection,
+        change: &BlockGroupChange<Self>,
+        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
+    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
+        match change.intervaltree_source.kind {
+            ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
+                let local_tree;
+                let tree = match tree {
+                    Some(tree) => tree,
+                    None => {
+                        local_tree =
+                            IntervalTreeSource::intervaltree(&change.intervaltree_source, conn)?;
+                        &local_tree
+                    }
+                };
+                return BlockGroup::set_up_new_edges(change, tree);
+            }
+            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
+        };
+
+        let graph_positions_from_tree = |coordinate| {
+            let mut positions = tree?
+                .query_point(coordinate)
+                .map(|entry| entry.value)
+                .filter(|block| !is_terminal(block.node_id))
+                .map(|block| GraphNodePosition {
+                    graph_node: GraphNode {
+                        node_id: block.node_id,
+                        sequence_start: block.sequence_start,
+                        sequence_end: block.sequence_end,
+                    },
+                    offset: coordinate - block.start,
+                })
+                .collect::<Vec<_>>();
+
+            if positions.is_empty() {
+                return None;
+            }
+
+            positions.sort();
+            positions.dedup();
+            Some(positions)
+        };
+
+        let (start_positions, end_positions) = if let Some(start_positions) =
+            graph_positions_from_tree(change.start)
+            && let Some(end_positions) = graph_positions_from_tree(change.end)
+        {
+            (start_positions, end_positions)
+        } else {
+            change
+                .intervaltree_source
+                .find_graph_positions(conn, 0, 0)
+                .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?
+        };
         let preserve_chromosome_index = if change.preserve_edge {
             0
         } else {
@@ -318,64 +403,6 @@ impl ChangeSource for Accession {
 
         Ok(new_edges)
     }
-}
-
-fn accession_change_positions(
-    conn: &GraphConnection,
-    change: &AccessionChange,
-    tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-) -> Result<(Vec<GraphNodePosition>, Vec<GraphNodePosition>), BlockGroupError> {
-    if let Some(tree) = tree
-        && let Some(start_positions) = graph_positions_from_tree(tree, change.start)
-        && let Some(end_positions) = graph_positions_from_tree(tree, change.end)
-    {
-        return Ok((start_positions, end_positions));
-    }
-
-    let target_block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
-    let accession_length = change.intervaltree_source.length(conn)?;
-    let region = ResolvedGenRegion {
-        block_group: target_block_group,
-        path: None,
-        accession: Some(change.intervaltree_source.clone()),
-        annotation: None,
-        kind: ResolvedRegionKind::Accession,
-        anchor_start: 0,
-        anchor_end: accession_length,
-        feature_length: accession_length,
-        start: change.start,
-        end: change.end,
-    };
-    region
-        .find_graph_positions(conn, 0, 0)
-        .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))
-}
-
-fn graph_positions_from_tree(
-    tree: &IntervalTree<i64, NodeIntervalBlock>,
-    coordinate: i64,
-) -> Option<Vec<GraphNodePosition>> {
-    let mut positions = tree
-        .query_point(coordinate)
-        .map(|entry| entry.value)
-        .filter(|block| !is_terminal(block.node_id))
-        .map(|block| GraphNodePosition {
-            graph_node: GraphNode {
-                node_id: block.node_id,
-                sequence_start: block.sequence_start,
-                sequence_end: block.sequence_end,
-            },
-            offset: coordinate - block.start,
-        })
-        .collect::<Vec<_>>();
-
-    if positions.is_empty() {
-        return None;
-    }
-
-    positions.sort();
-    positions.dedup();
-    Some(positions)
 }
 
 impl IntervalTreeSource for AccessionAnnotation {
