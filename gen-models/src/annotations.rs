@@ -1071,6 +1071,51 @@ mod tests {
 
             assert_eq!(resolved.id, child_annotation.id);
         }
+
+        #[test]
+        fn falls_back_to_parent_annotation_when_child_has_none() {
+            let conn = get_connection(None).unwrap();
+            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
+                .unwrap();
+            let parent_accession = BlockGroup::add_accession(
+                &conn,
+                &parent_path,
+                "parent-only-accession",
+                0,
+                5,
+                &mut cache,
+            )
+            .unwrap();
+            let parent_annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
+                    .unwrap();
+
+            let child_block_group = create_bg(&conn, "test", "child", "chr1");
+            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id)
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            let block_group_edges = edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: child_block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>();
+            crate::block_group_edge::BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+            let _child_path =
+                Path::create(&conn, "child-path", &child_block_group.id, &edge_ids).unwrap();
+            SampleLineage::create(&conn, "test", "child").unwrap();
+
+            let region = Region::parse("mreB").unwrap();
+            let resolved = Annotation::resolve(&region, &conn, "test", "child").unwrap();
+
+            assert_eq!(resolved.id, parent_annotation.id);
+        }
     }
 
     #[test]

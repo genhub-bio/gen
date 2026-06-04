@@ -12,8 +12,8 @@ use gen_core::{
     traits::Capnp,
 };
 use gen_graph::{
-    GenGraph, GraphNode, GraphNodePosition, all_intermediate_edges, all_reachable_nodes,
-    all_simple_paths, flatten_to_interval_tree,
+    GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
+    flatten_to_interval_tree,
 };
 use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value as SQLValue};
@@ -179,145 +179,6 @@ pub trait IntervalTreeSource {
 
 pub type IntervalTreeCache =
     HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>>;
-
-impl ResolvedGenRegion {
-    pub fn plan_edges(
-        &self,
-        conn: &GraphConnection,
-        change: &BlockGroupChange,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        match self.kind {
-            ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
-                let local_tree;
-                let tree = match tree {
-                    Some(tree) => tree,
-                    None => {
-                        local_tree = IntervalTreeSource::intervaltree(self, conn)?;
-                        &local_tree
-                    }
-                };
-                return BlockGroup::set_up_new_edges(change, tree);
-            }
-            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
-        };
-
-        let graph_positions_from_tree = |coordinate| {
-            let mut positions = tree?
-                .query_point(coordinate)
-                .map(|entry| entry.value)
-                .filter(|block| !is_terminal(block.node_id))
-                .map(|block| GraphNodePosition {
-                    graph_node: GraphNode {
-                        node_id: block.node_id,
-                        sequence_start: block.sequence_start,
-                        sequence_end: block.sequence_end,
-                    },
-                    offset: coordinate - block.start,
-                })
-                .collect::<Vec<_>>();
-
-            if positions.is_empty() {
-                return None;
-            }
-
-            positions.sort();
-            positions.dedup();
-            Some(positions)
-        };
-
-        let (start_positions, end_positions) =
-            if let (Some(start), Some(end)) = (&self.start_anchors, &self.end_anchors) {
-                (start.clone(), end.clone())
-            } else if let Some(start_positions) = graph_positions_from_tree(self.start)
-                && let Some(end_positions) = graph_positions_from_tree(self.end)
-            {
-                (start_positions, end_positions)
-            } else {
-                let resolved = self
-                    .find_graph_positions(conn, 0, 0)
-                    .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?;
-                (
-                    resolved.start_anchors.expect("should have start anchors"),
-                    resolved.end_anchors.expect("should have end anchors"),
-                )
-            };
-        let preserve_chromosome_index = if change.preserve_edge {
-            0
-        } else {
-            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-        };
-        let mut new_edges = vec![];
-
-        for position in start_positions.iter().chain(end_positions.iter()) {
-            if !is_terminal(position.graph_node.node_id) {
-                let coordinate = position.coordinate();
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: position.graph_node.node_id,
-                        source_coordinate: coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: position.graph_node.node_id,
-                        target_coordinate: coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: preserve_chromosome_index,
-                    phased: 0,
-                });
-            }
-        }
-
-        if change.block.sequence_start == change.block.sequence_end {
-            for start_position in &start_positions {
-                for end_position in &end_positions {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: start_position.graph_node.node_id,
-                            source_coordinate: start_position.coordinate(),
-                            source_strand: Strand::Forward,
-                            target_node_id: end_position.graph_node.node_id,
-                            target_coordinate: end_position.coordinate(),
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: change.chromosome_index,
-                        phased: change.phased,
-                    });
-                }
-            }
-        } else {
-            for start_position in &start_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: start_position.graph_node.node_id,
-                        source_coordinate: start_position.coordinate(),
-                        source_strand: Strand::Forward,
-                        target_node_id: change.block.node_id,
-                        target_coordinate: change.block.sequence_start,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-            for end_position in &end_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: change.block.node_id,
-                        source_coordinate: change.block.sequence_end,
-                        source_strand: Strand::Forward,
-                        target_node_id: end_position.graph_node.node_id,
-                        target_coordinate: end_position.coordinate(),
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-        }
-
-        Ok(new_edges)
-    }
-}
 
 pub struct PathCache<'a> {
     pub cache: HashMap<PathData, Path>,
@@ -839,63 +700,6 @@ impl BlockGroup {
         Ok(accession)
     }
 
-    fn persist_insert_changes(
-        conn: &GraphConnection,
-        new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
-        new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
-    ) -> Result<(), BlockGroupError> {
-        let mut edge_data_map = HashMap::new();
-
-        for (block_group_id, new_augmented_edges) in new_augmented_edges_by_block_group {
-            let new_edges = new_augmented_edges
-                .iter()
-                .map(|augmented_edge| augmented_edge.edge_data)
-                .collect::<Vec<_>>();
-            let edge_ids = Edge::bulk_create(conn, &new_edges);
-            for (i, edge_data) in new_edges.iter().enumerate() {
-                edge_data_map.insert(*edge_data, edge_ids[i]);
-            }
-            let new_block_group_edges = edge_ids
-                .iter()
-                .enumerate()
-                .map(|(i, edge_id)| BlockGroupEdgeData {
-                    block_group_id,
-                    edge_id: *edge_id,
-                    chromosome_index: new_augmented_edges[i].chromosome_index,
-                    phased: new_augmented_edges[i].phased,
-                })
-                .collect::<Vec<_>>();
-            BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-        }
-
-        for ((block_group_id, accession_name), path_edges) in new_accession_edges {
-            match Accession::get(
-                conn,
-                "select * from accessions where name = ?1 AND block_group_id = ?2",
-                params![accession_name, block_group_id],
-            ) {
-                Ok(_) => {
-                    println!(
-                        "accession already exists, consider a better matching algorithm to determine if this is an error."
-                    );
-                }
-                Err(_) => {
-                    let acc_edges = AccessionEdge::bulk_create(
-                        conn,
-                        &path_edges
-                            .iter()
-                            .map(AccessionEdgeData::from)
-                            .collect::<Vec<_>>(),
-                    );
-                    let acc = Accession::create(conn, &accession_name, &block_group_id, None)
-                        .expect("Accession could not be created.");
-                    AccessionPath::create(conn, &acc.id, &acc_edges)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub fn insert_change(
         conn: &GraphConnection,
         change: &BlockGroupChange,
@@ -965,7 +769,64 @@ impl BlockGroup {
         )
     }
 
-    fn set_up_new_edges(
+    fn persist_insert_changes(
+        conn: &GraphConnection,
+        new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
+        new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
+    ) -> Result<(), BlockGroupError> {
+        let mut edge_data_map = HashMap::new();
+
+        for (block_group_id, new_augmented_edges) in new_augmented_edges_by_block_group {
+            let new_edges = new_augmented_edges
+                .iter()
+                .map(|augmented_edge| augmented_edge.edge_data)
+                .collect::<Vec<_>>();
+            let edge_ids = Edge::bulk_create(conn, &new_edges);
+            for (i, edge_data) in new_edges.iter().enumerate() {
+                edge_data_map.insert(*edge_data, edge_ids[i]);
+            }
+            let new_block_group_edges = edge_ids
+                .iter()
+                .enumerate()
+                .map(|(i, edge_id)| BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id: *edge_id,
+                    chromosome_index: new_augmented_edges[i].chromosome_index,
+                    phased: new_augmented_edges[i].phased,
+                })
+                .collect::<Vec<_>>();
+            BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
+        }
+
+        for ((block_group_id, accession_name), path_edges) in new_accession_edges {
+            match Accession::get(
+                conn,
+                "select * from accessions where name = ?1 AND block_group_id = ?2",
+                params![accession_name, block_group_id],
+            ) {
+                Ok(_) => {
+                    println!(
+                        "accession already exists, consider a better matching algorithm to determine if this is an error."
+                    );
+                }
+                Err(_) => {
+                    let acc_edges = AccessionEdge::bulk_create(
+                        conn,
+                        &path_edges
+                            .iter()
+                            .map(AccessionEdgeData::from)
+                            .collect::<Vec<_>>(),
+                    );
+                    let acc = Accession::create(conn, &accession_name, &block_group_id, None)
+                        .expect("Accession could not be created.");
+                    AccessionPath::create(conn, &acc.id, &acc_edges)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_up_new_edges(
         change: &BlockGroupChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
