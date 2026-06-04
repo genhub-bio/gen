@@ -617,11 +617,8 @@ where
                                 )),
                             )?;
                             BlockGroupChange {
-                                block_group_id: block_group.id,
-                                intervaltree_source: region.clone(),
+                                region: region.clone(),
                                 path_accession: None,
-                                start,
-                                end,
                                 block: PathBlock {
                                     node_id: change_node_id,
                                     block_sequence: edit.new_sequence.clone(),
@@ -637,11 +634,8 @@ where
                             }
                         }
                         EditType::Deletion => BlockGroupChange {
-                            block_group_id: block_group.id,
-                            intervaltree_source: region,
+                            region,
                             path_accession: None,
-                            start,
-                            end,
                             block: PathBlock {
                                 node_id: wt_node_id,
                                 block_sequence: "".to_string(),

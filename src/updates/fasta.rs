@@ -120,8 +120,6 @@ pub fn update_with_fasta(
                     &resolved_region,
                     state.block_group_id,
                     state.path.as_ref(),
-                    start_coordinate,
-                    end_coordinate,
                     path_block,
                 )?;
                 if index == 0 {
@@ -161,8 +159,6 @@ pub fn update_with_fasta(
                     &resolved_region,
                     state.block_group_id,
                     state.path.as_ref(),
-                    start_coordinate,
-                    end_coordinate,
                     path_block,
                 )?;
                 if index == 0 {
@@ -232,17 +228,10 @@ fn insert_fasta_change(
     region: &ResolvedGenRegion,
     target_block_group_id: HashId,
     path: Option<&gen_models::path::Path>,
-    start_coordinate: i64,
-    end_coordinate: i64,
     block: PathBlock,
 ) -> Result<(), FastaError> {
     let source = target_update_region(conn, region, target_block_group_id, path)?;
-    let data = InsertChangeData::new(
-        target_block_group_id,
-        start_coordinate,
-        end_coordinate,
-        block,
-    );
+    let data = InsertChangeData::new(block);
     insert_update_change(conn, source, data)?;
     Ok(())
 }

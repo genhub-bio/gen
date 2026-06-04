@@ -152,7 +152,7 @@ fn prepare_change(
     sequence_length: i64,
     node_id: HashId,
     preserve_edge: bool,
-) -> Result<BlockGroupChange<ResolvedGenRegion>, BlockGroupError> {
+) -> Result<BlockGroupChange, BlockGroupError> {
     let new_block = PathBlock {
         node_id,
         block_sequence,
@@ -165,11 +165,8 @@ fn prepare_change(
     let region =
         ResolvedGenRegion::from_path(conn, *sample_bg_id, sample_path, ref_start, ref_end)?;
     Ok(BlockGroupChange {
-        block_group_id: *sample_bg_id,
-        intervaltree_source: region,
+        region,
         path_accession: ids,
-        start: ref_start,
-        end: ref_end,
         block: new_block,
         chromosome_index,
         phased,
@@ -257,8 +254,7 @@ pub fn update_with_vcf(
     let mut sequence_cache = SequenceCache::new(conn);
     let mut accession_cache = HashMap::new();
 
-    let mut changes: HashMap<(Path, String), Vec<BlockGroupChange<ResolvedGenRegion>>> =
-        HashMap::new();
+    let mut changes: HashMap<(Path, String), Vec<BlockGroupChange>> = HashMap::new();
 
     let mut node_source_paths: HashMap<HashId, HashId> = HashMap::new();
     let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
@@ -617,15 +613,12 @@ pub fn update_with_vcf(
                 let in_place_changes = chunk
                     .iter()
                     .map(|change| {
-                        let mut region = change.intervaltree_source.clone();
+                        let mut region = change.region.clone();
                         region.kind = ResolvedRegionKind::BlockGroup;
                         region.remove_ambiguous_positions = true;
                         BlockGroupChange {
-                            block_group_id: change.block_group_id,
-                            intervaltree_source: region,
+                            region,
                             path_accession: change.path_accession.clone(),
-                            start: change.start,
-                            end: change.end,
                             block: change.block.clone(),
                             chromosome_index: change.chromosome_index,
                             phased: change.phased,

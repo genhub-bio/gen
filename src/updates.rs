@@ -60,9 +60,6 @@ pub(crate) fn target_update_region(
 }
 
 pub(crate) struct InsertChangeData {
-    pub block_group_id: HashId,
-    pub start: i64,
-    pub end: i64,
     pub block: PathBlock,
     pub path_accession: Option<String>,
     pub chromosome_index: i64,
@@ -71,11 +68,8 @@ pub(crate) struct InsertChangeData {
 }
 
 impl InsertChangeData {
-    pub(crate) fn new(block_group_id: HashId, start: i64, end: i64, block: PathBlock) -> Self {
+    pub(crate) fn new(block: PathBlock) -> Self {
         Self {
-            block_group_id,
-            start,
-            end,
             block,
             path_accession: None,
             chromosome_index: NO_CHROMOSOME_INDEX,
@@ -91,11 +85,8 @@ pub(crate) fn insert_update_change(
     data: InsertChangeData,
 ) -> Result<(), BlockGroupError> {
     let change = BlockGroupChange {
-        block_group_id: data.block_group_id,
-        intervaltree_source: region,
+        region,
         path_accession: data.path_accession,
-        start: data.start,
-        end: data.end,
         block: data.block,
         chromosome_index: data.chromosome_index,
         phased: data.phased,

@@ -174,11 +174,8 @@ pub fn setup_test_data(conn: &GraphConnection) {
     .unwrap();
     let region = ResolvedGenRegion::from_path(conn, sample_bg_id, &sample_path, 3, 4).unwrap();
     let change = BlockGroupChange {
-        block_group_id: sample_bg_id,
-        intervaltree_source: region,
+        region,
         path_accession: None,
-        start: 3,
-        end: 4,
         block: PathBlock {
             node_id,
             block_sequence: alt_seq.to_string(),

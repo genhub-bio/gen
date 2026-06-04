@@ -275,11 +275,8 @@ mod tests {
         let region =
             ResolvedGenRegion::from_path(conn, sample_bg_id, &sample_path, 15, 25).unwrap();
         let change = BlockGroupChange {
-            block_group_id: sample_bg_id,
-            intervaltree_source: region,
+            region,
             path_accession: None,
-            start: 15,
-            end: 25,
             block: PathBlock {
                 node_id,
                 block_sequence: replacement_sequence.to_string(),

@@ -1521,11 +1521,8 @@ mod tests {
         };
         let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
         let change = BlockGroupChange {
-            block_group_id,
-            intervaltree_source: region,
+            region,
             path_accession: None,
-            start: 7,
-            end: 15,
             block: insert,
             chromosome_index: 0,
             phased: 0,

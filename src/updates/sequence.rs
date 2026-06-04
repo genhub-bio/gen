@@ -88,8 +88,6 @@ pub fn update_with_sequence(
                 &resolved_region,
                 target_block_group,
                 &path,
-                start_coordinate,
-                end_coordinate,
                 path_block,
             )?;
             node_id
@@ -125,8 +123,6 @@ pub fn update_with_sequence(
                 &resolved_region,
                 target_block_group,
                 &path,
-                start_coordinate,
-                end_coordinate,
                 path_block,
             )?;
             node_id
@@ -183,17 +179,10 @@ fn insert_sequence_change(
     region: &ResolvedGenRegion,
     target_block_group: &BlockGroup,
     path: &gen_models::path::Path,
-    start_coordinate: i64,
-    end_coordinate: i64,
     block: PathBlock,
 ) -> Result<(), SequenceUpdateError> {
     let source = target_update_region(conn, region, target_block_group.id, Some(path))?;
-    let data = InsertChangeData::new(
-        target_block_group.id,
-        start_coordinate,
-        end_coordinate,
-        block,
-    );
+    let data = InsertChangeData::new(block);
     insert_update_change(conn, source, data)?;
     Ok(())
 }
@@ -252,11 +241,8 @@ mod tests {
 
         let region = ResolvedGenRegion::from_accession(&conn, &accession, 5, 15).unwrap();
         let change = BlockGroupChange {
-            block_group_id,
-            intervaltree_source: region,
+            region,
             path_accession: None,
-            start: 5,
-            end: 15,
             block: insertion_block(&conn, "acc-no-path-node", "NNNN"),
             chromosome_index: NO_CHROMOSOME_INDEX,
             phased: 0,
@@ -289,11 +275,8 @@ mod tests {
         let region =
             ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, -5, 25).unwrap();
         let change = BlockGroupChange {
-            block_group_id,
-            intervaltree_source: region,
+            region,
             path_accession: None,
-            start: -5,
-            end: 25,
             block: insertion_block(&conn, "ann-no-path-node", "NNNN"),
             chromosome_index: NO_CHROMOSOME_INDEX,
             phased: 0,
