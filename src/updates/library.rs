@@ -3,22 +3,28 @@ use std::str;
 
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
-    errors::{BlockGroupError, PathError},
+    edge::Edge,
+    errors::{BlockGroupError, PathError, SampleError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
-    region::{GenRegionError, Region, resolve_path},
+    region::{
+        GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind, resolve_accession,
+        resolve_annotation, resolve_path,
+    },
     sample::Sample,
 };
 use thiserror::Error;
 
 use crate::graphs::{
-    BlockGroupChunk,
+    BlockGroupChunk, NodePoint,
     combinatorial_library::{
         CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
         create_library,
     },
     operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
+    stitch,
 };
 
 #[derive(Error, Debug)]
@@ -29,6 +35,12 @@ pub enum UpdateWithLibraryError {
     BlockGroupCreationFailed(#[from] BlockGroupError),
     #[error("Failed to create output graph(s)")]
     GraphOperation(GraphOperationError),
+    #[error("Graph error: {0}")]
+    Graph(#[from] crate::graphs::GraphError),
+    #[error("Graph resolution error: {0}")]
+    GraphResolution(#[from] gen_graph::GraphError),
+    #[error("Sample error: {0}")]
+    Sample(#[from] SampleError),
     #[error("Failed to read path")]
     Path(#[from] PathError),
     #[error("Failed to parse library files")]
@@ -41,6 +53,12 @@ pub enum UpdateWithLibraryError {
     MissingCoordinates(String),
     #[error("Unsupported region type for library update: {0}")]
     UnsupportedRegionType(String),
+}
+
+enum LibraryChangeSource {
+    Path(ResolvedGenRegion),
+    Accession(ResolvedGenRegion),
+    Annotation(ResolvedGenRegion),
 }
 
 impl From<CombinatorialLibraryParseError> for UpdateWithLibraryError {
@@ -81,14 +99,32 @@ pub fn update_with_library(
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
-    let resolved_region =
+    let change_source =
         match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
-            Ok(region) => region,
+            Ok(region) => LibraryChangeSource::Path(region),
             Err(GenRegionError::NotFound(_)) => {
-                return Err(GenRegionError::NotFound(region_name.to_string()).into());
+                match resolve_annotation(&parsed_region, conn, collection_name, parent_sample_name)
+                {
+                    Ok(region) => LibraryChangeSource::Annotation(region),
+                    Err(GenRegionError::NotFound(_)) => {
+                        let region = resolve_accession(
+                            &parsed_region,
+                            conn,
+                            collection_name,
+                            parent_sample_name,
+                        )?;
+                        LibraryChangeSource::Accession(region)
+                    }
+                    Err(err) => return Err(err.into()),
+                }
             }
             Err(err) => return Err(err.into()),
         };
+    let resolved_region = match &change_source {
+        LibraryChangeSource::Path(region)
+        | LibraryChangeSource::Accession(region)
+        | LibraryChangeSource::Annotation(region) => region,
+    };
     let (start_coordinate, end_coordinate) =
         if parsed_region.start.is_some() || parsed_region.end.is_some() {
             (resolved_region.start, resolved_region.end)
@@ -97,6 +133,44 @@ pub fn update_with_library(
                 region_name.to_string(),
             ));
         };
+
+    if !matches!(&change_source, LibraryChangeSource::Path(_)) {
+        update_graph_native_library(
+            context,
+            collection_name,
+            parent_sample_name,
+            new_sample_name,
+            resolved_region,
+            parts_list,
+        )?;
+
+        let mut files = vec![];
+        if let Some(library_file_path) = library_file_path {
+            files.push(
+                OperationFile::new(library_file_path.to_string()).set_file_type(FileTypes::CSV),
+            );
+        }
+        if let Some(parts_file_path) = parts_file_path {
+            files.push(
+                OperationFile::new(parts_file_path.to_string()).set_file_type(FileTypes::Fasta),
+            );
+        }
+
+        let summary_str = format!("{region_name} created.\n");
+        gen_models::session_operations::end_operation(
+            context,
+            &mut session,
+            &OperationInfo {
+                files,
+                description: "library_csv_update".to_string(),
+            },
+            &summary_str,
+            None,
+        )
+        .unwrap();
+
+        return Ok(());
+    }
 
     let _new_sample = Sample::get_or_create(
         conn,
@@ -242,12 +316,141 @@ pub fn update_with_library(
     Ok(())
 }
 
+fn update_graph_native_library(
+    context: &DbContext,
+    collection_name: &str,
+    parent_sample_name: &str,
+    new_sample_name: &str,
+    resolved_region: &ResolvedGenRegion,
+    parts_list: Vec<Vec<SequencePart>>,
+) -> Result<(), UpdateWithLibraryError> {
+    let conn = context.graph().conn();
+    let _new_sample = Sample::get_or_create_child(
+        conn,
+        collection_name,
+        new_sample_name,
+        vec![parent_sample_name.to_string()],
+    )?;
+    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
+
+    let mut target_block_groups = vec![];
+    for block_group in block_groups {
+        let new_block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            collection_name,
+            new_sample_name,
+            &block_group.name,
+            vec![parent_sample_name.to_string()],
+        )?;
+
+        if block_group.name == resolved_region.block_group.name {
+            target_block_groups = new_block_groups;
+        }
+    }
+
+    if target_block_groups.is_empty() {
+        return Err(UpdateWithLibraryError::Region(GenRegionError::NotFound(
+            resolved_region.block_group.name.clone(),
+        )));
+    }
+
+    for target_block_group in target_block_groups {
+        let mut target_region = resolved_region.clone();
+        target_region.block_group = target_block_group.clone();
+        target_region.kind = match target_region.kind {
+            ResolvedRegionKind::Annotation => ResolvedRegionKind::Annotation,
+            ResolvedRegionKind::Accession => ResolvedRegionKind::Accession,
+            kind => {
+                return Err(UpdateWithLibraryError::UnsupportedRegionType(format!(
+                    "{kind:?}"
+                )));
+            }
+        };
+
+        let (start_positions, end_positions) = target_region
+            .find_graph_positions(conn, 0, 0)
+            .map_err(UpdateWithLibraryError::from)?;
+        let library_chunk = create_library(
+            conn,
+            target_block_group.id,
+            new_sample_name,
+            parts_list.clone(),
+            false,
+        )?;
+        let start_chunk = BlockGroupChunk {
+            entry_node_points: graph_node_positions_to_points(&start_positions),
+            exit_node_points: graph_node_positions_to_points(&start_positions),
+            path_edges: vec![],
+            path_start_point: None,
+            path_end_point: None,
+        };
+        let end_chunk = BlockGroupChunk {
+            entry_node_points: graph_node_positions_to_points(&end_positions),
+            exit_node_points: graph_node_positions_to_points(&end_positions),
+            path_edges: vec![],
+            path_start_point: None,
+            path_end_point: None,
+        };
+
+        let stitched_start = stitch(conn, &start_chunk, &library_chunk, target_block_group.id)?;
+        let _stitched_end = stitch(conn, &stitched_start, &end_chunk, target_block_group.id)?;
+        preserve_library_boundary_points(conn, target_block_group.id, &start_positions)?;
+        preserve_library_boundary_points(conn, target_block_group.id, &end_positions)?;
+    }
+
+    Ok(())
+}
+
+fn graph_node_positions_to_points(positions: &[gen_graph::GraphNodePosition]) -> Vec<NodePoint> {
+    positions
+        .iter()
+        .map(|position| NodePoint {
+            id: position.graph_node.node_id,
+            coordinate: position.coordinate(),
+            strand: gen_core::Strand::Forward,
+        })
+        .collect()
+}
+
+fn preserve_library_boundary_points(
+    conn: &gen_models::db::GraphConnection,
+    block_group_id: gen_core::HashId,
+    positions: &[gen_graph::GraphNodePosition],
+) -> Result<(), UpdateWithLibraryError> {
+    let edge_data = positions
+        .iter()
+        .map(|position| {
+            let coordinate = position.coordinate();
+            gen_models::edge::EdgeData {
+                source_node_id: position.graph_node.node_id,
+                source_coordinate: coordinate,
+                source_strand: gen_core::Strand::Forward,
+                target_node_id: position.graph_node.node_id,
+                target_coordinate: coordinate,
+                target_strand: gen_core::Strand::Forward,
+            }
+        })
+        .collect::<Vec<_>>();
+    let edge_ids = Edge::bulk_create(conn, &edge_data);
+    let block_group_edges = edge_ids
+        .iter()
+        .map(|edge_id| BlockGroupEdgeData {
+            block_group_id,
+            edge_id: *edge_id,
+            chromosome_index: 0,
+            phased: 0,
+        })
+        .collect::<Vec<_>>();
+    BlockGroupEdge::bulk_create(conn, &block_group_edges);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use anyhow::Result;
-    use gen_models::block_group::BlockGroup;
+    use gen_models::{annotations::add_annotation, block_group::BlockGroup, path::Path};
 
     use super::*;
     use crate::{
@@ -372,6 +575,63 @@ mod tests {
         assert_eq!(
             path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotation_update_does_not_require_target_path() -> Result<()> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "simple",
+            false,
+        )
+        .unwrap();
+        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+
+        Sample::get_or_create_child(conn, &collection, "derived", vec!["simple".to_string()])
+            .unwrap();
+        let derived_block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
+        Path::delete(conn, "m123", &derived_block_group.id);
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
+
+        update_with_library(
+            &context,
+            &collection,
+            "simple",
+            "derived",
+            "foobar:-3-5",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )?;
+
+        let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATAAAACGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATTAATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCAACCGATCGATCGGGAACACACAGAGA".to_string(),
+            ])
         );
 
         Ok(())

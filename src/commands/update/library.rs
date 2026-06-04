@@ -20,9 +20,9 @@ pub struct Command {
     /// A new sample name to associate with the update
     #[arg(long)]
     new_sample: String,
-    /// The name of the path to add the library to
-    #[arg(short, long)]
-    path_name: String,
+    /// The region to replace with the library (path, accession, or annotation)
+    #[arg(short, long = "region-name", alias = "path-name")]
+    region_name: String,
     /// A CSV with combinatorial library information
     #[arg(short, long)]
     library: String,
@@ -53,7 +53,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         name,
         cmd.sample.as_str(),
         &cmd.new_sample,
-        &cmd.path_name,
+        &cmd.region_name,
         parts_list,
         Some(&cmd.parts),
         Some(&cmd.library),
