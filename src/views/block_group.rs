@@ -1232,6 +1232,5 @@ pub fn view_block_group(
         }
     }
 
-    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture).ok();
     Ok(())
 }

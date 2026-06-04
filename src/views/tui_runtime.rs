@@ -2,6 +2,7 @@ use std::io;
 
 use crossterm::{
     cursor::Show,
+    event::DisableMouseCapture,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -12,7 +13,12 @@ pub type CrosstermTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 /// Restore terminal state to normal mode.
 pub fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(std::io::stdout(), LeaveAlternateScreen, Show)?;
+    execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    )?;
     Ok(())
 }
 
@@ -71,7 +77,12 @@ impl TuiSession {
         self.restored = true;
         self.terminal.show_cursor().ok();
         disable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show)?;
+        execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            Show
+        )?;
         Ok(())
     }
 }
