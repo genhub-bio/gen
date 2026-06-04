@@ -1,29 +1,23 @@
 use std::str;
 
-use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
+use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{AccessionChange, AnnotationChange, BlockGroup, PathChange},
+    block_group::BlockGroup,
     db::DbContext,
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
-    region::{
-        GenRegionError, Region, ResolvedGenRegion, resolve_accession, resolve_annotation,
-        resolve_path,
-    },
+    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
     traits::*,
 };
 use rusqlite::{self, params};
 
-use crate::errors::SequenceUpdateError;
-
-enum SequenceChangeSource {
-    Path(ResolvedGenRegion),
-    Accession(ResolvedGenRegion),
-    Annotation(ResolvedGenRegion),
-}
+use crate::{
+    errors::SequenceUpdateError,
+    updates::{InsertChangeData, UpdateChangeSource, insert_update_change, resolve_update_region},
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_sequence(
@@ -38,33 +32,8 @@ pub fn update_with_sequence(
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
-    let change_source =
-        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
-            Ok(region) => SequenceChangeSource::Path(region),
-            Err(GenRegionError::NotFound(_)) => {
-                match resolve_annotation(&parsed_region, conn, collection_name, parent_sample_name)
-                {
-                    Ok(region) => SequenceChangeSource::Annotation(region),
-                    Err(GenRegionError::NotFound(_)) => {
-                        let region = resolve_accession(
-                            &parsed_region,
-                            conn,
-                            collection_name,
-                            parent_sample_name,
-                        )
-                        .map_err(SequenceUpdateError::from)?;
-                        SequenceChangeSource::Accession(region)
-                    }
-                    Err(err) => return Err(err.into()),
-                }
-            }
-            Err(err) => return Err(err.into()),
-        };
-    let resolved_region = match &change_source {
-        SequenceChangeSource::Path(region)
-        | SequenceChangeSource::Accession(region)
-        | SequenceChangeSource::Annotation(region) => region,
-    };
+    let resolved_region =
+        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
     if parsed_region.start.is_none() && parsed_region.end.is_none() {
         return Err(SequenceUpdateError::MissingCoordinates(
             region_name.to_string(),
@@ -99,20 +68,7 @@ pub fn update_with_sequence(
 
     for target_block_group in &target_block_groups {
         let path = BlockGroup::get_current_path(conn, &target_block_group.id);
-        let target_change_source = match &change_source {
-            SequenceChangeSource::Path(region) => SequenceChangeSource::Path(region.clone()),
-            SequenceChangeSource::Accession(region) => {
-                SequenceChangeSource::Accession(region.clone())
-            }
-            SequenceChangeSource::Annotation(region) => {
-                SequenceChangeSource::Annotation(region.clone())
-            }
-        };
-        let (start_coordinate, end_coordinate) = match &target_change_source {
-            SequenceChangeSource::Path(region)
-            | SequenceChangeSource::Accession(region)
-            | SequenceChangeSource::Annotation(region) => (region.start, region.end),
-        };
+        let (start_coordinate, end_coordinate) = (resolved_region.start, resolved_region.end);
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
@@ -127,7 +83,7 @@ pub fn update_with_sequence(
 
             insert_sequence_change(
                 conn,
-                &target_change_source,
+                &resolved_region,
                 target_block_group,
                 &path,
                 start_coordinate,
@@ -164,7 +120,7 @@ pub fn update_with_sequence(
 
             insert_sequence_change(
                 conn,
-                &target_change_source,
+                &resolved_region,
                 target_block_group,
                 &path,
                 start_coordinate,
@@ -174,9 +130,7 @@ pub fn update_with_sequence(
             node_id
         };
 
-        if !disable_reference_path_update
-            && matches!(target_change_source, SequenceChangeSource::Path(_))
-        {
+        if !disable_reference_path_update && resolved_region.kind == ResolvedRegionKind::Path {
             if node_id == HashId::convert_str("") {
                 let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
             } else {
@@ -224,65 +178,21 @@ pub fn update_with_sequence(
 
 fn insert_sequence_change(
     conn: &gen_models::db::GraphConnection,
-    change_source: &SequenceChangeSource,
+    region: &ResolvedGenRegion,
     target_block_group: &BlockGroup,
     path: &gen_models::path::Path,
     start_coordinate: i64,
     end_coordinate: i64,
     block: PathBlock,
 ) -> Result<(), SequenceUpdateError> {
-    match change_source {
-        SequenceChangeSource::Path(_) => {
-            let change = PathChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: path.clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-            BlockGroup::insert_change(conn, &change)?;
-        }
-        SequenceChangeSource::Accession(region) => {
-            let change = AccessionChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: region
-                    .accession
-                    .as_ref()
-                    .ok_or_else(|| GenRegionError::NotFound(region.block_group.name.clone()))?
-                    .clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-            BlockGroup::insert_change(conn, &change)?;
-        }
-        SequenceChangeSource::Annotation(region) => {
-            let change = AnnotationChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: region
-                    .annotation
-                    .as_ref()
-                    .ok_or_else(|| GenRegionError::NotFound(region.block_group.name.clone()))?
-                    .clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-            BlockGroup::insert_change(conn, &change)?;
-        }
-    }
+    let source = UpdateChangeSource::from_region(region, Some(path))?;
+    let data = InsertChangeData::new(
+        target_block_group.id,
+        start_coordinate,
+        end_coordinate,
+        block,
+    );
+    insert_update_change(conn, source, data)?;
     Ok(())
 }
 
@@ -290,10 +200,12 @@ fn insert_sequence_change(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
+    use gen_core::NO_CHROMOSOME_INDEX;
     use gen_models::{
         annotations::{Annotation, add_annotation},
         block_group::{AccessionChange, AnnotationChange, PathCache},
         path::Path,
+        region::resolve_annotation,
         sample_lineage::SampleLineage,
     };
 

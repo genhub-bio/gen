@@ -1,17 +1,14 @@
 use std::str;
 
-use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
+use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{AccessionChange, AnnotationChange, BlockGroup, PathChange},
+    block_group::BlockGroup,
     db::DbContext,
     edge::Edge,
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
-    region::{
-        GenRegionError, Region, ResolvedGenRegion, resolve_accession, resolve_annotation,
-        resolve_path,
-    },
+    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
     traits::*,
@@ -19,13 +16,10 @@ use gen_models::{
 use noodles::fasta;
 use rusqlite::{self, types::Value as SQLValue};
 
-use crate::fasta::FastaError;
-
-enum FastaChangeSource {
-    Path(ResolvedGenRegion),
-    Accession(ResolvedGenRegion),
-    Annotation(ResolvedGenRegion),
-}
+use crate::{
+    fasta::FastaError,
+    updates::{InsertChangeData, UpdateChangeSource, insert_update_change, resolve_update_region},
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_fasta(
@@ -40,32 +34,8 @@ pub fn update_with_fasta(
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
-    let change_source =
-        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
-            Ok(region) => FastaChangeSource::Path(region),
-            Err(GenRegionError::NotFound(_)) => {
-                match resolve_annotation(&parsed_region, conn, collection_name, parent_sample_name)
-                {
-                    Ok(region) => FastaChangeSource::Annotation(region),
-                    Err(GenRegionError::NotFound(_)) => {
-                        let region = resolve_accession(
-                            &parsed_region,
-                            conn,
-                            collection_name,
-                            parent_sample_name,
-                        )?;
-                        FastaChangeSource::Accession(region)
-                    }
-                    Err(err) => return Err(err.into()),
-                }
-            }
-            Err(err) => return Err(err.into()),
-        };
-    let resolved_region = match &change_source {
-        FastaChangeSource::Path(region)
-        | FastaChangeSource::Accession(region)
-        | FastaChangeSource::Annotation(region) => region,
-    };
+    let resolved_region =
+        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
     let (start_coordinate, end_coordinate) =
         if parsed_region.start.is_some() || parsed_region.end.is_some() {
             (resolved_region.start, resolved_region.end)
@@ -111,7 +81,7 @@ pub fn update_with_fasta(
     let mut target_states = target_block_groups
         .iter()
         .map(|target_block_group| -> Result<_, FastaError> {
-            let path = if matches!(&change_source, FastaChangeSource::Path(_)) {
+            let path = if resolved_region.kind == ResolvedRegionKind::Path {
                 Some(BlockGroup::get_current_path(conn, &target_block_group.id))
             } else {
                 None
@@ -145,7 +115,7 @@ pub fn update_with_fasta(
 
                 insert_fasta_change(
                     conn,
-                    &change_source,
+                    &resolved_region,
                     state.block_group_id,
                     state.path.as_ref(),
                     start_coordinate,
@@ -186,7 +156,7 @@ pub fn update_with_fasta(
 
                 insert_fasta_change(
                     conn,
-                    &change_source,
+                    &resolved_region,
                     state.block_group_id,
                     state.path.as_ref(),
                     start_coordinate,
@@ -205,7 +175,7 @@ pub fn update_with_fasta(
 
     for state in target_states {
         if !disable_reference_path_update
-            && matches!(&change_source, FastaChangeSource::Path(_))
+            && resolved_region.kind == ResolvedRegionKind::Path
             && let Some(node_id) = state.first_node
             && let Some(path) = state.path
         {
@@ -257,67 +227,21 @@ pub fn update_with_fasta(
 
 fn insert_fasta_change(
     conn: &gen_models::db::GraphConnection,
-    change_source: &FastaChangeSource,
+    region: &ResolvedGenRegion,
     target_block_group_id: HashId,
     path: Option<&gen_models::path::Path>,
     start_coordinate: i64,
     end_coordinate: i64,
     block: PathBlock,
 ) -> Result<(), FastaError> {
-    match change_source {
-        FastaChangeSource::Path(_) => {
-            let change = PathChange {
-                block_group_id: target_block_group_id,
-                intervaltree_source: path
-                    .ok_or_else(|| GenRegionError::NotFound("missing target path".to_string()))?
-                    .clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-            BlockGroup::insert_change(conn, &change)?;
-        }
-        FastaChangeSource::Accession(region) => {
-            let change = AccessionChange {
-                block_group_id: target_block_group_id,
-                intervaltree_source: region
-                    .accession
-                    .as_ref()
-                    .ok_or_else(|| GenRegionError::NotFound(region.block_group.name.clone()))?
-                    .clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-            BlockGroup::insert_change(conn, &change)?;
-        }
-        FastaChangeSource::Annotation(region) => {
-            let change = AnnotationChange {
-                block_group_id: target_block_group_id,
-                intervaltree_source: region
-                    .annotation
-                    .as_ref()
-                    .ok_or_else(|| GenRegionError::NotFound(region.block_group.name.clone()))?
-                    .clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-            BlockGroup::insert_change(conn, &change)?;
-        }
-    }
+    let source = UpdateChangeSource::from_region(region, path)?;
+    let data = InsertChangeData::new(
+        target_block_group_id,
+        start_coordinate,
+        end_coordinate,
+        block,
+    );
+    insert_update_change(conn, source, data)?;
     Ok(())
 }
 

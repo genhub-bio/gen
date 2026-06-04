@@ -404,20 +404,34 @@ impl RegionResolver for Annotation {
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
         let matches = Annotation::query(
             conn,
-            "WITH RECURSIVE visible_samples(name) AS (
-                 SELECT ?2
-                 UNION
-                 SELECT sl.parent_sample_name
+            "WITH RECURSIVE visible_samples(name, depth, path) AS (
+                 SELECT ?2, 0, ',' || ?2 || ','
+                 UNION ALL
+                 SELECT sl.parent_sample_name,
+                        visible.depth + 1,
+                        visible.path || sl.parent_sample_name || ','
                  FROM sample_lineage sl
                  JOIN visible_samples visible ON sl.child_sample_name = visible.name
+                 WHERE instr(visible.path, ',' || sl.parent_sample_name || ',') = 0
+             ),
+             matching_annotations AS (
+                 SELECT a.id,
+                        a.name,
+                        a.annotation_group,
+                        a.accession_id,
+                        a.extra,
+                        min(visible.depth) AS depth \
+                 FROM annotations a \
+                 JOIN accessions acc ON a.accession_id = acc.id \
+                 JOIN block_groups bg ON acc.block_group_id = bg.id \
+                 JOIN visible_samples visible ON bg.sample_name = visible.name \
+                 WHERE bg.collection_name = ?1 \
+                   AND lower(a.name) = lower(?3)
+                 GROUP BY a.id, a.name, a.annotation_group, a.accession_id, a.extra
              )
-             SELECT DISTINCT a.* \
-             FROM annotations a \
-             JOIN accessions acc ON a.accession_id = acc.id \
-             JOIN block_groups bg ON acc.block_group_id = bg.id \
-             JOIN visible_samples visible ON bg.sample_name = visible.name \
-             WHERE bg.collection_name = ?1 \
-               AND lower(a.name) = lower(?3)",
+             SELECT id, name, annotation_group, accession_id, extra \
+             FROM matching_annotations \
+             WHERE depth = (SELECT min(depth) FROM matching_annotations)",
             params![collection_name, sample_name, region.name],
         );
 
@@ -930,6 +944,7 @@ mod tests {
         path::Path,
         path_edge::PathEdge,
         sample::Sample,
+        sample_lineage::SampleLineage,
         test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
     };
 
@@ -1004,6 +1019,57 @@ mod tests {
                 err,
                 RegionResolutionError::Ambiguous(name) if name == "multiple annotations named mreB"
             ));
+        }
+
+        #[test]
+        fn resolves_closest_annotation_in_sample_lineage() {
+            let conn = get_connection(None).unwrap();
+            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
+                .unwrap();
+            let parent_accession = BlockGroup::add_accession(
+                &conn,
+                &parent_path,
+                "parent-accession",
+                0,
+                5,
+                &mut cache,
+            )
+            .unwrap();
+            let _parent_annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
+                    .unwrap();
+
+            let child_block_group = create_bg(&conn, "test", "child", "chr1");
+            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id)
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            let block_group_edges = edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: child_block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>();
+            crate::block_group_edge::BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+            let child_path =
+                Path::create(&conn, "child-path", &child_block_group.id, &edge_ids).unwrap();
+            let child_accession =
+                BlockGroup::add_accession(&conn, &child_path, "child-accession", 0, 5, &mut cache)
+                    .unwrap();
+            let child_annotation =
+                Annotation::get_or_create(&conn, "MREB", "genes", &child_accession.id, None)
+                    .unwrap();
+            SampleLineage::create(&conn, "test", "child").unwrap();
+
+            let region = Region::parse("mreB").unwrap();
+            let resolved = Annotation::resolve(&region, &conn, "test", "child").unwrap();
+
+            assert_eq!(resolved.id, child_annotation.id);
         }
     }
 

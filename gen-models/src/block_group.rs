@@ -12,8 +12,8 @@ use gen_core::{
     traits::Capnp,
 };
 use gen_graph::{
-    GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
-    flatten_to_interval_tree,
+    GenGraph, GraphNode, GraphNodePosition, all_intermediate_edges, all_reachable_nodes,
+    all_simple_paths, flatten_to_interval_tree,
 };
 use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value as SQLValue};
@@ -198,10 +198,6 @@ pub trait ChangeSource: IntervalTreeSource {
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError>
     where
         Self: Sized;
-
-    fn cache_intervaltree() -> bool {
-        false
-    }
 }
 
 impl IntervalTreeSource for Path {
@@ -229,10 +225,6 @@ impl ChangeSource for Path {
         };
         BlockGroup::set_up_new_edges(change, tree)
     }
-
-    fn cache_intervaltree() -> bool {
-        true
-    }
 }
 
 impl IntervalTreeSource for Accession {
@@ -248,25 +240,9 @@ impl ChangeSource for Accession {
     fn plan_edges(
         conn: &GraphConnection,
         change: &BlockGroupChange<Self>,
-        _tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
+        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let target_block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
-        let accession_length = change.intervaltree_source.length(conn)?;
-        let region = ResolvedGenRegion {
-            block_group: target_block_group,
-            path: None,
-            accession: Some(change.intervaltree_source.clone()),
-            annotation: None,
-            kind: ResolvedRegionKind::Accession,
-            anchor_start: 0,
-            anchor_end: accession_length,
-            feature_length: accession_length,
-            start: change.start,
-            end: change.end,
-        };
-        let (start_positions, end_positions) = region
-            .find_graph_positions(conn, 0, 0)
-            .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?;
+        let (start_positions, end_positions) = accession_change_positions(conn, change, tree)?;
         let preserve_chromosome_index = if change.preserve_edge {
             0
         } else {
@@ -344,6 +320,64 @@ impl ChangeSource for Accession {
     }
 }
 
+fn accession_change_positions(
+    conn: &GraphConnection,
+    change: &AccessionChange,
+    tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
+) -> Result<(Vec<GraphNodePosition>, Vec<GraphNodePosition>), BlockGroupError> {
+    if let Some(tree) = tree
+        && let Some(start_positions) = graph_positions_from_tree(tree, change.start)
+        && let Some(end_positions) = graph_positions_from_tree(tree, change.end)
+    {
+        return Ok((start_positions, end_positions));
+    }
+
+    let target_block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
+    let accession_length = change.intervaltree_source.length(conn)?;
+    let region = ResolvedGenRegion {
+        block_group: target_block_group,
+        path: None,
+        accession: Some(change.intervaltree_source.clone()),
+        annotation: None,
+        kind: ResolvedRegionKind::Accession,
+        anchor_start: 0,
+        anchor_end: accession_length,
+        feature_length: accession_length,
+        start: change.start,
+        end: change.end,
+    };
+    region
+        .find_graph_positions(conn, 0, 0)
+        .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))
+}
+
+fn graph_positions_from_tree(
+    tree: &IntervalTree<i64, NodeIntervalBlock>,
+    coordinate: i64,
+) -> Option<Vec<GraphNodePosition>> {
+    let mut positions = tree
+        .query_point(coordinate)
+        .map(|entry| entry.value)
+        .filter(|block| !is_terminal(block.node_id))
+        .map(|block| GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: block.node_id,
+                sequence_start: block.sequence_start,
+                sequence_end: block.sequence_end,
+            },
+            offset: coordinate - block.start,
+        })
+        .collect::<Vec<_>>();
+
+    if positions.is_empty() {
+        return None;
+    }
+
+    positions.sort();
+    positions.dedup();
+    Some(positions)
+}
+
 impl IntervalTreeSource for AccessionAnnotation {
     fn intervaltree(
         &self,
@@ -357,7 +391,7 @@ impl ChangeSource for AccessionAnnotation {
     fn plan_edges(
         conn: &GraphConnection,
         change: &BlockGroupChange<Self>,
-        _tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
+        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         let accession = Accession::get_by_id(conn, &change.intervaltree_source.accession_id)
             .ok_or(BlockGroupError::AccessionError(
@@ -374,7 +408,7 @@ impl ChangeSource for AccessionAnnotation {
             phased: change.phased,
             preserve_edge: change.preserve_edge,
         };
-        Accession::plan_edges(conn, &accession_change, None)
+        Accession::plan_edges(conn, &accession_change, tree)
     }
 }
 
@@ -402,10 +436,6 @@ impl ChangeSource for BlockGroupTreeSource {
             }
         };
         BlockGroup::set_up_new_edges(change, tree)
-    }
-
-    fn cache_intervaltree() -> bool {
-        true
     }
 }
 
@@ -932,24 +962,23 @@ impl BlockGroup {
     pub fn insert_changes<T: ChangeSource + Clone + Eq + Hash>(
         conn: &GraphConnection,
         changes: &[BlockGroupChange<T>],
-        tree_map: Option<&mut HashMap<T, IntervalTree<i64, NodeIntervalBlock>>>,
+        mut tree_map: Option<&mut HashMap<T, IntervalTree<i64, NodeIntervalBlock>>>,
     ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
         let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
-        let mut local_tree_map = HashMap::new();
-        let tree_map = match tree_map {
-            Some(tree_map) => tree_map,
-            None => &mut local_tree_map,
-        };
         for change in changes {
-            if T::cache_intervaltree() && !tree_map.contains_key(&change.intervaltree_source) {
-                tree_map.insert(
-                    change.intervaltree_source.clone(),
-                    change.intervaltree_source.intervaltree(conn)?,
-                );
-            }
-            let tree = tree_map.get(&change.intervaltree_source);
+            let tree = if let Some(tree_map) = tree_map.as_deref_mut() {
+                if !tree_map.contains_key(&change.intervaltree_source) {
+                    tree_map.insert(
+                        change.intervaltree_source.clone(),
+                        change.intervaltree_source.intervaltree(conn)?,
+                    );
+                }
+                tree_map.get(&change.intervaltree_source)
+            } else {
+                None
+            };
             let new_augmented_edges = T::plan_edges(conn, change, tree)?;
             new_augmented_edges_by_block_group
                 .entry(change.block_group_id)
