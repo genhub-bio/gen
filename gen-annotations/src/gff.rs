@@ -127,13 +127,14 @@ mod tests {
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     };
     use gen_models::{
-        block_group::{BlockGroup, NewBlockGroup, PathChange},
+        block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db::GraphConnection,
         edge::Edge,
         node::Node,
         path::Path,
+        region::ResolvedGenRegion,
         sample::Sample,
         sequence::Sequence,
         traits::Query,
@@ -271,9 +272,11 @@ mod tests {
             )),
         )
         .unwrap();
-        let change = PathChange {
+        let region =
+            ResolvedGenRegion::from_path(conn, sample_bg_id, &sample_path, 15, 25).unwrap();
+        let change = BlockGroupChange {
             block_group_id: sample_bg_id,
-            intervaltree_source: sample_path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 15,
             end: 25,

@@ -1,6 +1,6 @@
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupChange, ChangeSource},
+    block_group::{BlockGroup, BlockGroupChange},
     db::GraphConnection,
     errors::BlockGroupError,
     path::Path,
@@ -85,14 +85,14 @@ impl InsertChangeData {
     }
 }
 
-pub(crate) fn insert_update_change<T: ChangeSource>(
+pub(crate) fn insert_update_change(
     conn: &GraphConnection,
-    intervaltree_source: T,
+    region: ResolvedGenRegion,
     data: InsertChangeData,
 ) -> Result<(), BlockGroupError> {
     let change = BlockGroupChange {
         block_group_id: data.block_group_id,
-        intervaltree_source,
+        intervaltree_source: region,
         path_accession: data.path_accession,
         start: data.start,
         end: data.end,

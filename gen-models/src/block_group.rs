@@ -22,7 +22,7 @@ use thiserror::Error;
 
 use crate::{
     accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
-    annotations::{Annotation as AccessionAnnotation, AnnotationError},
+    annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{Edge, EdgeData, GroupBlock},
@@ -173,16 +173,6 @@ pub struct BlockGroupChange<T: IntervalTreeSource> {
     pub preserve_edge: bool,
 }
 
-pub type PathChange = BlockGroupChange<Path>;
-pub type AccessionChange = BlockGroupChange<Accession>;
-pub type AnnotationChange = BlockGroupChange<AccessionAnnotation>;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct BlockGroupTreeSource {
-    pub block_group_id: HashId,
-    pub remove_ambiguous_positions: bool,
-}
-
 pub trait IntervalTreeSource {
     fn intervaltree(
         &self,
@@ -190,104 +180,12 @@ pub trait IntervalTreeSource {
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError>;
 }
 
-pub trait ChangeSource: IntervalTreeSource {
-    fn plan_edges(
-        conn: &GraphConnection,
-        change: &BlockGroupChange<Self>,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError>
-    where
-        Self: Sized;
-}
+pub type IntervalTreeCache =
+    HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>>;
 
-impl IntervalTreeSource for Path {
-    fn intervaltree(
+impl ResolvedGenRegion {
+    pub fn plan_edges(
         &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        Path::intervaltree(self, conn).map_err(Into::into)
-    }
-}
-
-impl ChangeSource for Path {
-    fn plan_edges(
-        conn: &GraphConnection,
-        change: &BlockGroupChange<Self>,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
-        let path_length = change.intervaltree_source.length(conn)?;
-        let region = ResolvedGenRegion {
-            block_group,
-            path: Some(change.intervaltree_source.clone()),
-            accession: None,
-            annotation: None,
-            kind: ResolvedRegionKind::Path,
-            anchor_start: 0,
-            anchor_end: path_length,
-            feature_length: path_length,
-            start: change.start,
-            end: change.end,
-        };
-        plan_resolved_region_edges(conn, change, region, tree)
-    }
-}
-
-impl IntervalTreeSource for Accession {
-    fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        Accession::intervaltree(self, conn).map_err(Into::into)
-    }
-}
-
-impl ChangeSource for Accession {
-    fn plan_edges(
-        conn: &GraphConnection,
-        change: &BlockGroupChange<Self>,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let target_block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
-        let accession_length = change.intervaltree_source.length(conn)?;
-        let region = ResolvedGenRegion {
-            block_group: target_block_group,
-            path: None,
-            accession: Some(change.intervaltree_source.clone()),
-            annotation: None,
-            kind: ResolvedRegionKind::Accession,
-            anchor_start: 0,
-            anchor_end: accession_length,
-            feature_length: accession_length,
-            start: change.start,
-            end: change.end,
-        };
-        plan_resolved_region_edges(conn, change, region, tree)
-    }
-}
-
-fn plan_resolved_region_edges<T: IntervalTreeSource>(
-    conn: &GraphConnection,
-    change: &BlockGroupChange<T>,
-    region: ResolvedGenRegion,
-    tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-    let region_change = BlockGroupChange {
-        block_group_id: change.block_group_id,
-        intervaltree_source: region,
-        path_accession: change.path_accession.clone(),
-        start: change.start,
-        end: change.end,
-        block: change.block.clone(),
-        chromosome_index: change.chromosome_index,
-        phased: change.phased,
-        preserve_edge: change.preserve_edge,
-    };
-    ResolvedGenRegion::plan_edges(conn, &region_change, tree)
-}
-
-impl ChangeSource for ResolvedGenRegion {
-    fn plan_edges(
         conn: &GraphConnection,
         change: &BlockGroupChange<Self>,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
@@ -332,17 +230,22 @@ impl ChangeSource for ResolvedGenRegion {
             Some(positions)
         };
 
-        let (start_positions, end_positions) = if let Some(start_positions) =
-            graph_positions_from_tree(change.start)
-            && let Some(end_positions) = graph_positions_from_tree(change.end)
-        {
-            (start_positions, end_positions)
-        } else {
-            change
-                .intervaltree_source
-                .find_graph_positions(conn, 0, 0)
-                .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?
-        };
+        let (start_positions, end_positions) =
+            if let (Some(start), Some(end)) = (&self.start_anchors, &self.end_anchors) {
+                (start.clone(), end.clone())
+            } else if let Some(start_positions) = graph_positions_from_tree(change.start)
+                && let Some(end_positions) = graph_positions_from_tree(change.end)
+            {
+                (start_positions, end_positions)
+            } else {
+                let resolved = self
+                    .find_graph_positions(conn, 0, 0)
+                    .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?;
+                (
+                    resolved.start_anchors.expect("should have start anchors"),
+                    resolved.end_anchors.expect("should have end anchors"),
+                )
+            };
         let preserve_chromosome_index = if change.preserve_edge {
             0
         } else {
@@ -417,70 +320,6 @@ impl ChangeSource for ResolvedGenRegion {
         }
 
         Ok(new_edges)
-    }
-}
-
-impl IntervalTreeSource for AccessionAnnotation {
-    fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        AccessionAnnotation::intervaltree(self, conn).map_err(Into::into)
-    }
-}
-
-impl ChangeSource for AccessionAnnotation {
-    fn plan_edges(
-        conn: &GraphConnection,
-        change: &BlockGroupChange<Self>,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let accession = Accession::get_by_id(conn, &change.intervaltree_source.accession_id)
-            .ok_or(BlockGroupError::AccessionError(
-                AccessionError::MissingPath(change.intervaltree_source.accession_id),
-            ))?;
-        let block_group = BlockGroup::get_by_id(conn, &change.block_group_id)?;
-        let accession_length = accession.length(conn)?;
-        let region = ResolvedGenRegion {
-            block_group,
-            path: None,
-            accession: Some(accession),
-            annotation: Some(change.intervaltree_source.clone()),
-            kind: ResolvedRegionKind::Annotation,
-            anchor_start: 0,
-            anchor_end: accession_length,
-            feature_length: accession_length,
-            start: change.start,
-            end: change.end,
-        };
-        plan_resolved_region_edges(conn, change, region, tree)
-    }
-}
-
-impl IntervalTreeSource for BlockGroupTreeSource {
-    fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        BlockGroup::intervaltree_for(conn, &self.block_group_id, self.remove_ambiguous_positions)
-    }
-}
-
-impl ChangeSource for BlockGroupTreeSource {
-    fn plan_edges(
-        conn: &GraphConnection,
-        change: &BlockGroupChange<Self>,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        let local_tree;
-        let tree = match tree {
-            Some(tree) => tree,
-            None => {
-                local_tree = change.intervaltree_source.intervaltree(conn)?;
-                &local_tree
-            }
-        };
-        BlockGroup::set_up_new_edges(change, tree)
     }
 }
 
@@ -1004,47 +843,6 @@ impl BlockGroup {
         Ok(accession)
     }
 
-    pub fn insert_changes<T: ChangeSource + Clone + Eq + Hash>(
-        conn: &GraphConnection,
-        changes: &[BlockGroupChange<T>],
-        mut tree_map: Option<&mut HashMap<T, IntervalTree<i64, NodeIntervalBlock>>>,
-    ) -> Result<(), BlockGroupError> {
-        let mut new_augmented_edges_by_block_group =
-            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
-        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
-        for change in changes {
-            let tree = if let Some(tree_map) = tree_map.as_deref_mut() {
-                if !tree_map.contains_key(&change.intervaltree_source) {
-                    tree_map.insert(
-                        change.intervaltree_source.clone(),
-                        change.intervaltree_source.intervaltree(conn)?,
-                    );
-                }
-                tree_map.get(&change.intervaltree_source)
-            } else {
-                None
-            };
-            let new_augmented_edges = T::plan_edges(conn, change, tree)?;
-            new_augmented_edges_by_block_group
-                .entry(change.block_group_id)
-                .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
-                .or_insert_with(|| new_augmented_edges.clone());
-            if let Some(accession) = &change.path_accession {
-                new_accession_edges
-                    .entry((change.block_group_id, accession.clone()))
-                    .and_modify(|new_edge_data: &mut Vec<AugmentedEdgeData>| {
-                        new_edge_data.extend(new_augmented_edges.clone())
-                    })
-                    .or_insert_with(|| new_augmented_edges.clone());
-            }
-        }
-        Self::persist_insert_changes(
-            conn,
-            new_augmented_edges_by_block_group,
-            new_accession_edges,
-        )
-    }
-
     fn persist_insert_changes(
         conn: &GraphConnection,
         new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
@@ -1102,13 +900,11 @@ impl BlockGroup {
         Ok(())
     }
 
-    #[allow(clippy::ptr_arg)]
-    #[allow(clippy::needless_late_init)]
-    pub fn insert_change<T: ChangeSource>(
+    pub fn insert_change(
         conn: &GraphConnection,
-        change: &BlockGroupChange<T>,
+        change: &BlockGroupChange<ResolvedGenRegion>,
     ) -> Result<(), BlockGroupError> {
-        let new_augmented_edges = T::plan_edges(conn, change, None)?;
+        let new_augmented_edges = change.intervaltree_source.plan_edges(conn, change, None)?;
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
             .insert(change.block_group_id, new_augmented_edges.clone());
@@ -1118,6 +914,53 @@ impl BlockGroup {
                 (change.block_group_id, accession.clone()),
                 new_augmented_edges,
             );
+        }
+        Self::persist_insert_changes(
+            conn,
+            new_augmented_edges_by_block_group,
+            new_accession_edges,
+        )
+    }
+
+    pub fn insert_changes(
+        conn: &GraphConnection,
+        changes: &[BlockGroupChange<ResolvedGenRegion>],
+        tree_map: Option<&mut IntervalTreeCache>,
+    ) -> Result<(), BlockGroupError> {
+        let mut new_augmented_edges_by_block_group =
+            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
+        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
+        let mut local_tree_map = HashMap::new();
+        let tree_map = match tree_map {
+            Some(tree_map) => tree_map,
+            None => &mut local_tree_map,
+        };
+        for change in changes {
+            let cache_key = change.intervaltree_source.intervaltree_cache_key();
+            #[expect(
+                clippy::map_entry,
+                reason = "entry API doesn't work with ? error propagation"
+            )]
+            if !tree_map.contains_key(&cache_key) {
+                tree_map.insert(
+                    cache_key,
+                    IntervalTreeSource::intervaltree(&change.intervaltree_source, conn)?,
+                );
+            }
+            let tree = tree_map.get(&cache_key);
+            let new_augmented_edges = change.intervaltree_source.plan_edges(conn, change, tree)?;
+            new_augmented_edges_by_block_group
+                .entry(change.block_group_id)
+                .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
+                .or_insert_with(|| new_augmented_edges.clone());
+            if let Some(accession) = &change.path_accession {
+                new_accession_edges
+                    .entry((change.block_group_id, accession.clone()))
+                    .and_modify(|new_edge_data: &mut Vec<AugmentedEdgeData>| {
+                        new_edge_data.extend(new_augmented_edges.clone())
+                    })
+                    .or_insert_with(|| new_augmented_edges.clone());
+            }
         }
         Self::persist_insert_changes(
             conn,
@@ -1675,6 +1518,7 @@ mod tests {
         annotations::Annotation as ModelAnnotation,
         collection::Collection,
         node::Node,
+        region::{ResolvedGenRegion, ResolvedRegionKind},
         sample::{NewSample, Sample},
         sequence::Sequence,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
@@ -2625,9 +2469,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = AccessionChange {
+        let region = ResolvedGenRegion::from_accession(&conn, &accession, 5, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: accession,
+            intervaltree_source: region,
             path_accession: None,
             start: 5,
             end: 15,
@@ -2679,9 +2524,13 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = AnnotationChange {
+        let annotation_accession = Accession::get_by_id(&conn, &annotation.accession_id).unwrap();
+        let region =
+            ResolvedGenRegion::from_annotation(&conn, &annotation, &annotation_accession, 5, 15)
+                .unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: annotation,
+            intervaltree_source: region,
             path_accession: None,
             start: 5,
             end: 15,
@@ -2722,9 +2571,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 15,
@@ -2761,9 +2611,10 @@ mod tests {
             strand: Strand::Forward,
         };
 
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 19, 31).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 19,
             end: 31,
@@ -2772,7 +2623,6 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        // take out an entire block.
         BlockGroup::insert_change(&conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
@@ -2806,9 +2656,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 15,
@@ -2849,9 +2700,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 15, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 15,
             end: 15,
@@ -2892,9 +2744,10 @@ mod tests {
             path_end: 17,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 12, 17).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 12,
             end: 17,
@@ -2935,9 +2788,10 @@ mod tests {
             path_end: 10,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 10).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 10,
             end: 10,
@@ -2978,9 +2832,10 @@ mod tests {
             path_end: 9,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 9, 9).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 9,
             end: 9,
@@ -3021,9 +2876,10 @@ mod tests {
             path_end: 20,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 20).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 10,
             end: 20,
@@ -3064,9 +2920,10 @@ mod tests {
             path_end: 25,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 15, 25).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 15,
             end: 25,
@@ -3107,9 +2964,10 @@ mod tests {
             path_end: 35,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 5, 35).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 5,
             end: 35,
@@ -3151,9 +3009,10 @@ mod tests {
             strand: Strand::Forward,
         };
 
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 19, 31).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 19,
             end: 31,
@@ -3163,7 +3022,6 @@ mod tests {
             preserve_edge: true,
         };
 
-        // take out an entire block.
         BlockGroup::insert_change(&conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
@@ -3195,9 +3053,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 15,
@@ -3248,9 +3107,10 @@ mod tests {
             path_end: 0,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 0, 0).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 0,
             end: 0,
@@ -3291,9 +3151,10 @@ mod tests {
             path_end: 0,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 0, 0).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 0,
             end: 0,
@@ -3334,9 +3195,10 @@ mod tests {
             path_end: 40,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 40, 40).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 40,
             end: 40,
@@ -3377,9 +3239,10 @@ mod tests {
             path_end: 11,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 11).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 10,
             end: 11,
@@ -3420,9 +3283,10 @@ mod tests {
             path_end: 20,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 19, 20).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 19,
             end: 20,
@@ -3463,9 +3327,10 @@ mod tests {
             path_end: 1,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 0, 1).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 0,
             end: 1,
@@ -3506,9 +3371,10 @@ mod tests {
             path_end: 40,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 35, 40).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 35,
             end: 40,
@@ -3549,9 +3415,11 @@ mod tests {
             path_end: 400,
             strand: Strand::Forward,
         };
-        let after_end_change = PathChange {
+        let after_end_region =
+            ResolvedGenRegion::from_path(&conn, block_group_id, &path, 350, 400).unwrap();
+        let after_end_change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: after_end_region,
             path_accession: None,
             start: 350,
             end: 400,
@@ -3560,9 +3428,11 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let before_start_change = PathChange {
+        let before_start_region =
+            ResolvedGenRegion::from_path(&conn, block_group_id, &path, -300, 400).unwrap();
+        let before_start_change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: before_start_region,
             path_accession: None,
             start: -300,
             end: 400,
@@ -3597,9 +3467,10 @@ mod tests {
             path_end: 12,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 12).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 10,
             end: 12,
@@ -3640,9 +3511,10 @@ mod tests {
             path_end: 20,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 18, 20).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 18,
             end: 20,
@@ -3701,12 +3573,25 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
+        let bg = BlockGroup::get_by_id(conn, &new_bg_id).unwrap();
+        let region = ResolvedGenRegion {
+            block_group: bg,
+            path: None,
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::BlockGroup,
+            anchor_start: 0,
+            anchor_end: 0,
+            feature_length: 0,
+            start: 7,
+            end: 15,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: true,
+        };
         let change = BlockGroupChange {
             block_group_id: new_bg_id,
-            intervaltree_source: BlockGroupTreeSource {
-                block_group_id: new_bg_id,
-                remove_ambiguous_positions: true,
-            },
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 15,
@@ -3878,9 +3763,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(conn, new_bg_id, &new_path[0], 7, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id: new_bg_id,
-            intervaltree_source: new_path[0].clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 15,
@@ -3889,7 +3775,6 @@ mod tests {
             phased: 0,
             preserve_edge: false,
         };
-        // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
@@ -3928,12 +3813,25 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
+        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id).unwrap();
+        let gc_region = ResolvedGenRegion {
+            block_group: gc_bg,
+            path: None,
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::BlockGroup,
+            anchor_start: 0,
+            anchor_end: 0,
+            feature_length: 0,
+            start: 7,
+            end: 15,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: true,
+        };
         let change = BlockGroupChange {
             block_group_id: gc_bg_id,
-            intervaltree_source: BlockGroupTreeSource {
-                block_group_id: gc_bg_id,
-                remove_ambiguous_positions: true,
-            },
+            intervaltree_source: gc_region,
             path_accession: None,
             start: 7,
             end: 15,
@@ -3942,7 +3840,6 @@ mod tests {
             phased: 0,
             preserve_edge: false,
         };
-        // take out an entire block.
         BlockGroup::insert_change(conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
         assert_eq!(
@@ -3987,12 +3884,25 @@ mod tests {
             path_end: 11,
             strand: Strand::Forward,
         };
+        let bg = BlockGroup::get_by_id(conn, &new_bg_id).unwrap();
+        let region = ResolvedGenRegion {
+            block_group: bg,
+            path: None,
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::BlockGroup,
+            anchor_start: 0,
+            anchor_end: 0,
+            feature_length: 0,
+            start: 7,
+            end: 11,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: true,
+        };
         let change = BlockGroupChange {
             block_group_id: new_bg_id,
-            intervaltree_source: BlockGroupTreeSource {
-                block_group_id: new_bg_id,
-                remove_ambiguous_positions: true,
-            },
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 11,
@@ -4001,7 +3911,6 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
@@ -4055,12 +3964,25 @@ mod tests {
             path_end: 24,
             strand: Strand::Forward,
         };
+        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id).unwrap();
+        let gc_region = ResolvedGenRegion {
+            block_group: gc_bg,
+            path: None,
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::BlockGroup,
+            anchor_start: 0,
+            anchor_end: 0,
+            feature_length: 0,
+            start: 20,
+            end: 24,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: true,
+        };
         let change = BlockGroupChange {
             block_group_id: gc_bg_id,
-            intervaltree_source: BlockGroupTreeSource {
-                block_group_id: gc_bg_id,
-                remove_ambiguous_positions: true,
-            },
+            intervaltree_source: gc_region,
             path_accession: None,
             start: 20,
             end: 24,
@@ -4069,7 +3991,6 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        // take out an entire block.
         BlockGroup::insert_change(conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
         assert_eq!(
@@ -4121,12 +4042,25 @@ mod tests {
             path_end: 12,
             strand: Strand::Forward,
         };
+        let bg = BlockGroup::get_by_id(conn, &new_bg_id).unwrap();
+        let region = ResolvedGenRegion {
+            block_group: bg,
+            path: None,
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::BlockGroup,
+            anchor_start: 0,
+            anchor_end: 0,
+            feature_length: 0,
+            start: 7,
+            end: 12,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: true,
+        };
         let change = BlockGroupChange {
             block_group_id: new_bg_id,
-            intervaltree_source: BlockGroupTreeSource {
-                block_group_id: new_bg_id,
-                remove_ambiguous_positions: true,
-            },
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 12,
@@ -4135,7 +4069,6 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
@@ -4185,12 +4118,25 @@ mod tests {
             path_end: 24,
             strand: Strand::Forward,
         };
+        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id).unwrap();
+        let gc_region = ResolvedGenRegion {
+            block_group: gc_bg,
+            path: None,
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::BlockGroup,
+            anchor_start: 0,
+            anchor_end: 0,
+            feature_length: 0,
+            start: 20,
+            end: 24,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: true,
+        };
         let change = BlockGroupChange {
             block_group_id: gc_bg_id,
-            intervaltree_source: BlockGroupTreeSource {
-                block_group_id: gc_bg_id,
-                remove_ambiguous_positions: true,
-            },
+            intervaltree_source: gc_region,
             path_accession: None,
             start: 20,
             end: 24,
@@ -4199,7 +4145,6 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        // take out an entire block.
         BlockGroup::insert_change(conn, &change).unwrap();
     }
 

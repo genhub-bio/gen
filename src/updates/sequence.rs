@@ -205,9 +205,9 @@ mod tests {
     use gen_core::NO_CHROMOSOME_INDEX;
     use gen_models::{
         annotations::{Annotation, add_annotation},
-        block_group::{AccessionChange, AnnotationChange, PathCache},
+        block_group::{BlockGroup, BlockGroupChange, PathCache},
         path::Path,
-        region::resolve_annotation,
+        region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
     };
 
@@ -250,9 +250,10 @@ mod tests {
             BlockGroup::add_accession(&conn, &path, "target-acc", 10, 30, &mut path_cache).unwrap();
         Path::delete(&conn, "chr1", &block_group_id);
 
-        let change = AccessionChange {
+        let region = ResolvedGenRegion::from_accession(&conn, &accession, 5, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: accession,
+            intervaltree_source: region,
             path_accession: None,
             start: 5,
             end: 15,
@@ -285,9 +286,11 @@ mod tests {
             Annotation::get_or_create(&conn, "target-ann", "genes", &accession.id, None).unwrap();
         Path::delete(&conn, "chr1", &block_group_id);
 
-        let change = AnnotationChange {
+        let region =
+            ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, -5, 25).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: annotation,
+            intervaltree_source: region,
             path_accession: None,
             start: -5,
             end: 25,

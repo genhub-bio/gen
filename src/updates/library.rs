@@ -9,22 +9,22 @@ use gen_models::{
     errors::{BlockGroupError, PathError, SampleError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
-    region::{
-        GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind, resolve_accession,
-        resolve_annotation, resolve_path,
-    },
+    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
 };
 use thiserror::Error;
 
-use crate::graphs::{
-    BlockGroupChunk, NodePoint,
-    combinatorial_library::{
-        CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
-        create_library,
+use crate::{
+    graphs::{
+        BlockGroupChunk, NodePoint,
+        combinatorial_library::{
+            CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
+            create_library,
+        },
+        operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
+        stitch,
     },
-    operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
-    stitch,
+    updates::resolve_update_region,
 };
 
 #[derive(Error, Debug)]
@@ -53,12 +53,6 @@ pub enum UpdateWithLibraryError {
     MissingCoordinates(String),
     #[error("Unsupported region type for library update: {0}")]
     UnsupportedRegionType(String),
-}
-
-enum LibraryChangeSource {
-    Path(ResolvedGenRegion),
-    Accession(ResolvedGenRegion),
-    Annotation(ResolvedGenRegion),
 }
 
 impl From<CombinatorialLibraryParseError> for UpdateWithLibraryError {
@@ -99,32 +93,8 @@ pub fn update_with_library(
     let conn = context.graph().conn();
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
-    let change_source =
-        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
-            Ok(region) => LibraryChangeSource::Path(region),
-            Err(GenRegionError::NotFound(_)) => {
-                match resolve_annotation(&parsed_region, conn, collection_name, parent_sample_name)
-                {
-                    Ok(region) => LibraryChangeSource::Annotation(region),
-                    Err(GenRegionError::NotFound(_)) => {
-                        let region = resolve_accession(
-                            &parsed_region,
-                            conn,
-                            collection_name,
-                            parent_sample_name,
-                        )?;
-                        LibraryChangeSource::Accession(region)
-                    }
-                    Err(err) => return Err(err.into()),
-                }
-            }
-            Err(err) => return Err(err.into()),
-        };
-    let resolved_region = match &change_source {
-        LibraryChangeSource::Path(region)
-        | LibraryChangeSource::Accession(region)
-        | LibraryChangeSource::Annotation(region) => region,
-    };
+    let resolved_region =
+        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
     let (start_coordinate, end_coordinate) =
         if parsed_region.start.is_some() || parsed_region.end.is_some() {
             (resolved_region.start, resolved_region.end)
@@ -134,13 +104,13 @@ pub fn update_with_library(
             ));
         };
 
-    if !matches!(&change_source, LibraryChangeSource::Path(_)) {
+    if resolved_region.kind != ResolvedRegionKind::Path {
         update_graph_native_library(
             context,
             collection_name,
             parent_sample_name,
             new_sample_name,
-            resolved_region,
+            &resolved_region,
             parts_list,
         )?;
 
@@ -367,9 +337,11 @@ fn update_graph_native_library(
             }
         };
 
-        let (start_positions, end_positions) = target_region
+        let resolved = target_region
             .find_graph_positions(conn, 0, 0)
             .map_err(UpdateWithLibraryError::from)?;
+        let start_positions = resolved.start_anchors.as_ref().unwrap();
+        let end_positions = resolved.end_anchors.as_ref().unwrap();
         let library_chunk = create_library(
             conn,
             target_block_group.id,
@@ -378,15 +350,15 @@ fn update_graph_native_library(
             false,
         )?;
         let start_chunk = BlockGroupChunk {
-            entry_node_points: graph_node_positions_to_points(&start_positions),
-            exit_node_points: graph_node_positions_to_points(&start_positions),
+            entry_node_points: graph_node_positions_to_points(start_positions),
+            exit_node_points: graph_node_positions_to_points(start_positions),
             path_edges: vec![],
             path_start_point: None,
             path_end_point: None,
         };
         let end_chunk = BlockGroupChunk {
-            entry_node_points: graph_node_positions_to_points(&end_positions),
-            exit_node_points: graph_node_positions_to_points(&end_positions),
+            entry_node_points: graph_node_positions_to_points(end_positions),
+            exit_node_points: graph_node_positions_to_points(end_positions),
             path_edges: vec![],
             path_start_point: None,
             path_end_point: None,
@@ -394,8 +366,8 @@ fn update_graph_native_library(
 
         let stitched_start = stitch(conn, &start_chunk, &library_chunk, target_block_group.id)?;
         let _stitched_end = stitch(conn, &stitched_start, &end_chunk, target_block_group.id)?;
-        preserve_library_boundary_points(conn, target_block_group.id, &start_positions)?;
-        preserve_library_boundary_points(conn, target_block_group.id, &end_positions)?;
+        preserve_library_boundary_points(conn, target_block_group.id, start_positions)?;
+        preserve_library_boundary_points(conn, target_block_group.id, end_positions)?;
     }
 
     Ok(())

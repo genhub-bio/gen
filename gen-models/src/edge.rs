@@ -615,9 +615,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_group::{BlockGroup, PathChange},
+        block_group::{BlockGroup, BlockGroupChange},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
+        region::ResolvedGenRegion,
         sequence::Sequence,
         test_helpers::{get_connection, setup_block_group},
     };
@@ -1518,9 +1519,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = PathChange {
+        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
+        let change = BlockGroupChange {
             block_group_id,
-            intervaltree_source: path.clone(),
+            intervaltree_source: region,
             path_accession: None,
             start: 7,
             end: 15,

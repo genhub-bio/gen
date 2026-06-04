@@ -3,7 +3,7 @@ use std::{io::Read, str};
 use gb_io::reader;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup, PathChange},
+    block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::DbContext,
@@ -12,6 +12,7 @@ use gen_models::{
     node::Node,
     operations::{Operation, OperationInfo},
     path::Path,
+    region::ResolvedGenRegion,
     sequence::Sequence,
     session_operations::end_operation,
     traits::Query,
@@ -160,6 +161,8 @@ where
                 for edit in locus.changes_to_wt() {
                     let start = edit.start;
                     let end = edit.end;
+                    let region =
+                        ResolvedGenRegion::from_path(conn, block_group.id, &path, start, end)?;
                     let change = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()
@@ -179,9 +182,9 @@ where
                                     new_hash = &change_seq.hash,
                                 )),
                             )?;
-                            PathChange {
+                            BlockGroupChange {
                                 block_group_id: block_group.id,
-                                intervaltree_source: path.clone(),
+                                intervaltree_source: region.clone(),
                                 path_accession: None,
                                 start,
                                 end,
@@ -199,9 +202,9 @@ where
                                 preserve_edge: true,
                             }
                         }
-                        EditType::Deletion => PathChange {
+                        EditType::Deletion => BlockGroupChange {
                             block_group_id: block_group.id,
-                            intervaltree_source: path.clone(),
+                            intervaltree_source: region,
                             path_accession: None,
                             start,
                             end,

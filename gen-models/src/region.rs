@@ -1,8 +1,9 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    NodeIntervalBlock,
+    HashId, NodeIntervalBlock,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
+use gen_graph::GraphNodePosition;
 use intervaltree::IntervalTree;
 use thiserror::Error;
 
@@ -28,9 +29,12 @@ pub struct ResolvedGenRegion {
     pub feature_length: i64,
     pub start: i64,
     pub end: i64,
+    pub start_anchors: Option<Vec<GraphNodePosition>>,
+    pub end_anchors: Option<Vec<GraphNodePosition>>,
+    pub remove_ambiguous_positions: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ResolvedRegionKind {
     Path,
     Annotation,
@@ -289,6 +293,9 @@ fn resolve_target(
         feature_length: target.feature_length,
         start,
         end,
+        start_anchors: None,
+        end_anchors: None,
+        remove_ambiguous_positions: false,
     })
 }
 
@@ -323,6 +330,102 @@ fn target_from_accession(
 }
 
 impl ResolvedGenRegion {
+    pub fn from_path(
+        conn: &GraphConnection,
+        block_group_id: HashId,
+        path: &Path,
+        start: i64,
+        end: i64,
+    ) -> Result<Self, BlockGroupError> {
+        let block_group = BlockGroup::get_by_id(conn, &block_group_id)?;
+        let path_length = path.length(conn)?;
+        Ok(ResolvedGenRegion {
+            block_group,
+            path: Some(path.clone()),
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::Path,
+            anchor_start: 0,
+            anchor_end: path_length,
+            feature_length: path_length,
+            start,
+            end,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: false,
+        })
+    }
+
+    pub fn from_accession(
+        conn: &GraphConnection,
+        accession: &Accession,
+        start: i64,
+        end: i64,
+    ) -> Result<Self, BlockGroupError> {
+        let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id)?;
+        let accession_length = accession.length(conn)?;
+        Ok(ResolvedGenRegion {
+            block_group,
+            path: None,
+            accession: Some(accession.clone()),
+            annotation: None,
+            kind: ResolvedRegionKind::Accession,
+            anchor_start: 0,
+            anchor_end: accession_length,
+            feature_length: accession_length,
+            start,
+            end,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: false,
+        })
+    }
+
+    pub fn from_annotation(
+        conn: &GraphConnection,
+        annotation: &Annotation,
+        accession: &Accession,
+        start: i64,
+        end: i64,
+    ) -> Result<Self, BlockGroupError> {
+        let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id)?;
+        let accession_length = accession.length(conn)?;
+        Ok(ResolvedGenRegion {
+            block_group,
+            path: None,
+            accession: Some(accession.clone()),
+            annotation: Some(annotation.clone()),
+            kind: ResolvedRegionKind::Annotation,
+            anchor_start: 0,
+            anchor_end: accession_length,
+            feature_length: accession_length,
+            start,
+            end,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: false,
+        })
+    }
+
+    pub fn intervaltree_cache_key(&self) -> (HashId, ResolvedRegionKind) {
+        let id = match self.kind {
+            ResolvedRegionKind::Path => {
+                self.path
+                    .as_ref()
+                    .expect("should have path for Path region")
+                    .id
+            }
+            ResolvedRegionKind::Accession | ResolvedRegionKind::Annotation => {
+                self.accession
+                    .as_ref()
+                    .expect("should have accession for region")
+                    .id
+            }
+            ResolvedRegionKind::BlockGroup => self.block_group.id,
+        };
+        (id, self.kind)
+    }
+
     pub fn offset_range(
         &self,
         start_offset: i64,
@@ -386,12 +489,26 @@ impl ResolvedGenRegion {
             ResolvedRegionKind::BlockGroup => Ok(BlockGroup::intervaltree_for(
                 conn,
                 &self.block_group.id,
-                false,
+                self.remove_ambiguous_positions,
             )?),
         }
     }
 
     pub fn find_graph_positions(
+        &self,
+        conn: &GraphConnection,
+        start_offset: i64,
+        end_offset: i64,
+    ) -> Result<Self, gen_graph::GraphError> {
+        let (start_positions, end_positions) =
+            self.compute_graph_positions(conn, start_offset, end_offset)?;
+        let mut region = self.clone();
+        region.start_anchors = Some(start_positions);
+        region.end_anchors = Some(end_positions);
+        Ok(region)
+    }
+
+    fn compute_graph_positions(
         &self,
         conn: &GraphConnection,
         start_offset: i64,
@@ -866,6 +983,9 @@ mod tests {
                 feature_length,
                 start,
                 end,
+                start_anchors: None,
+                end_anchors: None,
+                remove_ambiguous_positions: false,
             }
         }
 
@@ -1043,7 +1163,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "within", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, 2, 2).unwrap();
+            let resolved = region.find_graph_positions(&conn, 2, 2).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1062,7 +1184,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "fwd", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, 5, 5).unwrap();
+            let resolved = region.find_graph_positions(&conn, 5, 5).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1081,7 +1205,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "bwd", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, -5, -5).unwrap();
+            let resolved = region.find_graph_positions(&conn, -5, -5).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1110,7 +1236,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "start", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 0, 0);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, 12, 12).unwrap();
+            let resolved = region.find_graph_positions(&conn, 12, 12).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1129,7 +1257,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "end", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 14, 14);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, -14, -14).unwrap();
+            let resolved = region.find_graph_positions(&conn, -14, -14).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1148,7 +1278,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "acc-within", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 2, 2);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, 1, 1).unwrap();
+            let resolved = region.find_graph_positions(&conn, 1, 1).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1167,7 +1299,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "acc-fwd", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 3, 3);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, 5, 5).unwrap();
+            let resolved = region.find_graph_positions(&conn, 5, 5).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1186,7 +1320,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "acc-bwd", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 1, 1);
 
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, -4, -4).unwrap();
+            let resolved = region.find_graph_positions(&conn, -4, -4).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
             assert_eq!(
                 start_pos[0].graph_node.node_id,
@@ -1217,12 +1353,14 @@ mod tests {
             let region = make_region(bg, acc, 3, 6, 3, 0, 0);
 
             // Backward 3 from TTT offset 0 → should find AAA and GGG at offset 0
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, -3, -3).unwrap();
+            let resolved = region.find_graph_positions(&conn, -3, -3).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 2);
             let start_ids: Vec<HashId> = start_pos.iter().map(|p| p.graph_node.node_id).collect();
             assert!(start_ids.contains(&HashId::convert_str("node-aaa")));
             assert!(start_ids.contains(&HashId::convert_str("node-ggg")));
-            for pos in &start_pos {
+            for pos in start_pos {
                 assert_eq!(pos.offset, 0);
             }
             assert_eq!(end_pos.len(), 2);
@@ -1240,12 +1378,14 @@ mod tests {
             let region = make_region(bg, acc, 3, 6, 3, 2, 2);
 
             // Forward 3 from TTT offset 2 → should find CCC and ATC at offset 2
-            let (start_pos, end_pos) = region.find_graph_positions(&conn, 3, 3).unwrap();
+            let resolved = region.find_graph_positions(&conn, 3, 3).unwrap();
+            let start_pos = resolved.start_anchors.as_ref().unwrap();
+            let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 2);
             let start_ids: Vec<HashId> = start_pos.iter().map(|p| p.graph_node.node_id).collect();
             assert!(start_ids.contains(&HashId::convert_str("node-ccc")));
             assert!(start_ids.contains(&HashId::convert_str("node-atc")));
-            for pos in &start_pos {
+            for pos in start_pos {
                 assert_eq!(pos.offset, 2);
             }
             assert_eq!(end_pos.len(), 2);
