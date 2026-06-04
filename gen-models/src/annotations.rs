@@ -404,12 +404,19 @@ impl RegionResolver for Annotation {
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
         let matches = Annotation::query(
             conn,
-            "SELECT a.* \
+            "WITH RECURSIVE visible_samples(name) AS (
+                 SELECT ?2
+                 UNION
+                 SELECT sl.parent_sample_name
+                 FROM sample_lineage sl
+                 JOIN visible_samples visible ON sl.child_sample_name = visible.name
+             )
+             SELECT DISTINCT a.* \
              FROM annotations a \
              JOIN accessions acc ON a.accession_id = acc.id \
              JOIN block_groups bg ON acc.block_group_id = bg.id \
+             JOIN visible_samples visible ON bg.sample_name = visible.name \
              WHERE bg.collection_name = ?1 \
-               AND bg.sample_name = ?2 \
                AND lower(a.name) = lower(?3)",
             params![collection_name, sample_name, region.name],
         );

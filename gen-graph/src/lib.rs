@@ -94,6 +94,12 @@ pub struct GraphNodePosition {
     pub offset: i64,
 }
 
+impl GraphNodePosition {
+    pub fn coordinate(&self) -> i64 {
+        self.graph_node.sequence_start + self.offset
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum GraphError {
     #[error("Distance {0} exceeds graph boundaries")]

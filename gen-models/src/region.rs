@@ -16,11 +16,12 @@ use crate::{
     traits::Query,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResolvedGenRegion {
     pub block_group: BlockGroup,
     pub path: Option<Path>,
     pub accession: Option<Accession>,
+    pub annotation: Option<Annotation>,
     pub kind: ResolvedRegionKind,
     pub anchor_start: i64,
     pub anchor_end: i64,
@@ -80,6 +81,7 @@ struct RegionTarget {
     block_group: BlockGroup,
     path: Option<Path>,
     accession: Option<Accession>,
+    annotation: Option<Annotation>,
     anchor_start: i64,
     anchor_end: i64,
     feature_length: i64,
@@ -135,6 +137,7 @@ pub fn resolve_path(
             block_group,
             path: Some(path),
             accession: None,
+            annotation: None,
             anchor_start: 0,
             anchor_end: path_length,
             feature_length: path_length,
@@ -165,6 +168,7 @@ pub fn resolve_block_group(
             block_group,
             path: Some(path),
             accession: None,
+            annotation: None,
             anchor_start: 0,
             anchor_end: path_length,
             feature_length: path_length,
@@ -193,6 +197,8 @@ pub fn resolve_accession(
         sample_name,
         RegionTargetKind::Accession,
         accession,
+        None,
+        true,
     )?;
     resolve_target(region, target)
 }
@@ -220,6 +226,8 @@ pub fn resolve_annotation(
         sample_name,
         RegionTargetKind::Annotation,
         accession,
+        Some(annotation),
+        false,
     )?;
     resolve_target(region, target)
 }
@@ -269,6 +277,7 @@ fn resolve_target(
         block_group: target.block_group,
         path: target.path,
         accession: target.accession,
+        annotation: target.annotation,
         kind: match target.kind {
             RegionTargetKind::Path => ResolvedRegionKind::Path,
             RegionTargetKind::Annotation => ResolvedRegionKind::Annotation,
@@ -283,6 +292,7 @@ fn resolve_target(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn target_from_accession(
     region: &Region,
     conn: &GraphConnection,
@@ -290,9 +300,13 @@ fn target_from_accession(
     sample_name: &str,
     kind: RegionTargetKind,
     accession: Accession,
+    annotation: Option<Annotation>,
+    require_current_sample: bool,
 ) -> Result<RegionTarget, GenRegionError> {
     let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id)?;
-    if block_group.collection_name != collection_name || block_group.sample_name != sample_name {
+    if block_group.collection_name != collection_name
+        || (require_current_sample && block_group.sample_name != sample_name)
+    {
         return Err(GenRegionError::NotFound(region.name.clone()));
     }
     let path_length = accession.length(conn)?;
@@ -301,6 +315,7 @@ fn target_from_accession(
         block_group,
         path: None,
         accession: Some(accession),
+        annotation,
         anchor_start: 0,
         anchor_end: path_length,
         feature_length: path_length,
@@ -391,8 +406,6 @@ impl ResolvedGenRegion {
         let interval_tree = self
             .intervaltree(conn)
             .map_err(|_| gen_graph::GraphError::NoPath)?;
-        dbg!("t is", &interval_tree);
-
         let filtered: Vec<(std::ops::Range<i64>, gen_core::NodeIntervalBlock)> = interval_tree
             .iter()
             .filter(|item| !gen_core::is_terminal(item.value.node_id))
@@ -836,6 +849,7 @@ mod tests {
                 block_group: bg,
                 path: None,
                 accession: Some(accession),
+                annotation: None,
                 kind: ResolvedRegionKind::Accession,
                 anchor_start,
                 anchor_end,
