@@ -2868,18 +2868,10 @@ mod tests {
         outside_file.flush().unwrap();
         let outside_path = outside_file.path().to_string_lossy().to_string();
         let outside_checksum = calculate_file_checksum(outside_file.path()).unwrap();
-        let outside_asset_path = format!(
-            ".gen/assets/{outside_checksum}.{}",
-            outside_file
-                .path()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .split_once('.')
-                .unwrap()
-                .1
-        );
+        let outside_suffix = LocalAssetUri::new(&outside_file.path().to_string_lossy())
+            .suffix()
+            .unwrap();
+        let outside_asset_path = format!(".gen/assets/{outside_checksum}.{outside_suffix}");
 
         let outside = FileAddition::get_or_create(
             context.workspace(),

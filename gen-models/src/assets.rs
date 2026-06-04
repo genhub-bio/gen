@@ -1054,25 +1054,14 @@ mod tests {
         outside_file.write_all(b"outside repo").unwrap();
         outside_file.flush().unwrap();
         let checksum = calculate_file_checksum(outside_file.path()).unwrap();
+        let outside_suffix = LocalAssetUri::new(&outside_file.path().to_string_lossy())
+            .suffix()
+            .unwrap();
 
         let relative =
             LocalAssetUri::stored_relative_path(workspace, outside_file.path(), &checksum).unwrap();
 
-        assert_eq!(
-            relative,
-            format!(
-                ".gen/assets/{checksum}.{}",
-                outside_file
-                    .path()
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .split_once('.')
-                    .unwrap()
-                    .1
-            )
-        );
+        assert_eq!(relative, format!(".gen/assets/{checksum}.{outside_suffix}"));
     }
 
     #[test]
