@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::{self, ErrorKind},
+    path::{Path, PathBuf},
+};
 
 use gen_core::config::Workspace;
 use gen_models::{
@@ -19,7 +23,7 @@ pub fn execute(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let repo_name = infer_repo_name(url)?;
     let repo_path = PathBuf::from(&repo_name);
 
-    fs::create_dir(&repo_path)?;
+    create_clone_directory(&repo_path)?;
 
     let workspace = Workspace::new(&repo_path);
     workspace.ensure_gen_dir();
@@ -41,6 +45,20 @@ pub fn execute(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     Ok(())
+}
+
+fn create_clone_directory(repo_path: &Path) -> io::Result<()> {
+    match fs::create_dir(repo_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            eprintln!(
+                "Directory '{}' already exists.  Will not clone into an existing repository path.",
+                repo_path.display()
+            );
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn pull_with_login_on_auth_error<P, L>(
@@ -80,6 +98,8 @@ fn infer_repo_name(repo_url: &str) -> Result<String, Box<dyn std::error::Error>>
 mod tests {
     use std::{cell::Cell, io};
 
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -96,6 +116,27 @@ mod tests {
             infer_repo_name("https://www.genhub.bio/api/repos/foo/bar/").unwrap(),
             "bar"
         );
+    }
+
+    #[test]
+    fn create_clone_directory_errors_when_directory_exists() {
+        let temp_dir = tempdir().unwrap();
+        let repo_path = temp_dir.path().join("existing-repo");
+        fs::create_dir(&repo_path).unwrap();
+
+        let err = create_clone_directory(&repo_path).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn create_clone_directory_creates_missing_directory() {
+        let temp_dir = tempdir().unwrap();
+        let repo_path = temp_dir.path().join("new-repo");
+
+        create_clone_directory(&repo_path).unwrap();
+
+        assert!(repo_path.is_dir());
     }
 
     #[test]
