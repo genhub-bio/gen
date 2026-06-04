@@ -7,6 +7,7 @@ use std::{
 
 use r#gen::{
     get_connection,
+    graphs::graph_search::GraphPos,
     views::{
         annotation_groups::load_annotation_group_entries,
         annotation_track::{
@@ -30,7 +31,6 @@ use gen_models::{
     graph::{expand as expand_graph, find_offset},
     locus::GraphLocus,
 };
-use r#gen::graphs::graph_search::GraphPos;
 use gen_tui::{
     LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
     layout::VisualDetail, plotter::PathStyle, theme::current_theme,
@@ -928,10 +928,7 @@ impl PyGraphController {
     /// list of graph positions, using this widget's database connection and block group.
     ///
     /// The returned positions can be passed to ``highlight_positions``.
-    pub fn resolve_annotation_offset(
-        &self,
-        ao: &PyAnnotationOffset,
-    ) -> PyResult<Vec<PyGraphPos>> {
+    pub fn resolve_annotation_offset(&self, ao: &PyAnnotationOffset) -> PyResult<Vec<PyGraphPos>> {
         let block_group_id = self.block_group_id.ok_or_else(|| {
             PyRuntimeError::new_err(
                 "resolve_annotation_offset() requires a block group; obtain the widget via BlockGroup.plot()",
@@ -948,12 +945,9 @@ impl PyGraphController {
             offset: slice.start as i64,
         };
         let mut graph = self.controller.graph().clone();
-        let positions = find_offset(
-            &mut graph,
-            &anchor,
-            ao.offset,
-            |g, nid| expand_graph(&conn, g, &block_group_id, nid),
-        )
+        let positions = find_offset(&mut graph, &anchor, ao.offset, |g, nid| {
+            expand_graph(&conn, g, &block_group_id, nid)
+        })
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(positions
             .into_iter()
@@ -968,15 +962,40 @@ impl PyGraphController {
 
     /// Highlight a list of graph positions as unlabelled cursor markers.
     ///
-    /// Each position is rendered as a single-character highlight in one colour.
-    /// The camera does not move.  ``color`` accepts named colours or a CSS hex
-    /// string; when omitted the next unused theme accent colour is chosen.
+    /// Navigates to the first position, centering it horizontally so that nearby
+    /// positions on parallel paths are more likely to remain on screen.  ``color``
+    /// accepts named colours or a CSS hex string; when omitted the next unused
+    /// theme accent colour is chosen.
     #[pyo3(signature = (positions, color=None))]
     pub fn highlight_positions(
         &mut self,
         positions: Vec<PyRef<PyGraphPos>>,
         color: Option<&str>,
     ) -> PyResult<()> {
+        if let Some(first) = positions.first() {
+            let block = first.inner.block;
+            self.controller.set_detail_level(VisualDetail::Full);
+            if let Ok((partition_idx, _)) = self
+                .controller
+                .partition_controller
+                .partition_table
+                .find_node(&block)
+            {
+                let _ = self.controller.ensure_partition_loaded(partition_idx);
+                let _ = self.controller.set_anchor_partition(partition_idx);
+                let domain_idx =
+                    NodeIndex::new(NodeIndexable::to_index(self.controller.graph(), block));
+                let block_len = block.length();
+                let frac_x = if block_len > 1 {
+                    first.inner.offset as f64 / (block_len - 1) as f64
+                } else {
+                    0.0
+                };
+                self.controller.go_to_node(domain_idx, (frac_x, 0.5));
+                self.controller.hide_cursor();
+                self.reapply_highlights();
+            }
+        }
         let c = self.resolve_color(color)?;
         let style = PathStyle::new(c)
             .with_line_style(LineStyle::Bold)
