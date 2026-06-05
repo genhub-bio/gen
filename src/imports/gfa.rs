@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufRead, BufReader},
     path::Path as FilePath,
@@ -9,7 +9,6 @@ use gen_core::{
     HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
     is_end_node, is_start_node,
 };
-use gen_graph::{GraphEdge, GraphNode};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -31,7 +30,10 @@ use gen_models::{
 };
 use indexmap::IndexSet;
 use itertools::Itertools;
-use petgraph::{algo::kosaraju_scc, prelude::UnGraphMap, visit::Dfs};
+use petgraph::{
+    prelude::UnGraphMap,
+    visit::{Bfs, Dfs},
+};
 use thiserror::Error;
 
 use crate::{
@@ -91,45 +93,98 @@ pub fn import_gfa(
     let sn_tags = read_sn_tags(gfa_path);
     bar.finish();
 
-    // Determine block group name per segment: SN:Z: tags > longest path/walk > filename stem
-    let bg_name_by_segment: HashMap<String, String> = if !sn_tags.is_empty() {
-        gfa.segments
-            .iter()
-            .map(|seg| {
-                (
-                    seg.id.clone(),
-                    sn_tags.get(&seg.id).cloned().unwrap_or_default(),
-                )
-            })
-            .collect()
-    } else if !gfa.paths.is_empty() || !gfa.walk.is_empty() {
-        let longest_name = gfa
-            .paths
-            .iter()
-            .map(|p| (p.name.as_str(), p.segments.len()))
-            .chain(
-                gfa.walk
+    // Build segment connectivity graph from GFA links
+    let mut seg_graph: UnGraphMap<&str, ()> = UnGraphMap::new();
+    for seg in &gfa.segments {
+        seg_graph.add_node(seg.id.as_str());
+    }
+    for link in &gfa.links {
+        seg_graph.add_edge(link.from.as_str(), link.to.as_str(), ());
+    }
+
+    // Find connected components via BFS
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut components: Vec<Vec<&str>> = vec![];
+    for seg in &gfa.segments {
+        if visited.contains(seg.id.as_str()) {
+            continue;
+        }
+        let mut component = vec![];
+        let mut bfs = Bfs::new(&seg_graph, seg.id.as_str());
+        while let Some(node) = bfs.next(&seg_graph) {
+            visited.insert(node);
+            component.push(node);
+        }
+        components.push(component);
+    }
+
+    // Assign one name per connected component: SN:Z: tags > longest path/walk > filename stem
+    let filename_stem = gfa_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let raw_names: Vec<String> = components
+        .iter()
+        .map(|segs| {
+            let seg_set: HashSet<&str> = segs.iter().copied().collect();
+            if !sn_tags.is_empty() {
+                // majority SN tag value among segments; tie-break alphabetically first
+                let mut counts: HashMap<&str, usize> = HashMap::new();
+                for seg_id in segs {
+                    if let Some(tag) = sn_tags.get(*seg_id) {
+                        *counts.entry(tag.as_str()).or_default() += 1;
+                    }
+                }
+                counts
+                    .into_iter()
+                    .max_by(|(a, ca), (b, cb)| ca.cmp(cb).then(b.cmp(a)))
+                    .map(|(tag, _)| tag.to_string())
+                    .unwrap_or_default()
+            } else if !gfa.paths.is_empty() || !gfa.walk.is_empty() {
+                gfa.paths
                     .iter()
-                    .map(|w| (w.sample_id.as_str(), w.segments.len())),
-            )
-            .max_by_key(|&(_, len)| len)
-            .map(|(name, _)| name.to_string())
-            .unwrap_or_default();
-        gfa.segments
-            .iter()
-            .map(|seg| (seg.id.clone(), longest_name.clone()))
-            .collect()
-    } else {
-        let filename_stem = gfa_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        gfa.segments
-            .iter()
-            .map(|seg| (seg.id.clone(), filename_stem.clone()))
-            .collect()
-    };
+                    .filter(|p| p.segments.iter().any(|s| seg_set.contains(s.as_str())))
+                    .map(|p| (p.name.as_str(), p.segments.len()))
+                    .chain(
+                        gfa.walk
+                            .iter()
+                            .filter(|w| w.segments.iter().any(|s| seg_set.contains(s.as_str())))
+                            .map(|w| (w.sample_id.as_str(), w.segments.len())),
+                    )
+                    .max_by_key(|&(_, len)| len)
+                    .map(|(name, _)| name.to_string())
+                    .unwrap_or_default()
+            } else {
+                filename_stem.clone()
+            }
+        })
+        .collect();
+
+    // Disambiguate duplicate base names with _N suffix
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for n in &raw_names {
+        *name_counts.entry(n.clone()).or_default() += 1;
+    }
+    let mut name_seen: HashMap<String, usize> = HashMap::new();
+    let component_names: Vec<String> = raw_names
+        .into_iter()
+        .map(|n| {
+            if name_counts[&n] > 1 {
+                let idx = name_seen.entry(n.clone()).or_default();
+                *idx += 1;
+                format!("{}_{}", n, idx)
+            } else {
+                n
+            }
+        })
+        .collect();
+
+    let bg_name_by_segment: HashMap<String, String> = components
+        .iter()
+        .zip(component_names.iter())
+        .flat_map(|(segs, name)| segs.iter().map(move |seg| (seg.to_string(), name.clone())))
+        .collect();
 
     // Create one block group per unique name
     let unique_bg_names: IndexSet<String> = bg_name_by_segment.values().cloned().collect();
@@ -465,83 +520,61 @@ pub fn import_gfa(
     let mut all_new_cycle_edges: Vec<(EdgeData, HashId)> = vec![];
     for bg in block_groups_by_name.values() {
         let graph = BlockGroup::get_graph(conn, &bg.id)?;
-        let mut undirected_graph: UnGraphMap<GraphNode, GraphEdge> = UnGraphMap::new();
-        for node in graph.nodes() {
-            undirected_graph.add_node(node);
+        if graph.node_count() < 3 {
+            continue;
         }
-        for (src, dst, weights) in graph.all_edges() {
-            undirected_graph.add_edge(src, dst, weights[0]);
-        }
-        let connected_components = kosaraju_scc(&undirected_graph);
-        for subgraph in connected_components.iter() {
-            if subgraph.len() >= 3 {
-                // For graphs with just one enter/exit point, we log a message
-                let mut has_start = false;
-                let mut has_end = false;
-                for node in subgraph.iter() {
-                    if !has_start && is_start_node(node.node_id) {
-                        has_start = true;
-                    } else if !has_end && is_end_node(node.node_id) {
-                        has_end = true;
-                    };
-                    if has_start && has_end {
-                        break;
-                    }
-                }
-                if !has_start && !has_end {
-                    // from the subgraph, we want to find a deterministic sort of ordered elements.
-                    // Kosaraju returns nodes in arbitrary order. We use DFS and then rotate the vector
-                    // so the first node_id starts the list for consistency. If a node in the DFS is in
-                    // a known start node for a path, we use that one.
-                    let mut order = vec![];
-                    let mut dfs = Dfs::new(&graph, subgraph[0]);
-                    while let Some(nx) = dfs.next(&graph) {
-                        order.push(nx);
-                    }
-                    let min_index =
-                        order.iter().enumerate().min_set_by_key(|(_, k)| k.node_id)[0].0;
-                    order.rotate_left(min_index);
-                    bar.inc(1);
-                    all_new_cycle_edges.push((
-                        edge_data_from_fields(
-                            PATH_START_NODE_ID,
-                            0,
-                            Strand::Forward,
-                            order[0].node_id,
-                            Strand::Forward,
-                        ),
-                        bg.id,
-                    ));
-                    let last_node = order.last().unwrap();
-                    all_new_cycle_edges.push((
-                        edge_data_from_fields(
-                            last_node.node_id,
-                            last_node.sequence_end,
-                            Strand::Forward,
-                            PATH_END_NODE_ID,
-                            Strand::Forward,
-                        ),
-                        bg.id,
-                    ));
-                    all_new_cycle_edges.push((
-                        edge_data_from_fields(
-                            PATH_END_NODE_ID,
-                            0,
-                            Strand::Forward,
-                            PATH_START_NODE_ID,
-                            Strand::Forward,
-                        ),
-                        bg.id,
-                    ));
-                } else if has_start && has_end {
-                    // there's a cycle, but has a start/end already. At some point we should track this
-                    // so we know ahead of time where the cycles are
-                } else {
-                    message_bar.set_message(
-                        "Path encountered with cycle after start/end node, no cycle breaking will apply.",
-                    );
-                }
+        let has_start = graph
+            .all_edges()
+            .any(|(src, _, _)| is_start_node(src.node_id));
+        let has_end = graph
+            .all_edges()
+            .any(|(_, dst, _)| is_end_node(dst.node_id));
+        if !has_start && !has_end {
+            // Cycle with no explicit entry/exit — wire start/end via DFS ordering
+            let first = graph.nodes().min_by_key(|n| n.node_id).unwrap();
+            let mut order = vec![];
+            let mut dfs = Dfs::new(&graph, first);
+            while let Some(nx) = dfs.next(&graph) {
+                order.push(nx);
             }
+            let min_index = order.iter().enumerate().min_set_by_key(|(_, k)| k.node_id)[0].0;
+            order.rotate_left(min_index);
+            bar.inc(1);
+            let last_node = *order.last().unwrap();
+            all_new_cycle_edges.push((
+                edge_data_from_fields(
+                    PATH_START_NODE_ID,
+                    0,
+                    Strand::Forward,
+                    order[0].node_id,
+                    Strand::Forward,
+                ),
+                bg.id,
+            ));
+            all_new_cycle_edges.push((
+                edge_data_from_fields(
+                    last_node.node_id,
+                    last_node.sequence_end,
+                    Strand::Forward,
+                    PATH_END_NODE_ID,
+                    Strand::Forward,
+                ),
+                bg.id,
+            ));
+            all_new_cycle_edges.push((
+                edge_data_from_fields(
+                    PATH_END_NODE_ID,
+                    0,
+                    Strand::Forward,
+                    PATH_START_NODE_ID,
+                    Strand::Forward,
+                ),
+                bg.id,
+            ));
+        } else if !has_start || !has_end {
+            message_bar.set_message(
+                "Path encountered with cycle after start/end node, no cycle breaking will apply.",
+            );
         }
     }
     message_bar.finish();
@@ -956,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_import_disjoint_graphs() {
-        // Two separate linear chains with no cross-links; both end up in one block group via shared start/end nodes.
+        // Two separate linear chains with no cross-links; each connected component becomes its own block group.
         let gfa_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/disjoint_graphs.gfa");
         let collection_name = "disjoint".to_string();
@@ -967,16 +1000,25 @@ mod tests {
         track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(
+        let bg1_id = BlockGroup::get_id(
             &collection_name,
             Sample::DEFAULT_NAME,
-            "disjoint_graphs",
+            "disjoint_graphs_1",
             None,
         );
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let bg2_id = BlockGroup::get_id(
+            &collection_name,
+            Sample::DEFAULT_NAME,
+            "disjoint_graphs_2",
+            None,
+        );
         assert_eq!(
-            all_sequences,
-            HashSet::from_iter(vec!["AAAACCCC".to_string(), "TTTTGGGG".to_string()])
+            BlockGroup::get_all_sequences(conn, &bg1_id, false).unwrap(),
+            HashSet::from_iter(vec!["AAAACCCC".to_string()])
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &bg2_id, false).unwrap(),
+            HashSet::from_iter(vec!["TTTTGGGG".to_string()])
         );
     }
 
@@ -1098,7 +1140,7 @@ mod tests {
 
     #[test]
     fn test_import_gfa_multiple_graphs_no_ref_uses_filename() {
-        // No SN:Z: tags, no paths, multiple disjoint subgraphs; all in one block group named by filename stem.
+        // No SN:Z: tags, no paths, multiple disjoint subgraphs; one block group per component, names disambiguated with _N.
         let gfa_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/disjoint_graphs.gfa");
         let collection_name = "disjoint_filename".to_string();
@@ -1114,7 +1156,37 @@ mod tests {
             "select * from block_groups where collection_name = ?1",
             params![collection_name],
         );
+        let names: HashSet<String> = block_groups.iter().map(|bg| bg.name.clone()).collect();
+        assert_eq!(block_groups.len(), 2);
+        assert_eq!(
+            names,
+            HashSet::from_iter(vec![
+                "disjoint_graphs_1".to_string(),
+                "disjoint_graphs_2".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_import_gfa_connected_mixed_sn_tags() {
+        // All segments connected (A→B→C) but with mixed SN:Z: tags (chr1, chr1, chr2).
+        // Connectivity takes priority: one block group named by majority SN tag (chr1, 2 vs 1).
+        let gfa_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/connected_mixed_sn.gfa");
+        let collection_name = "mixed_sn".to_string();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
+
+        let block_groups = BlockGroup::query(
+            conn,
+            "select * from block_groups where collection_name = ?1",
+            params![collection_name],
+        );
         assert_eq!(block_groups.len(), 1);
-        assert_eq!(block_groups[0].name, "disjoint_graphs");
+        assert_eq!(block_groups[0].name, "chr1");
     }
 }

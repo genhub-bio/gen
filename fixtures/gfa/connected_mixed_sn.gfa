@@ -1,0 +1,6 @@
+H	VN:Z:1.0
+S	A	AAAA	SN:Z:chr1
+S	B	CCCC	SN:Z:chr1
+S	C	TTTT	SN:Z:chr2
+L	A	+	B	+	*
+L	B	+	C	+	*
