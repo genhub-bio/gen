@@ -7,6 +7,7 @@ use petgraph::Direction;
 
 use crate::{
     block_group::BlockGroup, block_group_edge::AugmentedEdge, db::GraphConnection, edge::Edge,
+    node::Node,
 };
 
 pub struct ResolvedGraph {
@@ -260,6 +261,21 @@ impl ResolvedGraph {
         } else {
             coord - boundary.end
         };
+
+        let same_node_coordinate = if before_tree {
+            boundary.sequence_start + boundary_distance
+        } else {
+            boundary.sequence_end + boundary_distance
+        };
+        if same_node_coordinate >= 0
+            && let Ok(node_lengths) = Node::query_nodes_length(conn, &[boundary.node_id])
+            && same_node_coordinate <= *node_lengths.get(&boundary.node_id).unwrap_or(&0)
+        {
+            return Ok(GraphNodePosition {
+                graph_node: boundary_node,
+                offset: boundary_anchor.offset + boundary_distance,
+            });
+        }
 
         let mut expanded_graph = self.graph.clone();
         expand(
