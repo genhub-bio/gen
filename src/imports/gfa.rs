@@ -475,6 +475,7 @@ pub fn import_gfa(
         let connected_components = kosaraju_scc(&undirected_graph);
         for subgraph in connected_components.iter() {
             if subgraph.len() >= 3 {
+                // For graphs with just one enter/exit point, we log a message
                 let mut has_start = false;
                 let mut has_end = false;
                 for node in subgraph.iter() {
@@ -488,6 +489,10 @@ pub fn import_gfa(
                     }
                 }
                 if !has_start && !has_end {
+                    // from the subgraph, we want to find a deterministic sort of ordered elements.
+                    // Kosaraju returns nodes in arbitrary order. We use DFS and then rotate the vector
+                    // so the first node_id starts the list for consistency. If a node in the DFS is in
+                    // a known start node for a path, we use that one.
                     let mut order = vec![];
                     let mut dfs = Dfs::new(&graph, subgraph[0]);
                     while let Some(nx) = dfs.next(&graph) {
@@ -529,7 +534,8 @@ pub fn import_gfa(
                         bg.id,
                     ));
                 } else if has_start && has_end {
-                    // cycle with existing start/end — tracked in the graph already
+                    // there's a cycle, but has a start/end already. At some point we should track this
+                    // so we know ahead of time where the cycles are
                 } else {
                     message_bar.set_message(
                         "Path encountered with cycle after start/end node, no cycle breaking will apply.",
