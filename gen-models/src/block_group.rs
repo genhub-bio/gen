@@ -700,28 +700,6 @@ impl BlockGroup {
         Ok(accession)
     }
 
-    pub fn insert_change(
-        conn: &GraphConnection,
-        change: &BlockGroupChange,
-    ) -> Result<(), BlockGroupError> {
-        let new_augmented_edges = change.region.plan_edges(conn, change, None)?;
-        let mut new_augmented_edges_by_block_group = HashMap::new();
-        new_augmented_edges_by_block_group
-            .insert(change.region.block_group.id, new_augmented_edges.clone());
-        let mut new_accession_edges = HashMap::new();
-        if let Some(accession) = &change.path_accession {
-            new_accession_edges.insert(
-                (change.region.block_group.id, accession.clone()),
-                new_augmented_edges,
-            );
-        }
-        Self::persist_insert_changes(
-            conn,
-            new_augmented_edges_by_block_group,
-            new_accession_edges,
-        )
-    }
-
     pub fn insert_changes(
         conn: &GraphConnection,
         changes: &[BlockGroupChange],
@@ -761,6 +739,28 @@ impl BlockGroup {
                     })
                     .or_insert_with(|| new_augmented_edges.clone());
             }
+        }
+        Self::persist_insert_changes(
+            conn,
+            new_augmented_edges_by_block_group,
+            new_accession_edges,
+        )
+    }
+
+    pub fn insert_change(
+        conn: &GraphConnection,
+        change: &BlockGroupChange,
+    ) -> Result<(), BlockGroupError> {
+        let new_augmented_edges = change.region.plan_edges(conn, change, None)?;
+        let mut new_augmented_edges_by_block_group = HashMap::new();
+        new_augmented_edges_by_block_group
+            .insert(change.region.block_group.id, new_augmented_edges.clone());
+        let mut new_accession_edges = HashMap::new();
+        if let Some(accession) = &change.path_accession {
+            new_accession_edges.insert(
+                (change.region.block_group.id, accession.clone()),
+                new_augmented_edges,
+            );
         }
         Self::persist_insert_changes(
             conn,

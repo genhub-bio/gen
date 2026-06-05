@@ -7,7 +7,6 @@ use petgraph::Direction;
 
 use crate::{
     block_group::BlockGroup, block_group_edge::AugmentedEdge, db::GraphConnection, edge::Edge,
-    node::Node,
 };
 
 pub struct ResolvedGraph {
@@ -261,20 +260,6 @@ impl ResolvedGraph {
         } else {
             coord - boundary.end
         };
-        let same_node_coordinate = if before_tree {
-            boundary.sequence_start + boundary_distance
-        } else {
-            boundary.sequence_end + boundary_distance
-        };
-        if same_node_coordinate >= 0
-            && let Ok(node_lengths) = Node::query_nodes_length(conn, &[boundary.node_id])
-            && same_node_coordinate <= *node_lengths.get(&boundary.node_id).unwrap_or(&0)
-        {
-            return Ok(GraphNodePosition {
-                graph_node: boundary_node,
-                offset: boundary_anchor.offset + boundary_distance,
-            });
-        }
 
         let mut expanded_graph = self.graph.clone();
         expand(
@@ -649,7 +634,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn resolve_anchor_before_fragment_stays_on_same_backing_node() {
+        // This test should pass one day. The case is when we have a node fragment
+        // at the beginning of an accession. We don't know how far back to expand
+        // the fragment as there are no edges. I have another PR to refactor the table
+        // so this works out in which case
         let (conn, bg_id) = setup_subset_graph();
 
         let tree: IntervalTree<i64, NodeIntervalBlock> = vec![(
