@@ -45,7 +45,7 @@ use ratatui::{
 use serde::Serialize;
 
 use crate::python_api::{
-    block_group::PyBlockGroup,
+    block_group::PySequenceGraph,
     graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
     repository::PyRepository,
     utils::block_group_err_to_pyerr,
@@ -248,7 +248,7 @@ struct GraphOverlay {
 /// Internal graph controller for the Jupyter notebook widget.
 ///
 /// Not intended for direct use from Python — users should call
-/// `repo.plot(bg)` or `bg.plot()` which return a `GenGraphWidget`.
+/// `repo.plot(sg)` or `sg.plot()` which return a `GraphWidget`.
 ///
 /// # Thread safety
 ///
@@ -258,7 +258,7 @@ struct GraphOverlay {
 /// so it must be `Send`.  `GraphHandle` contains `Rc<GraphConnection>` which is
 /// `!Send`, so we store only the DB path and open a fresh connection per operation
 /// instead of holding a live handle.
-#[pyclass]
+#[pyclass(name = "GraphWidget")]
 #[derive(Clone)]
 pub struct PyGraphController {
     db_path: PathBuf,
@@ -381,12 +381,12 @@ impl PyGraphController {
         self.clone()
     }
 
-    /// Create a `GraphController` from a `Repository` and a `PyBlockGroup`.
+    /// Create a `GraphController` from a `Repository` and a `PySequenceGraph`.
     #[classmethod]
     fn from_block_group(
         _cls: &Bound<'_, PyType>,
         repo: &PyRepository,
-        block_group: &PyBlockGroup,
+        block_group: &PySequenceGraph,
     ) -> PyResult<Self> {
         let bg_id = block_group.id;
         let conn = repo.context.graph().conn();
@@ -1048,8 +1048,8 @@ mod tests {
     }
 }
 
-/// Instantiate a `GenGraphWidget` from a controller and optional viewport
-/// Shared by `PyBlockGroup::plot` and `PyRepository::plot`.
+/// Instantiate a `GraphWidget` from a controller and optional viewport
+/// Shared by `PySequenceGraph::plot` and `PyRepository::plot`.
 pub fn build_widget(
     py: Python<'_>,
     ctrl: Py<PyGraphController>,
@@ -1057,7 +1057,7 @@ pub fn build_widget(
     cols: Option<u32>,
 ) -> PyResult<PyObject> {
     let gen_module = py.import("gen")?;
-    let widget_cls = gen_module.getattr("GenGraphWidget")?;
+    let widget_cls = gen_module.getattr("GraphWidget")?;
     let kwargs = PyDict::new(py);
     if let Some(r) = rows {
         kwargs.set_item("rows", r)?;

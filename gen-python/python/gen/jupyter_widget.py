@@ -4,7 +4,7 @@ Architecture
 ------------
 - Native Rust (GraphController) owns all state, performs layout, renders into
   a ratatui Buffer, and serialises the result to a RenderedFrame JSON string.
-- Python (GenGraphWidget) is a thin bridge: it holds the Rust controller,
+- Python (GraphWidget) is a thin bridge: it holds the Rust controller,
   requests frames, and syncs them to the frontend via the `frame` traitlet.
 - The frontend (static/jupyter_widget.js) is a dumb canvas painter that also sends
   mouse events back as custom messages.
@@ -28,7 +28,7 @@ _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
 # All live widget instances, so that module-level helpers can operate on them.
 
 
-class GenGraphWidget(anywidget.AnyWidget):
+class GraphWidget(anywidget.AnyWidget):
     """Jupyter widget that displays a Gen graph using the native Rust renderer.
 
     Usage
@@ -36,8 +36,8 @@ class GenGraphWidget(anywidget.AnyWidget):
     ::
 
         repo   = gen.Repository()
-        bg     = repo.get_block_groups()[0]
-        widget = repo.plot(bg)   # or bg.plot()
+        sg     = repo.get_sequence_graphs()[0]
+        widget = repo.plot(sg)   # or sg.plot()
         widget  # display in Jupyter cell
 
         # Optionally send commands from Python afterwards:
@@ -62,7 +62,7 @@ class GenGraphWidget(anywidget.AnyWidget):
         ----------
         controller:
             A ``gen.PyGraphController`` instance.  Normally obtained via
-            ``repo.plot(bg)`` or ``bg.plot()``.
+            ``repo.plot(sg)`` or ``sg.plot()``.
         """
         super().__init__(**kwargs)
         self._controller = controller
@@ -92,7 +92,7 @@ class GenGraphWidget(anywidget.AnyWidget):
         from IPython.display import display
 
         cloned_ctrl = self._controller.clone_controller()
-        snapshot = GenGraphWidget(cloned_ctrl, cols=self.cols, rows=self.rows)
+        snapshot = GraphWidget(cloned_ctrl, cols=self.cols, rows=self.rows)
         data = {
             "text/plain": repr(snapshot),
             "application/vnd.jupyter.widget-view+json": {
@@ -207,8 +207,8 @@ class GenGraphWidget(anywidget.AnyWidget):
         Parameters
         ----------
         target:
-            A ``GraphPos`` (from ``locus.start()`` / ``locus.end()``),
-            a ``GraphLocus`` (from ``repo.search()``), or
+            A ``Position`` (from ``locus.start()`` / ``locus.end()``),
+            a ``Locus`` (from ``repo.search()``), or
             an ``Annotation`` object (e.g. from ``widget.list_annotations()``).
 
         Example
@@ -224,11 +224,11 @@ class GenGraphWidget(anywidget.AnyWidget):
         """
         if self._frozen:
             return
-        from gen import Annotation, GraphLocus  # noqa: PLC0415
+        from gen import Annotation, Locus  # noqa: PLC0415
 
         if isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target)
-        elif isinstance(target, GraphLocus):
+        elif isinstance(target, Locus):
             self._controller.go_to_locus(target)
         else:
             self._controller.go_to_pos(target)
@@ -240,7 +240,7 @@ class GenGraphWidget(anywidget.AnyWidget):
         Parameters
         ----------
         target:
-            A ``GraphLocus`` returned by ``repo.search()``, or an ``Annotation``
+            A ``Locus`` returned by ``repo.search()``, or an ``Annotation``
             object (e.g. from ``widget.list_annotations()``).
         color:
             Optional highlight colour.  Accepts named colours
@@ -276,7 +276,7 @@ class GenGraphWidget(anywidget.AnyWidget):
         Parameters
         ----------
         locus:
-            A ``GraphLocus`` returned by ``repo.search()``.
+            A ``Locus`` returned by ``repo.search()``.
         color:
             Optional colour for the highlight.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
