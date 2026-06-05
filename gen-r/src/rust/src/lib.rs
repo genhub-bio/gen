@@ -69,43 +69,6 @@ fn nullable_i64_to_option(value: Nullable<i64>) -> Option<i64> {
     }
 }
 
-fn open_db_context(
-    workspace_path: Option<String>,
-    db_path: Option<String>,
-) -> std::result::Result<(GenDbContext, String, String), String> {
-    let workspace = match workspace_path {
-        Some(path) => Workspace::new(path),
-        None => Workspace::from_current_dir(),
-    };
-
-    let resolved_workspace_path = workspace.base_dir().to_string_lossy().into_owned();
-    let gen_dir = workspace.ensure_gen_dir();
-    let operations_path = gen_dir.join("gen.db");
-    let operations_conn = r#gen::get_operation_connection(Some(operations_path))
-        .map_err(|err| format!("Failed to open operations database: {err}"))?;
-
-    let resolved_db_path = match db_path {
-        Some(path) => path,
-        None => {
-            let mut stmt = operations_conn
-                .prepare("select db_name from defaults where id = 1;")
-                .map_err(|err| format!("Failed to load defaults: {err}"))?;
-            let row: Option<String> = stmt.query_row([], |row| row.get(0)).ok();
-
-            row.unwrap_or_else(|| gen_dir.join("default.db").to_string_lossy().into_owned())
-        }
-    };
-
-    let graph_conn = r#gen::get_connection(PathBuf::from(&resolved_db_path))
-        .map_err(|err| format!("Failed to open database '{resolved_db_path}': {err}"))?;
-
-    Ok((
-        GenDbContext::new(workspace, graph_conn, operations_conn),
-        resolved_workspace_path,
-        resolved_db_path,
-    ))
-}
-
 fn resolve_collection_name(
     operations_conn: &gen_models::db::OperationsConnection,
     collection_name: Option<String>,
@@ -153,22 +116,8 @@ fn rollback_transactions(context: &GenDbContext) {
     let _ = operations_conn.execute("ROLLBACK TRANSACTION;", []);
 }
 
-fn open_repo_connection(db_path: &str) -> std::result::Result<GraphConnection, String> {
-    get_connection(db_path).map_err(|err| format!("Failed to open database '{db_path}': {err}"))
-}
-
 fn hash_id_from_string(value: &str) -> std::result::Result<HashId, String> {
     HashId::try_from(value.to_string()).map_err(|err| format!("Invalid hash id '{value}': {err}"))
-}
-
-fn sequence_graph_record(block_group: BlockGroup, db_path: Option<&str>) -> List {
-    list!(
-        id = block_group.id.to_string(),
-        collection_name = block_group.collection_name,
-        sample_name = block_group.sample_name,
-        name = block_group.name,
-        db_path = db_path.map(|path| path.to_string())
-    )
 }
 
 fn node_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Robj {
@@ -816,6 +765,7 @@ fn graph_locus_record(locus: &GraphLocus) -> Robj {
     obj
 }
 
+#[extendr]
 #[derive(Clone)]
 struct Repository {
     context: GenDbContext,
@@ -1865,7 +1815,7 @@ impl Repository {
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
-        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
 
         let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = graph
             .nodes()
@@ -1912,7 +1862,7 @@ impl Repository {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -1948,7 +1898,7 @@ impl Repository {
     ) -> std::result::Result<bool, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, &bg_id);
+        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
