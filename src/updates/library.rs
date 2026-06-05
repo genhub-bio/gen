@@ -388,6 +388,7 @@ fn graph_node_positions_to_points(positions: &[gen_graph::GraphNodePosition]) ->
         .collect()
 }
 
+/// Creates an edge at a given set of positions. Used for splitting the graph at start/end boundaries.
 fn preserve_library_boundary_points(
     conn: &gen_models::db::GraphConnection,
     block_group_id: gen_core::HashId,
