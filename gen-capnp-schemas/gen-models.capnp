@@ -114,20 +114,17 @@ struct Accession {
 
 struct AccessionEdge {
   id @0 :List(UInt8);
-  sourceNodeId @1 :List(UInt8);
-  sourceCoordinate @2 :Int64;
-  sourceStrand @3 :Core.Strand;
-  targetNodeId @4 :List(UInt8);
-  targetCoordinate @5 :Int64;
-  targetStrand @6 :Core.Strand;
-  chromosomeIndex @7 :Int64;
-}
-
-struct AccessionPath {
-  id @0 :List(UInt8);
   accessionId @1 :List(UInt8);
   indexInPath @2 :Int64;
   edgeId @3 :List(UInt8);
+  sourceOffset :union {
+    none @4 :Void;
+    some @5 :Int64;
+  }
+  targetOffset :union {
+    none @6 :Void;
+    some @7 :Int64;
+  }
 }
 
 # Operation and version control models
@@ -299,11 +296,10 @@ struct ChangesetModels {
   pathEdges @8 :List(PathEdge);
   accessions @9 :List(Accession);
   accessionEdges @10 :List(AccessionEdge);
-  accessionPaths @11 :List(AccessionPath);
-  annotationGroups @12 :List(AnnotationGroup);
-  annotations @13 :List(Annotation);
-  annotationGroupSamples @14 :List(AnnotationGroupSample);
-  sampleLineages @15 :List(SampleLineage);
+  annotationGroups @11 :List(AnnotationGroup);
+  annotations @12 :List(Annotation);
+  annotationGroupSamples @13 :List(AnnotationGroupSample);
+  sampleLineages @14 :List(SampleLineage);
 }
 
 struct DependencyModels {

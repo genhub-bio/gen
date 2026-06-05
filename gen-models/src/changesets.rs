@@ -16,7 +16,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    accession::{Accession, AccessionEdge, AccessionEdgeData},
     annotations::{Annotation, AnnotationGroup, AnnotationGroupSample},
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -91,7 +91,6 @@ pub struct ChangesetModels {
     pub path_edges: Vec<PathEdge>,
     pub accessions: Vec<Accession>,
     pub accession_edges: Vec<AccessionEdge>,
-    pub accession_paths: Vec<AccessionPath>,
     pub annotation_groups: Vec<AnnotationGroup>,
     pub annotations: Vec<Annotation>,
     pub annotation_group_samples: Vec<AnnotationGroupSample>,
@@ -199,15 +198,6 @@ impl<'a> Capnp<'a> for ChangesetModels {
         for (i, accession_edge) in self.accession_edges.iter().enumerate() {
             let mut accession_edge_builder = accession_edges_builder.reborrow().get(i as u32);
             accession_edge.write_capnp(&mut accession_edge_builder);
-        }
-
-        // Write accession paths
-        let mut accession_paths_builder = builder
-            .reborrow()
-            .init_accession_paths(self.accession_paths.len() as u32);
-        for (i, accession_path) in self.accession_paths.iter().enumerate() {
-            let mut accession_path_builder = accession_paths_builder.reborrow().get(i as u32);
-            accession_path.write_capnp(&mut accession_path_builder);
         }
 
         // Write annotation groups
@@ -325,13 +315,6 @@ impl<'a> Capnp<'a> for ChangesetModels {
             accession_edges.push(AccessionEdge::read_capnp(accession_edge_reader));
         }
 
-        // Read accession paths
-        let accession_paths_reader = reader.get_accession_paths().unwrap();
-        let mut accession_paths = Vec::new();
-        for accession_path_reader in accession_paths_reader.iter() {
-            accession_paths.push(AccessionPath::read_capnp(accession_path_reader));
-        }
-
         // Read annotation groups
         let annotation_groups_reader = reader.get_annotation_groups().unwrap();
         let mut annotation_groups = Vec::new();
@@ -368,7 +351,6 @@ impl<'a> Capnp<'a> for ChangesetModels {
             path_edges,
             accessions,
             accession_edges,
-            accession_paths,
             annotation_groups,
             annotations,
             annotation_group_samples,
@@ -452,7 +434,6 @@ pub fn process_changesetiter(
     let mut created_path_edges = vec![];
     let mut created_accessions = vec![];
     let mut created_accession_edges = vec![];
-    let mut created_accession_paths = vec![];
     let mut created_annotation_groups = vec![];
     let mut created_annotations = vec![];
     let mut created_annotation_group_samples = vec![];
@@ -466,7 +447,6 @@ pub fn process_changesetiter(
     let mut previous_accessions = HashSet::new();
     let mut previous_nodes = HashSet::new();
     let mut previous_sequences = HashSet::new();
-    let mut previous_accession_edges = HashSet::new();
     let mut created_block_groups_set = HashSet::new();
     let mut created_paths_set = HashSet::new();
     let mut created_accessions_set = HashSet::new();
@@ -681,48 +661,25 @@ pub fn process_changesetiter(
                     }
                 }
                 "accession_edges" => {
-                    let edge_id = parse_hashid(item, pk_column);
-                    let source_node_id = parse_hashid(item, 1);
-                    let target_node_id = parse_hashid(item, 4);
-
-                    created_accession_edges.push(AccessionEdge {
-                        id: edge_id,
-                        source_node_id,
-                        source_coordinate: parse_number(item, 2),
-                        source_strand: Strand::column_result(item.new_value(3).unwrap()).unwrap(),
-                        target_node_id,
-                        target_coordinate: parse_number(item, 5),
-                        target_strand: Strand::column_result(item.new_value(6).unwrap()).unwrap(),
-                        chromosome_index: parse_number(item, 7),
-                    });
-
-                    created_accession_edges_set.insert(edge_id);
-                    let nodes = Node::query_by_ids(conn, &[source_node_id, target_node_id]);
-                    if !created_nodes_set.contains(&source_node_id) {
-                        previous_sequences.insert(nodes[0].sequence_hash);
-                    }
-                    if source_node_id != target_node_id
-                        && !created_nodes_set.contains(&target_node_id)
-                    {
-                        previous_sequences.insert(nodes[1].sequence_hash);
-                    }
-                }
-                "accession_paths" => {
+                    let accession_edge_id = parse_hashid(item, pk_column);
                     let accession_id = parse_hashid(item, 1);
                     let edge_id = parse_hashid(item, 3);
 
-                    created_accession_paths.push(AccessionPath {
-                        id: parse_hashid(item, pk_column),
+                    created_accession_edges.push(AccessionEdge {
+                        id: accession_edge_id,
                         accession_id,
                         index_in_path: parse_number(item, 2),
                         edge_id,
+                        source_offset: parse_maybe_number(item, 4),
+                        target_offset: parse_maybe_number(item, 5),
                     });
 
+                    created_accession_edges_set.insert(accession_edge_id);
                     if !created_accessions_set.contains(&accession_id) {
                         previous_accessions.insert(accession_id);
                     }
-                    if !created_accession_edges_set.contains(&edge_id) {
-                        previous_accession_edges.insert(edge_id);
+                    if !created_edges_set.contains(&edge_id) {
+                        previous_edges.insert(edge_id);
                     }
                 }
                 "annotations" => {
@@ -806,7 +763,6 @@ pub fn process_changesetiter(
         path_edges: created_path_edges,
         accessions: created_accessions,
         accession_edges: created_accession_edges,
-        accession_paths: created_accession_paths,
         annotation_groups: created_annotation_groups,
         annotations: created_annotations,
         annotation_group_samples: created_annotation_group_samples,
@@ -821,7 +777,7 @@ pub fn process_changesetiter(
         edges: Edge::query_by_ids(conn, &previous_edges),
         paths: Path::query_by_ids(conn, &previous_paths),
         accessions: Accession::query_by_ids(conn, &previous_accessions),
-        accession_edges: AccessionEdge::query_by_ids(conn, &previous_accession_edges),
+        accession_edges: vec![],
     };
 
     (changeset_models, dependency_models)
@@ -889,15 +845,6 @@ pub fn apply_changeset(
         Path::create(conn, &path.name, &path.block_group_id, &[])?;
     }
 
-    AccessionEdge::bulk_create(
-        conn,
-        &dependencies
-            .accession_edges
-            .iter()
-            .map(AccessionEdgeData::from)
-            .collect::<Vec<AccessionEdgeData>>(),
-    );
-
     for accession in dependencies.accessions.iter() {
         Accession::get_or_create(
             conn,
@@ -905,6 +852,18 @@ pub fn apply_changeset(
             &accession.block_group_id,
             accession.parent_accession_id.as_ref(),
         )?;
+    }
+    for (accession_id, accession_edges) in &dependencies
+        .accession_edges
+        .iter()
+        .sorted_by(|left, right| Ord::cmp(&left.accession_id, &right.accession_id))
+        .chunk_by(|edge| edge.accession_id)
+    {
+        let edges = accession_edges
+            .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
+            .map(AccessionEdgeData::from)
+            .collect::<Vec<AccessionEdgeData>>();
+        AccessionEdge::bulk_create(conn, &accession_id, &edges);
     }
 
     for collection in &changeset.collections {
@@ -973,15 +932,6 @@ pub fn apply_changeset(
         let _ = PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
     }
 
-    AccessionEdge::bulk_create(
-        conn,
-        &changeset
-            .accession_edges
-            .iter()
-            .map(AccessionEdgeData::from)
-            .collect::<Vec<_>>(),
-    );
-
     for accession in &changeset.accessions {
         Accession::get_or_create(
             conn,
@@ -990,12 +940,13 @@ pub fn apply_changeset(
             accession.parent_accession_id.as_ref(),
         )?;
         let edges = changeset
-            .accession_paths
+            .accession_edges
             .iter()
-            .filter(|ap| ap.accession_id == accession.id)
+            .filter(|edge| edge.accession_id == accession.id)
             .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
-            .map(|ap| ap.edge_id);
-        AccessionPath::create(conn, &accession.id, &edges.collect::<Vec<_>>())?;
+            .map(AccessionEdgeData::from)
+            .collect::<Vec<_>>();
+        AccessionEdge::bulk_create(conn, &accession.id, &edges);
     }
 
     for annotation_group in &changeset.annotation_groups {
@@ -1101,14 +1052,6 @@ pub fn revert_changeset(
             .annotation_groups
             .iter()
             .map(|group| group.name.clone())
-            .collect::<Vec<_>>(),
-    );
-    AccessionPath::delete_by_ids(
-        conn,
-        &changeset
-            .accession_paths
-            .iter()
-            .map(|obj| obj.id)
             .collect::<Vec<_>>(),
     );
     // TODO: edges can be made by other operations in other dbs earlier and reused, so we likely want to allow FK failures delete for deletions
@@ -1389,19 +1332,11 @@ mod tests {
             }],
             accession_edges: vec![AccessionEdge {
                 id: HashId::pad_str(1),
-                source_node_id: HashId::convert_str("1"),
-                source_coordinate: 0,
-                source_strand: Strand::Forward,
-                target_node_id: HashId::convert_str("2"),
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-                chromosome_index: 0,
-            }],
-            accession_paths: vec![AccessionPath {
-                id: HashId::pad_str(1),
                 accession_id: HashId::pad_str(1),
                 index_in_path: 0,
                 edge_id: HashId::pad_str(1),
+                source_offset: Some(0),
+                target_offset: Some(0),
             }],
             annotation_groups: vec![AnnotationGroup {
                 name: "gff3".to_string(),
@@ -1455,7 +1390,6 @@ mod tests {
                 path_edges: vec![],
                 accessions: vec![],
                 accession_edges: vec![],
-                accession_paths: vec![],
                 annotation_groups: vec![],
                 annotations: vec![],
                 annotation_group_samples: vec![],
@@ -1556,19 +1490,11 @@ mod tests {
             }],
             accession_edges: vec![AccessionEdge {
                 id: HashId::pad_str(1),
-                source_node_id: HashId::convert_str("1"),
-                source_coordinate: 0,
-                source_strand: Strand::Forward,
-                target_node_id: HashId::convert_str("2"),
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-                chromosome_index: 0,
-            }],
-            accession_paths: vec![AccessionPath {
-                id: HashId::pad_str(1),
                 accession_id: HashId::pad_str(1),
                 index_in_path: 0,
                 edge_id: HashId::pad_str(1),
+                source_offset: Some(0),
+                target_offset: Some(0),
             }],
             annotation_groups: vec![AnnotationGroup {
                 name: "gff3".to_string(),

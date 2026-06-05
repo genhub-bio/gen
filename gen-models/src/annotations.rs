@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::anyhow;
 use gen_core::{
-    HashId, NodeIntervalBlock, calculate_hash,
+    HashId, NodeIntervalBlock, Strand, calculate_hash,
     config::Workspace,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -124,6 +124,7 @@ pub struct GenBankExtra {
     pub kind: String,
     pub qualifiers: Vec<GenBankQualifier>,
     pub location_operator: Option<GenBankLocationOperator>,
+    pub strands: Vec<Strand>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]

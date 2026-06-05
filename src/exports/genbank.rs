@@ -11,7 +11,7 @@ use std::{
 
 use gb_io::{self, seq::Location};
 use gen_annotations::projection::{
-    AnnotationSegment, accession_edges_to_segments, project_annotation_segments,
+    AnnotationSegment, accession_blocks_to_segments, project_annotation_segments,
 };
 use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
@@ -20,7 +20,7 @@ use gen_models::{
     annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
-    errors::{AnnotationError, BlockGroupError, PathError, SequenceError},
+    errors::{AccessionError, AnnotationError, BlockGroupError, PathError, SequenceError},
     node::Node,
     sample::Sample,
     traits::Query,
@@ -44,6 +44,8 @@ pub enum GenbankExportError {
     Path(#[from] PathError),
     #[error("Block group error while exporting GenBank: {0}")]
     BlockGroup(#[from] BlockGroupError),
+    #[error("Accession error while exporting GenBank: {0}")]
+    Accession(#[from] AccessionError),
 }
 
 fn build_annotation_location(
@@ -101,14 +103,17 @@ fn export_annotations(
             continue;
         }
 
-        let accession_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
-            conn,
-            &annotation.accession_id,
-        ));
         let genbank_extra = annotation
             .extra
             .as_ref()
             .and_then(|extra| extra.genbank.as_ref());
+        let accession_blocks = accession.blocks(conn)?;
+        let mut accession_segments = accession_blocks_to_segments(&accession_blocks);
+        if let Some(extra) = genbank_extra {
+            for (segment, strand) in accession_segments.iter_mut().zip(extra.strands.iter()) {
+                segment.strand = *strand;
+            }
+        }
         let projected_segments = project_annotation_segments(
             &accession_segments,
             path_blocks,
@@ -441,13 +446,14 @@ mod tests {
         HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal, strand::Strand::Forward,
     };
     use gen_models::{
-        accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+        accession::{Accession, AccessionEdge, AccessionEdgeData},
         annotations::{Annotation, AnnotationExtra, GenBankExtra, GenBankLocationOperator},
         block_group::BlockGroup,
         file_types::FileTypes,
         metadata,
         operations::{OperationFile, OperationInfo},
         path::Path,
+        path_edge::PathEdge,
     };
 
     use super::*;
@@ -542,47 +548,86 @@ mod tests {
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
+        let path_edges = PathEdge::edges_for_path(conn, &path.id);
         let first = segments
             .first()
             .expect("should contain at least one annotation segment");
+        let first_block = &blocks[first.0];
+        let first_edge = path_edges
+            .iter()
+            .find(|edge| {
+                edge.target_node_id == first_block.node_id
+                    && edge.target_coordinate == first_block.sequence_start
+            })
+            .expect("should find edge entering annotation segment");
         let mut edges = vec![AccessionEdgeData {
-            source_node_id: PATH_START_NODE_ID,
-            source_coordinate: -1,
-            source_strand: Strand::Forward,
-            target_node_id: blocks[first.0].node_id,
-            target_coordinate: first.1,
-            target_strand: first.3,
-            chromosome_index: 0,
+            edge_id: first_edge.id,
+            source_offset: None,
+            target_offset: Some(first.1 - first_edge.target_coordinate),
         }];
         for window in segments.windows(2) {
             let current = window[0];
             let next = window[1];
-            edges.push(AccessionEdgeData {
-                source_node_id: blocks[current.0].node_id,
-                source_coordinate: current.2,
-                source_strand: current.3,
-                target_node_id: blocks[next.0].node_id,
-                target_coordinate: next.1,
-                target_strand: next.3,
-                chromosome_index: 0,
-            });
+            let current_block = &blocks[current.0];
+            let next_block = &blocks[next.0];
+            if let Some(edge) = path_edges.iter().find(|edge| {
+                edge.source_node_id == current_block.node_id
+                    && edge.source_coordinate == current_block.sequence_end
+                    && edge.target_node_id == next_block.node_id
+                    && edge.target_coordinate == next_block.sequence_start
+            }) {
+                edges.push(AccessionEdgeData {
+                    edge_id: edge.id,
+                    source_offset: Some(current.2 - edge.source_coordinate),
+                    target_offset: Some(next.1 - edge.target_coordinate),
+                });
+            } else {
+                let leaving_edge = path_edges
+                    .iter()
+                    .find(|edge| {
+                        edge.source_node_id == current_block.node_id
+                            && edge.source_coordinate == current_block.sequence_end
+                    })
+                    .expect("should find edge leaving annotation segment");
+                edges.push(AccessionEdgeData {
+                    edge_id: leaving_edge.id,
+                    source_offset: Some(current.2 - leaving_edge.source_coordinate),
+                    target_offset: None,
+                });
+
+                let entering_edge = path_edges
+                    .iter()
+                    .find(|edge| {
+                        edge.target_node_id == next_block.node_id
+                            && edge.target_coordinate == next_block.sequence_start
+                    })
+                    .expect("should find edge entering annotation segment");
+                edges.push(AccessionEdgeData {
+                    edge_id: entering_edge.id,
+                    source_offset: None,
+                    target_offset: Some(next.1 - entering_edge.target_coordinate),
+                });
+            }
         }
         let last = segments
             .last()
             .expect("should contain at least one annotation segment");
+        let last_block = &blocks[last.0];
+        let last_edge = path_edges
+            .iter()
+            .find(|edge| {
+                edge.source_node_id == last_block.node_id
+                    && edge.source_coordinate == last_block.sequence_end
+            })
+            .expect("should find edge leaving annotation segment");
         edges.push(AccessionEdgeData {
-            source_node_id: blocks[last.0].node_id,
-            source_coordinate: last.2,
-            source_strand: last.3,
-            target_node_id: PATH_END_NODE_ID,
-            target_coordinate: -1,
-            target_strand: Strand::Forward,
-            chromosome_index: 0,
+            edge_id: last_edge.id,
+            source_offset: Some(last.2 - last_edge.source_coordinate),
+            target_offset: None,
         });
 
         let accession = Accession::get_or_create(conn, name, &path.block_group_id, None).unwrap();
-        let edge_ids = AccessionEdge::bulk_create(conn, &edges);
-        AccessionPath::create(conn, &accession.id, &edge_ids);
+        AccessionEdge::bulk_create(conn, &accession.id, &edges);
         Annotation::create_with_samples(
             conn,
             name,
@@ -596,6 +641,7 @@ mod tests {
                         value: Some(name.to_string()),
                     }],
                     location_operator: operator,
+                    strands: segments.iter().map(|segment| segment.3).collect(),
                 }),
                 ..AnnotationExtra::default()
             }),

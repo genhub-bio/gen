@@ -444,7 +444,6 @@ mod tests {
             path_edges: vec![],
             accessions: vec![],
             accession_edges: vec![],
-            accession_paths: vec![],
             annotation_groups: vec![],
             annotations: vec![],
             annotation_group_samples: vec![],

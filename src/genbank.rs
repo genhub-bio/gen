@@ -8,8 +8,8 @@ use gen_core::Strand;
 use gen_models::{
     annotations::{AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier},
     errors::{
-        AccessionError, AccessionPathError, AnnotationError, BlockGroupError, CollectionError,
-        EdgeError, NodeError, OperationError, PathError, SampleError, SequenceError,
+        AccessionError, AnnotationError, BlockGroupError, CollectionError, EdgeError, NodeError,
+        OperationError, PathError, SampleError, SequenceError,
     },
 };
 use regex::{Error as RegexError, Regex};
@@ -47,8 +47,6 @@ pub enum GenBankError {
     PathError(#[from] PathError),
     #[error("Accession creation error: {0}")]
     AccessionError(#[from] AccessionError),
-    #[error("Accession path creation error: {0}")]
-    AccessionPathError(#[from] AccessionPathError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
 }
@@ -250,6 +248,10 @@ fn genbank_extra_for_feature(feature: &Feature) -> AnnotationExtra {
                 })
                 .collect(),
             location_operator: genbank_location_operator(&feature.location),
+            strands: annotation_segments_for_location(&feature.location)
+                .into_iter()
+                .map(|segment| segment.strand)
+                .collect(),
         }),
         ..AnnotationExtra::default()
     }

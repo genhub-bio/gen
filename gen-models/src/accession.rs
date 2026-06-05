@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
-    gen_models_capnp::{accession, accession_edge, accession_path},
+    edge::Edge,
+    gen_models_capnp::{accession, accession_edge},
     traits::*,
 };
 
@@ -32,7 +32,7 @@ pub enum AccessionError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
-    #[error("Accession {0} has no edges in accession_paths")]
+    #[error("Accession {0} has no edges in accession_edges")]
     MissingPath(HashId),
 }
 
@@ -91,16 +91,14 @@ impl<'a> Capnp<'a> for Accession {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq, Hash)]
 pub struct AccessionEdge {
     pub id: HashId,
-    pub source_node_id: HashId,
-    pub source_coordinate: i64,
-    pub source_strand: Strand,
-    pub target_node_id: HashId,
-    pub target_coordinate: i64,
-    pub target_strand: Strand,
-    pub chromosome_index: i64,
+    pub accession_id: HashId,
+    pub index_in_path: i64,
+    pub edge_id: HashId,
+    pub source_offset: Option<i64>,
+    pub target_offset: Option<i64>,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -115,84 +113,29 @@ impl<'a> Capnp<'a> for AccessionEdge {
 
     fn write_capnp(&self, builder: &mut Self::Builder) {
         builder.set_id(&self.id.0).unwrap();
-        builder.set_source_node_id(&self.source_node_id.0).unwrap();
-        builder.set_source_coordinate(self.source_coordinate);
-        builder.set_source_strand(self.source_strand.into());
-        builder.set_target_node_id(&self.target_node_id.0).unwrap();
-        builder.set_target_coordinate(self.target_coordinate);
-        builder.set_target_strand(self.target_strand.into());
-        builder.set_chromosome_index(self.chromosome_index);
-    }
-
-    fn read_capnp(reader: Self::Reader) -> Self {
-        let id = reader
-            .get_id()
-            .unwrap()
-            .as_slice()
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let source_node_id = reader
-            .get_source_node_id()
-            .unwrap()
-            .as_slice()
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let source_coordinate = reader.get_source_coordinate();
-        let source_strand = reader.get_source_strand().unwrap().into();
-        let target_node_id = reader
-            .get_target_node_id()
-            .unwrap()
-            .as_slice()
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let target_coordinate = reader.get_target_coordinate();
-        let target_strand = reader.get_target_strand().unwrap().into();
-        let chromosome_index = reader.get_chromosome_index();
-
-        AccessionEdge {
-            id,
-            source_node_id,
-            source_coordinate,
-            source_strand,
-            target_node_id,
-            target_coordinate,
-            target_strand,
-            chromosome_index,
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
-pub struct AccessionPath {
-    pub id: HashId,
-    pub accession_id: HashId,
-    pub index_in_path: i64,
-    pub edge_id: HashId,
-}
-
-#[derive(Debug, Error, PartialEq)]
-pub enum AccessionPathError {
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] rusqlite::Error),
-}
-
-impl<'a> Capnp<'a> for AccessionPath {
-    type Builder = accession_path::Builder<'a>;
-    type Reader = accession_path::Reader<'a>;
-
-    fn write_capnp(&self, builder: &mut Self::Builder) {
-        builder.set_id(&self.id.0).unwrap();
         builder.set_accession_id(&self.accession_id.0).unwrap();
         builder.set_index_in_path(self.index_in_path);
         builder.set_edge_id(&self.edge_id.0).unwrap();
+        match self.source_offset {
+            Some(offset) => builder.reborrow().get_source_offset().set_some(offset),
+            None => builder.reborrow().get_source_offset().set_none(()),
+        }
+        match self.target_offset {
+            Some(offset) => builder.reborrow().get_target_offset().set_some(offset),
+            None => builder.reborrow().get_target_offset().set_none(()),
+        }
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
         let id = reader
             .get_id()
+            .unwrap()
+            .as_slice()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let edge_id = reader
+            .get_edge_id()
             .unwrap()
             .as_slice()
             .unwrap()
@@ -206,45 +149,38 @@ impl<'a> Capnp<'a> for AccessionPath {
             .try_into()
             .unwrap();
         let index_in_path = reader.get_index_in_path();
-        let edge_id = reader
-            .get_edge_id()
-            .unwrap()
-            .as_slice()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let source_offset = match reader.get_source_offset().which().unwrap() {
+            accession_edge::source_offset::None(()) => None,
+            accession_edge::source_offset::Some(offset) => Some(offset),
+        };
+        let target_offset = match reader.get_target_offset().which().unwrap() {
+            accession_edge::target_offset::None(()) => None,
+            accession_edge::target_offset::Some(offset) => Some(offset),
+        };
 
-        AccessionPath {
+        AccessionEdge {
             id,
             accession_id,
             index_in_path,
             edge_id,
+            source_offset,
+            target_offset,
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AccessionEdgeData {
-    pub source_node_id: HashId,
-    pub source_coordinate: i64,
-    pub source_strand: Strand,
-    pub target_node_id: HashId,
-    pub target_coordinate: i64,
-    pub target_strand: Strand,
-    pub chromosome_index: i64,
+    pub edge_id: HashId,
+    pub source_offset: Option<i64>,
+    pub target_offset: Option<i64>,
 }
 
 impl AccessionEdgeData {
-    pub fn id_hash(&self) -> HashId {
+    pub fn id_hash(&self, accession_id: &HashId, index_in_path: i64) -> HashId {
         HashId(calculate_hash(&format!(
-            "{}:{}:{}:{}:{}:{}:{}",
-            self.source_node_id,
-            self.source_coordinate,
-            self.source_strand,
-            self.target_node_id,
-            self.target_coordinate,
-            self.target_strand,
-            self.chromosome_index
+            "{}:{}:{}:{:?}:{:?}",
+            accession_id, index_in_path, self.edge_id, self.source_offset, self.target_offset
         )))
     }
 }
@@ -252,29 +188,17 @@ impl AccessionEdgeData {
 impl From<&AccessionEdge> for AccessionEdgeData {
     fn from(item: &AccessionEdge) -> Self {
         AccessionEdgeData {
-            source_node_id: item.source_node_id,
-            source_coordinate: item.source_coordinate,
-            source_strand: item.source_strand,
-            target_node_id: item.target_node_id,
-            target_coordinate: item.target_coordinate,
-            target_strand: item.target_strand,
-            chromosome_index: item.chromosome_index,
+            edge_id: item.edge_id,
+            source_offset: item.source_offset,
+            target_offset: item.target_offset,
         }
     }
 }
 
-impl From<&AugmentedEdgeData> for AccessionEdgeData {
-    fn from(item: &AugmentedEdgeData) -> Self {
-        AccessionEdgeData {
-            source_node_id: item.edge_data.source_node_id,
-            source_coordinate: item.edge_data.source_coordinate,
-            source_strand: item.edge_data.source_strand,
-            target_node_id: item.edge_data.target_node_id,
-            target_coordinate: item.edge_data.target_coordinate,
-            target_strand: item.edge_data.target_strand,
-            chromosome_index: item.chromosome_index,
-        }
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AccessionEdgeWithEdge {
+    accession_edge: AccessionEdge,
+    edge: Edge,
 }
 
 impl Accession {
@@ -344,14 +268,42 @@ impl Accession {
         let query = "\
             select ae.* \
             from accession_edges ae \
-            join accession_paths ap on ap.edge_id = ae.id \
-            where ap.accession_id = ?1 \
-            order by ap.index_in_path;";
+            where ae.accession_id = ?1 \
+            order by ae.index_in_path;";
         AccessionEdge::query(conn, query, params![accession_id])
     }
 
+    fn get_edges_with_edges_by_id(
+        conn: &GraphConnection,
+        accession_id: &HashId,
+    ) -> Vec<AccessionEdgeWithEdge> {
+        let accession_edges = Self::get_edges_by_id(conn, accession_id);
+        let edge_ids = accession_edges
+            .iter()
+            .map(|accession_edge| accession_edge.edge_id)
+            .collect::<Vec<_>>();
+        let edges = Edge::query_by_ids(conn, &edge_ids);
+        let edges_by_id = edges
+            .into_iter()
+            .map(|edge| (edge.id, edge))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        accession_edges
+            .into_iter()
+            .filter_map(|accession_edge| {
+                edges_by_id
+                    .get(&accession_edge.edge_id)
+                    .cloned()
+                    .map(|edge| AccessionEdgeWithEdge {
+                        accession_edge,
+                        edge,
+                    })
+            })
+            .collect()
+    }
+
     pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
-        let edges = Self::get_edges_by_id(conn, &self.id);
+        let edges = Self::get_edges_with_edges_by_id(conn, &self.id);
         if edges.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
         }
@@ -367,14 +319,25 @@ impl Accession {
         }];
 
         for (into, out_of) in edges.iter().tuple_windows() {
-            let block_len = out_of.source_coordinate - into.target_coordinate;
+            let Some(target_offset) = into.accession_edge.target_offset else {
+                continue;
+            };
+            let Some(source_offset) = out_of.accession_edge.source_offset else {
+                continue;
+            };
+            let sequence_start = into.edge.target_coordinate + target_offset;
+            let sequence_end = out_of.edge.source_coordinate + source_offset;
+            let block_len = sequence_end - sequence_start;
+            if block_len <= 0 {
+                continue;
+            }
             blocks.push(NodeIntervalBlock {
-                node_id: into.target_node_id,
+                node_id: into.edge.target_node_id,
                 start: offset,
                 end: offset + block_len,
-                sequence_start: into.target_coordinate,
-                sequence_end: out_of.source_coordinate,
-                strand: into.target_strand,
+                sequence_start,
+                sequence_end,
+                strand: into.edge.target_strand,
             });
             offset += block_len;
         }
@@ -458,30 +421,21 @@ impl Query for Accession {
 impl AccessionEdge {
     pub fn create(
         conn: &GraphConnection,
+        accession_id: &HashId,
+        index_in_path: i64,
         edge: AccessionEdgeData,
     ) -> Result<AccessionEdge, AccessionEdgeError> {
-        let hash = HashId(calculate_hash(&format!(
-            "{}:{}:{}:{}:{}:{}:{}",
-            edge.source_node_id,
-            edge.source_coordinate,
-            edge.source_strand,
-            edge.target_node_id,
-            edge.target_coordinate,
-            edge.target_strand,
-            edge.chromosome_index
-        )));
+        let hash = edge.id_hash(accession_id, index_in_path);
         // TODO: handle get-or-create
-        let insert_statement = "INSERT INTO accession_edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand, chromosome_index) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);";
+        let insert_statement = "INSERT INTO accession_edges (id, accession_id, index_in_path, edge_id, source_offset, target_offset) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
         let mut stmt = conn.prepare(insert_statement).unwrap();
         match stmt.execute(params![
             hash,
-            edge.source_node_id,
-            edge.source_coordinate,
-            edge.source_strand,
-            edge.target_node_id,
-            edge.target_coordinate,
-            edge.target_strand,
-            edge.chromosome_index
+            accession_id,
+            index_in_path,
+            edge.edge_id,
+            edge.source_offset,
+            edge.target_offset
         ]) {
             Ok(_) => {}
             Err(rusqlite::Error::SqliteFailure(err, _details)) => {
@@ -491,46 +445,51 @@ impl AccessionEdge {
         };
         Ok(AccessionEdge {
             id: hash,
-            source_node_id: edge.source_node_id,
-            source_coordinate: edge.source_coordinate,
-            source_strand: edge.source_strand,
-            target_node_id: edge.target_node_id,
-            target_coordinate: edge.target_coordinate,
-            target_strand: edge.target_strand,
-            chromosome_index: edge.chromosome_index,
+            accession_id: *accession_id,
+            index_in_path,
+            edge_id: edge.edge_id,
+            source_offset: edge.source_offset,
+            target_offset: edge.target_offset,
         })
     }
 
-    pub fn bulk_create(conn: &GraphConnection, edges: &[AccessionEdgeData]) -> Vec<HashId> {
-        let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
+    pub fn bulk_create(
+        conn: &GraphConnection,
+        accession_id: &HashId,
+        edges: &[AccessionEdgeData],
+    ) -> Vec<HashId> {
+        let edge_ids = edges
+            .iter()
+            .enumerate()
+            .map(|(index, edge)| edge.id_hash(accession_id, index as i64))
+            .collect::<Vec<_>>();
         let query = AccessionEdge::query_by_ids(conn, &edge_ids);
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
 
-        let mut edges_to_insert = HashSet::new();
+        let mut edges_to_insert = Vec::new();
         for (index, edge) in edge_ids.iter().enumerate() {
             if !existing_edges.contains(edge) {
-                edges_to_insert.insert(&edges[index]);
+                edges_to_insert.push((index, &edges[index]));
             }
         }
 
-        let batch_size = max_rows_per_batch(conn, 8);
+        let batch_size = max_rows_per_batch(conn, 4);
 
         for chunk in &edges_to_insert.iter().chunks(batch_size) {
             let mut rows = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            for edge in chunk {
-                params.push(Box::new(edge.id_hash()));
-                params.push(Box::new(edge.source_node_id));
-                params.push(Box::new(edge.source_coordinate));
-                params.push(Box::new(edge.source_strand));
-                params.push(Box::new(edge.target_node_id));
-                params.push(Box::new(edge.target_coordinate));
-                params.push(Box::new(edge.target_strand));
-                params.push(Box::new(edge.chromosome_index));
-                rows.push("(?, ?, ?, ?, ?, ?, ?, ?)");
+            for (index, edge) in chunk {
+                let index_in_path = *index as i64;
+                params.push(Box::new(edge.id_hash(accession_id, index_in_path)));
+                params.push(Box::new(*accession_id));
+                params.push(Box::new(index_in_path));
+                params.push(Box::new(edge.edge_id));
+                params.push(Box::new(edge.source_offset));
+                params.push(Box::new(edge.target_offset));
+                rows.push("(?, ?, ?, ?, ?, ?)");
             }
             let sql = format!(
-                "INSERT INTO accession_edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand, chromosome_index) VALUES {};",
+                "INSERT INTO accession_edges (id, accession_id, index_in_path, edge_id, source_offset, target_offset) VALUES {};",
                 rows.join(",")
             );
             conn.execute(&sql, rusqlite::params_from_iter(params))
@@ -539,20 +498,11 @@ impl AccessionEdge {
         edge_ids
     }
 
-    pub fn bulk_delete(conn: &GraphConnection, edges: &[AccessionEdgeData]) {
-        let ids = edges.iter().map(|e| e.id_hash()).collect::<Vec<_>>();
-        AccessionEdge::delete_by_ids(conn, &ids);
-    }
-
     pub fn to_data(edge: AccessionEdge) -> AccessionEdgeData {
         AccessionEdgeData {
-            source_node_id: edge.source_node_id,
-            source_coordinate: edge.source_coordinate,
-            source_strand: edge.source_strand,
-            target_node_id: edge.target_node_id,
-            target_coordinate: edge.target_coordinate,
-            target_strand: edge.target_strand,
-            chromosome_index: edge.chromosome_index,
+            edge_id: edge.edge_id,
+            source_offset: edge.source_offset,
+            target_offset: edge.target_offset,
         }
     }
 }
@@ -565,70 +515,11 @@ impl Query for AccessionEdge {
     fn process_row(row: &Row) -> Self::Model {
         AccessionEdge {
             id: row.get(0).unwrap(),
-            source_node_id: row.get(1).unwrap(),
-            source_coordinate: row.get(2).unwrap(),
-            source_strand: row.get(3).unwrap(),
-            target_node_id: row.get(4).unwrap(),
-            target_coordinate: row.get(5).unwrap(),
-            target_strand: row.get(6).unwrap(),
-            chromosome_index: row.get(7).unwrap(),
-        }
-    }
-}
-
-impl AccessionPath {
-    pub fn create(
-        conn: &GraphConnection,
-        accession_id: &HashId,
-        edge_ids: &[HashId],
-    ) -> Result<(), AccessionPathError> {
-        let batch_size = max_rows_per_batch(conn, 4);
-
-        for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
-            let mut rows_to_insert = vec![];
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            for (index2, edge_id) in chunk.iter().enumerate() {
-                rows_to_insert.push("(?, ?, ?, ?)".to_string());
-                let index_of = index1 * 100000 + index2;
-                let hash = HashId(calculate_hash(&format!(
-                    "{accession_id}:{edge_ids:?}:{index_of}",
-                )));
-                params.push(Box::new(hash));
-                params.push(Box::new(accession_id));
-                params.push(Box::new(edge_id));
-                params.push(Box::new(index_of));
-            }
-
-            let sql = format!(
-                "INSERT OR IGNORE INTO accession_paths (id, accession_id, edge_id, index_in_path) VALUES {};",
-                rows_to_insert.join(", ")
-            );
-
-            let mut stmt = match conn.prepare(&sql) {
-                Ok(s) => s,
-                Err(e) => return Err(AccessionPathError::DatabaseError(e)),
-            };
-            match stmt.execute(rusqlite::params_from_iter(params)) {
-                Ok(_) => {}
-                Err(e) => return Err(AccessionPathError::DatabaseError(e)),
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Query for AccessionPath {
-    type Model = AccessionPath;
-
-    const TABLE_NAME: &'static str = "accession_paths";
-
-    fn process_row(row: &Row) -> AccessionPath {
-        AccessionPath {
-            id: row.get(0).unwrap(),
             accession_id: row.get(1).unwrap(),
             index_in_path: row.get(2).unwrap(),
             edge_id: row.get(3).unwrap(),
+            source_offset: row.get(4).unwrap(),
+            target_offset: row.get(5).unwrap(),
         }
     }
 }
@@ -764,13 +655,11 @@ mod tests {
             id: "0000000000000000000000000000030000000000000000000000000000000000"
                 .try_into()
                 .unwrap(),
-            source_node_id: HashId::convert_str("10"),
-            source_coordinate: 100,
-            source_strand: Strand::Forward,
-            target_node_id: HashId::convert_str("20"),
-            target_coordinate: 200,
-            target_strand: Strand::Reverse,
-            chromosome_index: 1,
+            accession_id: HashId::convert_str("1"),
+            index_in_path: 2,
+            edge_id: HashId::convert_str("10"),
+            source_offset: Some(100),
+            target_offset: Some(200),
         };
 
         let mut message = TypedBuilder::<accession_edge::Owned>::new_default();
@@ -779,6 +668,50 @@ mod tests {
 
         let deserialized = AccessionEdge::read_capnp(root.into_reader());
         assert_eq!(accession_edge, deserialized);
+    }
+
+    #[test]
+    fn accession_edges_store_block_group_edge_offsets() {
+        let conn = &get_connection(None).unwrap();
+        let (_bg, path) = setup_block_group(conn);
+        let mut path_cache = PathCache::new(conn);
+
+        let accession =
+            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+        let edges = Accession::get_edges_by_id(conn, &accession.id);
+
+        assert_eq!(edges.len(), 5);
+        assert_eq!(edges[0].source_offset, None);
+        assert_eq!(edges[0].target_offset, Some(5));
+        assert_eq!(edges[1].source_offset, Some(0));
+        assert_eq!(edges[1].target_offset, Some(0));
+        assert_eq!(edges[4].source_offset, Some(-5));
+        assert_eq!(edges[4].target_offset, None);
+    }
+
+    #[test]
+    fn accession_edges_store_accession_path_order() {
+        let conn = &get_connection(None).unwrap();
+        let (_bg, path) = setup_block_group(conn);
+        let mut path_cache = PathCache::new(conn);
+
+        let accession =
+            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+        let edges = Accession::get_edges_by_id(conn, &accession.id);
+
+        assert_eq!(edges.len(), 5);
+        assert!(edges.iter().all(|edge| edge.accession_id == accession.id));
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.index_in_path)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert!(
+            conn.prepare("select * from accession_paths").is_err(),
+            "accession_paths table should be merged into accession_edges"
+        );
     }
 
     #[test]

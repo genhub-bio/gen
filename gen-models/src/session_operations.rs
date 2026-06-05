@@ -151,7 +151,6 @@ pub fn attach_session(session: &mut session::Session) {
         "block_group_edges",
         "accessions",
         "accession_edges",
-        "accession_paths",
         "annotation_groups",
         "annotations",
         "annotation_group_samples",
@@ -399,13 +398,11 @@ mod tests {
             }],
             accession_edges: vec![AccessionEdge {
                 id: HashId::pad_str(1),
-                source_node_id: HashId::convert_str("1"),
-                source_coordinate: 0,
-                source_strand: Strand::Forward,
-                target_node_id: HashId::convert_str("2"),
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-                chromosome_index: 0,
+                accession_id: HashId::pad_str(1),
+                index_in_path: 0,
+                edge_id: HashId::pad_str(1),
+                source_offset: Some(0),
+                target_offset: Some(0),
             }],
         };
 

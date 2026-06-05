@@ -2,7 +2,7 @@ use gen_core::errors::{ConfigError, ConnectionError, StrandError};
 use thiserror::Error;
 
 pub use crate::{
-    accession::{AccessionError, AccessionPathError},
+    accession::AccessionError,
     annotations::{AnnotationError, AnnotationGroupError},
     block_group::BlockGroupError,
     collection::CollectionError,
@@ -41,8 +41,6 @@ pub enum ChangesetError {
     PathError(#[from] PathError),
     #[error("Accession creation error: {0}")]
     AccessionError(#[from] AccessionError),
-    #[error("Accession path creation error: {0}")]
-    AccessionPathError(#[from] AccessionPathError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
     #[error("Block group creation error: {0}")]

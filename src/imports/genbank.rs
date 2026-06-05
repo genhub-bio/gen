@@ -12,7 +12,7 @@ use gen_core::{
     range::{Range, merge_ordered_items},
 };
 use gen_models::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    accession::{Accession, AccessionEdge, AccessionEdgeData},
     annotations::Annotation,
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -23,6 +23,7 @@ use gen_models::{
     node::Node,
     operations::{Operation, OperationInfo},
     path::Path,
+    path_edge::PathEdge,
     region::ResolvedGenRegion,
     sample::Sample,
     sequence::Sequence,
@@ -338,48 +339,115 @@ fn create_accession_for_segments(
         Ok(accession) => accession,
         Err(err) => return Err(GenBankError::AccessionError(err)),
     };
+    let path_blocks = path.blocks(conn)?;
+    let path_edges = PathEdge::edges_for_path(conn, &path.id);
     let mut edges = Vec::with_capacity(segments.len() + 1);
+    let block_at =
+        |segment: &AnnotationSegment, coordinate: i64| -> Result<&PathBlock, GenBankError> {
+            path_blocks
+                .iter()
+                .find(|block| {
+                    block.node_id == segment.node_id
+                        && coordinate >= block.sequence_start
+                        && coordinate < block.sequence_end
+                })
+                .ok_or_else(|| {
+                    GenBankError::ParseError(format!(
+                        "Annotation segment coordinate {coordinate} does not map to path block"
+                    ))
+                })
+        };
 
     let first = segments.first().ok_or_else(|| {
         GenBankError::ParseError("Annotation has no mappable segments".to_string())
     })?;
+    let first_block = block_at(first, first.range.start)?;
+    let first_edge = path_edges
+        .iter()
+        .find(|edge| {
+            edge.target_node_id == first_block.node_id
+                && edge.target_coordinate == first_block.sequence_start
+        })
+        .ok_or_else(|| {
+            GenBankError::ParseError("Could not find edge entering annotation segment".to_string())
+        })?;
     edges.push(AccessionEdgeData {
-        source_node_id: PATH_START_NODE_ID,
-        source_coordinate: -1,
-        source_strand: Strand::Forward,
-        target_node_id: first.node_id,
-        target_coordinate: first.range.start,
-        target_strand: first.strand,
-        chromosome_index: 0,
+        edge_id: first_edge.id,
+        source_offset: None,
+        target_offset: Some(first.range.start - first_edge.target_coordinate),
     });
 
     for window in segments.windows(2) {
         let current = &window[0];
         let next = &window[1];
-        edges.push(AccessionEdgeData {
-            source_node_id: current.node_id,
-            source_coordinate: current.range.end,
-            source_strand: current.strand,
-            target_node_id: next.node_id,
-            target_coordinate: next.range.start,
-            target_strand: next.strand,
-            chromosome_index: 0,
-        });
+        let current_block = block_at(current, current.range.end - 1)?;
+        let next_block = block_at(next, next.range.start)?;
+        if let Some(edge) = path_edges.iter().find(|edge| {
+            edge.source_node_id == current_block.node_id
+                && edge.source_coordinate == current_block.sequence_end
+                && edge.target_node_id == next_block.node_id
+                && edge.target_coordinate == next_block.sequence_start
+        }) {
+            edges.push(AccessionEdgeData {
+                edge_id: edge.id,
+                source_offset: Some(current.range.end - edge.source_coordinate),
+                target_offset: Some(next.range.start - edge.target_coordinate),
+            });
+        } else {
+            let leaving_edge = path_edges
+                .iter()
+                .find(|edge| {
+                    edge.source_node_id == current_block.node_id
+                        && edge.source_coordinate == current_block.sequence_end
+                })
+                .ok_or_else(|| {
+                    GenBankError::ParseError(
+                        "Could not find edge leaving annotation segment".to_string(),
+                    )
+                })?;
+            edges.push(AccessionEdgeData {
+                edge_id: leaving_edge.id,
+                source_offset: Some(current.range.end - leaving_edge.source_coordinate),
+                target_offset: None,
+            });
+
+            let entering_edge = path_edges
+                .iter()
+                .find(|edge| {
+                    edge.target_node_id == next_block.node_id
+                        && edge.target_coordinate == next_block.sequence_start
+                })
+                .ok_or_else(|| {
+                    GenBankError::ParseError(
+                        "Could not find edge entering annotation segment".to_string(),
+                    )
+                })?;
+            edges.push(AccessionEdgeData {
+                edge_id: entering_edge.id,
+                source_offset: None,
+                target_offset: Some(next.range.start - entering_edge.target_coordinate),
+            });
+        }
     }
 
     let last = segments.last().unwrap();
+    let last_block = block_at(last, last.range.end - 1)?;
+    let last_edge = path_edges
+        .iter()
+        .find(|edge| {
+            edge.source_node_id == last_block.node_id
+                && edge.source_coordinate == last_block.sequence_end
+        })
+        .ok_or_else(|| {
+            GenBankError::ParseError("Could not find edge leaving annotation segment".to_string())
+        })?;
     edges.push(AccessionEdgeData {
-        source_node_id: last.node_id,
-        source_coordinate: last.range.end,
-        source_strand: last.strand,
-        target_node_id: PATH_END_NODE_ID,
-        target_coordinate: -1,
-        target_strand: Strand::Forward,
-        chromosome_index: 0,
+        edge_id: last_edge.id,
+        source_offset: Some(last.range.end - last_edge.source_coordinate),
+        target_offset: None,
     });
 
-    let edge_ids = AccessionEdge::bulk_create(conn, &edges);
-    AccessionPath::create(conn, &accession.id, &edge_ids)?;
+    AccessionEdge::bulk_create(conn, &accession.id, &edges);
     Ok(accession.id)
 }
 
@@ -703,7 +771,7 @@ where
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_annotations::projection::accession_edges_to_segments;
+    use gen_annotations::projection::accession_blocks_to_segments;
     use gen_models::{
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
@@ -1152,19 +1220,23 @@ mod tests {
             .iter()
             .find(|annotation| annotation.name == "M13 Forward")
             .unwrap();
-        let m13_forward_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
-            conn,
-            &m13_forward.accession_id,
-        ));
+        let m13_forward_accession = Accession::get_by_id(conn, &m13_forward.accession_id).unwrap();
+        let m13_forward_segments =
+            accession_blocks_to_segments(&m13_forward_accession.blocks(conn).unwrap());
         assert_eq!(m13_forward_segments.len(), 1);
         assert_eq!(m13_forward_segments[0].range.start, 688);
         assert_eq!(m13_forward_segments[0].range.end, 706);
-        assert_eq!(m13_forward_segments[0].strand, Strand::Reverse);
+        assert_eq!(
+            m13_forward
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.genbank.as_ref())
+                .map(|extra| extra.strands.as_slice()),
+            Some([Strand::Reverse].as_slice())
+        );
 
-        let ori_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
-            conn,
-            &ori_annotation.accession_id,
-        ));
+        let ori_accession = Accession::get_by_id(conn, &ori_annotation.accession_id).unwrap();
+        let ori_segments = accession_blocks_to_segments(&ori_accession.blocks(conn).unwrap());
         assert_eq!(ori_segments.len(), 2);
         assert!(
             ori_segments
