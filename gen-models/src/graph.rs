@@ -650,9 +650,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn resolve_anchor_before_fragment_stays_on_same_backing_node() {
-        // This test should pass one day. The case is when we have a node fragment
+        // The case is when we have a node fragment
         // at the beginning of an accession. We don't know how far back to expand
         // the fragment as there are no edges. I have another PR to refactor the table
         // so this works out in which case
