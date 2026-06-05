@@ -1,0 +1,7 @@
+H	VN:Z:1.0
+S	1	AAAA	SN:Z:chr1	SO:i:0	SR:i:0
+S	2	CCCC	SN:Z:chr1	SO:i:4	SR:i:0
+S	3	TTTT	SN:Z:chr2	SO:i:0	SR:i:0
+S	4	GGGG	SN:Z:chr2	SO:i:4	SR:i:0
+L	1	+	2	+	*
+L	3	+	4	+	*

@@ -1073,7 +1073,7 @@ impl Repository {
         filename: String,
         sample: String,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<List, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1086,9 +1086,13 @@ impl Repository {
             &collection_name,
             &sample,
         ) {
-            Ok(_) => {
+            Ok((_, block_groups)) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("GFA imported.".to_string())
+                let values = block_groups
+                    .into_iter()
+                    .map(|bg| r!(self.into_sequence_graph(bg)))
+                    .collect::<Vec<_>>();
+                Ok(List::from_values(values))
             }
             Err(r#gen::imports::gfa::GFAImportError::OperationError(OperationError::NoChanges)) => {
                 rollback_transactions(&self.context);

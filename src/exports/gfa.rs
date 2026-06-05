@@ -609,7 +609,8 @@ mod tests {
 
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
+        let block_group_id =
+            BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "m123", None);
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -652,7 +653,12 @@ mod tests {
 
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
+        let block_group_id = BlockGroup::get_id(
+            &collection_name,
+            Sample::DEFAULT_NAME,
+            "BBa_J23119#0#BBa_J23119",
+            None,
+        );
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -695,7 +701,8 @@ mod tests {
 
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
-        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
+        let block_group_id =
+            BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "123", None);
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");

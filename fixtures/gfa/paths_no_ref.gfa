@@ -1,0 +1,8 @@
+H	VN:Z:1.0
+S	1	AAAA
+S	2	CCCC
+S	3	TTTT
+L	1	+	2	+	*
+L	2	+	3	+	*
+P	short	1+,2+	*
+P	longer_path	1+,2+,3+	*

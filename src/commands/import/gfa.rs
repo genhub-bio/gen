@@ -57,10 +57,15 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         )?;
     }
     match import_gfa(context, &PathBuf::from(cmd.path.clone()), name, sample_name) {
-        Ok(_) => {
-            println!("GFA imported.");
+        Ok((_, block_groups)) => {
             conn.execute("END TRANSACTION;", []).unwrap();
             operation_conn.execute("END TRANSACTION;", []).unwrap();
+            let names: Vec<&str> = block_groups.iter().map(|bg| bg.name.as_str()).collect();
+            println!(
+                "Imported {} sequence graph(s): {}",
+                names.len(),
+                names.join(", ")
+            );
             Ok(())
         }
         Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
