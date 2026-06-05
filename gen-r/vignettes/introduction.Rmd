@@ -17,11 +17,18 @@ knitr::opts_chunk$set(eval = TRUE)
 ```
 
 Gen is a sequence version control system built around a graph database.
-Rather than storing sequences as flat strings, Gen stores them as a
-sequence graph where every sample is a named path through that graph.
-Edits branch the graph rather than overwriting it, so every version of a
-sequence coexists in the same database and their differences are always
-queryable.
+Rather than storing a sequence as a flat string, Gen breaks it into
+nodes, each holding a short subsequence, connected by edges into a
+graph. A path through that graph reconstructs a full sequence. When a
+change is recorded, Gen adds new nodes and edges to represent the
+altered subsequence and the new junctions around it. A path can then
+take an alternative route through the new nodes, or skip nodes entirely
+in the case of a deletion. Changes can be naturally occurring or
+deliberately engineered. What makes this especially powerful is that the
+graph does not just capture changes over time: it can represent the full
+set of expected or observed variants across haplotypes, design libraries,
+or a pangenome, all coexisting in one database with their differences
+always queryable.
 
 This vignette walks through a concrete lab scenario that shows where
 that design pays off: you design an edit, apply it, confirm it with
@@ -41,7 +48,7 @@ ws <- file.path(tempdir(), "puc19_demo")
 dir.create(ws)
 setwd(ws)
 
-repo <- Repository()
+repo <- Repository(NULL)
 ```
 
 `Repository()` discovers the `.gen/` directory from the current working
@@ -62,15 +69,15 @@ repo$import_genbank(gbk_path, sample = "wt")
 List the block groups in the repository to confirm the import:
 
 ```{r list-bgs}
-bgs <- repo$get_block_groups()
+bgs <- repo$get_sequence_graphs()
 bg_wt <- bgs[[1]]
-cat("Block group:", bg_wt$name, "| sample:", bg_wt$sample_name, "\n")
+cat("Sequence graph:", bg_wt$name(), "| sample:", bg_wt$sample_name(), "\n")
 ```
 
 ## Visualise the reference
 
 ```{r plot-wt}
-p <- repo$plot(bg_wt)
+p <- plot(bg_wt)
 
 # Navigate to the MCS — annotated features are first-class, so you can
 # jump directly to any named feature rather than specifying coordinates.
@@ -127,7 +134,7 @@ diverges through the new MCS nodes.
 ## Inspect the design
 
 ```{r get-gg-bg}
-bg_gg <- Filter(function(x) x$sample_name == "gg_design", repo$get_block_groups())[[1]]
+bg_gg <- Filter(function(x) x$sample_name() == "gg_design", repo$get_sequence_graphs())[[1]]
 ```
 
 ### Confirm the BsaI sites with search
@@ -140,12 +147,12 @@ the reverse complement as well as the forward sequence.
 ```{r search-bsai}
 # GGTCTC is the BsaI recognition sequence (cuts 1 nt downstream on sense strand).
 # DNA-mode search finds both the forward site and its reverse-complement counterpart.
-hits <- repo$search("GGTCTC", bgs = list(bg_gg))
+hits <- repo$search("GGTCTC", c(bg_gg$id()), "dna")
 cat("BsaI sites found:", length(hits[[1]]$matches), "\n")
 ```
 
 ```{r plot-gg}
-p_gg <- repo$plot(bg_gg)
+p_gg <- plot(bg_gg)
 p_gg$go_to(hits[[1]]$matches[[1]])
 p_gg
 ```
@@ -159,7 +166,7 @@ Three hits. To understand why, run the same search against the
 wild-type:
 
 ```{r search-wt}
-hits_wt <- repo$search("GGTCTC", bgs = list(bg_wt))
+hits_wt <- repo$search("GGTCTC", c(bg_wt$id()), "dna")
 wt_count <- if (length(hits_wt) > 0) length(hits_wt[[1]]$matches) else 0L
 cat("BsaI sites in wild-type:", wt_count, "\n")   # 1
 ```
@@ -180,7 +187,7 @@ possible hexamers — pass the IUPAC string and `search()` matches all of
 them:
 
 ```{r search-iupac}
-hits_hincii <- repo$search("GTYRAC", bgs = list(bg_gg))
+hits_hincii <- repo$search("GTYRAC", c(bg_gg$id()), "dna")
 cat("HincII sites found:", length(hits_hincii[[1]]$matches), "\n")
 ```
 
@@ -245,11 +252,11 @@ repo$update_with_vcf(
 Plot the sequenced sample:
 
 ```{r get-sequenced-bg}
-bg_seq <- Filter(function(x) x$sample_name == "sequenced", repo$get_block_groups())[[1]]
+bg_seq <- Filter(function(x) x$sample_name() == "sequenced", repo$get_sequence_graphs())[[1]]
 ```
 
 ```{r plot-sequenced}
-p_seq <- repo$plot(bg_seq)
+p_seq <- plot(bg_seq)
 p_seq
 ```
 
@@ -295,7 +302,7 @@ documentation.
 ## Further capabilities
 
 The sections below cover the full R API surface. All examples are
-self-contained and assume `repo <- Repository()` in a workspace
+self-contained and assume `repo <- Repository(NULL)` in a workspace
 initialised with `gen init` (or the R equivalent).
 
 ### Additional import formats
@@ -434,8 +441,8 @@ repo$import_library(
   sample       = "design-v1"
 )
 
-cassette_bgs <- Filter(function(x) x$name == "expression-cassette", repo$get_block_groups())
-repo$plot(cassette_bgs[[1]])
+cassette_bgs <- Filter(function(x) x$name() == "expression-cassette", repo$get_sequence_graphs())
+plot(cassette_bgs[[1]])
 ```
 
 `DNAStringSet` columns work identically to named character vectors and
@@ -478,12 +485,12 @@ repo$derive_subgraph(
 )
 ```
 
-Block groups expose `subgraph()` as a shorthand that returns the new
-block group immediately:
+Sequence graphs expose `subgraph()` as a shorthand that returns the new
+sequence graph immediately:
 
 ```{r bg-subgraph, eval=FALSE}
-mcs_bg <- bg_gg$subgraph("mcs_v2", start = 390L, end = 460L)
-repo$plot(mcs_bg)
+mcs_bg <- bg_gg$subgraph("mcs_v2", 390L, 460L, NULL)
+plot(mcs_bg)
 ```
 
 #### Chunks and stitching
@@ -494,15 +501,16 @@ or `breakpoints` (an integer vector of positions) for explicit cut
 points:
 
 ```{r derive-chunks, eval=FALSE}
-chunks <- bg_gg$chunks("gg_500bp_chunks", chunk_size = 500L)
+chunks <- bg_gg$chunks("gg_500bp_chunks", integer(0), 500L, NULL)
 cat("Chunks created:", length(chunks), "\n")
 ```
 
-`repo$stitch()` reverses the operation, concatenating a list of
+`stitch()` reverses the operation, concatenating a list of
 same-sample block groups end-to-end into a new block group:
 
 ```{r stitch, eval=FALSE}
-reassembled <- repo$stitch(
+reassembled <- stitch(
+  repo,
   bgs        = chunks,
   new_sample = "gg_reassembled",
   new_region = "pUC19.reassembled"
@@ -511,7 +519,7 @@ reassembled <- repo$stitch(
 
 `repo$derive_chunks()` is the lower-level counterpart that creates
 chunks in-place (returning a status string); retrieve the results
-afterwards with `repo$get_block_groups()` filtered by name.
+afterwards with `repo$get_sequence_graphs()` filtered by name.
 
 ### Annotation tracks
 

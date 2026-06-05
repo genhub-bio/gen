@@ -8,7 +8,7 @@ NULL
 #' Construct a HashId
 #'
 #' Wraps a raw hash string as a typed \code{gen_hash_id} object used to
-#' identify block groups and nodes within the Gen database.
+#' identify sequence graphs and nodes within the Gen database.
 #'
 #' @param hash_id Character. The hex hash string.
 #' @return A \code{gen_hash_id} list.
@@ -17,28 +17,30 @@ HashId <- function(hash_id) {
   structure(list(hash_id = as.character(hash_id)), class = "gen_hash_id")
 }
 
-#' Construct a Block
-#'
-#' A block identifies a contiguous byte range within a graph node.
-#' Pass the result to \code{repo$get_block_sequence()} to retrieve the
-#' underlying sequence.
-#'
-#' @param node_id Character or \code{gen_hash_id}. Node identifier.
-#' @param sequence_start Integer. Start byte offset (inclusive).
-#' @param sequence_end Integer. End byte offset (exclusive).
-#' @return A \code{gen_block} list.
 #' @export
-Block <- function(node_id, sequence_start, sequence_end) {
-  structure(
-    list(
-      node_id = if (inherits(node_id, "gen_hash_id")) node_id else HashId(node_id),
-      sequence_start = as.integer(sequence_start),
-      sequence_end = as.integer(sequence_end)
-    ),
-    class = "gen_block"
-  )
+print.gen_node <- function(x, ...) {
+  len <- x$sequence_end - x$sequence_start
+  cat(sprintf("<Node [%d bp]>\n", len))
+  invisible(x)
 }
 
+#' @export
+print.gen_node_slice <- function(x, ...) {
+  cat(sprintf("<NodeSlice [%d..%d] %s>\n", x$start, x$end, x$strand))
+  invisible(x)
+}
+
+#' @export
+print.gen_position <- function(x, ...) {
+  cat(sprintf("<Position offset=%d %s>\n", x$offset, x$strand))
+  invisible(x)
+}
+
+#' @export
+print.gen_locus <- function(x, ...) {
+  cat(sprintf("<Locus %d slice(s) %s>\n", length(x$slices), x$strand))
+  invisible(x)
+}
 
 # Extract the genome string from a sequence container.
 # Supported: BSgenome, DNAStringSet (with metadata$genome set), FaFile, TwoBitFile.
@@ -95,65 +97,15 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 }
 
 
-.as_block_group <- function(gen_bg) {
-  bg <- new.env(parent = emptyenv())
-  bg$.inner <- gen_bg
-  bg$id <- HashId(gen_bg$id())
-  bg$collection <- gen_bg$collection()
-  bg$sample_name <- gen_bg$sample_name()
-  bg$name <- gen_bg$name()
-  bg$db_path <- gen_bg$db_path()
-  bg$gen_dir <- gen_bg$gen_dir()
-
-  bg$plot <- function(rows = NULL, cols = NULL, detail = "normal") {
-    GenPlot(bg$db_path, bg$id$hash_id, detail = detail, rows = rows, cols = cols)
-  }
-
-  bg$export_fasta <- function(filename) gen_bg$export_fasta(filename)
-
-  bg$export_gfa <- function(filename, node_max = NULL) gen_bg$export_gfa(filename, node_max)
-
-  bg$export_genbank <- function(filename) gen_bg$export_genbank(filename)
-
-  bg$build_index <- function(sequence_kind = "dna", k = 16L) {
-    gen_bg$build_index(sequence_kind, as.integer(k))
-  }
-
-  bg$search <- function(query, sequence_kind = "dna") gen_bg$search(query, sequence_kind)
-
-  bg$clear_index <- function() gen_bg$clear_index()
-
-  bg$subgraph <- function(new_sample, start, end, backbone = NULL) {
-    .as_block_group(gen_bg$subgraph(new_sample, as.integer(start), as.integer(end), backbone))
-  }
-
-  bg$chunks <- function(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL) {
-    if (!is.null(breakpoints) && !is.numeric(breakpoints) && !is.integer(breakpoints)) {
-      stop("breakpoints must be a numeric or integer vector, e.g. c(10L, 20L)", call. = FALSE)
-    }
-    lapply(
-      gen_bg$chunks(
-        new_sample,
-        if (is.null(breakpoints)) integer(0) else as.integer(breakpoints),
-        chunk_size,
-        backbone
-      ),
-      .as_block_group
-    )
-  }
-
-  class(bg) <- "gen_block_group"
-  bg
-}
 
 #' Create a graph plot controller
 #'
 #' Returns a \code{gen_plot} environment that renders the sequence graph for a
-#' block group.  Printing or displaying the object in RStudio / Shiny shows an
+#' sequence graph.  Printing or displaying the object in RStudio / Shiny shows an
 #' interactive htmlwidget.
 #'
 #' @param db_path Character. Path to the Gen graph SQLite database.
-#' @param block_group_id Character or \code{gen_hash_id}. Block group to render.
+#' @param sequence_graph_id Character or \code{gen_hash_id}. Sequence graph to render.
 #' @param detail Character. Level of node detail: \code{"normal"} (default) or
 #'   \code{"compressed"}.
 #' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
@@ -176,14 +128,14 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 #'   }
 #' @export
-GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL) {
+GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, cols = NULL) {
   ctrl <- new.env(parent = emptyenv())
-  ctrl$db_path <- db_path
-  ctrl$block_group_id <- if (inherits(block_group_id, "gen_hash_id")) block_group_id$hash_id else as.character(block_group_id)
+  ctrl$repo <- .RepositoryClass$new(dirname(dirname(db_path)))
+  ctrl$sequence_graph_id <- if (inherits(sequence_graph_id, "gen_hash_id")) sequence_graph_id$hash_id else as.character(sequence_graph_id)
   ctrl$detail <- detail
   ctrl$ops <- character()
   ctrl$track_specs <- tryCatch({
-    group_names <- repo_get_annotation_group_names(db_path, ctrl$block_group_id)
+    group_names <- ctrl$repo$get_annotation_group_names(ctrl$sequence_graph_id)
     lapply(group_names, function(n) list(type = "group", name = n))
   }, error = function(e) list())
   ctrl$rows <- rows %||% 24L
@@ -197,7 +149,7 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   ctrl$render_frame <- function(cols = ctrl$cols, rows = ctrl$rows) {
     ctrl$cols <- cols
     ctrl$rows <- rows
-    graph_render_frame(ctrl$db_path, ctrl$block_group_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE))
+    ctrl$repo$render_frame(ctrl$sequence_graph_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE))
   }
 
   ctrl$add_track_group <- function(group) {
@@ -227,9 +179,8 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   }
 
   ctrl$handle_click <- function(col, row) {
-    clicked <- graph_handle_click(
-      ctrl$db_path,
-      ctrl$block_group_id,
+    clicked <- ctrl$repo$handle_click(
+      ctrl$sequence_graph_id,
       ctrl$detail,
       paste(ctrl$ops, collapse = ";"),
       as.integer(col),
@@ -248,28 +199,29 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
 
   ctrl$goto_match <- function(match_locus) {
     ctrl$detail <- "full"
-    block <- match_locus$start$block
-    offset <- match_locus$start$offset
-    node_len <- block$sequence_end - block$sequence_start
+    pos <- match_locus$start
+    node <- pos$node
+    offset <- pos$offset
+    node_len <- node$sequence_end - node$sequence_start
     frac_x <- if (node_len > 1L) offset / (node_len - 1L) else 0.5
     frac_x <- max(0.0, min(1.0, frac_x))
     ctrl$ops <- c(ctrl$ops, sprintf("goto,%s,%d,%d,%.6f",
-      block$node_id,
-      as.integer(block$sequence_start),
-      as.integer(block$sequence_end),
+      node$node_id,
+      as.integer(node$sequence_start),
+      as.integer(node$sequence_end),
       frac_x))
     invisible(ctrl)
   }
 
   ctrl$highlight_match <- function(match_locus, color = "yellow") {
-    blocks <- match_locus$slices
-    n <- length(blocks)
+    slices <- match_locus$slices
+    n <- length(slices)
     start_offset <- match_locus$start$offset
     end_offset <- match_locus$end$offset
     strand_code <- switch(match_locus$strand, "+" = "f", "-" = "r", "u")
     block_parts <- paste(
-      sapply(blocks, function(b) {
-        sprintf("%s,%d,%d", b$node_id, as.integer(b$sequence_start), as.integer(b$sequence_end))
+      sapply(slices, function(s) {
+        sprintf("%s,%d,%d", s$node$node_id, as.integer(s$node$sequence_start), as.integer(s$node$sequence_end))
       }),
       collapse = ","
     )
@@ -289,7 +241,7 @@ GenPlot <- function(db_path, block_group_id, detail = "normal", rows = NULL, col
   }
 
   ctrl$list_annotations <- function() {
-    repo_list_annotations(ctrl$db_path, ctrl$block_group_id)
+    ctrl$repo$list_annotations(ctrl$sequence_graph_id)
   }
 
   ctrl$go_to <- function(x) {
@@ -320,11 +272,11 @@ methods::setMethod("show", "gen_plot", function(object) print(object))
 #' Import sequences from a Bioconductor XStringSet or named character vector
 #'
 #' Accepts a \code{DNAStringSet}, \code{AAStringSet}, or any named character
-#' vector.  Each named entry becomes one block group.  No intermediate FASTA
+#' vector.  Each named entry becomes one sequence graph.  No intermediate FASTA
 #' file is written to disk.
 #'
 #' @param sequences A named character vector, \code{DNAStringSet},
-#'   \code{AAStringSet}, or any \code{XStringSet}.  Names become block group
+#'   \code{AAStringSet}, or any \code{XStringSet}.  Names become sequence graph
 #'   names and must all be non-empty.
 #' @param sample Character. Sample name (default \code{"sample"}).
 #' @param collection Character or \code{NULL}. Collection name; if
@@ -359,16 +311,8 @@ import_bioconductor <- function(sequences, sample = "sample", collection = NULL,
   if (is.null(nms) || any(is.na(nms)) || any(nms == "")) {
     stop("All sequences must have non-empty names.", call. = FALSE)
   }
-  workspace_path <- if (is.null(repo)) NULL else dirname(repo$gen_dir)
-  db_path        <- if (is.null(repo)) NULL else repo$db_path
-  import_sequences(
-    workspace_path  = workspace_path,
-    db_path         = db_path,
-    names           = nms,
-    sequences       = unname(sequences),
-    sample          = sample,
-    collection = collection
-  )
+  repo <- repo %||% Repository(NULL)
+  repo$import_sequences(nms, unname(sequences), sample, collection)
   invisible(NULL)
 }
 
@@ -376,7 +320,7 @@ import_bioconductor <- function(sequences, sample = "sample", collection = NULL,
 #'
 #' Each reference sequence is stored once as a node (identified by sequence
 #' hash), so overlapping or repeated imports of the same chromosome do not
-#' duplicate stored sequence data.  Each region then becomes a BlockGroup
+#' duplicate stored sequence data.  Each region then becomes a SequenceGraph
 #' whose edges slice into that shared node at \code{[start, end)}.
 #'
 #' Coordinates follow Bioconductor convention on input (1-based, closed
@@ -413,7 +357,7 @@ import_bioconductor <- function(sequences, sample = "sample", collection = NULL,
 #'   chr2 = "TTGCTTGCTTGCTTGC"
 #' ))
 #'
-#' # Regions of interest — names become block group names
+#' # Regions of interest — names become sequence graph names
 #' gr <- GRanges(
 #'   seqnames = c("chr1", "chr1", "chr2"),
 #'   ranges   = IRanges(start = c(1, 9, 5), end = c(8, 16, 12)),
@@ -487,233 +431,166 @@ import_granges <- function(regions, sequences, sample = "sample", collection = N
     )
   }
 
-  workspace_path <- if (is.null(repo)) NULL else dirname(repo$gen_dir)
-  db_path        <- if (is.null(repo)) NULL else repo$db_path
-  import_genomic_regions(
-    workspace_path   = workspace_path,
-    db_path          = db_path,
-    seq_names        = seq_names,
-    seq_sequences    = unname(sequences),
-    region_names     = region_names,
-    region_seq_names = region_seqnames,
-    region_starts    = as.double(region_starts),
-    region_ends      = as.double(region_ends),
-    sample           = sample,
-    collection  = collection
+  repo <- repo %||% Repository(NULL)
+  repo$import_genomic_regions(
+    seq_names, unname(sequences),
+    region_names, region_seqnames,
+    as.double(region_starts), as.double(region_ends),
+    sample, collection
   )
   invisible(NULL)
 }
 
+#' Concatenate sequence graphs end-to-end into a new sequence graph
+#'
+#' @param repo A \code{Repository} object.
+#' @param bgs List of \code{SequenceGraph} objects, all in the same collection
+#'   and sample.
+#' @param new_sample Character. Sample name for the stitched result.
+#' @param new_region Character. Name for the stitched sequence graph.
+#' @return A \code{SequenceGraph}.
+#' @export
+stitch <- function(repo, bgs, new_sample, new_region) {
+  if (length(bgs) == 0L) stop("stitch() requires at least one sequence graph", call. = FALSE)
+  collection  <- bgs[[1L]]$collection()
+  sample_name <- bgs[[1L]]$sample_name()
+  for (bg in bgs[-1L]) {
+    if (bg$collection() != collection)
+      stop(sprintf("All sequence graphs must be in the same collection ('%s' vs '%s')",
+                   collection, bg$collection()), call. = FALSE)
+    if (bg$sample_name() != sample_name)
+      stop(sprintf("All sequence graphs must be in the same sample ('%s' vs '%s')",
+                   sample_name, bg$sample_name()), call. = FALSE)
+  }
+  regions <- paste(sapply(bgs, function(bg) bg$name()), collapse = ",")
+  repo$stitch(collection, sample_name, new_sample, new_region, regions)
+}
+
+#' Get the sequence string for a node
+#'
+#' @param obj A \code{Repository} or \code{SequenceGraph}.
+#' @param node A \code{gen_node} record (from \code{to_dict()$nodes}).
+#' @return Character string of the node sequence.
+#' @export
+get_node_sequence <- function(obj, node) {
+  obj$get_node_sequence(
+    node$node_id,
+    as.integer(node$sequence_start),
+    as.integer(node$sequence_end)
+  )
+}
+
+#' @export
+plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", ...) {
+  GenPlot(x$db_path(), x$id(), detail = detail, rows = rows, cols = cols)
+}
+
+#' Import a combinatorial library with optional GRanges part sequences
+#'
+#' Thin wrapper around \code{repo$import_library()} that resolves any GRanges
+#' columns in \code{parts_list} before handing off to Rust.
+#'
+#' @param repo A \code{Repository}.
+#' @param library_name Character. Library name.
+#' @param parts_list Named list of part vectors (character or GRanges).
+#' @param seq_containers List of sequence containers for GRanges resolution.
+#' @param sample Character or \code{NULL}.
+#' @param collection Character or \code{NULL}.
+#' @return Invisibly the import message string.
+#' @export
+import_library <- function(repo, library_name, parts_list, seq_containers = list(),
+                           sample = NULL, collection = NULL) {
+  parts_list <- resolve_granges_columns(parts_list, seq_containers)
+  repo$import_library(library_name, parts_list, sample, collection)
+}
+
+#' Apply a library update with optional GRanges part sequences
+#'
+#' @param repo A \code{Repository}.
+#' @param sample Character or \code{NULL}. Source sample.
+#' @param new_sample_name Character. New sample name.
+#' @param path_name Character. Path to update.
+#' @param parts_list Named list of part vectors (character or GRanges).
+#' @param seq_containers List of sequence containers for GRanges resolution.
+#' @param collection Character or \code{NULL}.
+#' @return Invisibly the update message string.
+#' @export
+update_with_library <- function(repo, sample = NULL, new_sample_name, path_name,
+                                parts_list, seq_containers = list(), collection = NULL) {
+  parts_list <- resolve_granges_columns(parts_list, seq_containers)
+  repo$update_with_library(sample, new_sample_name, path_name, parts_list, collection)
+}
+
+# Save the extendr Repository class before Repository() overwrites the name.
+.RepositoryClass <- Repository
+
+# Patch the generated $.Repository so it resolves against .RepositoryClass
+# rather than the name "Repository", which is overwritten below.
+`$.Repository` <- function(self, name) {
+  func <- .RepositoryClass[[name]]
+  environment(func) <- environment()
+  func
+}
+`[[.Repository` <- `$.Repository`
+
 #' Open a Gen repository
 #'
-#' The main entry point for working with a Gen sequence graph database.
-#' Discovers the \code{.gen/} directory from \code{path} (or the current
-#' working directory) and opens both the graph and operations databases.
-#'
-#' @param path Character or \code{NULL}. Path to the workspace root.  When
-#'   \code{NULL} the current working directory is used.
-#' @return A \code{gen_repository} environment with the following methods:
-#'   \describe{
-#'     \item{\code{import_fasta(filename, sample="sample", shallow=FALSE, collection=NULL)}}{Import a FASTA file as a new block group.}
-#'     \item{\code{import_gfa(filename, sample="sample", collection=NULL)}}{Import a GFA file.}
-#'     \item{\code{import_genbank(filename, sample="sample", collection=NULL)}}{Import a GenBank file (plain or gzipped).}
-#'     \item{\code{import_library(library_name, parts_list, sample=NULL, collection=NULL)}}{Import a combinatorial sequence library.}
-#'     \item{\code{import_library_files(library_name, parts, library, sample="sample", collection=NULL)}}{Import a library from parts/library CSV files.}
-#'     \item{\code{export_fasta(filename, sample=NULL, collection=NULL)}}{Export sequences to FASTA.}
-#'     \item{\code{export_gfa(filename, sample, node_max=NULL, collection=NULL)}}{Export to GFA.}
-#'     \item{\code{export_genbank(filename, sample, collection=NULL)}}{Export to GenBank.}
-#'     \item{\code{update_with_fasta(filename, sample, new_sample, region_name, collection=NULL)}}{Apply a FASTA update to an existing block group.}
-#'     \item{\code{update_with_gfa(filename, sample, new_sample, collection=NULL)}}{Apply a GFA update.}
-#'     \item{\code{update_with_gaf(filename, csv, sample, parent_sample=NULL, collection=NULL)}}{Apply a GAF update.}
-#'     \item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples=character(), in_place=FALSE, collection=NULL)}}{Apply a VCF update.}
-#'     \item{\code{update_with_genbank(filename, sample, create_missing=FALSE, collection=NULL)}}{Apply a GenBank update.}
-#'     \item{\code{update_with_sequence(sequence, sample, new_sample, region_name, no_reference_path_update=FALSE, collection=NULL)}}{Apply a raw sequence update.}
-#'     \item{\code{update_with_library(sample=NULL, new_sample_name, path_name, parts_list, collection=NULL)}}{Apply a library update.}
-#'     \item{\code{update_with_library_files(sample, new_sample, path_name, library, parts, collection=NULL)}}{Apply a library-files update.}
-#'     \item{\code{get_block_groups()}}{Return a list of all block groups.}
-#'     \item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
-#'     \item{\code{get_block_groups_by_collection(collection)}}{Return block groups in a collection.}
-#'     \item{\code{get_block_sequence(block)}}{Return the sequence string for a \code{Block}.}
-#'     \item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
-#'     \item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate a list of block groups end-to-end into a new block group.}
-#'     \item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection=NULL)}}{Derive a subgraph block group.}
-#'     \item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection=NULL)}}{Split a block group into chunks.}
-#'     \item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
-#'     \item{\code{search(query, bgs = NULL, sequence_kind = "dna")}}{Search for exact sequence occurrences across block groups.
-#'       Returns a list, one entry per block group that has at least one hit.  Each entry is a list with:
-#'       \code{block_group} (a \code{gen_block_group}) and \code{matches} (a list of locus records).
-#'       Each locus record has fields \code{start}, \code{end}, \code{blocks}, and \code{strand}.
-#'       \code{start$block} is the first \code{gen_block} of the match; \code{start$offset} is the byte offset within that block's local sequence where the match begins (\code{0} = block start).
-#'       \code{end$block} is the last \code{gen_block}; \code{end$offset} is the exclusive end offset within that block's local sequence.
-#'       \code{blocks} is a list of every \code{gen_block} spanned by the match; middle blocks are fully covered.
-#'       \code{strand} is one of \code{"forward"}, \code{"reverse"}, or \code{"unknown"}.
-#'       Pass a match locus directly to \code{plot$goto_match()} or \code{plot$highlight_match()}.}
-#'     \item{\code{clear_index(bgs)}}{Remove cached search index files.}
-#'     \item{\code{execute(query)}}{Run a raw SQL statement against the graph database.}
-#'     \item{\code{query(query)}}{Run a raw SQL query and return results as a list of rows.}
-#'   }
+#' @param path Character or \code{NULL}. Workspace root; defaults to the current
+#'   working directory.
+#' @return A \code{gen_repository} environment.
 #' @export
 Repository <- function(path = NULL) {
-  inner <- GenRepository$new(path)
-
-  repo <- new.env(parent = emptyenv())
+  inner <- .RepositoryClass$new(path)
+  repo  <- new.env(parent = emptyenv())
   class(repo) <- "gen_repository"
-  repo$.inner <- inner
+  repo$.inner  <- inner
   repo$gen_dir <- inner$gen_dir()
   repo$db_path <- inner$db_path()
 
-  repo$execute <- function(query) inner$execute(query)
+  repo$execute    <- function(query) inner$execute(query)
+  repo$query      <- function(query) inner$query(query)
+  repo$get_sequence_graph_by_id          <- function(id) inner$get_sequence_graph_by_id(as.character(id))
+  repo$get_sequence_graphs               <- function() inner$get_sequence_graphs()
+  repo$get_sequence_graphs_by_collection <- function(collection) inner$get_sequence_graphs_by_collection(collection)
+  repo$build_index    <- function(ids = character(), sequence_kind = "dna", k = 16L) inner$build_index(ids, sequence_kind, as.integer(k))
+  repo$search         <- function(query, ids = character(), sequence_kind = "dna") inner$search(query, ids, sequence_kind)
+  repo$clear_index    <- function(ids = character()) inner$clear_index(ids)
+  repo$render_frame   <- function(sg_id, detail, cols, rows, ops, tracks_json) inner$render_frame(sg_id, detail, cols, rows, ops, tracks_json)
+  repo$handle_click   <- function(sg_id, detail, ops, col, row) inner$handle_click(sg_id, detail, ops, col, row)
+  repo$list_annotations           <- function(sg_id) inner$list_annotations(sg_id)
+  repo$get_annotation_group_names <- function(sg_id) inner$get_annotation_group_names(sg_id)
+  repo$get_node_sequence          <- function(node_id, sequence_start, sequence_end) inner$get_node_sequence(node_id, as.integer(sequence_start), as.integer(sequence_end))
 
-  repo$query <- function(query) inner$query(query)
+  repo$import_fasta           <- function(filename, sample = "sample", shallow = FALSE, collection = NULL) inner$import_fasta(filename, sample, isTRUE(shallow), collection)
+  repo$import_reference_fasta <- function(filename, reference, shallow = FALSE, collection = NULL) inner$import_reference_fasta(filename, reference, isTRUE(shallow), collection)
+  repo$import_gfa             <- function(filename, sample = "sample", collection = NULL) inner$import_gfa(filename, sample, collection)
+  repo$import_genbank         <- function(filename, sample = "sample", collection = NULL) inner$import_genbank(filename, sample, collection)
+  repo$import_library_files   <- function(library_name, parts, library, sample = "sample", collection = NULL) inner$import_library_files(library_name, parts, library, sample, collection)
+  repo$import_sequences       <- function(names, sequences, sample = "sample", collection = NULL) inner$import_sequences(names, sequences, sample, collection)
+  repo$import_genomic_regions <- function(seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample = "sample", collection = NULL) inner$import_genomic_regions(seq_names, seq_sequences, region_names, region_seq_names, region_starts, region_ends, sample, collection)
+  repo$import_library         <- function(library_name, parts_list, sample = NULL, collection = NULL) inner$import_library(library_name, parts_list, sample, collection)
 
-  repo$get_block_group_by_id <- function(id) {
-    id_str <- if (inherits(id, "gen_hash_id")) id$hash_id else as.character(id)
-    .as_block_group(inner$get_block_group_by_id(id_str))
-  }
+  repo$update_with_fasta          <- function(filename, sample, new_sample, region_name, collection = NULL) inner$update_with_fasta(filename, sample, new_sample, region_name, collection)
+  repo$update_with_gfa            <- function(filename, sample, new_sample, collection = NULL) inner$update_with_gfa(filename, sample, new_sample, collection)
+  repo$update_with_gaf            <- function(filename, csv, sample, parent_sample = NULL, collection = NULL) inner$update_with_gaf(filename, csv, sample, parent_sample, collection)
+  repo$update_with_vcf            <- function(filename, genotype = NULL, sample = NULL, reference = character(), in_place = FALSE, collection = NULL) inner$update_with_vcf(filename, genotype, sample, reference, isTRUE(in_place), collection)
+  repo$update_with_genbank        <- function(filename, sample, create_missing = FALSE, collection = NULL) inner$update_with_genbank(filename, sample, isTRUE(create_missing), collection)
+  repo$update_with_sequence       <- function(sequence, sample, new_sample, region_name, no_reference_path_update = FALSE, collection = NULL) inner$update_with_sequence(sequence, sample, new_sample, region_name, isTRUE(no_reference_path_update), collection)
+  repo$update_with_library_files  <- function(sample, new_sample, path_name, library, parts, collection = NULL) inner$update_with_library_files(sample, new_sample, path_name, library, parts, collection)
+  repo$update_with_library        <- function(sample = NULL, new_sample_name, path_name, parts_list, collection = NULL) inner$update_with_library(sample, new_sample_name, path_name, parts_list, collection)
 
-  repo$get_block_groups <- function() {
-    lapply(inner$get_block_groups(), .as_block_group)
-  }
+  repo$export_fasta   <- function(filename, sample = NULL, collection = NULL) inner$export_fasta(filename, sample, collection)
+  repo$export_gfa     <- function(filename, sample, node_max = NULL, collection = NULL) inner$export_gfa(filename, sample, node_max, collection)
+  repo$export_genbank <- function(filename, sample, collection = NULL) inner$export_genbank(filename, sample, collection)
 
-  repo$get_block_groups_by_collection <- function(collection) {
-    lapply(inner$get_block_groups_by_collection(collection), .as_block_group)
-  }
-
-  repo$block_group_to_dict <- function(block_group) {
-    inner$block_group_to_dict(block_group$id$hash_id)
-  }
-
-  repo$plot <- function(block_group, rows = NULL, cols = NULL, detail = "normal") {
-    GenPlot(repo$db_path, block_group$id$hash_id, detail = detail, rows = rows, cols = cols)
-  }
-
-  repo$get_block_sequence <- function(block) {
-    inner$get_block_sequence(
-      block$node_id$hash_id,
-      as.integer(block$sequence_start),
-      as.integer(block$sequence_end)
-    )
-  }
-
-  repo$stitch <- function(bgs, new_sample, new_region) {
-    if (length(bgs) == 0L) stop("stitch() requires at least one block group", call. = FALSE)
-    collection <- bgs[[1L]]$collection
-    sample_name <- bgs[[1L]]$sample_name
-    for (bg in bgs[-1L]) {
-      if (bg$collection != collection)
-        stop(sprintf("All block groups must be in the same collection ('%s' vs '%s')",
-                     collection, bg$collection), call. = FALSE)
-      if (bg$sample_name != sample_name)
-        stop(sprintf("All block groups must be in the same sample ('%s' vs '%s')",
-                     sample_name, bg$sample_name), call. = FALSE)
-    }
-    regions <- paste(sapply(bgs, function(bg) bg$name), collapse = ",")
-    .as_block_group(inner$stitch(collection, sample_name, new_sample, new_region, regions))
-  }
-
-  repo$build_index <- function(bgs = NULL, sequence_kind = "dna", k = 16L) {
-    ids <- if (is.null(bgs)) character() else sapply(bgs, function(bg) bg$id$hash_id)
-    inner$build_index(ids, sequence_kind, as.integer(k))
-  }
-
-  repo$search <- function(query, bgs = NULL, sequence_kind = "dna") {
-    ids <- if (is.null(bgs)) character() else sapply(bgs, function(bg) bg$id$hash_id)
-    results <- inner$search(query, ids, sequence_kind)
-    lapply(results, function(r) {
-      list(
-        block_group = .as_block_group(r$block_group),
-        matches = r$matches
-      )
-    })
-  }
-
-  repo$clear_index <- function(bgs = NULL) {
-    ids <- if (is.null(bgs)) character() else sapply(bgs, function(bg) bg$id$hash_id)
-    inner$clear_index(ids)
-  }
-
-  repo$import_fasta <- function(filename, sample = "sample", shallow = FALSE, collection = NULL) {
-    inner$import_fasta(filename, sample, isTRUE(shallow), collection)
-  }
-
-  repo$import_reference_fasta <- function(filename, reference, shallow = FALSE, collection = NULL) {
-    inner$import_reference_fasta(filename, reference, isTRUE(shallow), collection)
-  }
-
-  repo$import_gfa <- function(filename, sample = "sample", collection = NULL) {
-    inner$import_gfa(filename, sample, collection)
-  }
-
-  repo$import_genbank <- function(filename, sample = "sample", collection = NULL) {
-    inner$import_genbank(filename, sample, collection)
-  }
-
-  repo$import_library <- function(library_name, parts_list, seq_containers = list(), sample = NULL, collection = NULL) {
-    parts_list <- resolve_granges_columns(parts_list, seq_containers)
-    inner$import_library(library_name, parts_list, sample, collection)
-  }
-
-  repo$import_library_files <- function(library_name, parts, library, sample = "sample", collection = NULL) {
-    inner$import_library_files(library_name, parts, library, sample, collection)
-  }
-
-  repo$update_with_fasta <- function(filename, sample, new_sample, region_name, collection = NULL) {
-    inner$update_with_fasta(filename, sample, new_sample, region_name, collection)
-  }
-
-  repo$update_with_gfa <- function(filename, sample, new_sample, collection = NULL) {
-    inner$update_with_gfa(filename, sample, new_sample, collection)
-  }
-
-  repo$update_with_gaf <- function(filename, csv, sample, parent_sample = NULL, collection = NULL) {
-    inner$update_with_gaf(filename, csv, sample, parent_sample, collection)
-  }
-
-  repo$update_with_vcf <- function(filename, genotype = NULL, sample = NULL, reference = character(), in_place = FALSE, collection = NULL) {
-    inner$update_with_vcf(filename, genotype, sample, reference, isTRUE(in_place), collection)
-  }
-
-  repo$update_with_genbank <- function(filename, sample, create_missing = FALSE, collection = NULL) {
-    inner$update_with_genbank(filename, sample, isTRUE(create_missing), collection)
-  }
-
-  repo$update_with_sequence <- function(sequence, sample, new_sample, region_name, no_reference_path_update = FALSE, collection = NULL) {
-    inner$update_with_sequence(sequence, sample, new_sample, region_name, isTRUE(no_reference_path_update), collection)
-  }
-
-  repo$update_with_library <- function(sample = NULL, new_sample_name, path_name, parts_list, seq_containers = list(), collection = NULL) {
-    parts_list <- resolve_granges_columns(parts_list, seq_containers)
-    inner$update_with_library(sample, new_sample_name, path_name, parts_list, collection)
-  }
-
-  repo$update_with_library_files <- function(sample, new_sample, path_name, library, parts, collection = NULL) {
-    inner$update_with_library_files(sample, new_sample, path_name, library, parts, collection)
-  }
-
-  repo$export_fasta <- function(filename, sample = NULL, collection = NULL) {
-    inner$export_fasta(filename, sample, collection)
-  }
-
-  repo$export_gfa <- function(filename, sample, node_max = NULL, collection = NULL) {
-    inner$export_gfa(filename, sample, node_max, collection)
-  }
-
-  repo$export_genbank <- function(filename, sample, collection = NULL) {
-    inner$export_genbank(filename, sample, collection)
-  }
-
-  repo$derive_subgraph <- function(sample, new_sample, region, backbone = NULL, collection = NULL) {
-    inner$derive_subgraph(collection, sample, new_sample, region, backbone)
-  }
-
-  repo$derive_chunks <- function(sample, new_sample, region, backbone = NULL, breakpoints = NULL, chunk_size = NULL, collection = NULL) {
-    if (!is.null(breakpoints) && !is.numeric(breakpoints) && !is.integer(breakpoints)) {
-      stop("breakpoints must be a numeric or integer vector, e.g. c(10L, 20L)", call. = FALSE)
-    }
+  repo$derive_subgraph <- function(sample, new_sample, region, backbone = NULL, collection = NULL) inner$derive_subgraph(collection, sample, new_sample, region, backbone)
+  repo$derive_chunks   <- function(sample, new_sample, region, backbone = NULL, breakpoints = NULL, chunk_size = NULL, collection = NULL)
     inner$derive_chunks(collection, sample, new_sample, region, backbone,
                         if (is.null(breakpoints)) integer(0) else as.integer(breakpoints),
                         if (is.null(chunk_size)) NULL else as.integer(chunk_size))
-  }
+
+  repo$stitch <- function(collection_name, sample_name, new_sample, new_region, regions)
+    inner$stitch(collection_name, sample_name, new_sample, new_region, regions)
 
   repo
 }

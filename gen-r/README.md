@@ -9,8 +9,8 @@ library(genr)
 
 repo <- Repository()          # open workspace in current directory
 repo$import_fasta("seq.fa", sample = "ref")
-bgs  <- repo$get_block_groups()
-repo$plot(bgs[[1]])           # opens the graph viewer
+bgs  <- repo$get_sequence_graphs()
+plot(bgs[[1]])                # opens the graph viewer
 ```
 
 `Repository()` is the primary entry point. It discovers the `.gen/` workspace,
@@ -58,36 +58,36 @@ Bioconductor `DNAStringSet` / `GRanges` objects.
 | Method | Description |
 |--------|-------------|
 | `derive_subgraph(sample, new_sample, region, ...)` | Extract a coordinate-bounded subgraph |
-| `derive_chunks(sample, new_sample, region, ...)` | Split a block group at breakpoints or a fixed chunk size |
-| `stitch(bgs, new_sample, new_region)` | Concatenate block groups end-to-end |
+| `derive_chunks(sample, new_sample, region, ...)` | Split a sequence graph at breakpoints or a fixed chunk size |
+| `stitch(sgs, new_sample, new_region)` | Concatenate sequence graphs end-to-end |
 
 **Query**
 
 | Method | Description |
 |--------|-------------|
-| `get_block_groups()` | All block groups in the database |
-| `get_block_groups_by_collection(collection)` | Block groups in one collection |
-| `get_block_group_by_id(id)` | Block group by `HashId` |
-| `get_block_sequence(block)` | Sequence string for a `Block` |
-| `search(query, bgs, sequence_kind)` | K-mer search across block groups |
-| `build_index(bgs, sequence_kind, k)` | Build search index |
-| `clear_index(bgs)` | Remove cached index files |
+| `get_sequence_graphs()` | All sequence graphs in the database |
+| `get_sequence_graphs_by_collection(collection)` | Sequence graphs in one collection |
+| `get_sequence_graph_by_id(id)` | Sequence graph by `HashId` |
+| `get_node_sequence(node)` | Sequence string for a graph node (`node$key` from graph dict) |
+| `search(query, sgs, sequence_kind)` | K-mer search across sequence graphs |
+| `build_index(sgs, sequence_kind, k)` | Build search index |
+| `clear_index(sgs)` | Remove cached index files |
 
 **Visualize**
 
 ```r
-repo$plot(bg)                 # returns a gen_plot; displays in RStudio Viewer / Shiny
+plot(bg)                 # returns a gen_plot; displays in RStudio Viewer / Shiny
 ```
 
 ## Graph viewer (GenPlot)
 
-`repo$plot(bg)` returns a `gen_plot` object. Printing it in RStudio or Shiny
+`plot(bg)` returns a `gen_plot` object. Printing it in RStudio or Shiny
 renders an interactive canvas widget via `anyhtmlwidget`.
 
 Navigate the view programmatically:
 
 ```r
-p <- repo$plot(bg)
+p <- plot(bg)
 p$zoom_in()
 p$zoom_out()
 p$move_by(dx = 5, dy = 0)   # pan right by 5 columns

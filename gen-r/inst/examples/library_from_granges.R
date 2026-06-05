@@ -55,5 +55,5 @@ repo$import_library(
   collection_name = "genomic-library"
 )
 
-bgs <- repo$get_block_groups_by_collection("genomic-library")
-repo$plot(bgs[[1]])
+bgs <- repo$get_sequence_graphs_by_collection("genomic-library")
+plot(bgs[[1]])
