@@ -2863,6 +2863,7 @@ mod tests {
             preserve_edge: true,
         };
 
+        // take out an entire block
         BlockGroup::insert_change(&conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
         assert_eq!(
@@ -3574,6 +3575,8 @@ mod tests {
             phased: 0,
             preserve_edge: false,
         };
+
+        // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
@@ -3856,6 +3859,8 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
+
+        // note we are making our change against the new blockgroup, and not the parent blockgroup
         BlockGroup::insert_change(conn, &change).unwrap();
         let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
         assert_eq!(
