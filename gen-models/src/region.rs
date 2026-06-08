@@ -655,6 +655,8 @@ mod tests {
     }
 
     mod find_graph_positions {
+        use std::collections::HashSet;
+
         use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 
         use super::*;
@@ -815,6 +817,22 @@ mod tests {
                 }
             }
             let path = Path::create(conn, name, &block_group_id, &ordered).unwrap();
+            let mut path_cache = PathCache::new(conn);
+            let accession =
+                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            Path::delete(conn, name, &block_group_id);
+            accession
+        }
+
+        fn create_accession_from_edges(
+            conn: &crate::db::GraphConnection,
+            block_group_id: HashId,
+            name: &str,
+            edge_ids: &[HashId],
+            start: i64,
+            end: i64,
+        ) -> Accession {
+            let path = Path::create(conn, name, &block_group_id, edge_ids).unwrap();
             let mut path_cache = PathCache::new(conn);
             let accession =
                 BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
@@ -1009,6 +1027,149 @@ mod tests {
             );
 
             (conn, bg.id)
+        }
+
+        struct GraphFixture {
+            conn: crate::db::GraphConnection,
+            block_group_id: HashId,
+            path: Vec<HashId>,
+        }
+
+        /// Creates a branched graph: AAA -> {CC, GGGG} -> TTT.
+        fn setup_variable_length_branched_graph() -> GraphFixture {
+            let conn = get_connection(None).unwrap();
+            Collection::get_or_create(&conn, "test").unwrap();
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: "test",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let bg = BlockGroup::create(
+                &conn,
+                NewBlockGroup {
+                    collection_name: "test",
+                    sample_name: "test",
+                    name: "variable-length-branched",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let seq_aaa = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("AAA")
+                .save(&conn)
+                .unwrap();
+            let seq_cc = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("CC")
+                .save(&conn)
+                .unwrap();
+            let seq_gggg = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("GGGG")
+                .save(&conn)
+                .unwrap();
+            let seq_ttt = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("TTT")
+                .save(&conn)
+                .unwrap();
+
+            let n_aaa =
+                Node::create(&conn, &seq_aaa.hash, &HashId::convert_str("node-aaa")).unwrap();
+            let n_cc = Node::create(&conn, &seq_cc.hash, &HashId::convert_str("node-cc")).unwrap();
+            let n_gggg =
+                Node::create(&conn, &seq_gggg.hash, &HashId::convert_str("node-gggg")).unwrap();
+            let n_ttt =
+                Node::create(&conn, &seq_ttt.hash, &HashId::convert_str("node-ttt")).unwrap();
+
+            let e_start = Edge::create(
+                &conn,
+                PATH_START_NODE_ID,
+                -1,
+                Strand::Forward,
+                n_aaa,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let e_aaa_cc =
+                Edge::create(&conn, n_aaa, 3, Strand::Forward, n_cc, 0, Strand::Forward).unwrap();
+            let e_aaa_gggg =
+                Edge::create(&conn, n_aaa, 3, Strand::Forward, n_gggg, 0, Strand::Forward).unwrap();
+            let e_cc_ttt =
+                Edge::create(&conn, n_cc, 2, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+            let e_gggg_ttt =
+                Edge::create(&conn, n_gggg, 4, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
+            let e_end = Edge::create(
+                &conn,
+                n_ttt,
+                3,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+
+            BlockGroupEdge::bulk_create(
+                &conn,
+                &[
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_start.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_aaa_cc.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_aaa_gggg.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_cc_ttt.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_gggg_ttt.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                    BlockGroupEdgeData {
+                        block_group_id: bg.id,
+                        edge_id: e_end.id,
+                        chromosome_index: 0,
+                        phased: 0,
+                    },
+                ],
+            );
+
+            GraphFixture {
+                conn,
+                block_group_id: bg.id,
+                path: vec![e_start.id, e_aaa_cc.id, e_cc_ttt.id, e_end.id],
+            }
+        }
+
+        fn position_set(positions: &[gen_graph::GraphNodePosition]) -> HashSet<(HashId, i64)> {
+            positions
+                .iter()
+                .map(|pos| (pos.graph_node.node_id, pos.offset))
+                .collect()
         }
 
         #[test]
@@ -1227,6 +1388,98 @@ mod tests {
             let end_ids: Vec<HashId> = end_pos.iter().map(|p| p.graph_node.node_id).collect();
             assert!(end_ids.contains(&HashId::convert_str("node-ccc")));
             assert!(end_ids.contains(&HashId::convert_str("node-atc")));
+        }
+
+        #[test]
+        fn test_finds_graph_positions_in_variable_length_branch_finds_middle_nodes() {
+            let fixture = setup_variable_length_branched_graph();
+            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id).unwrap();
+            let aaa_acc = create_accession_from_edges(
+                &fixture.conn,
+                fixture.block_group_id,
+                "variable-aaa",
+                &fixture.path,
+                0,
+                3,
+            );
+            let aaa_region = make_region(bg.clone(), aaa_acc, 0, 3, 3, 2, 2);
+
+            let (from_aaa, _) = aaa_region
+                .find_graph_positions(&fixture.conn, 2, 2)
+                .unwrap();
+            assert_eq!(
+                position_set(&from_aaa),
+                HashSet::from([
+                    (HashId::convert_str("node-cc"), 1),
+                    (HashId::convert_str("node-gggg"), 1)
+                ])
+            );
+
+            let ttt_acc = create_accession_from_edges(
+                &fixture.conn,
+                fixture.block_group_id,
+                "variable-ttt",
+                &fixture.path,
+                5,
+                8,
+            );
+            let ttt_region = make_region(bg, ttt_acc, 5, 8, 3, 0, 0);
+
+            let (from_ttt, _) = ttt_region
+                .find_graph_positions(&fixture.conn, -2, -2)
+                .unwrap();
+            assert_eq!(
+                position_set(&from_ttt),
+                HashSet::from([
+                    (HashId::convert_str("node-cc"), 0),
+                    (HashId::convert_str("node-gggg"), 2)
+                ])
+            );
+        }
+
+        #[test]
+        fn test_finds_graph_positions_in_variable_length_branch_returns_single_position() {
+            let fixture = setup_variable_length_branched_graph();
+            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id).unwrap();
+            let acc = create_accession_from_edges(
+                &fixture.conn,
+                fixture.block_group_id,
+                "variable-single",
+                &fixture.path,
+                0,
+                3,
+            );
+            let region = make_region(bg, acc, 0, 3, 3, 1, 1);
+
+            let (positions, _) = region.find_graph_positions(&fixture.conn, 1, 1).unwrap();
+            assert_eq!(
+                position_set(&positions),
+                HashSet::from([(HashId::convert_str("node-aaa"), 2)])
+            );
+        }
+
+        #[test]
+        fn test_finds_graph_positions_in_variable_length_branch_finds_different_ttt_offsets() {
+            let fixture = setup_variable_length_branched_graph();
+            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id).unwrap();
+            let acc = create_accession_from_edges(
+                &fixture.conn,
+                fixture.block_group_id,
+                "variable-ttt-offsets",
+                &fixture.path,
+                0,
+                3,
+            );
+            let region = make_region(bg, acc, 0, 3, 3, 2, 2);
+
+            let (positions, _) = region.find_graph_positions(&fixture.conn, 6, 6).unwrap();
+            assert_eq!(
+                position_set(&positions),
+                HashSet::from([
+                    (HashId::convert_str("node-ttt"), 1),
+                    (HashId::convert_str("node-ttt"), 3)
+                ])
+            );
         }
     }
 }
