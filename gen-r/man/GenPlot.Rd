@@ -4,12 +4,18 @@
 \alias{GenPlot}
 \title{Create a graph plot controller}
 \usage{
-GenPlot(db_path, block_group_id, detail = "normal", rows = NULL, cols = NULL)
+GenPlot(
+  db_path,
+  sequence_graph_id,
+  detail = "normal",
+  rows = NULL,
+  cols = NULL
+)
 }
 \arguments{
 \item{db_path}{Character. Path to the Gen graph SQLite database.}
 
-\item{block_group_id}{Character or \code{gen_hash_id}. Block group to render.}
+\item{sequence_graph_id}{Character or \code{gen_hash_id}. Sequence graph to render.}
 
 \item{detail}{Character. Level of node detail: \code{"normal"} (default) or
 \code{"compressed"}.}
@@ -39,6 +45,6 @@ A \code{gen_plot} environment with methods:
 }
 \description{
 Returns a \code{gen_plot} environment that renders the sequence graph for a
-block group.  Printing or displaying the object in RStudio / Shiny shows an
+sequence graph.  Printing or displaying the object in RStudio / Shiny shows an
 interactive htmlwidget.
 }

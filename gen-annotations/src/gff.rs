@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs::File, io, io::BufReader};
 
 use gen_models::{
-    block_group::BlockGroup,
+    block_group::{BlockGroup, BlockGroupError},
     db::GraphConnection,
     errors::PathError,
     path::{Annotation, Path},
@@ -15,6 +15,8 @@ pub enum PropagateGffError {
     Io(#[from] io::Error),
     #[error("Path error: {0}")]
     Path(#[from] PathError),
+    #[error("Block group error: {0}")]
+    BlockGroup(#[from] BlockGroupError),
 }
 
 pub fn gff_attribute_value_to_string(
@@ -57,12 +59,12 @@ pub fn propagate_gff(
     let target_block_groups = Sample::get_block_groups(conn, collection_name, to_sample_name);
     let source_paths_by_bg_name = source_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
-        .collect::<HashMap<String, Path>>();
+        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
     let target_paths_by_bg_name = target_block_groups
         .iter()
-        .map(|bg| (bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)))
-        .collect::<HashMap<String, Path>>();
+        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
 
     let mut path_mappings_by_bg_name = HashMap::new();
     for (name, target_path) in &target_paths_by_bg_name {
@@ -254,7 +256,7 @@ mod tests {
         )
         .expect("should create child block group")[0]
             .id;
-        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id);
+        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id).unwrap();
         let replacement_sequence = "AA";
 
         let replacement = Sequence::new()

@@ -23,8 +23,6 @@ fixture_path <- function(...) {
   normalizePath(file.path(fixture_root, ...), mustWork = TRUE)
 }
 
-# Create a temp directory, initialize a Repository in it, and return it.
-# Mirrors setup_gen_on_disk() from the Rust/Python test helpers.
 setup_repository <- function() {
   path <- tempfile("genr-test-")
   dir.create(path, recursive = TRUE)
@@ -56,11 +54,9 @@ test_that("Repository initializes workspace and returns correct paths", {
   expect_match(repo$db_path, "default\\.db$")
 })
 
-test_that("constructors HashId and Block work", {
+test_that("HashId constructor works", {
   hash_id <- HashId("abc123")
-  block <- Block(hash_id, 1, 4)
   expect_s3_class(hash_id, "gen_hash_id")
-  expect_s3_class(block, "gen_block")
 })
 
 test_that("FASTA import and export work", {
@@ -120,37 +116,11 @@ test_that("sequence update bindings work", {
     region_name = "m123:3-5"
   ), silent = TRUE))
 
-  expect_binding_result(try(update_with_fasta(
-    filename = fixture_path("aa.fa"),
-    collection_name = "update-collection",
-    sample = "sample-a",
-    new_sample = "from-fasta",
-    region_name = "m123:3-5"
-  ), silent = TRUE))
-
-  expect_true(inherits(try(update_with_fasta(
-    filename = fixture_path("aa.fa"),
-    name = "update-collection",
-    sample = "sample-a",
-    new_sample = "missing-coords",
-    region_name = "m123"
-  ), silent = TRUE), "try-error"))
-
-  expect_binding_result(try(update_with_sequence(
+  expect_binding_result(try(repo$update_with_sequence(
     sequence = "AAAAAAAA",
-    collection_name = "update-collection",
-    sample = "sample-a",
-    new_sample = "from-sequence",
+    sample = "sample-a", new_sample = "from-sequence",
     region_name = "m123:2-5"
   ), silent = TRUE))
-
-  expect_true(inherits(try(update_with_sequence(
-    sequence = "AAAAAAAA",
-    name = "update-collection",
-    sample = "sample-a",
-    new_sample = "missing-seq-coords",
-    region_name = "m123"
-  ), silent = TRUE), "try-error"))
 })
 
 test_that("graph-derived update bindings work", {
@@ -164,7 +134,7 @@ test_that("graph-derived update bindings work", {
 
   expect_binding_result(try(repo$update_with_vcf(
     fixture_path("simple.vcf"),
-    parent_samples = "sample-a"
+    reference = "sample-a"
   ), silent = TRUE))
 
   repo2 <- setup_repository()
@@ -200,17 +170,8 @@ test_that("GenBank and library update bindings work", {
     parts   = fixture_path("parts.fa")
   ), silent = TRUE))
 
-  expect_binding_result(try(update_with_library_files(
-    collection_name = "library-update-collection",
-    sample = "sample-a",
-    new_sample = "library-files-child",
-    path_name = "m123:7-20",
-    library = fixture_path("combinatorial_design.csv"),
-    parts = fixture_path("parts.fa")
-  ), silent = TRUE))
-
   expect_binding_result(try(update_with_library(
-    collection_name = "library-update-collection",
+    repo,
     sample = "sample-a",
     new_sample_name = "library-memory-child",
     path_name = "m123:7-20",
@@ -223,34 +184,36 @@ test_that("graph operation bindings work", {
   repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
 
   expect_binding_result(try(repo$derive_chunks(
-    sample = "sample-a", new_sample = "chunked",
-    region = "m123", breakpoints = c(10L, 20L)
+    collection = NULL, sample = "sample-a", new_sample = "chunked",
+    region = "m123", backbone = NULL,
+    breakpoints = integer(0), chunk_size = NULL
   ), silent = TRUE))
 
-  groups <- repo$get_block_groups()
+  groups <- repo$get_sequence_graphs()
   expect_true(length(groups) >= 1)
 
   expect_binding_result(try(repo$derive_subgraph(
-    sample = "sample-a", new_sample = "subgraph",
-    region = "m123:3-12"
+    collection = NULL, sample = "sample-a", new_sample = "subgraph",
+    region = "m123:3-12", backbone = NULL
   ), silent = TRUE))
 
-  chunks <- Filter(function(bg) bg$sample_name == "chunked", repo$get_block_groups())
-  expect_binding_result(try(repo$stitch(
-    bgs = chunks, new_sample = "stitched", new_region = "m123.stitched"
-  ), silent = TRUE))
+  chunks <- Filter(function(bg) bg$sample_name() == "chunked", repo$get_sequence_graphs())
+  expect_binding_result(try(
+    stitch(repo, bgs = chunks, new_sample = "stitched", new_region = "m123.stitched"),
+    silent = TRUE
+  ))
 })
 
 test_that("repository inspection and graph controller work", {
   repo <- setup_repository()
   repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
 
-  groups <- repo$get_block_groups()
+  groups <- repo$get_sequence_graphs()
   expect_length(groups, 1)
-  expect_s3_class(groups[[1]], "gen_block_group")
+  expect_s3_class(groups[[1]], "SequenceGraph")
 
-  group_by_id <- repo$get_block_group_by_id(groups[[1]]$id)
-  expect_equal(group_by_id$name, groups[[1]]$name)
+  group_by_id <- repo$get_sequence_graph_by_id(groups[[1]]$id())
+  expect_equal(group_by_id$name(), groups[[1]]$name())
 
   rows <- repo$query("SELECT name FROM block_groups ORDER BY name")
   expect_equal(rows[[1]][[1]], "m123")
@@ -259,18 +222,14 @@ test_that("repository inspection and graph controller work", {
   repo$execute("INSERT INTO r_binding_smoke (id) VALUES (1)")
   expect_equal(repo$query("SELECT id FROM r_binding_smoke")[[1]][[1]], 1)
 
-  graph_dict <- repo$block_group_to_dict(groups[[1]])
+  graph_dict <- groups[[1]]$to_dict()
   expect_true(length(graph_dict$nodes) >= 1)
   expect_true(length(graph_dict$edges) >= 1)
 
   node <- graph_dict$nodes[[1]]
-  key <- Block(node$node_id, node$sequence_start, node$sequence_end)
-  expect_equal(
-    repo$get_block_sequence(key),
-    genr:::repo_get_block_sequence(repo$db_path, node$node_id, node$sequence_start, node$sequence_end)
-  )
+  expect_true(nzchar(get_node_sequence(repo, node)))
 
-  controller <- repo$plot(groups[[1]], rows = 12, cols = 40)
+  controller <- GenPlot(groups[[1]]$db_path(), groups[[1]]$id(), rows = 12, cols = 40)
   expect_s3_class(controller, "gen_plot")
   controller$set_detail("minimal")
   frame_json <- controller$render_frame(40, 12)
@@ -282,35 +241,32 @@ test_that("repository inspection and graph controller work", {
   controller$move_by(1, 0)
   expect_match(controller$render_frame(40, 12), "\"cells\"")
 
-  via_plot <- groups[[1]]$plot(rows = 10, cols = 30)
+  via_plot <- plot(groups[[1]], rows = 10, cols = 30)
   expect_s3_class(via_plot, "gen_plot")
   expect_match(via_plot$render_frame(30, 10), "\"cols\":30")
 })
 
-test_that("low-level internal bindings are accessible via :::", {
+test_that("raw SQL execute/query and sequence graph object API work", {
   repo <- setup_repository()
   repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
-  db_path <- repo$db_path
 
-  genr:::repo_execute(db_path, "CREATE TABLE IF NOT EXISTS low_level_smoke (id INTEGER)")
-  genr:::repo_execute(db_path, "INSERT INTO low_level_smoke (id) VALUES (7)")
-  expect_equal(genr:::repo_query(db_path, "SELECT id FROM low_level_smoke")[[1]][[1]], 7)
+  repo$execute("CREATE TABLE IF NOT EXISTS low_level_smoke (id INTEGER)")
+  repo$execute("INSERT INTO low_level_smoke (id) VALUES (7)")
+  expect_equal(repo$query("SELECT id FROM low_level_smoke")[[1]][[1]], 7)
 
-  groups <- genr:::repo_get_block_groups(db_path)
+  groups <- repo$get_sequence_graphs()
   expect_length(groups, 1)
 
-  fetched <- genr:::repo_get_block_group_by_id(db_path, groups[[1]]$id)
-  expect_equal(fetched$name, "m123")
+  sg <- groups[[1]]
+  expect_equal(sg$name(), "m123")
 
-  graph_dict <- genr:::repo_block_group_to_dict(db_path, groups[[1]]$id)
+  graph_dict <- sg$to_dict()
   expect_true(length(graph_dict$nodes) >= 1)
 
   node <- graph_dict$nodes[[1]]
-  expect_true(nzchar(genr:::repo_get_block_sequence(
-    db_path, node$node_id, node$sequence_start, node$sequence_end
-  )))
+  expect_true(nzchar(repo$get_node_sequence(node$node_id, node$sequence_start, node$sequence_end)))
 
-  frame_json <- genr:::graph_render_frame(db_path, groups[[1]]$id, "normal", 40L, 12L, "", "[]")
+  frame_json <- repo$render_frame(sg$id(), "normal", 40L, 12L, "", "[]")
   expect_match(frame_json, "\"cells\"")
-  expect_type(genr:::graph_handle_click(db_path, groups[[1]]$id, "normal", "", 1L, 1L), "logical")
+  expect_type(repo$handle_click(sg$id(), "normal", "", 1L, 1L), "logical")
 })

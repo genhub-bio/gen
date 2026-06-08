@@ -49,7 +49,7 @@ repo$import_library(
   collection_name = "cassette-library"
 )
 
-bgs <- repo$get_block_groups_by_collection("cassette-library")
+bgs <- repo$get_sequence_graphs_by_collection("cassette-library")
 cassette_bg <- bgs[[1]]
 
-repo$plot(cassette_bg)
+plot(cassette_bg)

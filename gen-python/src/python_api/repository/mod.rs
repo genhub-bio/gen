@@ -9,8 +9,8 @@ use gen_models::{
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{
-    block::PyGraphNode,
-    block_group::PyBlockGroup,
+    block_group::PySequenceGraph,
+    graph_node::PyGraphNode,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
     utils::{block_group_err_to_pyerr, path_to_py_path, py_query, sqlite_err_to_pyerr},
@@ -94,8 +94,8 @@ impl PyRepository {
             .unwrap_or_else(|| "default".to_string())
     }
 
-    pub(crate) fn into_py_block_group(&self, bg: BlockGroup) -> PyBlockGroup {
-        PyBlockGroup {
+    pub(crate) fn into_py_block_group(&self, bg: BlockGroup) -> PySequenceGraph {
+        PySequenceGraph {
             id: bg.id,
             collection_name: bg.collection_name,
             sample_name: bg.sample_name,
@@ -207,17 +207,17 @@ impl PyRepository {
     }
 
     // -------------------------------------------------------------------------
-    // BlockGroup queries
+    // SequenceGraph queries
     // -------------------------------------------------------------------------
 
-    fn get_block_group_by_id(&self, id: &PyHashId) -> PyResult<PyBlockGroup> {
+    fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
         let conn = self.context.graph().conn();
         let block_group =
             BlockGroup::get_by_id(conn, &id.hash_id).map_err(block_group_err_to_pyerr)?;
         Ok(self.into_py_block_group(block_group))
     }
 
-    fn get_block_groups(&self) -> PyResult<Vec<PyBlockGroup>> {
+    fn get_sequence_graphs(&self) -> PyResult<Vec<PySequenceGraph>> {
         let conn = self.context.graph().conn();
         Ok(BlockGroup::all(conn)
             .into_iter()
@@ -225,7 +225,10 @@ impl PyRepository {
             .collect())
     }
 
-    fn get_block_groups_by_collection(&self, collection_name: &str) -> PyResult<Vec<PyBlockGroup>> {
+    fn get_sequence_graphs_by_collection(
+        &self,
+        collection_name: &str,
+    ) -> PyResult<Vec<PySequenceGraph>> {
         let conn = self.context.graph().conn();
         Ok(Collection::get_block_groups(conn, collection_name)
             .into_iter()
@@ -237,11 +240,11 @@ impl PyRepository {
     // Plot
     // -------------------------------------------------------------------------
 
-    #[pyo3(signature = (block_group, rows=None, cols=None, detail=None))]
+    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None))]
     fn plot(
         &self,
         py: Python<'_>,
-        block_group: &PyBlockGroup,
+        sequence_graph: &PySequenceGraph,
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
@@ -252,9 +255,9 @@ impl PyRepository {
             .map(std::path::PathBuf::from)
             .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
         let graph =
-            BlockGroup::get_graph(graph_conn, &block_group.id).map_err(block_group_err_to_pyerr)?;
+            BlockGroup::get_graph(graph_conn, &sequence_graph.id).map_err(block_group_err_to_pyerr)?;
         let mut ctrl = PyGraphController::new(db_path, graph);
-        ctrl.block_group_id = Some(block_group.id);
+        ctrl.block_group_id = Some(sequence_graph.id);
         ctrl.auto_load_annotation_groups(graph_conn);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
@@ -263,7 +266,7 @@ impl PyRepository {
         build_widget(py, ctrl, rows, cols)
     }
 
-    fn get_block_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
+    fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
         let sequences_by_node_id =
             Node::get_sequences_by_node_ids(self.context.graph().conn(), &[node_key.node_id]);
         let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
@@ -350,7 +353,7 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
+            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
             assert_eq!(block_groups.len(), 1);
             assert_eq!(block_groups[0].name, "chr1");
         });
@@ -415,7 +418,7 @@ mod python_tests {
 
             PyRepository::__exit__(py_repo.borrow_mut(py), None, None, None).unwrap();
 
-            let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
+            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
             assert_eq!(
                 block_groups.len(),
                 2,
@@ -491,7 +494,7 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
+            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
             let bg = &block_groups[0];
 
             py_repo.borrow(py).build_index("dna", 4, None).unwrap();
@@ -552,7 +555,7 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
+            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
             let bg = &block_groups[0];
 
             py_repo.borrow(py).build_index("dna", 4, None).unwrap();
@@ -591,7 +594,7 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
+            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
             let bg = &block_groups[0];
             let bg_id = bg.id;
 
@@ -606,13 +609,13 @@ mod python_tests {
             bg.build_index("protein", 4).unwrap();
             assert!(
                 index_file.exists(),
-                "Index should exist after PyBlockGroup::build_index"
+                "Index should exist after PySequenceGraph::build_index"
             );
 
             bg.clear_index().unwrap();
             assert!(
                 !index_file.exists(),
-                "Index should be gone after PyBlockGroup::clear_index"
+                "Index should be gone after PySequenceGraph::clear_index"
             );
         });
     }
@@ -641,10 +644,10 @@ mod python_tests {
             let fake_exc = py.None().into_bound(py);
             PyRepository::__exit__(py_repo.borrow_mut(py), Some(&fake_exc), None, None).unwrap();
 
-            let block_groups = py_repo.borrow(py).get_block_groups().unwrap();
+            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
             assert!(
                 block_groups.is_empty(),
-                "Import should have been rolled back, but found {} block group(s)",
+                "Import should have been rolled back, but found {} sequence graph(s)",
                 block_groups.len()
             );
         });

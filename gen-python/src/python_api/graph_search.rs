@@ -6,14 +6,14 @@ use gen_core::Strand;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
 
-use super::block::{PyGraphNode, PyGraphNodeSlice};
+use super::graph_node::{PyGraphNode, PyGraphNodeSlice};
 
 /// A position in the graph: a specific node plus a byte offset within that
 /// node's local text (`0..node.length()`).
 ///
-/// Returned by `PyGraphLocus.start()` and `PyGraphLocus.end()`.
-/// Pass directly to `GenGraphWidget.go_to()`.
-#[pyclass(name = "GraphPos")]
+/// Returned by `Locus.start()` and `Locus.end()`.
+/// Pass directly to `GraphWidget.go_to()`.
+#[pyclass(name = "Position")]
 #[derive(Clone)]
 pub struct PyGraphPos {
     pub inner: GraphPos,
@@ -31,7 +31,7 @@ impl PyGraphPos {
 impl PyGraphPos {
     /// The graph node this position is inside.
     #[getter]
-    fn block(&self) -> PyGraphNode {
+    fn node(&self) -> PyGraphNode {
         let n = self.inner.block;
         PyGraphNode::new(n.node_id, n.sequence_start, n.sequence_end)
     }
@@ -81,9 +81,9 @@ impl PyGraphPos {
 
 /// A linear sequence of nodes in graph space, anchored by byte offsets.
 ///
-/// Obtain via `repo.search(block_group, query)`.
+/// Obtain via `sg.search(query)` or `repo.search(query)`.
 /// Pass `.start()` or `.end()` to `widget.go_to()`.
-#[pyclass(name = "GraphLocus")]
+#[pyclass(name = "Locus")]
 pub struct PyGraphLocus {
     pub inner: GraphLocus,
 }
@@ -165,7 +165,7 @@ impl PyGraphLocus {
                 }
             })
             .collect();
-        format!("GraphLocus([{}], strand='{}')", segs.join(", "), strand)
+        format!("Locus([{}], strand='{}')", segs.join(", "), strand)
     }
 
     fn __str__(&self) -> String {
@@ -210,12 +210,10 @@ impl PyGraphLocus {
     }
 }
 
-/// A named annotation in graph space, built from one or more `GraphLocus` objects.
+/// A named annotation in graph space, built from one or more `Locus` objects.
 ///
-/// Create with ``Annotation(locus, name)`` for a single hit or
-/// ``Annotation([locus1, locus2], name)`` to combine multiple hits into one
-/// named span.  Pass a list of ``Annotation`` objects to
-/// ``widget.add_annotation_track()``.
+/// Create with ``Annotation(locus, name)`` for a single hit.
+/// Pass a list of ``Annotation`` objects to ``widget.add_annotation_track()``.
 #[pyclass(name = "Annotation")]
 #[derive(Clone)]
 pub struct PyAnnotation {
@@ -235,9 +233,7 @@ impl PyAnnotation {
 
     /// The graph-space locus covered by this annotation.
     ///
-    /// Provides ``.blocks`` (list of ``Block`` objects with
-    /// ``node_id``, ``sequence_start``, ``sequence_end``),
-    /// ``.start()`` / ``.end()`` (``GraphPos``), and ``.strand``.
+    /// Provides ``.start()`` / ``.end()`` (``Position``) and ``.strand``.
     #[getter]
     fn locus(&self) -> PyGraphLocus {
         PyGraphLocus::from_locus(self.locus.clone())

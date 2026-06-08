@@ -84,7 +84,7 @@ pub fn update_with_fasta(
         .iter()
         .map(|target_block_group| -> Result<_, FastaError> {
             let path = if resolved_region.kind == ResolvedRegionKind::Path {
-                Some(BlockGroup::get_current_path(conn, &target_block_group.id))
+                Some(BlockGroup::get_current_path(conn, &target_block_group.id)?)
             } else {
                 None
             };
@@ -351,8 +351,8 @@ mod tests {
 
         let child_blockgroup = get_sample_bg(conn, &collection, "child sample").id;
         let other_blockgroup = get_sample_bg(conn, &collection, "other sample").id;
-        let child_path = BlockGroup::get_current_path(conn, &child_blockgroup);
-        let other_path = BlockGroup::get_current_path(conn, &other_blockgroup);
+        let child_path = BlockGroup::get_current_path(conn, &child_blockgroup).unwrap();
+        let other_path = BlockGroup::get_current_path(conn, &other_blockgroup).unwrap();
         assert_eq!(
             child_path.sequence(conn).unwrap(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
@@ -870,7 +870,7 @@ mod tests {
             HashSet::from_iter(expected_sequences),
         );
 
-        let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id);
+        let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id).unwrap();
         assert_eq!(
             latest_path.sequence(conn).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"

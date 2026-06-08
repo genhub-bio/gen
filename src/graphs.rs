@@ -76,7 +76,8 @@ pub fn load_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) ->
         })
         .collect();
 
-    let path = BlockGroup::get_current_path(conn, &block_group_id);
+    let path = BlockGroup::get_current_path(conn, &block_group_id)
+        .expect("Block group chunk requires a current path");
     let path_edges = PathEdge::edges_for_path(conn, &path.id);
 
     let start_edge = path_edges[0].clone();

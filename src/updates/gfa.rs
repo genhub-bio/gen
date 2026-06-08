@@ -58,7 +58,7 @@ pub fn update_with_gfa(
     let existing_paths = block_groups
         .iter()
         .map(|block_group| BlockGroup::get_current_path(conn, &block_group.id))
-        .collect::<Vec<Path>>();
+        .collect::<Result<Vec<Path>, _>>()?;
 
     let gfa: Gfa<String, (), ()> = Gfa::parse_gfa_file(gfa_path);
 

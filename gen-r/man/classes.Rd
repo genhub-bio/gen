@@ -1,17 +1,14 @@
 \name{HashId}
 \alias{HashId}
-\alias{Block}
 \alias{GenPlot}
 \alias{Repository}
 \title{Constructors for Gen R Objects}
 \usage{
 HashId(hash_id)
 
-Block(node_id, sequence_start, sequence_end)
-
 GenPlot(
   db_path,
-  block_group_id,
+  sequence_graph_id,
   detail = "normal",
   rows = NULL,
   cols = NULL
@@ -22,15 +19,9 @@ Repository(path = NULL)
 \arguments{
   \item{hash_id}{Hash identifier string.}
 
-  \item{node_id}{Node identifier string or a \code{gen_hash_id} object.}
-
-  \item{sequence_start}{Start offset within a node sequence.}
-
-  \item{sequence_end}{End offset within a node sequence.}
-
   \item{db_path}{Path to a Gen SQLite database.}
 
-  \item{block_group_id}{Block group hash ID string or \code{gen_hash_id} object.}
+  \item{sequence_graph_id}{Sequence graph hash ID string or \code{gen_hash_id} object.}
 
   \item{detail}{Graph detail level: \code{"normal"}, \code{"full"}, or \code{"minimal"}.}
 
@@ -41,35 +32,38 @@ Repository(path = NULL)
   \item{path}{Optional workspace or \code{.gen} directory path for \code{Repository()}.}
 }
 \value{
-\code{HashId()} and \code{Block()} return lightweight S3 objects.
+\code{HashId()} returns a lightweight \code{gen_hash_id} S3 object.
 \code{GenPlot()} and \code{Repository()} return environment-backed
 helper objects with methods attached as fields.
 }
 \description{
 These constructors provide the main R-side object model for \pkg{genr}.
-\code{HashId()} and \code{Block()} are small value objects.
+\code{HashId()} is a small value object wrapping a hash string.
 \code{Repository()} opens a Gen workspace and exposes database and
-block-group helper methods. \code{GenPlot()} exposes stateful
-rendering and navigation methods for a single block group.
+sequence-graph helper methods. \code{GenPlot()} exposes stateful
+rendering and navigation methods for a single sequence graph.
+
+Graph nodes (\code{gen_node}) are obtained directly from
+\code{to_dict()$nodes[[i]]$key} and passed to
+\code{repo$get_node_sequence()}.
 }
 \details{
 \code{Repository()} exposes the methods \code{execute(query)},
-\code{query(query)}, \code{get_block_group_by_id(id)}, \code{get_block_groups()},
-\code{get_block_groups_by_collection(collection_name)},
-\code{block_group_to_dict(block_group)},
-\code{plot(block_group, rows = NULL, cols = NULL, detail = "normal")},
-\code{get_block_sequence(block)},
-\code{stitch(bgs, new_sample, new_region)},
-\code{build_index(bgs = NULL, sequence_kind = "dna", k = 16L)},
-\code{search(query, bgs = NULL, sequence_kind = "dna")}, and
-\code{clear_index(bgs = NULL)}.
+\code{query(query)}, \code{get_sequence_graph_by_id(id)}, \code{get_sequence_graphs()},
+\code{get_sequence_graphs_by_collection(collection_name)},
+\code{get_node_sequence(node)},
+\code{stitch(sgs, new_sample, new_region)},
+\code{build_index(sgs = NULL, sequence_kind = "dna", k = 16L)},
+\code{search(query, sgs = NULL, sequence_kind = "dna")}, and
+\code{clear_index(sgs = NULL)}.
 
-\code{BlockGroup} objects expose the methods
+\code{SequenceGraph} objects expose the methods
 \code{plot(rows = NULL, cols = NULL, detail = "normal")},
 \code{export_fasta(filename)}, \code{export_gfa(filename, node_max = NULL)},
 \code{export_genbank(filename)},
 \code{build_index(sequence_kind = "dna", k = 16L)},
-\code{search(query, sequence_kind = "dna")}, \code{clear_index()},
+\code{search(query, sequence_kind = "dna")}, \code{get_node_sequence(node)},
+\code{clear_index()},
 \code{subgraph(new_sample, start, end, backbone = NULL)}, and
 \code{chunks(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL)}.
 
@@ -80,14 +74,15 @@ rendering and navigation methods for a single block group.
 \examples{
 \dontrun{
 id <- HashId("abc123")
-key <- Block(id, 1, 4)
 
 repo <- Repository()
-groups <- repo$get_block_groups()
+graphs <- repo$get_sequence_graphs()
 
-if (length(groups) > 0) {
-  ctrl <- repo$plot(groups[[1]], rows = 12, cols = 40)
-  ctrl$render_frame(40, 12)
+if (length(graphs) > 0) {
+  p <- plot(graphs[[1]])
+
+  graph_dict <- graphs[[1]]$to_dict()
+  node_seq <- repo$get_node_sequence(graph_dict$nodes[[1]]$key)
 }
 }
 }

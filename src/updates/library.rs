@@ -551,7 +551,7 @@ mod tests {
             ])
         );
 
-        let path = BlockGroup::get_current_path(conn, &block_group.id);
+        let path = BlockGroup::get_current_path(conn, &block_group.id).unwrap();
         assert_eq!(
             path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()

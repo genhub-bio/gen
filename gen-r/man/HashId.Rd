@@ -14,5 +14,5 @@ A \code{gen_hash_id} list.
 }
 \description{
 Wraps a raw hash string as a typed \code{gen_hash_id} object used to
-identify block groups and nodes within the Gen database.
+identify sequence graphs and nodes within the Gen database.
 }

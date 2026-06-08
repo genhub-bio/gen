@@ -88,9 +88,11 @@ pub struct GraphEdge {
     pub created_on: i64,
 }
 
+/// A cursor within a GraphNode
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct GraphNodePosition {
     pub graph_node: GraphNode,
+    /// Distance from sequence_start of graph_node
     pub offset: i64,
 }
 
@@ -416,7 +418,7 @@ pub fn flatten_to_interval_tree(
         }
     }
 
-    let total_length = spans
+    let segment_length = spans
         .iter()
         .filter(|block| block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID)
         .map(|block| block.end)
@@ -426,7 +428,7 @@ pub fn flatten_to_interval_tree(
         .iter()
         .filter(|block| !remove_ambiguous_positions || !excluded_nodes.contains(&block.node_id))
         .map(|block| {
-            let block = normalize_sentinel_block(block, total_length);
+            let block = normalize_terminal_block(block, segment_length);
             (block.start..block.end, block)
         })
         .collect();
@@ -435,7 +437,7 @@ pub fn flatten_to_interval_tree(
 
 pub fn graph_from_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> GenGraph {
     let mut graph = GenGraph::new();
-    let total_length = tree
+    let tree_length = tree
         .iter()
         .map(|item| &item.value)
         .filter(|block| block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID)
@@ -444,7 +446,7 @@ pub fn graph_from_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> 
         .unwrap_or(0);
     let mut blocks: Vec<NodeIntervalBlock> = tree
         .iter()
-        .map(|item| normalize_sentinel_block(&item.value, total_length))
+        .map(|item| normalize_terminal_block(&item.value, tree_length))
         .collect();
     blocks.sort_by_key(|b| b.start);
 
@@ -487,7 +489,7 @@ pub fn graph_from_interval_tree(tree: &IntervalTree<i64, NodeIntervalBlock>) -> 
     graph
 }
 
-fn normalize_sentinel_block(block: &NodeIntervalBlock, total_length: i64) -> NodeIntervalBlock {
+fn normalize_terminal_block(block: &NodeIntervalBlock, total_length: i64) -> NodeIntervalBlock {
     if block.node_id == PATH_START_NODE_ID {
         NodeIntervalBlock {
             start: i64::MIN + 1,
@@ -1117,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_from_interval_tree_keeps_sentinels() {
+    fn test_graph_from_interval_tree_keeps_terminals() {
         let tree: IntervalTree<i64, NodeIntervalBlock> = vec![
             (
                 i64::MIN + 1..0,
@@ -1182,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flatten_to_interval_tree_normalizes_sentinel_bounds() {
+    fn test_flatten_to_interval_tree_normalizes_terminal_bounds() {
         let start_node = GraphNode {
             node_id: PATH_START_NODE_ID,
             sequence_start: 0,
@@ -1229,12 +1231,12 @@ mod tests {
             .iter()
             .map(|item| item.value)
             .find(|block| block.node_id == PATH_START_NODE_ID)
-            .expect("should contain start sentinel block");
+            .expect("should contain start terminal block");
         let end_block = tree
             .iter()
             .map(|item| item.value)
             .find(|block| block.node_id == PATH_END_NODE_ID)
-            .expect("should contain end sentinel block");
+            .expect("should contain end terminal block");
 
         assert_eq!(start_block.start, i64::MIN + 1);
         assert_eq!(start_block.end, 0);

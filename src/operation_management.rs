@@ -33,7 +33,10 @@ use gen_models::{
 };
 use log::info;
 use petgraph::Direction;
-use reqwest::blocking::{Client, multipart};
+use reqwest::{
+    StatusCode,
+    blocking::{Client, multipart},
+};
 use rusqlite::{self, Error as SQLError};
 use serde::Deserialize;
 use thiserror::Error;
@@ -851,6 +854,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
                     let manifest =
                         generator.generate_manifest(&current_branch.name, Some(&current_hash))?;
                     let diff = send_manifest_to_remote(remote_name, &remote_url, &manifest)?;
+                    println!("Manifest sent successfully to {remote_url}");
 
                     let auth_tokens = load_tokens(remote_name).map_err(|e| {
                         RemoteOperationError::AuthError(format!(
@@ -1083,6 +1087,8 @@ fn pull_from_remote_server(
             &manifest_operation.operation.hash,
         );
     }
+
+    println!("Pull succeeded from {remote_url}");
 
     Ok(())
 }
@@ -1354,6 +1360,12 @@ fn download_remote_operation_assets(
     let url = format!("{endpoint}/{}", manifest_operation.operation.hash);
     let response = client.get(url).bearer_auth(auth_token).send()?;
     let status = response.status();
+    if is_authorization_status(status) {
+        return Err(RemoteOperationError::AuthError(format!(
+            "Remote authorization failed while downloading manifest operation {} (HTTP {status}).",
+            manifest_operation.operation.hash
+        )));
+    }
     if !status.is_success() {
         return Err(RemoteOperationError::FileTransferError(
             "manifest_operation".to_string(),
@@ -1419,6 +1431,11 @@ fn download_binary(
 
     let mut response = request.send()?;
     let status = response.status();
+    if is_authorization_status(status) {
+        return Err(RemoteOperationError::AuthError(format!(
+            "Remote authorization failed while downloading {resource_name} (HTTP {status})."
+        )));
+    }
     if !status.is_success() {
         return Err(RemoteOperationError::FileTransferError(
             resource_name.to_string(),
@@ -1465,8 +1482,13 @@ fn send_manifest_to_remote(
         .body(buf)
         .send()?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if is_authorization_status(status) {
+        return Err(RemoteOperationError::AuthError(format!(
+            "Remote authorization failed while sending manifest to {remote_url} (HTTP {status})."
+        )));
+    }
+    if !status.is_success() {
         return Err(RemoteOperationError::FileTransferError(
             "manifest".to_string(),
             "local".to_string(),
@@ -1474,8 +1496,11 @@ fn send_manifest_to_remote(
         ));
     }
 
-    println!("Manifest sent successfully to {remote_url}");
     Ok(response.json()?)
+}
+
+fn is_authorization_status(status: StatusCode) -> bool {
+    matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
 }
 
 #[cfg(test)]

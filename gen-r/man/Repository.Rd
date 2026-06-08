@@ -7,53 +7,12 @@
 Repository(path = NULL)
 }
 \arguments{
-\item{path}{Character or \code{NULL}. Path to the workspace root.  When
-\code{NULL} the current working directory is used.}
+\item{path}{Character or \code{NULL}. Workspace root; defaults to the current
+working directory.}
 }
 \value{
-A \code{gen_repository} environment with the following methods:
-\describe{
-\item{\code{import_fasta(filename, sample="sample", shallow=FALSE, collection=NULL)}}{Import a FASTA file as a new block group.}
-\item{\code{import_gfa(filename, sample="sample", collection=NULL)}}{Import a GFA file.}
-\item{\code{import_genbank(filename, sample="sample", collection=NULL)}}{Import a GenBank file (plain or gzipped).}
-\item{\code{import_library(library_name, parts_list, sample=NULL, collection=NULL)}}{Import a combinatorial sequence library.}
-\item{\code{import_library_files(library_name, parts, library, sample="sample", collection=NULL)}}{Import a library from parts/library CSV files.}
-\item{\code{export_fasta(filename, sample=NULL, collection=NULL)}}{Export sequences to FASTA.}
-\item{\code{export_gfa(filename, sample, node_max=NULL, collection=NULL)}}{Export to GFA.}
-\item{\code{export_genbank(filename, sample, collection=NULL)}}{Export to GenBank.}
-\item{\code{update_with_fasta(filename, sample, new_sample, region_name, collection=NULL)}}{Apply a FASTA update to an existing block group.}
-\item{\code{update_with_gfa(filename, sample, new_sample, collection=NULL)}}{Apply a GFA update.}
-\item{\code{update_with_gaf(filename, csv, sample, parent_sample=NULL, collection=NULL)}}{Apply a GAF update.}
-\item{\code{update_with_vcf(filename, genotype=NULL, sample=NULL, parent_samples=character(), in_place=FALSE, collection=NULL)}}{Apply a VCF update.}
-\item{\code{update_with_genbank(filename, sample, create_missing=FALSE, collection=NULL)}}{Apply a GenBank update.}
-\item{\code{update_with_sequence(sequence, sample, new_sample, region_name, no_reference_path_update=FALSE, collection=NULL)}}{Apply a raw sequence update.}
-\item{\code{update_with_library(sample=NULL, new_sample_name, path_name, parts_list, collection=NULL)}}{Apply a library update.}
-\item{\code{update_with_library_files(sample, new_sample, path_name, library, parts, collection=NULL)}}{Apply a library-files update.}
-\item{\code{get_block_groups()}}{Return a list of all block groups.}
-\item{\code{get_block_group_by_id(id)}}{Return a block group by its \code{HashId}.}
-\item{\code{get_block_groups_by_collection(collection)}}{Return block groups in a collection.}
-\item{\code{get_block_sequence(block)}}{Return the sequence string for a \code{Block}.}
-\item{\code{plot(block_group, rows, cols, detail)}}{Return a \code{gen_plot} for a block group.}
-\item{\code{stitch(bgs, new_sample, new_region)}}{Concatenate a list of block groups end-to-end into a new block group.}
-\item{\code{derive_subgraph(sample, new_sample, region, backbone=NULL, collection=NULL)}}{Derive a subgraph block group.}
-\item{\code{derive_chunks(sample, new_sample, region, backbone=NULL, breakpoints=NULL, chunk_size=NULL, collection=NULL)}}{Split a block group into chunks.}
-\item{\code{build_index(bgs, sequence_kind, k)}}{Build a k-mer seed index to accelerate \code{search()}.}
-\item{\code{search(query, bgs = NULL, sequence_kind = "dna")}}{Search for exact sequence occurrences across block groups.
-Returns a list, one entry per block group that has at least one hit.  Each entry is a list with:
-\code{block_group} (a \code{gen_block_group}) and \code{matches} (a list of locus records).
-Each locus record has fields \code{start}, \code{end}, \code{blocks}, and \code{strand}.
-\code{start$block} is the first \code{gen_block} of the match; \code{start$offset} is the byte offset within that block's local sequence where the match begins (\code{0} = block start).
-\code{end$block} is the last \code{gen_block}; \code{end$offset} is the exclusive end offset within that block's local sequence.
-\code{blocks} is a list of every \code{gen_block} spanned by the match; middle blocks are fully covered.
-\code{strand} is one of \code{"forward"}, \code{"reverse"}, or \code{"unknown"}.
-Pass a match locus directly to \code{plot$goto_match()} or \code{plot$highlight_match()}.}
-\item{\code{clear_index(bgs)}}{Remove cached search index files.}
-\item{\code{execute(query)}}{Run a raw SQL statement against the graph database.}
-\item{\code{query(query)}}{Run a raw SQL query and return results as a list of rows.}
-}
+A \code{gen_repository} environment.
 }
 \description{
-The main entry point for working with a Gen sequence graph database.
-Discovers the \code{.gen/} directory from \code{path} (or the current
-working directory) and opens both the graph and operations databases.
+Open a Gen repository
 }

@@ -45,7 +45,8 @@ pub fn load_annotation_group_entries(
             &block_group.sample_name,
             &block_group.name,
             &ancestor_samples,
-        );
+        )
+        .unwrap_or_default();
         let mut grouped = HashMap::<String, Vec<BlockGroup>>::new();
         for ancestor_block_group in ancestor_block_groups {
             grouped

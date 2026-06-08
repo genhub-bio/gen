@@ -164,12 +164,8 @@ impl Operation {
         filename: &str,
         file_path: &str,
     ) -> Result<(), FileAdditionError> {
-        let file_path = OperationFile::storage_file_path(
-            workspace,
-            file_path,
-            &file_addition.checksum,
-            file_addition.file_type,
-        )?;
+        let file_path =
+            OperationFile::storage_file_path(workspace, file_path, &file_addition.checksum)?;
         let query = "INSERT INTO operation_files (operation_hash, file_addition_id, filename, file_path) VALUES (?1, ?2, ?3, ?4)";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![
@@ -407,7 +403,7 @@ impl OperationFileInfo {
     }
 
     pub fn hashed_filename(&self) -> String {
-        LocalAssetUri::asset_filename(&self.checksum, self.file_type)
+        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }
 }
 
@@ -442,10 +438,9 @@ impl OperationFile {
         workspace: &Workspace,
         path_or_uri: &str,
         checksum: &HashId,
-        file_type: FileTypes,
     ) -> Result<String, FileAdditionError> {
         if LocalAssetUri::is_local_path_or_file_uri(path_or_uri) {
-            LocalAssetUri::operation_file_path(workspace, path_or_uri, checksum, file_type)
+            LocalAssetUri::operation_file_path(workspace, path_or_uri, checksum)
         } else {
             Ok(path_or_uri.to_string())
         }
@@ -523,12 +518,8 @@ pub fn add_files_operation(
             let file_type = FileTypes::infer_from_path(path);
             let file_addition =
                 FileAddition::get_or_create(workspace, operation_conn, path, file_type, None)?;
-            let operation_file_path = OperationFile::storage_file_path(
-                workspace,
-                path,
-                &file_addition.checksum,
-                file_type,
-            )?;
+            let operation_file_path =
+                OperationFile::storage_file_path(workspace, path, &file_addition.checksum)?;
             Ok::<(FileAddition, String, String), FileAdditionError>((
                 file_addition,
                 OperationFile::new(path.clone()).filename,
@@ -669,8 +660,8 @@ impl FileAddition {
     ) -> Result<FileAddition, FileAdditionError> {
         let asset_uri = <dyn AssetUri>::new(workspace, file_path);
         let checksum = asset_uri.checksum(workspace, checksum_override)?;
-        let stored_asset_uri = asset_uri.stored_asset_uri(workspace, &checksum, file_type)?;
-        asset_uri.ensure_asset(workspace, &checksum, file_type)?;
+        let stored_asset_uri = asset_uri.stored_asset_uri(workspace, &checksum)?;
+        asset_uri.ensure_asset(workspace, &checksum)?;
 
         let id = LocalAssetUri::generate_file_addition_id(&checksum, &stored_asset_uri);
 
@@ -744,7 +735,7 @@ impl FileAddition {
     }
 
     pub fn hashed_filename(self) -> String {
-        LocalAssetUri::asset_filename(&self.checksum, self.file_type)
+        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }
 }
 
@@ -2732,11 +2723,63 @@ mod tests {
             context.workspace(),
             &absolute_path.to_string_lossy(),
             &checksum,
-            FileTypes::Fasta,
         )
         .unwrap();
 
         assert_eq!(storage_path, "nested/sample.fa");
+    }
+
+    #[test]
+    fn operation_add_file_keeps_compression_suffix_for_asset_path() {
+        let context = setup_gen();
+        let operation_conn = context.operations().conn();
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/simple.fa.bgz");
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_path = outside_dir.path().join("simple.fa.bgz");
+        fs::copy(&fixture_path, &outside_path).unwrap();
+        let outside_path_string = outside_path.to_string_lossy().to_string();
+
+        let file_addition = FileAddition::get_or_create(
+            context.workspace(),
+            operation_conn,
+            &outside_path_string,
+            FileTypes::Fasta,
+            None,
+        )
+        .unwrap();
+        let operation_hash = HashId(calculate_hash("compressed-file-operation"));
+        let operation = Operation::create_without_tracking(
+            operation_conn,
+            &operation_hash,
+            "add-file",
+            None,
+            None,
+        )
+        .unwrap();
+
+        Operation::add_file(
+            context.workspace(),
+            operation_conn,
+            &operation.hash,
+            &file_addition,
+            "simple.fa.bgz",
+            &outside_path_string,
+        )
+        .unwrap();
+
+        let operation_files =
+            OperationFile::get_files_for_operation(operation_conn, &operation.hash).unwrap();
+
+        assert_eq!(operation_files[0].filename, "simple.fa.bgz");
+        assert_eq!(
+            operation_files[0].file_path,
+            format!(".gen/assets/{}.fa.bgz", file_addition.checksum),
+        );
+        assert_eq!(
+            operation_files[0].asset_uri,
+            LocalAssetUri::asset_uri(&format!(".gen/assets/{}.fa.bgz", file_addition.checksum)),
+        );
     }
 
     #[test]
@@ -2758,10 +2801,7 @@ mod tests {
         .expect("Failed to create FileAddition");
 
         let checksum = calculate_file_checksum(&file1_path_str).unwrap();
-        let expected_asset_path = format!(
-            ".gen/assets/{checksum}.{}",
-            FileTypes::suffix(FileTypes::Fasta)
-        );
+        let expected_asset_path = format!(".gen/assets/{checksum}.txt");
         assert_eq!(
             fa1.asset_uri,
             LocalAssetUri::asset_uri(&expected_asset_path)
@@ -2828,10 +2868,10 @@ mod tests {
         outside_file.flush().unwrap();
         let outside_path = outside_file.path().to_string_lossy().to_string();
         let outside_checksum = calculate_file_checksum(outside_file.path()).unwrap();
-        let outside_asset_path = format!(
-            ".gen/assets/{outside_checksum}.{}",
-            FileTypes::suffix(FileTypes::Fasta)
-        );
+        let outside_suffix = LocalAssetUri::new(&outside_file.path().to_string_lossy())
+            .suffix()
+            .unwrap();
+        let outside_asset_path = format!(".gen/assets/{outside_checksum}.{outside_suffix}");
 
         let outside = FileAddition::get_or_create(
             context.workspace(),
@@ -2875,12 +2915,10 @@ mod tests {
         assert_eq!(addition.asset_uri, asset_uri);
         assert_eq!(addition.file_path(), asset_uri);
         assert!(
-            !context
-                .workspace()
-                .asset_dir()
+            fs::read_dir(context.workspace().asset_dir().unwrap())
                 .unwrap()
-                .join(addition.clone().hashed_filename())
-                .exists()
+                .next()
+                .is_none()
         );
     }
 

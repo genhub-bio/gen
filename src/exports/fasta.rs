@@ -1,7 +1,10 @@
 use std::{fs::File, path::PathBuf};
 
 use gen_models::{
-    block_group::BlockGroup, collection::Collection, db::GraphConnection, errors::PathError,
+    block_group::{BlockGroup, BlockGroupError},
+    collection::Collection,
+    db::GraphConnection,
+    errors::PathError,
     sample::Sample,
 };
 use noodles::fasta;
@@ -13,6 +16,8 @@ pub enum FastaExportError {
     Io(#[from] std::io::Error),
     #[error("Path error while exporting FASTA: {0}")]
     Path(#[from] PathError),
+    #[error("Block group error while exporting FASTA: {0}")]
+    BlockGroup(#[from] BlockGroupError),
 }
 
 pub fn export_fasta(
@@ -31,7 +36,7 @@ pub fn export_fasta(
     let mut writer = fasta::io::Writer::new(file);
 
     for block_group in block_groups {
-        let path = BlockGroup::get_current_path(conn, &block_group.id);
+        let path = BlockGroup::get_current_path(conn, &block_group.id)?;
 
         let definition = fasta::record::Definition::new(block_group.name, None);
         let sequence = fasta::record::Sequence::from(path.sequence(conn)?.into_bytes());

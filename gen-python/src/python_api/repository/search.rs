@@ -6,24 +6,24 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;
 use crate::python_api::{
-    block_group::{PyBlockGroup, parse_sequence_kind},
+    block_group::{PySequenceGraph, parse_sequence_kind},
     graph_search::PyGraphLocus,
     utils::block_group_err_to_pyerr,
 };
 
 #[pymethods]
 impl PyRepository {
-    /// Build a junction-aware k-mer seed index for `block_group` and save it
+    /// Build a junction-aware k-mer seed index for a sequence graph and save it
     /// to `.gen/search_index/{block_group_id}.bin`.
     ///
-    /// If `block_groups` is None or empty, indexes all block groups.
+    /// If `sgs` is None or empty, indexes all sequence graphs.
     /// Subsequent calls to `search()` will load this index automatically.
     #[pyo3(signature = (sequence_kind="dna", k=16, bgs=None))]
     pub fn build_index(
         &self,
         sequence_kind: &str,
         k: usize,
-        bgs: Option<Vec<PyBlockGroup>>,
+        bgs: Option<Vec<PySequenceGraph>>,
     ) -> PyResult<()> {
         let kind = parse_sequence_kind(sequence_kind)?;
         let normalized = kind != SequenceKind::Exact;
@@ -60,14 +60,14 @@ impl PyRepository {
 
     /// Search for exact occurrences of `query`.
     ///
-    /// Returns a list of tuples `(block_group, matches)` where:
-    ///   - `block_group` is a `PyBlockGroup` object
+    /// Returns a list of `(SequenceGraph, list[Locus])` tuples — one entry per
+    ///   - graph that contains at least one match
     ///   - `matches` is a list of `GraphLocus` objects. Each locus exposes:
     ///       - `.start()` / `.end()` → `GraphPos` (node + byte offset) — pass
     ///         directly to `widget.go_to()`
     ///       - `.slices` → `list[NodeSlice]`
     ///
-    /// If `bgs` is None or empty, searches all block groups.
+    /// If `sgs` is None or empty, searches all sequence graphs.
     /// If a seed index was previously built with `build_index()`, it is loaded
     /// automatically to accelerate the search. Falls back to a full scan
     /// when no index is found.
@@ -75,9 +75,9 @@ impl PyRepository {
     pub fn search(
         &self,
         query: &str,
-        bgs: Option<Vec<PyBlockGroup>>,
+        bgs: Option<Vec<PySequenceGraph>>,
         sequence_kind: &str,
-    ) -> PyResult<Vec<(PyBlockGroup, Vec<PyGraphLocus>)>> {
+    ) -> PyResult<Vec<(PySequenceGraph, Vec<PyGraphLocus>)>> {
         let kind = parse_sequence_kind(sequence_kind)?;
         let conn = self.context.graph().conn();
 
@@ -124,10 +124,10 @@ impl PyRepository {
 
     /// Clear the search index cache.
     ///
-    /// If `block_groups` is None or empty, clears all indices in `.gen/search_index/`.
-    /// Otherwise, clears only the specified block group indices.
+    /// If `sgs` is None or empty, clears all indices in `.gen/search_index/`.
+    /// Otherwise, clears only the specified sequence graph indices.
     #[pyo3(signature = (bgs=None))]
-    pub fn clear_index(&self, bgs: Option<Vec<PyBlockGroup>>) -> PyResult<()> {
+    pub fn clear_index(&self, bgs: Option<Vec<PySequenceGraph>>) -> PyResult<()> {
         let index_dir = self
             .context
             .workspace()

@@ -291,7 +291,12 @@ impl BlockGroup {
         }
     }
 
-    pub fn delete(conn: &GraphConnection, collection_name: &str, sample_name: &str, name: &str) {
+    pub fn delete(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        name: &str,
+    ) -> Result<(), BlockGroupError> {
         let query = "delete from block_groups where collection_name = ?1 and sample_name = ?2 and name = ?3;";
         conn.execute(
             query,
@@ -300,8 +305,8 @@ impl BlockGroup {
                 sample_name.to_string(),
                 name.to_string()
             ],
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
     pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> Result<BlockGroup, BlockGroupError> {
@@ -324,8 +329,8 @@ impl BlockGroup {
     pub fn get_reference_block_groups(
         conn: &GraphConnection,
         collection_name: &str,
-    ) -> Vec<BlockGroup> {
-        BlockGroup::query(
+    ) -> Result<Vec<BlockGroup>, BlockGroupError> {
+        BlockGroup::try_query(
             conn,
             "select bg.*
              from block_groups bg
@@ -334,6 +339,7 @@ impl BlockGroup {
              order by bg.name, bg.sample_name, bg.created_on, bg.id;",
             params![collection_name],
         )
+        .map_err(BlockGroupError::from)
     }
 
     fn copy_paths_and_accessions_into(
@@ -383,7 +389,7 @@ impl BlockGroup {
             sample_name,
             group_name,
             &parent_samples,
-        );
+        )?;
 
         if parent_block_groups.is_empty() {
             return Ok(vec![BlockGroup::create(
@@ -422,17 +428,17 @@ impl BlockGroup {
         sample_name: &str,
         group_name: &str,
         parent_samples: &[String],
-    ) -> Vec<BlockGroup> {
+    ) -> Result<Vec<BlockGroup>, BlockGroupError> {
         let parent_samples = if parent_samples.is_empty() {
             Sample::get_parent_names(conn, sample_name)
         } else {
             parent_samples.to_vec()
         };
         if parent_samples.is_empty() {
-            return vec![];
+            return Ok(vec![]);
         }
 
-        BlockGroup::query(
+        BlockGroup::try_query(
             conn,
             "select * from block_groups
              where collection_name = ?1 AND sample_name IN rarray(?2) AND name = ?3
@@ -449,6 +455,7 @@ impl BlockGroup {
                 group_name
             ],
         )
+        .map_err(BlockGroupError::from)
     }
 
     fn copy_contents_from(
@@ -495,6 +502,8 @@ impl BlockGroup {
         Ok(graph)
     }
 
+    /// Build a graph from a set of known edges. If a source or target node is unknown, the graph
+    /// will expand out automatically to cover it.
     pub fn get_graph_from_edges(
         conn: &GraphConnection,
         block_group_id: &HashId,
@@ -1082,33 +1091,40 @@ impl BlockGroup {
         Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
     }
 
-    pub fn get_current_path(conn: &GraphConnection, block_group_id: &HashId) -> Path {
-        let paths = Path::query(
+    pub fn get_current_path(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+    ) -> Result<Path, BlockGroupError> {
+        let paths = Path::try_query(
             conn,
             "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
             params![block_group_id],
-        );
-        paths[0].clone()
+        )?;
+        paths.first().cloned().ok_or_else(|| {
+            BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
+                "No current path found for block group {block_group_id}"
+            )))
+        })
     }
 
     pub fn get_path_by_name(
         conn: &GraphConnection,
         block_group_id: &HashId,
         path_name: &str,
-    ) -> Option<Path> {
-        let paths = Path::query(
+    ) -> Result<Option<Path>, BlockGroupError> {
+        let paths = Path::try_query(
             conn,
             "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
             params![block_group_id],
-        );
+        )?;
 
         for path in &paths {
             if path.name == path_name {
-                return Some(path.clone());
+                return Ok(Some(path.clone()));
             }
         }
 
-        None
+        Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1541,7 +1557,7 @@ mod tests {
         let bg1 = create_bg(conn, "test", "sample1", "hg19");
         let bg2 = create_bg(conn, "test", "sample2", "hg19");
 
-        BlockGroup::delete(conn, "test", &bg1.sample_name, &bg1.name);
+        BlockGroup::delete(conn, "test", &bg1.sample_name, &bg1.name).unwrap();
 
         let bgs = BlockGroup::all(conn);
         assert_eq!(bgs.len(), 1);
