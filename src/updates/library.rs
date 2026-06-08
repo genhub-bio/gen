@@ -2,23 +2,29 @@ use core::ops::Range;
 use std::str;
 
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::BlockGroup,
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
-    errors::{BlockGroupError, PathError},
+    edge::Edge,
+    errors::{BlockGroupError, PathError, SampleError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
-    region::{GenRegionError, Region, resolve_path},
+    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
 };
 use thiserror::Error;
 
-use crate::graphs::{
-    BlockGroupChunk,
-    combinatorial_library::{
-        CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
-        create_library,
+use crate::{
+    graphs::{
+        BlockGroupChunk, NodePoint,
+        combinatorial_library::{
+            CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
+            create_library,
+        },
+        operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
+        stitch,
     },
-    operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
+    updates::resolve_update_region,
 };
 
 #[derive(Error, Debug)]
@@ -29,6 +35,12 @@ pub enum UpdateWithLibraryError {
     BlockGroupCreationFailed(#[from] BlockGroupError),
     #[error("Failed to create output graph(s)")]
     GraphOperation(GraphOperationError),
+    #[error("Graph error: {0}")]
+    Graph(#[from] crate::graphs::GraphError),
+    #[error("Graph resolution error: {0}")]
+    GraphResolution(#[from] gen_graph::GraphError),
+    #[error("Sample error: {0}")]
+    Sample(#[from] SampleError),
     #[error("Failed to read path")]
     Path(#[from] PathError),
     #[error("Failed to parse library files")]
@@ -82,32 +94,138 @@ pub fn update_with_library(
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
-        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
-            Ok(region) => region,
-            Err(GenRegionError::NotFound(_)) => {
-                return Err(GenRegionError::NotFound(region_name.to_string()).into());
-            }
-            Err(err) => return Err(err.into()),
-        };
-    let (start_coordinate, end_coordinate) =
-        if parsed_region.start.is_some() || parsed_region.end.is_some() {
-            (resolved_region.start, resolved_region.end)
-        } else {
-            return Err(UpdateWithLibraryError::MissingCoordinates(
-                region_name.to_string(),
-            ));
-        };
+        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
 
-    let _new_sample = Sample::get_or_create(
-        conn,
-        gen_models::sample::NewSample {
-            name: new_sample_name,
-            ..Default::default()
+    update_graph_with_library(
+        context,
+        collection_name,
+        parent_sample_name,
+        new_sample_name,
+        &resolved_region,
+        parts_list,
+    )?;
+
+    let files = operation_files(library_file_path, parts_file_path);
+    let summary_str = format!("{region_name} created.\n");
+    gen_models::session_operations::end_operation(
+        context,
+        &mut session,
+        &OperationInfo {
+            files,
+            description: "library_csv_update".to_string(),
         },
-    );
+        &summary_str,
+        None,
+    )
+    .unwrap();
+
+    Ok(())
+}
+
+fn update_graph_with_library(
+    context: &DbContext,
+    collection_name: &str,
+    parent_sample_name: &str,
+    new_sample_name: &str,
+    resolved_region: &ResolvedGenRegion,
+    parts_list: Vec<Vec<SequencePart>>,
+) -> Result<(), UpdateWithLibraryError> {
+    let conn = context.graph().conn();
+    let target_block_groups = target_library_block_groups(
+        conn,
+        collection_name,
+        parent_sample_name,
+        new_sample_name,
+        resolved_region,
+    )?;
+
+    for target_block_group in target_block_groups {
+        let mut target_region = resolved_region.clone();
+        target_region.block_group = target_block_group.clone();
+
+        match target_region.kind {
+            ResolvedRegionKind::Path => update_path_library(
+                context,
+                collection_name,
+                parent_sample_name,
+                new_sample_name,
+                &target_region,
+                &target_block_group,
+                parts_list.clone(),
+            )?,
+            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {
+                update_graph_native_library(
+                    conn,
+                    new_sample_name,
+                    &target_region,
+                    &target_block_group,
+                    parts_list.clone(),
+                )?;
+            }
+            kind => {
+                return Err(UpdateWithLibraryError::UnsupportedRegionType(format!(
+                    "{kind:?}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn target_library_block_groups(
+    conn: &gen_models::db::GraphConnection,
+    collection_name: &str,
+    parent_sample_name: &str,
+    new_sample_name: &str,
+    resolved_region: &ResolvedGenRegion,
+) -> Result<Vec<BlockGroup>, UpdateWithLibraryError> {
+    let _new_sample = Sample::get_or_create_child(
+        conn,
+        collection_name,
+        new_sample_name,
+        vec![parent_sample_name.to_string()],
+    )?;
+    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
+
+    let mut target_block_groups = vec![];
+    for block_group in block_groups {
+        let new_block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            collection_name,
+            new_sample_name,
+            &block_group.name,
+            vec![parent_sample_name.to_string()],
+        )?;
+
+        if block_group.name == resolved_region.block_group.name {
+            target_block_groups = new_block_groups;
+        }
+    }
+
+    if target_block_groups.is_empty() {
+        return Err(UpdateWithLibraryError::Region(GenRegionError::NotFound(
+            resolved_region.block_group.name.clone(),
+        )));
+    }
+
+    Ok(target_block_groups)
+}
+
+fn update_path_library(
+    context: &DbContext,
+    collection_name: &str,
+    parent_sample_name: &str,
+    new_sample_name: &str,
+    resolved_region: &ResolvedGenRegion,
+    target_block_group: &BlockGroup,
+    parts_list: Vec<Vec<SequencePart>>,
+) -> Result<(), UpdateWithLibraryError> {
+    let conn = context.graph().conn();
     let parent_path = resolved_region.path.clone().unwrap();
     let parent_path_length = parent_path.length(conn)?;
-
+    let start_coordinate = resolved_region.start;
+    let end_coordinate = resolved_region.end;
     let mut chunk_ranges = vec![];
     if start_coordinate > 0 {
         chunk_ranges.push(Range {
@@ -126,16 +244,6 @@ pub fn update_with_library(
         });
     }
 
-    let child_block_group = BlockGroup::create(
-        conn,
-        NewBlockGroup {
-            collection_name,
-            sample_name: new_sample_name,
-            name: new_sample_name,
-            ..Default::default()
-        },
-    )?;
-
     let derived_block_group_chunks = derive_chunks(
         context,
         collection_name,
@@ -144,13 +252,13 @@ pub fn update_with_library(
         &resolved_region.block_group.name,
         None,
         chunk_ranges,
-        Some(child_block_group.id),
+        Some(target_block_group.id),
         false,
     )?;
 
     let library_block_group_chunk = create_library(
         conn,
-        child_block_group.id,
+        target_block_group.id,
         new_sample_name,
         parts_list,
         false,
@@ -193,20 +301,12 @@ pub fn update_with_library(
         block_group_chunks.push(pathless_end_chunk);
     }
 
-    let _new_sample = Sample::get_or_create(
-        conn,
-        gen_models::sample::NewSample {
-            name: new_sample_name,
-            ..Default::default()
-        },
-    );
-
     // Create (re-create) the reference sequence/path out of the derived chunks,
     // in the child block group
     make_stitch_from_block_groups(
         context,
         &reference_block_group_chunks,
-        child_block_group.id,
+        target_block_group.id,
         new_sample_name,
     )?;
 
@@ -214,10 +314,59 @@ pub fn update_with_library(
     make_stitch_from_block_groups(
         context,
         &block_group_chunks,
-        child_block_group.id,
+        target_block_group.id,
         new_sample_name,
     )?;
 
+    Ok(())
+}
+
+fn update_graph_native_library(
+    conn: &gen_models::db::GraphConnection,
+    new_sample_name: &str,
+    resolved_region: &ResolvedGenRegion,
+    target_block_group: &BlockGroup,
+    parts_list: Vec<Vec<SequencePart>>,
+) -> Result<(), UpdateWithLibraryError> {
+    let resolved = resolved_region
+        .find_graph_positions(conn, 0, 0)
+        .map_err(UpdateWithLibraryError::from)?;
+    let start_positions = resolved.start_anchors.as_ref().unwrap();
+    let end_positions = resolved.end_anchors.as_ref().unwrap();
+    let library_chunk = create_library(
+        conn,
+        target_block_group.id,
+        new_sample_name,
+        parts_list,
+        false,
+    )?;
+    let start_chunk = BlockGroupChunk {
+        entry_node_points: graph_node_positions_to_points(start_positions),
+        exit_node_points: graph_node_positions_to_points(start_positions),
+        path_edges: vec![],
+        path_start_point: None,
+        path_end_point: None,
+    };
+    let end_chunk = BlockGroupChunk {
+        entry_node_points: graph_node_positions_to_points(end_positions),
+        exit_node_points: graph_node_positions_to_points(end_positions),
+        path_edges: vec![],
+        path_start_point: None,
+        path_end_point: None,
+    };
+
+    let stitched_start = stitch(conn, &start_chunk, &library_chunk, target_block_group.id)?;
+    let _stitched_end = stitch(conn, &stitched_start, &end_chunk, target_block_group.id)?;
+    preserve_library_boundary_points(conn, target_block_group.id, start_positions)?;
+    preserve_library_boundary_points(conn, target_block_group.id, end_positions)?;
+
+    Ok(())
+}
+
+fn operation_files(
+    library_file_path: Option<&str>,
+    parts_file_path: Option<&str>,
+) -> Vec<OperationFile> {
     let mut files = vec![];
     if let Some(library_file_path) = library_file_path {
         files.push(OperationFile::new(library_file_path.to_string()).set_file_type(FileTypes::CSV));
@@ -225,20 +374,51 @@ pub fn update_with_library(
     if let Some(parts_file_path) = parts_file_path {
         files.push(OperationFile::new(parts_file_path.to_string()).set_file_type(FileTypes::Fasta));
     }
+    files
+}
 
-    let summary_str = format!("{region_name} created.\n");
-    gen_models::session_operations::end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
-            files,
-            description: "library_csv_update".to_string(),
-        },
-        &summary_str,
-        None,
-    )
-    .unwrap();
+fn graph_node_positions_to_points(positions: &[gen_graph::GraphNodePosition]) -> Vec<NodePoint> {
+    positions
+        .iter()
+        .map(|position| NodePoint {
+            id: position.graph_node.node_id,
+            coordinate: position.coordinate(),
+            strand: gen_core::Strand::Forward,
+        })
+        .collect()
+}
 
+/// Creates an edge at a given set of positions. Used for splitting the graph at start/end boundaries.
+fn preserve_library_boundary_points(
+    conn: &gen_models::db::GraphConnection,
+    block_group_id: gen_core::HashId,
+    positions: &[gen_graph::GraphNodePosition],
+) -> Result<(), UpdateWithLibraryError> {
+    let edge_data = positions
+        .iter()
+        .map(|position| {
+            let coordinate = position.coordinate();
+            gen_models::edge::EdgeData {
+                source_node_id: position.graph_node.node_id,
+                source_coordinate: coordinate,
+                source_strand: gen_core::Strand::Forward,
+                target_node_id: position.graph_node.node_id,
+                target_coordinate: coordinate,
+                target_strand: gen_core::Strand::Forward,
+            }
+        })
+        .collect::<Vec<_>>();
+    let edge_ids = Edge::bulk_create(conn, &edge_data);
+    let block_group_edges = edge_ids
+        .iter()
+        .map(|edge_id| BlockGroupEdgeData {
+            block_group_id,
+            edge_id: *edge_id,
+            chromosome_index: 0,
+            phased: 0,
+        })
+        .collect::<Vec<_>>();
+    BlockGroupEdge::bulk_create(conn, &block_group_edges);
     Ok(())
 }
 
@@ -247,7 +427,10 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use anyhow::Result;
-    use gen_models::block_group::BlockGroup;
+    use gen_models::{
+        annotations::add_annotation, block_group::BlockGroup, path::Path,
+        sample_lineage::SampleLineage,
+    };
 
     use super::*;
     use crate::{
@@ -372,6 +555,119 @@ mod tests {
         assert_eq!(
             path.sequence(conn).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
+        );
+        assert_eq!(
+            SampleLineage::get_parents(conn, "new sample"),
+            vec![Sample::DEFAULT_NAME.to_string()]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotation_update_does_not_require_target_path() -> Result<()> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "simple",
+            false,
+        )
+        .unwrap();
+        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+
+        Sample::get_or_create_child(conn, &collection, "derived", vec!["simple".to_string()])
+            .unwrap();
+        let derived_block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
+        Path::delete(conn, "m123", &derived_block_group.id);
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
+
+        update_with_library(
+            &context,
+            &collection,
+            "simple",
+            "derived",
+            "foobar:-3-5",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )?;
+
+        let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATAAAACGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATTAATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCAACCGATCGATCGGGAACACACAGAGA".to_string(),
+            ])
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotation_update_can_use_resolved_bounds() -> Result<()> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "simple",
+            false,
+        )
+        .unwrap();
+        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/single_column_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path)?;
+
+        update_with_library(
+            &context,
+            &collection,
+            "simple",
+            "derived",
+            "foobar",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )?;
+
+        let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            HashSet::from_iter(vec![
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCGAAAAAGGAACACACAGAGA".to_string(),
+                "ATCGATAATGGAACACACAGAGA".to_string(),
+                "ATCGACAACGGAACACACAGAGA".to_string(),
+            ])
         );
 
         Ok(())

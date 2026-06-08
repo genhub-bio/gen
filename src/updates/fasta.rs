@@ -1,14 +1,14 @@
 use std::str;
 
-use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
+use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, PathChange},
+    block_group::BlockGroup,
     db::DbContext,
     edge::Edge,
     file_types::FileTypes,
     node::Node,
     operations::{Operation, OperationFile, OperationInfo},
-    region::{GenRegionError, Region, resolve_path},
+    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
     traits::*,
@@ -16,7 +16,12 @@ use gen_models::{
 use noodles::fasta;
 use rusqlite::{self, types::Value as SQLValue};
 
-use crate::fasta::FastaError;
+use crate::{
+    fasta::FastaError,
+    updates::{
+        InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
+    },
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_fasta(
@@ -32,13 +37,7 @@ pub fn update_with_fasta(
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
-        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
-            Ok(region) => region,
-            Err(GenRegionError::NotFound(_)) => {
-                return Err(GenRegionError::NotFound(region_name.to_string()).into());
-            }
-            Err(err) => return Err(err.into()),
-        };
+        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
     let (start_coordinate, end_coordinate) =
         if parsed_region.start.is_some() || parsed_region.end.is_some() {
             (resolved_region.start, resolved_region.end)
@@ -48,13 +47,12 @@ pub fn update_with_fasta(
 
     let mut fasta_reader = fasta::io::reader::Builder.build_from_path(fasta_file_path)?;
 
-    let _new_sample = Sample::get_or_create(
+    let _new_sample = Sample::get_or_create_child(
         conn,
-        gen_models::sample::NewSample {
-            name: new_sample_name,
-            ..Default::default()
-        },
-    );
+        collection_name,
+        new_sample_name,
+        vec![parent_sample_name.to_string()],
+    )?;
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
     let mut target_block_groups = vec![];
@@ -78,14 +76,18 @@ pub fn update_with_fasta(
 
     struct TargetBlockGroupState {
         block_group_id: HashId,
-        path: gen_models::path::Path,
+        path: Option<gen_models::path::Path>,
         first_node: Option<HashId>,
     }
 
     let mut target_states = target_block_groups
         .iter()
         .map(|target_block_group| -> Result<_, FastaError> {
-            let path = BlockGroup::get_current_path(conn, &target_block_group.id)?;
+            let path = if resolved_region.kind == ResolvedRegionKind::Path {
+                Some(BlockGroup::get_current_path(conn, &target_block_group.id)?)
+            } else {
+                None
+            };
             Ok(TargetBlockGroupState {
                 block_group_id: target_block_group.id,
                 path,
@@ -113,19 +115,13 @@ pub fn update_with_fasta(
                     strand: Strand::Forward,
                 };
 
-                let path_change = PathChange {
-                    block_group_id: state.block_group_id,
-                    intervaltree_source: state.path.clone(),
-                    path_accession: None,
-                    start: start_coordinate,
-                    end: end_coordinate,
-                    block: path_block,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                    preserve_edge: true,
-                };
-
-                BlockGroup::insert_change(conn, &path_change).unwrap();
+                insert_fasta_change(
+                    conn,
+                    &resolved_region,
+                    state.block_group_id,
+                    state.path.as_ref(),
+                    path_block,
+                )?;
                 if index == 0 {
                     state.first_node = Some(node_id);
                 } else if state.first_node.is_some() {
@@ -140,8 +136,8 @@ pub fn update_with_fasta(
                     conn,
                     &seq.hash,
                     &HashId::convert_str(&format!(
-                        "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                        path_id = state.path.id,
+                        "{block_group_id}:{ref_start}-{ref_end}->{sequence_hash}",
+                        block_group_id = state.block_group_id,
                         ref_start = 0,
                         ref_end = seq.length,
                         sequence_hash = seq.hash
@@ -158,19 +154,13 @@ pub fn update_with_fasta(
                     strand: Strand::Forward,
                 };
 
-                let path_change = PathChange {
-                    block_group_id: state.block_group_id,
-                    intervaltree_source: state.path.clone(),
-                    path_accession: None,
-                    start: start_coordinate,
-                    end: end_coordinate,
-                    block: path_block,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                    preserve_edge: true,
-                };
-
-                BlockGroup::insert_change(conn, &path_change).unwrap();
+                insert_fasta_change(
+                    conn,
+                    &resolved_region,
+                    state.block_group_id,
+                    state.path.as_ref(),
+                    path_block,
+                )?;
                 if index == 0 {
                     state.first_node = Some(node_id);
                 } else if state.first_node.is_some() {
@@ -182,11 +172,13 @@ pub fn update_with_fasta(
     }
 
     for state in target_states {
-        if !disable_reference_path_update && let Some(node_id) = state.first_node {
+        if !disable_reference_path_update
+            && resolved_region.kind == ResolvedRegionKind::Path
+            && let Some(node_id) = state.first_node
+            && let Some(path) = state.path
+        {
             if node_id == HashId::convert_str("") {
-                let _ = state
-                    .path
-                    .new_path_with_deletion(conn, start_coordinate, end_coordinate);
+                let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
             } else {
                 let edge_to_new_node = Edge::query(
                     conn,
@@ -200,7 +192,7 @@ pub fn update_with_fasta(
                     rusqlite::params!(SQLValue::from(node_id)),
                 )[0]
                 .clone();
-                state.path.new_path_with(
+                path.new_path_with(
                     conn,
                     start_coordinate,
                     end_coordinate,
@@ -231,10 +223,26 @@ pub fn update_with_fasta(
     Ok(op)
 }
 
+fn insert_fasta_change(
+    conn: &gen_models::db::GraphConnection,
+    region: &ResolvedGenRegion,
+    target_block_group_id: HashId,
+    path: Option<&gen_models::path::Path>,
+    block: PathBlock,
+) -> Result<(), FastaError> {
+    let source = target_update_region(conn, region, target_block_group_id, path)?;
+    let data = InsertChangeData::new(block);
+    insert_update_change(conn, source, data)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use std::{collections::HashSet, path::PathBuf};
+    use std::{collections::HashSet, io::Write, path::PathBuf};
+
+    use gen_models::{annotations::add_annotation, path::Path};
+    use tempfile::NamedTempFile;
 
     use super::*;
     use crate::{
@@ -758,6 +766,55 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
             HashSet::from_iter(expected_sequences),
+        );
+    }
+
+    #[test]
+    fn update_with_fasta_accepts_annotation_region_without_target_path() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "simple",
+            false,
+        )
+        .unwrap();
+        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+
+        Sample::get_or_create_child(conn, &collection, "derived", vec!["simple".to_string()])
+            .unwrap();
+        let derived_block_group = get_sample_bg(conn, &collection, "derived");
+        Path::delete(conn, "m123", &derived_block_group.id);
+
+        let mut update_fasta = NamedTempFile::new().unwrap();
+        update_fasta.write_all(b">update\nAAA\n").unwrap();
+
+        let result = update_with_fasta(
+            &context,
+            &collection,
+            "simple",
+            "derived",
+            "foobar:-3-5",
+            update_fasta.path().to_str().unwrap(),
+            false,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        let block_group = get_sample_bg(conn, &collection, "derived");
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            HashSet::from_iter([
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATAAACGATCGATCGGGAACACACAGAGA".to_string(),
+            ])
         );
     }
 

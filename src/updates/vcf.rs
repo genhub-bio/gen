@@ -4,11 +4,9 @@ use std::{
     io, str,
 };
 
-use gen_core::{HashId, PathBlock, Strand};
+use gen_core::{HashId, NodeIntervalBlock, PathBlock, Strand};
 use gen_models::{
-    block_group::{
-        BlockGroup, BlockGroupChange, BlockGroupData, BlockGroupTreeSource, PathCache, PathChange,
-    },
+    block_group::{BlockGroup, BlockGroupChange, BlockGroupData, PathCache},
     db::{DbContext, GraphConnection},
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
     file_types::FileTypes,
@@ -16,10 +14,12 @@ use gen_models::{
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     reference_alias::ReferenceAlias,
+    region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
 };
+use intervaltree::IntervalTree;
 use noodles::{
     vcf,
     vcf::variant::{
@@ -140,6 +140,7 @@ impl<'a> SequenceCache<'_> {
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_change(
+    conn: &GraphConnection,
     sample_bg_id: &HashId,
     sample_path: &Path,
     ids: Option<String>,
@@ -151,8 +152,7 @@ fn prepare_change(
     sequence_length: i64,
     node_id: HashId,
     preserve_edge: bool,
-) -> PathChange {
-    // TODO: new sequence may not be real and be <DEL> or some sort. Handle these.
+) -> Result<BlockGroupChange, BlockGroupError> {
     let new_block = PathBlock {
         node_id,
         block_sequence,
@@ -162,17 +162,16 @@ fn prepare_change(
         path_end: ref_end,
         strand: Strand::Forward,
     };
-    PathChange {
-        block_group_id: *sample_bg_id,
-        intervaltree_source: sample_path.clone(),
+    let region =
+        ResolvedGenRegion::from_path(conn, *sample_bg_id, sample_path, ref_start, ref_end)?;
+    Ok(BlockGroupChange {
+        region,
         path_accession: ids,
-        start: ref_start,
-        end: ref_end,
         block: new_block,
         chromosome_index,
         phased,
         preserve_edge,
-    }
+    })
 }
 
 #[derive(Debug)]
@@ -255,7 +254,7 @@ pub fn update_with_vcf(
     let mut sequence_cache = SequenceCache::new(conn);
     let mut accession_cache = HashMap::new();
 
-    let mut changes: HashMap<(Path, String), Vec<PathChange>> = HashMap::new();
+    let mut changes: HashMap<(Path, String), Vec<BlockGroupChange>> = HashMap::new();
 
     let mut node_source_paths: HashMap<HashId, HashId> = HashMap::new();
     let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
@@ -579,6 +578,7 @@ pub fn update_with_vcf(
                 )),
             )?;
             let change = prepare_change(
+                conn,
                 &vcf_entry.block_group_id,
                 &vcf_entry.path,
                 vcf_entry.ids,
@@ -590,7 +590,7 @@ pub fn update_with_vcf(
                 sequence_string.len() as i64,
                 node_id,
                 vcf_entry.preserve_reference,
-            );
+            )?;
             changes
                 .entry((vcf_entry.path, vcf_entry.sample_name))
                 .or_default()
@@ -605,36 +605,30 @@ pub fn update_with_vcf(
     ));
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
-    let mut path_tree_cache = HashMap::new();
-    let mut block_group_tree_cache = HashMap::new();
+    let mut tree_map: HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>> =
+        HashMap::new();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(1000) {
             if in_place {
                 let in_place_changes = chunk
                     .iter()
-                    .map(|change| BlockGroupChange {
-                        block_group_id: change.block_group_id,
-                        intervaltree_source: BlockGroupTreeSource {
-                            block_group_id: change.block_group_id,
-                            remove_ambiguous_positions: true,
-                        },
-                        path_accession: change.path_accession.clone(),
-                        start: change.start,
-                        end: change.end,
-                        block: change.block.clone(),
-                        chromosome_index: change.chromosome_index,
-                        phased: change.phased,
-                        preserve_edge: change.preserve_edge,
+                    .map(|change| {
+                        let mut region = change.region.clone();
+                        region.kind = ResolvedRegionKind::BlockGroup;
+                        region.remove_ambiguous_positions = true;
+                        BlockGroupChange {
+                            region,
+                            path_accession: change.path_accession.clone(),
+                            block: change.block.clone(),
+                            chromosome_index: change.chromosome_index,
+                            phased: change.phased,
+                            preserve_edge: change.preserve_edge,
+                        }
                     })
                     .collect::<Vec<_>>();
-                BlockGroup::insert_changes(
-                    conn,
-                    &in_place_changes,
-                    Some(&mut block_group_tree_cache),
-                )
-                .unwrap();
+                BlockGroup::insert_changes(conn, &in_place_changes, Some(&mut tree_map)).unwrap();
             } else {
-                BlockGroup::insert_changes(conn, chunk, Some(&mut path_tree_cache)).unwrap();
+                BlockGroup::insert_changes(conn, chunk, Some(&mut tree_map)).unwrap();
             }
             bar.inc(chunk.len() as u64);
         }

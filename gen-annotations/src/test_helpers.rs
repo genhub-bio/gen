@@ -1,6 +1,6 @@
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup, PathChange},
+    block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
@@ -8,6 +8,7 @@ use gen_models::{
     migrations::run_migrations,
     node::Node,
     path::Path,
+    region::ResolvedGenRegion,
     sample::Sample,
     sequence::Sequence,
 };
@@ -171,12 +172,10 @@ pub fn setup_test_data(conn: &GraphConnection) {
         )),
     )
     .unwrap();
-    let change = PathChange {
-        block_group_id: sample_bg_id,
-        intervaltree_source: sample_path,
+    let region = ResolvedGenRegion::from_path(conn, sample_bg_id, &sample_path, 3, 4).unwrap();
+    let change = BlockGroupChange {
+        region,
         path_accession: None,
-        start: 3,
-        end: 4,
         block: PathBlock {
             node_id,
             block_sequence: alt_seq.to_string(),

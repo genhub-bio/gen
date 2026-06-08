@@ -22,7 +22,7 @@ pub struct Command {
     /// A new sample name to associate with the update
     #[arg(long)]
     new_sample: String,
-    /// The name of the region to update (eg "chr1")
+    /// The region to update (path, accession, or annotation; e.g. "chr1:2-5")
     #[arg(long)]
     region_name: String,
     /// Do not update the sample's reference path if there is a single fasta entry

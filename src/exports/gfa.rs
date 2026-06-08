@@ -331,10 +331,11 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
     use gen_models::{
-        block_group::{BlockGroup, PathChange},
+        block_group::{BlockGroup, BlockGroupChange},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
         node::Node,
+        region::ResolvedGenRegion,
         sequence::Sequence,
         traits::Query,
     };
@@ -753,12 +754,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let change = PathChange {
-            block_group_id,
-            intervaltree_source: path.clone(),
+        let region = ResolvedGenRegion::from_path(conn, block_group_id, &path, 7, 15).unwrap();
+        let change = BlockGroupChange {
+            region,
             path_accession: None,
-            start: 7,
-            end: 15,
             block: insert,
             chromosome_index: 1,
             phased: 0,

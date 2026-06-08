@@ -1,20 +1,25 @@
 use std::str;
 
-use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
+use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, PathChange},
+    block_group::BlockGroup,
     db::DbContext,
     edge::Edge,
     node::Node,
     operations::{Operation, OperationInfo},
-    region::{GenRegionError, Region, resolve_path},
+    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
     traits::*,
 };
 use rusqlite::{self, params};
 
-use crate::errors::SequenceUpdateError;
+use crate::{
+    errors::SequenceUpdateError,
+    updates::{
+        InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
+    },
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_sequence(
@@ -30,22 +35,12 @@ pub fn update_with_sequence(
     let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
-        match resolve_path(&parsed_region, conn, collection_name, parent_sample_name) {
-            Ok(region) => region,
-            Err(GenRegionError::NotFound(_)) => {
-                return Err(GenRegionError::NotFound(region_name.to_string()).into());
-            }
-            Err(err) => return Err(err.into()),
-        };
-    let (start_coordinate, end_coordinate) =
-        if parsed_region.start.is_some() || parsed_region.end.is_some() {
-            (resolved_region.start, resolved_region.end)
-        } else {
-            return Err(SequenceUpdateError::MissingCoordinates(
-                region_name.to_string(),
-            ));
-        };
-
+        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
+    if parsed_region.start.is_none() && parsed_region.end.is_none() {
+        return Err(SequenceUpdateError::MissingCoordinates(
+            region_name.to_string(),
+        ));
+    }
     let _new_sample = Sample::get_or_create_child(
         conn,
         collection_name,
@@ -75,6 +70,7 @@ pub fn update_with_sequence(
 
     for target_block_group in &target_block_groups {
         let path = BlockGroup::get_current_path(conn, &target_block_group.id)?;
+        let (start_coordinate, end_coordinate) = (resolved_region.start, resolved_region.end);
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
@@ -87,19 +83,13 @@ pub fn update_with_sequence(
                 strand: Strand::Forward,
             };
 
-            let path_change = PathChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: path.clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block: path_block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-
-            BlockGroup::insert_change(conn, &path_change).unwrap();
+            insert_sequence_change(
+                conn,
+                &resolved_region,
+                target_block_group,
+                &path,
+                path_block,
+            )?;
             node_id
         } else {
             let seq = Sequence::new()
@@ -110,8 +100,8 @@ pub fn update_with_sequence(
                 conn,
                 &seq.hash,
                 &HashId::convert_str(&format!(
-                    "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                    path_id = path.id,
+                    "{block_group_id}:{ref_start}-{ref_end}->{sequence_hash}",
+                    block_group_id = target_block_group.id,
                     ref_start = 0,
                     ref_end = seq.length,
                     sequence_hash = seq.hash
@@ -128,23 +118,17 @@ pub fn update_with_sequence(
                 strand: Strand::Forward,
             };
 
-            let path_change = PathChange {
-                block_group_id: target_block_group.id,
-                intervaltree_source: path.clone(),
-                path_accession: None,
-                start: start_coordinate,
-                end: end_coordinate,
-                block: path_block,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                preserve_edge: true,
-            };
-
-            BlockGroup::insert_change(conn, &path_change).unwrap();
+            insert_sequence_change(
+                conn,
+                &resolved_region,
+                target_block_group,
+                &path,
+                path_block,
+            )?;
             node_id
         };
 
-        if !disable_reference_path_update {
+        if !disable_reference_path_update && resolved_region.kind == ResolvedRegionKind::Path {
             if node_id == HashId::convert_str("") {
                 let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
             } else {
@@ -190,18 +174,184 @@ pub fn update_with_sequence(
     Ok(op)
 }
 
+fn insert_sequence_change(
+    conn: &gen_models::db::GraphConnection,
+    region: &ResolvedGenRegion,
+    target_block_group: &BlockGroup,
+    path: &gen_models::path::Path,
+    block: PathBlock,
+) -> Result<(), SequenceUpdateError> {
+    let source = target_update_region(conn, region, target_block_group.id, Some(path))?;
+    let data = InsertChangeData::new(block);
+    insert_update_change(conn, source, data)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::sample_lineage::SampleLineage;
+    use gen_core::NO_CHROMOSOME_INDEX;
+    use gen_models::{
+        annotations::{Annotation, add_annotation},
+        block_group::{BlockGroup, BlockGroupChange, PathCache},
+        path::Path,
+        region::{ResolvedGenRegion, resolve_annotation},
+        sample_lineage::SampleLineage,
+    };
 
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{get_sample_bg, setup_gen},
+        test_helpers::{get_sample_bg, setup_block_group, setup_gen},
         track_database,
     };
+
+    fn insertion_block(
+        conn: &gen_models::db::GraphConnection,
+        name: &str,
+        sequence: &str,
+    ) -> PathBlock {
+        let seq = Sequence::new()
+            .sequence_type("DNA")
+            .sequence(sequence)
+            .save(conn)
+            .unwrap();
+        let node_id = Node::create(conn, &seq.hash, &HashId::convert_str(name)).unwrap();
+
+        PathBlock {
+            node_id,
+            block_sequence: sequence.to_string(),
+            sequence_start: 0,
+            sequence_end: seq.length,
+            path_start: 0,
+            path_end: 0,
+            strand: Strand::Forward,
+        }
+    }
+
+    #[test]
+    fn accession_update_does_not_require_target_path() {
+        let conn = crate::test_helpers::get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
+        let mut path_cache = PathCache::new(&conn);
+        let accession =
+            BlockGroup::add_accession(&conn, &path, "target-acc", 10, 30, &mut path_cache).unwrap();
+        Path::delete(&conn, "chr1", &block_group_id);
+
+        let region = ResolvedGenRegion::from_accession(&conn, &accession, 5, 15).unwrap();
+        let change = BlockGroupChange {
+            region,
+            path_accession: None,
+            block: insertion_block(&conn, "acc-no-path-node", "NNNN"),
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: true,
+        };
+
+        BlockGroup::insert_change(&conn, &change).unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap(),
+            HashSet::from_iter([
+                "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                "AAAAAAAAAATTTTTNNNNCCCCCGGGGGGGGGG".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn annotation_update_does_not_require_target_path() {
+        let conn = crate::test_helpers::get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
+        let mut path_cache = PathCache::new(&conn);
+        let accession =
+            BlockGroup::add_accession(&conn, &path, "target-ann-acc", 10, 30, &mut path_cache)
+                .unwrap();
+        let annotation =
+            Annotation::get_or_create(&conn, "target-ann", "genes", &accession.id, None).unwrap();
+        Path::delete(&conn, "chr1", &block_group_id);
+
+        let region =
+            ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, -5, 25).unwrap();
+        let change = BlockGroupChange {
+            region,
+            path_accession: None,
+            block: insertion_block(&conn, "ann-no-path-node", "NNNN"),
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: true,
+        };
+
+        BlockGroup::insert_change(&conn, &change).unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap(),
+            HashSet::from_iter([
+                "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                "AAAAANNNNGGGGG".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn update_sequence_with_annotation_negative_start_after_fasta_import() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "simple",
+            false,
+        )
+        .unwrap();
+        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+        assert!(
+            resolve_annotation(
+                &Region::parse("foobar:-3-5").unwrap(),
+                conn,
+                &collection,
+                "simple"
+            )
+            .is_ok()
+        );
+
+        let result = update_with_sequence(
+            &context,
+            &collection,
+            "simple",
+            "derived",
+            "foobar:-3-5",
+            "AAA",
+            false,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            resolve_annotation(
+                &Region::parse("foobar:-3-5").unwrap(),
+                conn,
+                &collection,
+                "derived"
+            )
+            .is_ok()
+        );
+        let block_group = get_sample_bg(conn, &collection, "derived");
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            HashSet::from_iter([
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATAAACGATCGATCGGGAACACACAGAGA".to_string(),
+            ])
+        );
+    }
 
     #[test]
     fn test_update_with_sequence() {
