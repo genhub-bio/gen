@@ -454,7 +454,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn path_range_finding() {
+        fn test_resolves_path_ranges() {
             let (conn, _block_group, path, _accession, _annotation) = setup_targets();
 
             let point =
@@ -501,7 +501,7 @@ mod tests {
         }
 
         #[test]
-        fn block_group_range_finding() {
+        fn test_resolves_block_group_ranges() {
             let (conn, block_group, _path, _accession, _annotation) = setup_targets();
 
             let point =
@@ -551,7 +551,7 @@ mod tests {
         }
 
         #[test]
-        fn accession_range_finding() {
+        fn test_resolves_accession_ranges() {
             let (conn, _block_group, _path, accession, _annotation) = setup_targets();
 
             let point = resolve_accession(&Region::parse("mreB:5").unwrap(), &conn, "test", "test")
@@ -593,7 +593,7 @@ mod tests {
         }
 
         #[test]
-        fn annotation_range_finding() {
+        fn test_resolves_annotation_ranges() {
             let (conn, _block_group, _path, accession, annotation) = setup_targets();
 
             let point = resolve_annotation(
@@ -1012,7 +1012,7 @@ mod tests {
         }
 
         #[test]
-        fn within_node() {
+        fn test_finds_graph_positions_within_node() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "within", 0, 15);
@@ -1031,7 +1031,7 @@ mod tests {
         }
 
         #[test]
-        fn forward_across_nodes() {
+        fn test_finds_graph_positions_forward_across_nodes() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "fwd", 0, 15);
@@ -1050,7 +1050,7 @@ mod tests {
         }
 
         #[test]
-        fn backward_across_nodes() {
+        fn test_finds_graph_positions_backwards_across_nodes() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "bwd", 0, 15);
@@ -1069,7 +1069,7 @@ mod tests {
         }
 
         #[test]
-        fn out_of_bounds() {
+        fn test_reports_out_of_bounds() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "oob", 0, 15);
@@ -1079,7 +1079,7 @@ mod tests {
         }
 
         #[test]
-        fn from_start() {
+        fn test_finds_graph_positions_from_start() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "start", 0, 15);
@@ -1098,7 +1098,7 @@ mod tests {
         }
 
         #[test]
-        fn from_end() {
+        fn test_finds_graph_positions_from_end() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "end", 0, 15);
@@ -1117,7 +1117,7 @@ mod tests {
         }
 
         #[test]
-        fn accession_within() {
+        fn test_finds_graph_positions_within_accessions() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-within", 5, 10);
@@ -1136,7 +1136,7 @@ mod tests {
         }
 
         #[test]
-        fn accession_forward_expand() {
+        fn test_finds_graph_positions_expands_accession_forward() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-fwd", 5, 10);
@@ -1155,7 +1155,7 @@ mod tests {
         }
 
         #[test]
-        fn accession_backward_expand() {
+        fn test_finds_graph_positions_expands_accession_backward() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-bwd", 5, 10);
@@ -1174,7 +1174,7 @@ mod tests {
         }
 
         #[test]
-        fn accession_out_of_bounds() {
+        fn test_finds_graph_positions_reports_accession_out_of_bounds() {
             let (conn, bg_id) = setup_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-oob", 5, 10);
@@ -1184,7 +1184,7 @@ mod tests {
         }
 
         #[test]
-        fn branched_graph_backward_returns_all_positions() {
+        fn test_finds_graph_positions_in_branched_graph_backwards_returns_all_positions() {
             let (conn, bg_id) = setup_branched_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             // Accession on TTT: path positions 3..6, accession-relative 0..3
@@ -1207,7 +1207,7 @@ mod tests {
         }
 
         #[test]
-        fn branched_graph_forward_returns_all_positions() {
+        fn test_finds_graph_positions_in_branched_graph_forwardsgr_returns_all_positions() {
             let (conn, bg_id) = setup_branched_graph();
             let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
             // Accession on TTT: path positions 3..6, accession-relative 0..3

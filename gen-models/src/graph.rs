@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_core::{HashId, NodeIntervalBlock, is_terminal};
 use gen_graph::{GenGraph, GraphError, GraphNode, GraphNodePosition, MergeGraph};
@@ -15,6 +15,8 @@ pub struct ResolvedGraph {
     pub block_group_id: HashId,
 }
 
+/// Identify all edges leading to and from a provided node_id in a block_group and merge them into an existing GenGraph.
+/// Returns true if the graph was expanded, false if no new edges were added.
 pub fn expand(
     conn: &GraphConnection,
     graph: &mut GenGraph,
@@ -32,17 +34,13 @@ pub fn expand(
     neighbor_ids.sort();
     neighbor_ids.dedup();
 
-    let mut all_edges = edges_1hop;
+    let mut all_edges: HashMap<HashId, AugmentedEdge> =
+        edges_1hop.into_iter().map(|ae| (ae.edge.id, ae)).collect();
     if !neighbor_ids.is_empty() {
         let neighbor_edges = Edge::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids)
             .unwrap_or_default();
         for ae in neighbor_edges {
-            if !all_edges
-                .iter()
-                .any(|existing| existing.edge.id == ae.edge.id)
-            {
-                all_edges.push(ae);
-            }
+            all_edges.entry(ae.edge.id).or_insert(ae);
         }
     }
 
@@ -52,7 +50,7 @@ pub fn expand(
         .collect();
 
     let new_edges: Vec<AugmentedEdge> = all_edges
-        .into_iter()
+        .into_values()
         .filter(|ae| !existing_edge_ids.contains(&ae.edge.id))
         .collect();
 
@@ -68,9 +66,17 @@ pub fn expand(
     true
 }
 
+/// From a given position in a graph, find positions a given number of characters away. An
+/// expand function can be given that specifies how to expand the input graph when it is exhausted.
+/// By default, this function searches along the known graph, and if a matching position cannot be found
+/// it will expand until it is not possible to grow the graph anymore.
+/// Returns a Result<Vec<GraphNodePosition>>, given a list of matching GraphNodePositions at the requested distance.
 pub fn find_offset(
     graph: &mut GenGraph,
+    // The position to begin the search from
     anchor: &GraphNodePosition,
+    // How far from the anchor the position of interst is. negative means search upstream of the graph position.
+    // positive means search downstream.
     distance: i64,
     mut expand: impl FnMut(&mut GenGraph, HashId) -> bool,
 ) -> Result<Vec<GraphNodePosition>, GraphError> {
@@ -87,10 +93,12 @@ pub fn find_offset(
     }
 }
 
+/// The actual function doing the work from `find_offset`. See docs in `find_offset` for explanation.
 fn find_offset_with_optional_expansion(
     graph: &mut GenGraph,
     anchor: &GraphNodePosition,
     distance: i64,
+    // If true, expand the graph if search leads to the end of a graph.
     expand_through_existing_paths: bool,
     expand: &mut impl FnMut(&mut GenGraph, HashId) -> bool,
 ) -> Result<Vec<GraphNodePosition>, GraphError> {
@@ -121,6 +129,7 @@ fn find_offset_with_optional_expansion(
                 continue;
             }
 
+            // Outgoing nodes means downstream nodes to search for.
             let mut neighbors: Vec<GraphNode> = graph
                 .neighbors_directed(node, Direction::Outgoing)
                 .collect();
@@ -155,6 +164,7 @@ fn find_offset_with_optional_expansion(
                 continue;
             }
 
+            // Incoming edges means upstream nodes to traverse
             let mut neighbors: Vec<GraphNode> = graph
                 .neighbors_directed(node, Direction::Incoming)
                 .collect();
@@ -189,6 +199,8 @@ fn find_offset_with_optional_expansion(
 }
 
 impl ResolvedGraph {
+    /// Find a postion in a graph according to a provided coordinate. This is generally utilized by the GenRegion machinery to identify the
+    /// positions a user requested.
     pub fn resolve_anchor(
         &self,
         coord: i64,

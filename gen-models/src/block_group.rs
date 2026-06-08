@@ -565,6 +565,8 @@ impl BlockGroup {
         Ok(graph)
     }
 
+    /// Build a graph from a set of known edges. If a source or target node is unknown, the graph
+    /// will expand out automatically to cover it.
     pub fn get_graph_from_edges(
         conn: &GraphConnection,
         block_group_id: &HashId,
