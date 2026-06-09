@@ -30,7 +30,6 @@ pub fn accession_blocks_to_segments(blocks: &[NodeIntervalBlock]) -> Vec<Annotat
     blocks
         .iter()
         .filter(|block| !is_terminal(block.node_id))
-        .filter(|block| block.sequence_end > block.sequence_start)
         .map(|block| AnnotationSegment {
             node_id: block.node_id,
             range: Range {

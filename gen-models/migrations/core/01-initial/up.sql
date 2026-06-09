@@ -73,8 +73,8 @@ CREATE UNIQUE INDEX accession_null_aid_uidx ON accessions(block_group_id, name) 
 CREATE TABLE accession_edges (
   id BLOB PRIMARY KEY NOT NULL,
   accession_id BLOB NOT NULL,
-  index_in_path INTEGER NOT NULL,
   edge_id BLOB NOT NULL,
+  index_in_path INTEGER NOT NULL,
   source_offset INTEGER,
   target_offset INTEGER,
   FOREIGN KEY(accession_id) REFERENCES accessions(id),
@@ -111,7 +111,7 @@ CREATE TABLE block_group_edges (
   edge_id BLOB NOT NULL,
   chromosome_index INTEGER,
   phased INTEGER NOT NULL,
-  created_on INTEGER NOT NULL, 
+  created_on INTEGER NOT NULL,
   FOREIGN KEY(block_group_id) REFERENCES block_groups(id),
   FOREIGN KEY(edge_id) REFERENCES edges(id)
 ) STRICT;

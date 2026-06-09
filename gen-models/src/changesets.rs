@@ -663,13 +663,13 @@ pub fn process_changesetiter(
                 "accession_edges" => {
                     let accession_edge_id = parse_hashid(item, pk_column);
                     let accession_id = parse_hashid(item, 1);
-                    let edge_id = parse_hashid(item, 3);
+                    let edge_id = parse_hashid(item, 2);
 
                     created_accession_edges.push(AccessionEdge {
                         id: accession_edge_id,
                         accession_id,
-                        index_in_path: parse_number(item, 2),
                         edge_id,
+                        index_in_path: parse_number(item, 3),
                         source_offset: parse_maybe_number(item, 4),
                         target_offset: parse_maybe_number(item, 5),
                     });
@@ -768,6 +768,17 @@ pub fn process_changesetiter(
         annotation_group_samples: created_annotation_group_samples,
     };
 
+    let mut previous_accession_edges = HashSet::new();
+    for accession_id in &previous_accessions {
+        if let Ok(edges) = Accession::get_edges_by_id(conn, accession_id) {
+            previous_accession_edges.extend(edges);
+        }
+    }
+    let previous_accession_edges = previous_accession_edges
+        .into_iter()
+        .sorted_by_key(|edge| (edge.accession_id, edge.index_in_path, edge.id))
+        .collect();
+
     let dependency_models = DependencyModels {
         collections: Collection::query_by_ids(conn, &previous_collections),
         samples: Sample::query_by_ids(conn, &previous_samples),
@@ -777,7 +788,7 @@ pub fn process_changesetiter(
         edges: Edge::query_by_ids(conn, &previous_edges),
         paths: Path::query_by_ids(conn, &previous_paths),
         accessions: Accession::query_by_ids(conn, &previous_accessions),
-        accession_edges: vec![],
+        accession_edges: previous_accession_edges,
     };
 
     (changeset_models, dependency_models)
@@ -1732,6 +1743,7 @@ mod tests {
     #[cfg(test)]
     mod changeset_dependencies {
         use super::*;
+        use crate::block_group::PathCache;
 
         #[test]
         fn test_tracks_nodes_and_sequences_from_previous_block_group_edges() {
@@ -1872,6 +1884,42 @@ mod tests {
             );
             assert_eq!(dependencies.block_group[0].name, dep_bg.name);
             assert_eq!(dependencies.block_group[0].sample_name, dep_bg.sample_name);
+        }
+
+        #[test]
+        fn test_tracks_accession_edges_from_previous_accessions() {
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
+
+            let db_uuid = crate::metadata::get_db_uuid(conn);
+            crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path")
+                .unwrap();
+
+            let (_bg_id, path) = setup_block_group(conn);
+            let mut path_cache = PathCache::new(conn);
+            let accession =
+                BlockGroup::add_accession(conn, &path, "test-accession", 3, 10, &mut path_cache)
+                    .unwrap();
+            let existing_accession_edges = Accession::get_edges_by_id(conn, &accession.id).unwrap();
+
+            let mut session = start_operation(conn);
+            Annotation::get_or_create(conn, "ann", "annotations", &accession.id, None).unwrap();
+            let operation = end_operation(
+                &context,
+                &mut session,
+                &OperationInfo {
+                    files: vec![],
+                    description: "test".to_string(),
+                },
+                "test",
+                None,
+            )
+            .unwrap();
+
+            let dependencies = operation.get_changeset_dependencies(context.workspace());
+            assert_eq!(dependencies.accessions, vec![accession]);
+            assert_eq!(dependencies.accession_edges, existing_accession_edges);
         }
     }
 }

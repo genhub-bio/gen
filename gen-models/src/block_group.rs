@@ -639,68 +639,68 @@ impl BlockGroup {
         let all_path_edges = PathEdge::edges_for_path(conn, &path.id);
         let start_coordinate = start - start_block.start + start_block.sequence_start;
         let end_coordinate = end - end_block.start + end_block.sequence_start;
-        let start_edge = all_path_edges
+        let (start_edge_index, start_edge) = all_path_edges
             .iter()
-            .find(|edge| {
+            .enumerate()
+            .find(|(_, edge)| {
                 edge.target_node_id == start_block.node_id
                     && edge.target_coordinate == start_block.sequence_start
             })
             .expect("should find path edge entering accession start block");
-        let end_edge = all_path_edges
+        let (end_edge_index, end_edge) = all_path_edges
             .iter()
-            .find(|edge| {
+            .enumerate()
+            .find(|(_, edge)| {
                 edge.source_node_id == end_block.node_id
                     && edge.source_coordinate == end_block.sequence_end
             })
             .expect("should find path edge leaving accession end block");
-        let start_edge = AccessionEdgeData {
-            edge_id: start_edge.id,
-            source_offset: None,
-            target_offset: Some(start_coordinate - start_edge.target_coordinate),
-        };
-        let end_edge = AccessionEdgeData {
-            edge_id: end_edge.id,
-            source_offset: Some(end_coordinate - end_edge.source_coordinate),
-            target_offset: None,
-        };
+        assert!(
+            start_edge_index <= end_edge_index,
+            "accession start edge should precede end edge"
+        );
         let accession = Accession::create(conn, name, &path.block_group_id, None)
             .expect("Unable to create accession.");
-        let mut accession_path_edges = vec![start_edge];
-        if start_block == end_block {
-            accession_path_edges.push(end_edge);
+
+        let accession_path_edges = if start_edge_index == end_edge_index {
+            vec![
+                AccessionEdgeData {
+                    edge_id: start_edge.id,
+                    source_offset: None,
+                    target_offset: Some(start_coordinate - start_edge.target_coordinate),
+                },
+                AccessionEdgeData {
+                    edge_id: end_edge.id,
+                    source_offset: Some(end_coordinate - end_edge.source_coordinate),
+                    target_offset: None,
+                },
+            ]
         } else {
-            let mut in_range = false;
-            let path_blocks: Vec<&NodeIntervalBlock> = tree
-                .iter_sorted()
-                .map(|x| &x.value)
-                .filter(|block| {
-                    if *block == start_block {
-                        in_range = true;
-                    } else if *block == end_block {
-                        in_range = false;
-                        return true;
+            all_path_edges[start_edge_index..=end_edge_index]
+                .iter()
+                .enumerate()
+                .map(|(relative_index, edge)| {
+                    let path_index = start_edge_index + relative_index;
+                    AccessionEdgeData {
+                        edge_id: edge.id,
+                        source_offset: if path_index == start_edge_index {
+                            None
+                        } else if path_index == end_edge_index {
+                            Some(end_coordinate - end_edge.source_coordinate)
+                        } else {
+                            Some(0)
+                        },
+                        target_offset: if path_index == start_edge_index {
+                            Some(start_coordinate - start_edge.target_coordinate)
+                        } else if path_index == end_edge_index {
+                            None
+                        } else {
+                            Some(0)
+                        },
                     }
-                    in_range
                 })
-                .collect::<Vec<_>>();
-            for (block, next_block) in path_blocks.iter().zip(path_blocks[1..].iter()) {
-                let edge = all_path_edges
-                    .iter()
-                    .find(|edge| {
-                        edge.source_node_id == block.node_id
-                            && edge.source_coordinate == block.sequence_end
-                            && edge.target_node_id == next_block.node_id
-                            && edge.target_coordinate == next_block.sequence_start
-                    })
-                    .expect("should find path edge between accession blocks");
-                accession_path_edges.push(AccessionEdgeData {
-                    edge_id: edge.id,
-                    source_offset: Some(0),
-                    target_offset: Some(0),
-                })
-            }
-            accession_path_edges.push(end_edge);
-        }
+                .collect::<Vec<_>>()
+        };
         AccessionEdge::bulk_create(conn, &accession.id, &accession_path_edges);
         Ok(accession)
     }
@@ -2302,7 +2302,7 @@ mod tests {
 
         let accession =
             BlockGroup::add_accession(conn, &path, "test", 3, 10, &mut path_cache).unwrap();
-        let edges = Accession::get_edges_by_id(conn, &accession.id);
+        let edges = Accession::get_edges_by_id(conn, &accession.id).unwrap();
 
         assert_eq!(accession.length(conn).unwrap(), 7);
         assert_eq!(edges.len(), 2);

@@ -242,7 +242,7 @@ impl<'a> Capnp<'a> for DependencyModels {
             accession.write_capnp(&mut accession_builder);
         }
 
-        // Write accession edges (note: field name is accessionEdges in capnp schema)
+        // Write accession edges
         let mut accession_edges_builder = builder
             .reborrow()
             .init_accession_edges(self.accession_edges.len() as u32);

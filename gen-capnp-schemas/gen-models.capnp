@@ -115,8 +115,8 @@ struct Accession {
 struct AccessionEdge {
   id @0 :List(UInt8);
   accessionId @1 :List(UInt8);
-  indexInPath @2 :Int64;
-  edgeId @3 :List(UInt8);
+  edgeId @2 :List(UInt8);
+  indexInPath @3 :Int64;
   sourceOffset :union {
     none @4 :Void;
     some @5 :Int64;

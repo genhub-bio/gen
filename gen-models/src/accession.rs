@@ -7,7 +7,7 @@ use gen_core::{
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
-use rusqlite::{Row, params};
+use rusqlite::{Result, Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -95,8 +95,8 @@ impl<'a> Capnp<'a> for Accession {
 pub struct AccessionEdge {
     pub id: HashId,
     pub accession_id: HashId,
-    pub index_in_path: i64,
     pub edge_id: HashId,
+    pub index_in_path: i64,
     pub source_offset: Option<i64>,
     pub target_offset: Option<i64>,
 }
@@ -180,7 +180,7 @@ impl AccessionEdgeData {
     pub fn id_hash(&self, accession_id: &HashId, index_in_path: i64) -> HashId {
         HashId(calculate_hash(&format!(
             "{}:{}:{}:{:?}:{:?}",
-            accession_id, index_in_path, self.edge_id, self.source_offset, self.target_offset
+            accession_id, self.edge_id, index_in_path, self.source_offset, self.target_offset
         )))
     }
 }
@@ -196,9 +196,46 @@ impl From<&AccessionEdge> for AccessionEdgeData {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct AccessionEdgeWithEdge {
+struct AccessionEdgeInfo {
     accession_edge: AccessionEdge,
     edge: Edge,
+}
+
+impl Query for AccessionEdgeInfo {
+    type Model = AccessionEdgeInfo;
+
+    const PRIMARY_KEY: &'static str = "id";
+    const TABLE_NAME: &'static str = "accession_edges";
+
+    fn process_row(row: &Row) -> Self::Model {
+        AccessionEdgeInfo {
+            accession_edge: AccessionEdge::process_row(row),
+            edge: Edge {
+                id: row.get(6).unwrap(),
+                source_node_id: row.get(7).unwrap(),
+                source_coordinate: row.get(8).unwrap(),
+                source_strand: row.get(9).unwrap(),
+                target_node_id: row.get(10).unwrap(),
+                target_coordinate: row.get(11).unwrap(),
+                target_strand: row.get(12).unwrap(),
+            },
+        }
+    }
+}
+
+impl AccessionEdgeInfo {
+    pub fn get_by_accession_id(
+        conn: &GraphConnection,
+        accession_id: &HashId,
+    ) -> Result<Vec<AccessionEdgeInfo>> {
+        let query = "\
+            select ae.*, e.* \
+            from accession_edges ae \
+            join edges e on e.id = ae.edge_id \
+            where ae.accession_id = ?1 \
+            order by ae.index_in_path;";
+        Ok(Self::query(conn, query, params![accession_id]))
+    }
 }
 
 impl Accession {
@@ -264,46 +301,19 @@ impl Accession {
         }
     }
 
-    pub fn get_edges_by_id(conn: &GraphConnection, accession_id: &HashId) -> Vec<AccessionEdge> {
-        let query = "\
-            select ae.* \
-            from accession_edges ae \
-            where ae.accession_id = ?1 \
-            order by ae.index_in_path;";
-        AccessionEdge::query(conn, query, params![accession_id])
-    }
-
-    fn get_edges_with_edges_by_id(
+    pub fn get_edges_by_id(
         conn: &GraphConnection,
         accession_id: &HashId,
-    ) -> Vec<AccessionEdgeWithEdge> {
-        let accession_edges = Self::get_edges_by_id(conn, accession_id);
-        let edge_ids = accession_edges
-            .iter()
-            .map(|accession_edge| accession_edge.edge_id)
-            .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids);
-        let edges_by_id = edges
-            .into_iter()
-            .map(|edge| (edge.id, edge))
-            .collect::<std::collections::HashMap<_, _>>();
-
-        accession_edges
-            .into_iter()
-            .filter_map(|accession_edge| {
-                edges_by_id
-                    .get(&accession_edge.edge_id)
-                    .cloned()
-                    .map(|edge| AccessionEdgeWithEdge {
-                        accession_edge,
-                        edge,
-                    })
-            })
-            .collect()
+    ) -> Result<Vec<AccessionEdge>, AccessionError> {
+        Ok(AccessionEdge::query(
+            conn,
+            "select * from accession_edges where accession_id = ?1",
+            params![accession_id],
+        ))
     }
 
     pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
-        let edges = Self::get_edges_with_edges_by_id(conn, &self.id);
+        let edges = AccessionEdgeInfo::get_by_accession_id(conn, &self.id)?;
         if edges.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
         }
@@ -427,13 +437,13 @@ impl AccessionEdge {
     ) -> Result<AccessionEdge, AccessionEdgeError> {
         let hash = edge.id_hash(accession_id, index_in_path);
         // TODO: handle get-or-create
-        let insert_statement = "INSERT INTO accession_edges (id, accession_id, index_in_path, edge_id, source_offset, target_offset) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
+        let insert_statement = "INSERT INTO accession_edges (id, accession_id, edge_id, index_in_path, source_offset, target_offset) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
         let mut stmt = conn.prepare(insert_statement).unwrap();
         match stmt.execute(params![
             hash,
             accession_id,
-            index_in_path,
             edge.edge_id,
+            index_in_path,
             edge.source_offset,
             edge.target_offset
         ]) {
@@ -446,8 +456,8 @@ impl AccessionEdge {
         Ok(AccessionEdge {
             id: hash,
             accession_id: *accession_id,
-            index_in_path,
             edge_id: edge.edge_id,
+            index_in_path,
             source_offset: edge.source_offset,
             target_offset: edge.target_offset,
         })
@@ -473,7 +483,7 @@ impl AccessionEdge {
             }
         }
 
-        let batch_size = max_rows_per_batch(conn, 4);
+        let batch_size = max_rows_per_batch(conn, 6);
 
         for chunk in &edges_to_insert.iter().chunks(batch_size) {
             let mut rows = vec![];
@@ -482,14 +492,14 @@ impl AccessionEdge {
                 let index_in_path = *index as i64;
                 params.push(Box::new(edge.id_hash(accession_id, index_in_path)));
                 params.push(Box::new(*accession_id));
-                params.push(Box::new(index_in_path));
                 params.push(Box::new(edge.edge_id));
+                params.push(Box::new(index_in_path));
                 params.push(Box::new(edge.source_offset));
                 params.push(Box::new(edge.target_offset));
                 rows.push("(?, ?, ?, ?, ?, ?)");
             }
             let sql = format!(
-                "INSERT INTO accession_edges (id, accession_id, index_in_path, edge_id, source_offset, target_offset) VALUES {};",
+                "INSERT INTO accession_edges (id, accession_id, edge_id, index_in_path, source_offset, target_offset) VALUES {};",
                 rows.join(",")
             );
             conn.execute(&sql, rusqlite::params_from_iter(params))
@@ -516,8 +526,8 @@ impl Query for AccessionEdge {
         AccessionEdge {
             id: row.get(0).unwrap(),
             accession_id: row.get(1).unwrap(),
-            index_in_path: row.get(2).unwrap(),
-            edge_id: row.get(3).unwrap(),
+            edge_id: row.get(2).unwrap(),
+            index_in_path: row.get(3).unwrap(),
             source_offset: row.get(4).unwrap(),
             target_offset: row.get(5).unwrap(),
         }
@@ -671,14 +681,14 @@ mod tests {
     }
 
     #[test]
-    fn accession_edges_store_block_group_edge_offsets() {
+    fn test_accession_edges_stores_block_group_edge_offsets() {
         let conn = &get_connection(None).unwrap();
         let (_bg, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);
 
         let accession =
             BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
-        let edges = Accession::get_edges_by_id(conn, &accession.id);
+        let edges = Accession::get_edges_by_id(conn, &accession.id).unwrap();
 
         assert_eq!(edges.len(), 5);
         assert_eq!(edges[0].source_offset, None);
@@ -690,14 +700,14 @@ mod tests {
     }
 
     #[test]
-    fn accession_edges_store_accession_path_order() {
+    fn test_accession_edges_store_accession_path_order() {
         let conn = &get_connection(None).unwrap();
         let (_bg, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);
 
         let accession =
             BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
-        let edges = Accession::get_edges_by_id(conn, &accession.id);
+        let edges = Accession::get_edges_by_id(conn, &accession.id).unwrap();
 
         assert_eq!(edges.len(), 5);
         assert!(edges.iter().all(|edge| edge.accession_id == accession.id));
