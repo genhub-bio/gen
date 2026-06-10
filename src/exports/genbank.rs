@@ -523,6 +523,18 @@ mod tests {
             .find_map(|(key, value)| (*key == "label").then(|| value.clone()).flatten())
     }
 
+    fn labeled_feature_locations(seq: &gb_io::seq::Seq) -> Vec<(String, Location)> {
+        let mut locations = seq
+            .features
+            .iter()
+            .filter_map(|feature| {
+                feature_label(feature).map(|label| (label, feature.location.clone()))
+            })
+            .collect::<Vec<_>>();
+        locations.sort_by(|(left, _), (right, _)| left.cmp(right));
+        locations
+    }
+
     fn feature_qualifier(feature: &gb_io::seq::Feature, key: &str) -> Option<String> {
         feature
             .qualifiers
@@ -772,7 +784,12 @@ mod tests {
         let mut output = Vec::new();
         export_genbank(conn, "fixtures", "puc19-export", &mut output).unwrap();
 
+        let original = reader::parse_file(&path).unwrap();
         let parsed = reader::parse_slice(&output).unwrap();
+        assert_eq!(
+            labeled_feature_locations(&parsed[0]),
+            labeled_feature_locations(&original[0])
+        );
         let features = &parsed[0].features;
         let labels = features
             .iter()

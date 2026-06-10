@@ -1,15 +1,9 @@
-use std::{
-    cmp::{max, min},
-    io::Read,
-    path::Path as FsPath,
-    str,
-};
+use std::{io::Read, path::Path as FsPath, str};
 
 use gb_io::reader;
-use gen_annotations::projection::AnnotationSegment;
 use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
-    range::{Range, merge_ordered_items},
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
+    calculate_hash,
 };
 use gen_models::{
     accession::{Accession, AccessionEdge, AccessionEdgeData},
@@ -23,6 +17,7 @@ use gen_models::{
     node::Node,
     operations::{Operation, OperationInfo},
     path::Path,
+    path_edge::PathEdge,
     region::ResolvedGenRegion,
     sample::Sample,
     sequence::Sequence,
@@ -31,8 +26,7 @@ use gen_models::{
 
 use crate::{
     genbank::{
-        EditType, GenBankAnnotation, GenBankAnnotationSegment, GenBankEdit, GenBankError,
-        process_sequence,
+        EditType, GenBankAnnotation, GenBankAnnotationSegment, GenBankError, process_sequence,
     },
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
@@ -64,6 +58,129 @@ impl GenBankImportOptions {
             .map(str::to_string);
         self
     }
+}
+
+fn annotation_file_label(annotation_name: Option<&str>, fallback: &str) -> String {
+    annotation_name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| (!fallback.is_empty()).then(|| fallback.to_string()))
+        .unwrap_or_else(|| "genbank".to_string())
+}
+
+fn annotation_group_name(
+    annotation_name: Option<&str>,
+    collection: &str,
+    sample: &str,
+    locus_name: &str,
+) -> String {
+    let file_label = annotation_file_label(annotation_name, locus_name);
+    format!("GenBank {collection}/{sample}/{file_label}")
+}
+
+fn blocks_at_coordinate(
+    tree: &intervaltree::IntervalTree<i64, NodeIntervalBlock>,
+    coordinate: i64,
+) -> Vec<&NodeIntervalBlock> {
+    tree.query_point(coordinate)
+        .map(|item| &item.value)
+        .collect()
+}
+
+fn annotation_segment_edges(
+    segment: &GenBankAnnotationSegment,
+    tree: &intervaltree::IntervalTree<i64, NodeIntervalBlock>,
+    all_path_edges: &[Edge],
+) -> Vec<AccessionEdgeData> {
+    let start_blocks = blocks_at_coordinate(tree, segment.start);
+    assert_eq!(start_blocks.len(), 1);
+    let start_block = start_blocks[0];
+    let end_blocks = blocks_at_coordinate(tree, segment.end - 1);
+    assert_eq!(end_blocks.len(), 1);
+    let end_block = end_blocks[0];
+
+    let start_coordinate = segment.start - start_block.start + start_block.sequence_start;
+    let end_coordinate = segment.end - end_block.start + end_block.sequence_start;
+    let (start_edge_index, start_edge) = all_path_edges
+        .iter()
+        .enumerate()
+        .find(|(_, edge)| {
+            edge.target_node_id == start_block.node_id
+                && edge.target_coordinate == start_block.sequence_start
+        })
+        .expect("should find path edge entering annotation start block");
+    let (end_edge_index, end_edge) = all_path_edges
+        .iter()
+        .enumerate()
+        .find(|(_, edge)| {
+            edge.source_node_id == end_block.node_id
+                && edge.source_coordinate == end_block.sequence_end
+        })
+        .expect("should find path edge leaving annotation end block");
+    assert!(
+        start_edge_index <= end_edge_index,
+        "annotation start edge should precede end edge"
+    );
+
+    if start_edge_index == end_edge_index {
+        return vec![
+            AccessionEdgeData {
+                edge_id: start_edge.id,
+                source_offset: None,
+                target_offset: Some(start_coordinate - start_edge.target_coordinate),
+            },
+            AccessionEdgeData {
+                edge_id: end_edge.id,
+                source_offset: Some(end_coordinate - end_edge.source_coordinate),
+                target_offset: None,
+            },
+        ];
+    }
+
+    all_path_edges[start_edge_index..=end_edge_index]
+        .iter()
+        .enumerate()
+        .map(|(relative_index, edge)| {
+            let path_index = start_edge_index + relative_index;
+            AccessionEdgeData {
+                edge_id: edge.id,
+                source_offset: if path_index == start_edge_index {
+                    None
+                } else if path_index == end_edge_index {
+                    Some(end_coordinate - end_edge.source_coordinate)
+                } else {
+                    Some(0)
+                },
+                target_offset: if path_index == start_edge_index {
+                    Some(start_coordinate - start_edge.target_coordinate)
+                } else if path_index == end_edge_index {
+                    None
+                } else {
+                    Some(0)
+                },
+            }
+        })
+        .collect()
+}
+
+fn annotation_sequence(annotation: &GenBankAnnotation, sequence: &str) -> String {
+    annotation
+        .segments
+        .iter()
+        .map(|segment| sequence[segment.start as usize..segment.end as usize].to_string())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn annotation_sequence_hash(annotation: &GenBankAnnotation, sequence: &str) -> HashId {
+    HashId(calculate_hash(&annotation_sequence(annotation, sequence)))
+}
+
+fn annotation_accession_name(annotation_group: &str, annotation_sequence_hash: &HashId) -> String {
+    HashId(calculate_hash(&format!(
+        "{annotation_group}:{annotation_sequence_hash}"
+    )))
+    .to_string()
 }
 
 pub fn import_genbank<'a, R>(
@@ -251,7 +368,43 @@ where
                     BlockGroup::insert_change(conn, &change).unwrap();
                 }
 
-                if options.add_annotations {}
+                if options.add_annotations && locus.changes.is_empty() {
+                    let annotation_group = options.annotation_group.clone().unwrap_or_else(|| {
+                        annotation_group_name(
+                            options.annotation_name.as_deref(),
+                            &collection.name,
+                            sample,
+                            &locus.name,
+                        )
+                    });
+                    let path_tree = path.intervaltree(conn)?;
+                    let all_path_edges = PathEdge::edges_for_path(conn, &path.id);
+                    for annotation in locus.annotations.iter() {
+                        let sequence_hash = annotation_sequence_hash(annotation, &original_seq);
+                        let accession_name =
+                            annotation_accession_name(&annotation_group, &sequence_hash);
+                        let accession =
+                            Accession::get_or_create(conn, &accession_name, &block_group.id, None)?;
+                        let accession_edges = annotation
+                            .segments
+                            .iter()
+                            .flat_map(|segment| {
+                                annotation_segment_edges(segment, &path_tree, &all_path_edges)
+                            })
+                            .collect::<Vec<_>>();
+                        if Accession::get_edges_by_id(conn, &accession.id)?.is_empty() {
+                            AccessionEdge::bulk_create(conn, &accession.id, &accession_edges);
+                        }
+                        Annotation::create_with_samples(
+                            conn,
+                            &annotation.name,
+                            &annotation_group,
+                            &accession.id,
+                            annotation.extra.as_ref(),
+                            &[sample],
+                        )?;
+                    }
+                }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
         }
@@ -284,6 +437,7 @@ mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
     use gen_models::{
+        accession::Accession,
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
         operations::OperationFile,
@@ -438,6 +592,101 @@ mod tests {
         assert!(AnnotationGroup::query_by_sample(conn, "no-annotation-sample").is_empty());
         let annotations = Annotation::query(conn, "select * from annotations", rusqlite::params!());
         assert!(annotations.is_empty());
+    }
+
+    #[test]
+    fn imports_puc19_annotations() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        let path = import_puc19(&context, "puc19-import", GenBankImportOptions::default());
+
+        let expected_group = "GenBank fixtures/puc19-import/puc19";
+        assert_eq!(
+            AnnotationGroup::query_by_sample(conn, "puc19-import"),
+            vec![AnnotationGroup {
+                name: expected_group.to_string()
+            }]
+        );
+        let annotations = Annotation::query_by_group(conn, expected_group).unwrap();
+        let labels = annotations
+            .iter()
+            .map(|annotation| annotation.name.clone())
+            .collect::<HashSet<_>>();
+        assert!(labels.contains("AmpR"));
+        assert!(labels.contains("lac promoter"));
+        assert!(labels.contains("M13 Forward"));
+        assert!(labels.contains("ori"));
+
+        let m13_rev = annotations
+            .iter()
+            .find(|annotation| annotation.name == "M13 rev")
+            .unwrap();
+        let m13_reverse = annotations
+            .iter()
+            .find(|annotation| annotation.name == "M13 Reverse")
+            .unwrap();
+        assert_eq!(m13_rev.accession_id, m13_reverse.accession_id);
+
+        let parsed = reader::parse_file(PathBuf::from(path)).unwrap();
+        let locus = process_sequence(parsed.into_iter().next().unwrap()).unwrap();
+        let original_sequence = locus.original_sequence();
+        let source_annotation = locus
+            .annotations
+            .into_iter()
+            .find(|annotation| annotation.name == "M13 rev")
+            .unwrap();
+        let sequence_hash = annotation_sequence_hash(&source_annotation, &original_sequence);
+        let expected_accession_name = annotation_accession_name(expected_group, &sequence_hash);
+        let accession = Accession::get_by_id(conn, &m13_rev.accession_id).unwrap();
+        assert_eq!(accession.name, expected_accession_name);
+
+        let amp_r = annotations
+            .iter()
+            .find(|annotation| annotation.name == "AmpR")
+            .unwrap();
+        let amp_r_extra = amp_r
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.genbank.as_ref())
+            .unwrap();
+        assert_eq!(amp_r_extra.kind, "CDS");
+        assert_eq!(
+            amp_r_extra.location_operator,
+            Some(GenBankLocationOperator::Join)
+        );
+        assert!(amp_r_extra.qualifiers.iter().any(|qualifier| {
+            qualifier.key == "product" && qualifier.value.as_deref() == Some("beta-lactamase")
+        }));
+        let amp_r_blocks = Accession::get_by_id(conn, &amp_r.accession_id)
+            .unwrap()
+            .blocks(conn)
+            .unwrap()
+            .into_iter()
+            .filter(|block| {
+                block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID
+            })
+            .map(|block| (block.sequence_start, block.sequence_end))
+            .collect::<Vec<_>>();
+        assert_eq!(amp_r_blocks, vec![(1283, 1352), (1352, 2144)]);
+
+        let ori = annotations
+            .iter()
+            .find(|annotation| annotation.name == "ori")
+            .unwrap();
+        let ori_blocks = Accession::get_by_id(conn, &ori.accession_id)
+            .unwrap()
+            .blocks(conn)
+            .unwrap()
+            .into_iter()
+            .filter(|block| {
+                block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID
+            })
+            .map(|block| (block.sequence_start, block.sequence_end))
+            .collect::<Vec<_>>();
+        assert_eq!(ori_blocks, vec![(2314, 2686), (0, 217)]);
     }
 
     #[cfg(test)]
