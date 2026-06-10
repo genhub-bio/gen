@@ -17,7 +17,6 @@ use gen_models::{
     node::Node,
     operations::{Operation, OperationInfo},
     path::Path,
-    path_edge::PathEdge,
     region::ResolvedGenRegion,
     sample::Sample,
     sequence::Sequence,
@@ -183,6 +182,141 @@ fn annotation_accession_name(annotation_group: &str, annotation_sequence_hash: &
     .to_string()
 }
 
+fn add_sequence_block(
+    blocks: &mut Vec<PathBlock>,
+    node_id: HashId,
+    sequence_start: i64,
+    sequence_end: i64,
+    final_position: &mut i64,
+) {
+    if sequence_end <= sequence_start {
+        return;
+    }
+    let block_len = sequence_end - sequence_start;
+    blocks.push(PathBlock {
+        node_id,
+        block_sequence: String::new(),
+        sequence_start,
+        sequence_end,
+        path_start: *final_position,
+        path_end: *final_position + block_len,
+        strand: Strand::Forward,
+    });
+    *final_position += block_len;
+}
+
+fn updated_sequence_blocks(
+    wt_node_id: HashId,
+    original_length: i64,
+    edited_blocks: &[(i64, i64, Option<PathBlock>)],
+) -> Vec<PathBlock> {
+    let mut blocks = Vec::new();
+    let mut original_position = 0;
+    let mut final_position = 0;
+    for (edit_start, edit_end, inserted_block) in edited_blocks {
+        add_sequence_block(
+            &mut blocks,
+            wt_node_id,
+            original_position,
+            *edit_start,
+            &mut final_position,
+        );
+        if let Some(block) = inserted_block {
+            add_sequence_block(
+                &mut blocks,
+                block.node_id,
+                block.sequence_start,
+                block.sequence_end,
+                &mut final_position,
+            );
+        }
+        original_position = *edit_end;
+    }
+    add_sequence_block(
+        &mut blocks,
+        wt_node_id,
+        original_position,
+        original_length,
+        &mut final_position,
+    );
+    blocks
+}
+
+fn updated_sequence_edges(
+    conn: &gen_models::db::GraphConnection,
+    blocks: &[PathBlock],
+) -> Vec<Edge> {
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut edges = Vec::new();
+    let first = blocks.first().expect("should contain first updated block");
+    edges.push(
+        Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            first.node_id,
+            first.sequence_start,
+            Strand::Forward,
+        )
+        .expect("should create edge entering updated annotation path"),
+    );
+    for window in blocks.windows(2) {
+        let source = &window[0];
+        let target = &window[1];
+        edges.push(
+            Edge::create(
+                conn,
+                source.node_id,
+                source.sequence_end,
+                Strand::Forward,
+                target.node_id,
+                target.sequence_start,
+                Strand::Forward,
+            )
+            .expect("should create edge within updated annotation path"),
+        );
+    }
+    let last = blocks.last().expect("should contain last updated block");
+    edges.push(
+        Edge::create(
+            conn,
+            last.node_id,
+            last.sequence_end,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create edge leaving updated annotation path"),
+    );
+    edges
+}
+
+fn updated_sequence_intervaltree(
+    blocks: &[PathBlock],
+) -> intervaltree::IntervalTree<i64, NodeIntervalBlock> {
+    blocks
+        .iter()
+        .map(|block| {
+            (
+                block.path_start..block.path_end,
+                NodeIntervalBlock {
+                    node_id: block.node_id,
+                    start: block.path_start,
+                    end: block.path_end,
+                    sequence_start: block.sequence_start,
+                    sequence_end: block.sequence_end,
+                    strand: block.strand,
+                },
+            )
+        })
+        .collect()
+}
+
 pub fn import_genbank<'a, R>(
     context: &DbContext,
     data: R,
@@ -307,6 +441,7 @@ where
                 )?;
 
                 let wt_changes = locus.changes_to_wt();
+                let mut edited_blocks = Vec::<(i64, i64, Option<PathBlock>)>::new();
                 for edit in wt_changes {
                     let start = edit.start;
                     let end = edit.end;
@@ -331,16 +466,37 @@ where
                                     new_hash = &change_seq.hash,
                                 )),
                             )?;
+                            let block = PathBlock {
+                                node_id: change_node_id,
+                                block_sequence: edit.new_sequence.clone(),
+                                sequence_start: 0,
+                                sequence_end: change_seq.length,
+                                path_start: start,
+                                path_end: end + change_seq.length,
+                                strand: Strand::Forward,
+                            };
+                            edited_blocks.push((start, end, Some(block.clone())));
                             BlockGroupChange {
                                 region: region.clone(),
                                 path_accession: None,
+                                block,
+                                chromosome_index: 1,
+                                phased: 0,
+                                preserve_edge: true,
+                            }
+                        }
+                        EditType::Deletion => {
+                            edited_blocks.push((start, end, None));
+                            BlockGroupChange {
+                                region,
+                                path_accession: None,
                                 block: PathBlock {
-                                    node_id: change_node_id,
-                                    block_sequence: edit.new_sequence.clone(),
+                                    node_id: wt_node_id,
+                                    block_sequence: "".to_string(),
                                     sequence_start: 0,
-                                    sequence_end: change_seq.length,
+                                    sequence_end: 0,
                                     path_start: start,
-                                    path_end: end + change_seq.length,
+                                    path_end: end,
                                     strand: Strand::Forward,
                                 },
                                 chromosome_index: 1,
@@ -348,27 +504,11 @@ where
                                 preserve_edge: true,
                             }
                         }
-                        EditType::Deletion => BlockGroupChange {
-                            region,
-                            path_accession: None,
-                            block: PathBlock {
-                                node_id: wt_node_id,
-                                block_sequence: "".to_string(),
-                                sequence_start: 0,
-                                sequence_end: 0,
-                                path_start: start,
-                                path_end: end,
-                                strand: Strand::Forward,
-                            },
-                            chromosome_index: 1,
-                            phased: 0,
-                            preserve_edge: true,
-                        },
                     };
                     BlockGroup::insert_change(conn, &change).unwrap();
                 }
 
-                if options.add_annotations && locus.changes.is_empty() {
+                if options.add_annotations {
                     let annotation_group = options.annotation_group.clone().unwrap_or_else(|| {
                         annotation_group_name(
                             options.annotation_name.as_deref(),
@@ -377,10 +517,12 @@ where
                             &locus.name,
                         )
                     });
-                    let path_tree = path.intervaltree(conn)?;
-                    let all_path_edges = PathEdge::edges_for_path(conn, &path.id);
+                    let annotation_blocks =
+                        updated_sequence_blocks(wt_node_id, sequence.length, &edited_blocks);
+                    let path_tree = updated_sequence_intervaltree(&annotation_blocks);
+                    let all_path_edges = updated_sequence_edges(conn, &annotation_blocks);
                     for annotation in locus.annotations.iter() {
-                        let sequence_hash = annotation_sequence_hash(annotation, &original_seq);
+                        let sequence_hash = annotation_sequence_hash(annotation, &locus.sequence);
                         let accession_name =
                             annotation_accession_name(&annotation_group, &sequence_hash);
                         let accession =
@@ -730,6 +872,72 @@ mod tests {
                     format!("{}{}", &seq[..1425].to_string(), &seq[2220..].to_string()).to_string()
                 ])
             );
+        }
+
+        #[test]
+        fn imports_annotations_when_genbank_has_edits() {
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
+
+            track_database(conn, op_conn).unwrap();
+
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/geneious_genbank/insertion.gb");
+            let file = File::open(&path).unwrap();
+            let _ = import_genbank(
+                &context,
+                BufReader::new(file),
+                None,
+                Sample::DEFAULT_NAME,
+                OperationInfo {
+                    files: vec![
+                        OperationFile::new("".to_string()).set_file_type(FileTypes::GenBank),
+                    ],
+                    description: "test".to_string(),
+                },
+                GenBankImportOptions::default().annotation_name_from_path(&path),
+            );
+
+            let expected_group = "GenBank /reference/insertion";
+            assert_eq!(
+                AnnotationGroup::query_by_sample(conn, Sample::DEFAULT_NAME),
+                vec![AnnotationGroup {
+                    name: expected_group.to_string()
+                }]
+            );
+            let annotations = Annotation::query_by_group(conn, expected_group).unwrap();
+            let lac_z = annotations
+                .iter()
+                .find(|annotation| annotation.name == "lacZalpha")
+                .unwrap();
+            let lac_z_blocks = Accession::get_by_id(conn, &lac_z.accession_id)
+                .unwrap()
+                .blocks(conn)
+                .unwrap()
+                .into_iter()
+                .filter(|block| {
+                    block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID
+                })
+                .map(|block| (block.sequence_start, block.sequence_end))
+                .collect::<Vec<_>>();
+            assert_eq!(lac_z_blocks, vec![(55, 436)]);
+
+            let inserted_cds = annotations
+                .iter()
+                .find(|annotation| annotation.name == "AAA73390.1")
+                .unwrap();
+            let inserted_cds_blocks = Accession::get_by_id(conn, &inserted_cds.accession_id)
+                .unwrap()
+                .blocks(conn)
+                .unwrap()
+                .into_iter()
+                .filter(|block| {
+                    block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID
+                })
+                .map(|block| (block.sequence_start, block.sequence_end))
+                .collect::<Vec<_>>();
+            assert_eq!(inserted_cds_blocks, vec![(0, 795)]);
         }
 
         #[test]

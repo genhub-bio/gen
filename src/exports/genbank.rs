@@ -290,13 +290,14 @@ pub fn export_genbank(
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
         seq.seq = path.sequence(conn)?.into_bytes();
-        export_annotations(conn, &path, &path_blocks, &mut seq, sample_name)?;
 
         // Identify the node traversal corresponding to our path.
         let graph = BlockGroup::get_graph(conn, &block_group.id)?;
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();
+        let mut annotation_path_blocks = Vec::new();
+        let mut replaced_or_deleted_nodes = HashSet::new();
 
         let mut position = 0;
         let mut offset = 0;
@@ -304,6 +305,17 @@ pub fn export_genbank(
         // current_node and next_node correspond to the nodes in our path traversal.
         while let Some(current_node) = node_it.next() {
             position += current_node.length();
+            if !replaced_or_deleted_nodes.contains(current_node) {
+                annotation_path_blocks.push(PathBlock {
+                    node_id: current_node.node_id,
+                    block_sequence: String::new(),
+                    sequence_start: current_node.sequence_start,
+                    sequence_end: current_node.sequence_end,
+                    path_start: position - current_node.length() + offset,
+                    path_end: position + offset,
+                    strand: Strand::Forward,
+                });
+            }
 
             // we evaluate all edges from our node, and if the connection point is not the expected
             // next node of the path, it's a bubble and a change we incorporate.
@@ -332,6 +344,19 @@ pub fn export_genbank(
                         sequence.push_str(
                             &seq.get_sequence(sub_node.sequence_start, sub_node.sequence_end)?,
                         );
+                    }
+                    let mut inserted_position = position + offset;
+                    for sub_node in &sub_path {
+                        annotation_path_blocks.push(PathBlock {
+                            node_id: sub_node.node_id,
+                            block_sequence: String::new(),
+                            sequence_start: sub_node.sequence_start,
+                            sequence_end: sub_node.sequence_end,
+                            path_start: inserted_position,
+                            path_end: inserted_position + sub_node.length(),
+                            strand: Strand::Forward,
+                        });
+                        inserted_position += sub_node.length();
                     }
                     let mut qualifiers = vec![];
 
@@ -373,6 +398,7 @@ pub fn export_genbank(
                             } else {
                                 let end_pos = upos + next_node.length() as usize;
                                 offset += sequence.len() as i64 - next_node.length();
+                                replaced_or_deleted_nodes.insert(**next_node);
                                 let original_bases = seq
                                     .seq
                                     .splice(upos..end_pos, sequence.into_bytes())
@@ -394,6 +420,7 @@ pub fn export_genbank(
                     {
                         // if we're not contiguous, it's a deletion
                         offset -= next_node.length();
+                        replaced_or_deleted_nodes.insert(**next_node);
                         let original_bases = seq
                             .seq
                             .splice(
@@ -430,6 +457,10 @@ pub fn export_genbank(
             }
         }
 
+        if annotation_path_blocks.is_empty() {
+            annotation_path_blocks = path_blocks.clone();
+        }
+        export_annotations(conn, &path, &annotation_path_blocks, &mut seq, sample_name)?;
         writer.write(&seq)?;
     }
 
@@ -691,6 +722,14 @@ mod tests {
         let mut output = Vec::new();
         export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
         compare_genbanks(&path, &output);
+
+        let parsed = reader::parse_slice(&output).unwrap();
+        let sop_a = parsed[0]
+            .features
+            .iter()
+            .find(|feature| feature_qualifier(feature, "gene").as_deref() == Some("sopA"))
+            .unwrap();
+        assert_eq!(sop_a.location, Location::simple_range(4902, 6069));
     }
 
     #[test]
