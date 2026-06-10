@@ -13,7 +13,7 @@ use rstar::{AABB, RTree};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    distribute_nodes::redistribute_horizontal_chains,
+    distribute_nodes::{compress_dead_space, redistribute_horizontal_chains},
     edge_router::route_graph::make_rectilinear,
     geometry::{BigRect, LayoutObject, LayoutPos, LocalPos, PartitionIndex},
     partition::{PartitionEdge, PartitionNode, StitchSide},
@@ -251,8 +251,18 @@ impl PartitionLayout {
             log::warn!("Edge routing failed: {:?}", e);
         }
 
+        // Remove dead space left behind by the Brandes-Köpf averaging step and
+        // by raw routing channel positions. This must happen before
+        // redistribution: once nodes are re-centered along their chains they
+        // straddle inter-column gaps and block compression.
+        compress_dead_space(&mut layout_graph, vertex_spacing);
+
         // Redistribute nodes along horizontal chains after edge routing
         redistribute_horizontal_chains(&mut layout_graph, vertex_spacing);
+
+        // Compress again: redistribution can vacate bands (e.g. a wide node
+        // moving out of an inflated column), reopening dead space.
+        compress_dead_space(&mut layout_graph, vertex_spacing);
 
         let (dx, dy) = align_partition_to_origin(&mut layout_graph);
 

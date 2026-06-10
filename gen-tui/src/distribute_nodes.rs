@@ -667,6 +667,120 @@ pub fn redistribute_horizontal_chains(
     }
 }
 
+/// The axis along which [`compress_dead_space`] operates.
+#[derive(Clone, Copy, Debug)]
+enum CompressAxis {
+    X,
+    Y,
+}
+
+/// Compute the cells occupied by a node along one axis, matching the
+/// asymmetric extents of `BigRect::from_center_and_size`: even sizes extend
+/// one cell further in the positive direction.
+fn occupied_extent(center: i64, size: i64) -> Interval {
+    Interval {
+        start: center - ((size + 1) / 2 - 1),
+        end: center + size / 2,
+    }
+}
+
+/// Remove dead space from the layout by shrinking oversized gaps between
+/// occupied bands down to `vertex_spacing`, on both axes.
+///
+/// The Brandes-Köpf coordinate assignment averages four extreme layouts. For
+/// dense graphs (e.g. layers connected all-to-all) the four layouts disagree
+/// strongly on block placement, and the average leaves large bands of empty
+/// space between nodes that no individual layout had. This pass scans each
+/// axis for bands of cells not covered by any node's bounding box and shrinks
+/// them to the configured spacing. Gaps at or below the spacing are never
+/// touched, and nothing is ever moved apart, so legitimate tight routing
+/// tracks are preserved.
+///
+/// Edges are drawn as segments between node positions, so shifting whole
+/// bands keeps the layout rectilinear: vertical and horizontal runs through a
+/// removed gap simply get shorter.
+///
+/// Note: this pass is complementary to, not redundant with, the edge router's
+/// `compress_graph` (see [`crate::edge_router::layout_graph_process`]). That
+/// pass is a local normalizer: per layer pair, label-aware, and bidirectional,
+/// meaning it may *expand* spacing so routing channels clear wide node labels.
+/// This pass is a global, shrink-only cleaner: it removes slack spanning the
+/// whole partition (e.g. Brandes-Köpf averaging artifacts) that no single
+/// layer pair can see. Removing either reintroduces distortions: without
+/// `compress_graph`, junctions can end up inside wide nodes; without this
+/// pass, dense graphs keep large dead bands.
+///
+/// In the layout pipeline this runs both before and after
+/// [`redistribute_horizontal_chains`]: before, because once nodes are
+/// re-centered along their chains they straddle inter-column gaps and block
+/// compression; after, because redistribution can vacate bands (e.g. a wide
+/// node moving out of an inflated column), reopening dead space.
+pub fn compress_dead_space(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    vertex_spacing: f64,
+) {
+    let min_gap = (vertex_spacing.round() as i64).max(1);
+    compress_axis(graph, min_gap, CompressAxis::X);
+    compress_axis(graph, min_gap, CompressAxis::Y);
+}
+
+fn compress_axis(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    min_gap: i64,
+    axis: CompressAxis,
+) {
+    let extent = |node: &LayoutNode| match axis {
+        CompressAxis::X => occupied_extent(node.pos.x, node.size.0 as i64),
+        CompressAxis::Y => occupied_extent(node.pos.y, node.size.1 as i64),
+    };
+
+    let mut intervals: Vec<Interval> = graph.node_weights().map(extent).collect();
+    if intervals.is_empty() {
+        return;
+    }
+    intervals.sort_by_key(|interval| interval.start);
+
+    // Merge intervals whose gap is at most min_gap: those gaps cannot shrink,
+    // so the band boundary carries no shift change.
+    let mut bands: Vec<Interval> = vec![intervals[0]];
+    for interval in &intervals[1..] {
+        let last = bands.last_mut().unwrap();
+        if interval.start <= last.end + 1 + min_gap {
+            last.end = last.end.max(interval.end);
+        } else {
+            bands.push(*interval);
+        }
+    }
+
+    // Accumulate the leftward shift for each band: every gap larger than
+    // min_gap is reduced to exactly min_gap.
+    let mut shifts: Vec<i64> = vec![0; bands.len()];
+    for i in 1..bands.len() {
+        let gap = bands[i].start - bands[i - 1].end - 1;
+        shifts[i] = shifts[i - 1] + (gap - min_gap);
+    }
+
+    if *shifts.last().unwrap() == 0 {
+        return;
+    }
+
+    for node_idx in graph.node_indices().collect::<Vec<_>>() {
+        let node = &mut graph[node_idx];
+        let center = match axis {
+            CompressAxis::X => node.pos.x,
+            CompressAxis::Y => node.pos.y,
+        };
+
+        // Find the band containing this node's center
+        let band_idx = bands.partition_point(|band| band.start <= center) - 1;
+
+        match axis {
+            CompressAxis::X => node.pos.x -= shifts[band_idx],
+            CompressAxis::Y => node.pos.y -= shifts[band_idx],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,6 +1610,83 @@ mod tests {
              (N3.x={} layer={:?}, N4.x={} layer={:?})",
             n3_x, n3_layer, n4_x, n4_layer
         );
+    }
+
+    #[test]
+    fn test_occupied_extent_matches_rect_convention() {
+        // Odd size: symmetric
+        let extent = occupied_extent(10, 3);
+        assert_eq!((extent.start, extent.end), (9, 11));
+
+        // Even size: extends one cell further in the positive direction
+        let extent = occupied_extent(10, 4);
+        assert_eq!((extent.start, extent.end), (9, 12));
+
+        // Unit size occupies a single cell
+        let extent = occupied_extent(10, 1);
+        assert_eq!((extent.start, extent.end), (10, 10));
+    }
+
+    #[test]
+    fn test_compress_dead_space_shrinks_oversized_gap() {
+        use crate::geometry::LocalPos;
+
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        // Two rows of height 3 with centers 20 apart (occupied gap of 17 cells)
+        // and two columns of width 5 with centers 30 apart.
+        let top_left = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos::new_xy(0, 0, 0),
+            (5, 3),
+            Some(0),
+        ));
+        let bottom_right = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos::new_xy(0, 30, 20),
+            (5, 3),
+            Some(1),
+        ));
+
+        compress_dead_space(&mut graph, 1.0);
+
+        // X: occupied bands [-2,2] and [28,32] -> gap 25 shrinks to 1,
+        // so the second center moves from 30 to 6.
+        // Y: occupied bands [-1,1] and [19,21] -> gap 17 shrinks to 1,
+        // so the second center moves from 20 to 4.
+        assert_eq!(graph[top_left].pos.x, 0);
+        assert_eq!(graph[top_left].pos.y, 0);
+        assert_eq!(graph[bottom_right].pos.x, 6);
+        assert_eq!(graph[bottom_right].pos.y, 4);
+    }
+
+    #[test]
+    fn test_compress_dead_space_preserves_tight_gaps() {
+        use crate::geometry::LocalPos;
+
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        // Rows already at minimum spacing (centers 4 apart, height 3, gap 1)
+        let positions = [(0, 0), (0, 4), (0, 8)];
+        let nodes: Vec<_> = positions
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| {
+                graph.add_node(LayoutNode::data(
+                    NodeIndex::new(i),
+                    LocalPos::new_xy(0, x, y),
+                    (5, 3),
+                    Some(0),
+                ))
+            })
+            .collect();
+
+        compress_dead_space(&mut graph, 1.0);
+
+        for (node_idx, &(x, y)) in nodes.iter().zip(positions.iter()) {
+            assert_eq!(graph[*node_idx].pos.x, x, "tight layout must not move");
+            assert_eq!(graph[*node_idx].pos.y, y, "tight layout must not move");
+        }
     }
 
     /// Tests that a node's *layer* field is updated when redistribution shifts it

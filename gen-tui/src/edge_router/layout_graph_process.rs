@@ -207,6 +207,14 @@ pub fn simplify_graph(
 /// by reducing gaps between consecutive layers.
 /// Modifies the graph in place.
 ///
+/// Note: complementary to, not redundant with,
+/// `crate::distribute_nodes::compress_dead_space`. With
+/// `account_for_node_dimensions` this function is a normalizer that may also
+/// *increase* spacing so routing channels clear wide node labels — the raw
+/// channel tracks from routing are not label-aware. `compress_dead_space` is
+/// shrink-only and global, so it can never take over that clearance role;
+/// removing this call makes junctions land inside wide nodes.
+///
 /// # Arguments
 /// * `graph` - The graph to compress
 /// * `axis` - 0 for x-axis/horizontal, 1 for y-axis/vertical
