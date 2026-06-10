@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, ErrorKind},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use gen_core::config::Workspace;
@@ -20,8 +20,12 @@ use crate::{
 const ORIGIN: &str = "origin";
 
 pub fn execute(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    execute_in_parent(url, Path::new("."))
+}
+
+fn execute_in_parent(url: &str, parent_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let repo_name = infer_repo_name(url)?;
-    let repo_path = PathBuf::from(&repo_name);
+    let repo_path = parent_path.join(&repo_name);
 
     create_clone_directory(&repo_path)?;
 
@@ -98,9 +102,17 @@ fn infer_repo_name(repo_url: &str) -> Result<String, Box<dyn std::error::Error>>
 mod tests {
     use std::{cell::Cell, io};
 
+    use gen_core::HashId;
+    use gen_models::{
+        file_types::FileTypes,
+        manifest::ManifestGenerator,
+        operations::{Branch, Operation},
+        traits::Query,
+    };
     use tempfile::tempdir;
 
     use super::*;
+    use crate::test_helpers::{create_operation, setup_gen_on_disk};
 
     #[test]
     fn infer_repo_name_from_genhub_url() {
@@ -137,6 +149,66 @@ mod tests {
         create_clone_directory(&repo_path).unwrap();
 
         assert!(repo_path.is_dir());
+    }
+
+    #[test]
+    fn clone_from_file_remote_materializes_asset_files() {
+        let remote_context = setup_gen_on_disk();
+        let remote_conn = remote_context.graph().conn();
+        let remote_op_conn = remote_context.operations().conn();
+        track_database(remote_conn, remote_op_conn).unwrap();
+
+        let remote_operation = create_operation(
+            &remote_context,
+            "fastas/clone_file.fa",
+            FileTypes::Fasta,
+            "remote operation",
+            HashId::random_str(),
+        );
+        let remote_branch = Branch::get_by_name(remote_op_conn, "main").unwrap();
+        let remote_manifest = ManifestGenerator::new(remote_op_conn)
+            .generate_manifest("main", remote_branch.current_operation_hash.as_ref())
+            .unwrap();
+        let manifest_operation = remote_manifest
+            .operations
+            .iter()
+            .find(|op| op.operation.hash == remote_operation.hash)
+            .unwrap();
+        let remote_asset_path = remote_context.workspace().repo_root().unwrap().join(
+            manifest_operation.file_additions[0]
+                .file_addition
+                .file_path(),
+        );
+        fs::remove_file(
+            remote_context
+                .workspace()
+                .repo_root()
+                .unwrap()
+                .join("fastas/clone_file.fa"),
+        )
+        .unwrap();
+
+        let clone_parent = tempdir().unwrap();
+        let remote_url = format!(
+            "file://{}",
+            remote_context.workspace().base_dir().to_string_lossy()
+        );
+        execute_in_parent(&remote_url, clone_parent.path()).unwrap();
+
+        let cloned_repo_path = clone_parent
+            .path()
+            .join(remote_context.workspace().base_dir().file_name().unwrap());
+        let cloned_file_path = cloned_repo_path.join("fastas/clone_file.fa");
+        assert!(cloned_file_path.exists());
+        assert_eq!(
+            fs::read(cloned_file_path).unwrap(),
+            fs::read(remote_asset_path).unwrap()
+        );
+
+        let operation_conn =
+            get_operation_connection(Some(cloned_repo_path.join(".gen/gen.db"))).unwrap();
+        let cloned_ops = Operation::all(&operation_conn);
+        assert!(cloned_ops.iter().any(|op| op.hash == remote_operation.hash));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use gen_models::{
     file_types::FileTypes,
     manifest::{
         ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
-        ManifestOperation,
+        ManifestOperation, ManifestOperationFileAddition,
     },
     metadata::get_db_uuid,
     operations::{
@@ -572,39 +572,7 @@ fn apply_operations_to_remote(
                     )
                 })?;
 
-                // This is materializing the file in the directory. If file_addition file_path
-                // will always be the asset_dir path, while file_addition.file_path can be like
-                // fastas/hg19.fa. So if we are not in the asset_dir, we copy it out
-                if file_addition.file_path != file_addition.file_addition.file_path()
-                    && LocalAssetUri::is_asset_relative_path(
-                        remote_workspace,
-                        file_addition.file_addition.file_path(),
-                    )?
-                {
-                    let user_dst_path = LocalAssetUri::repo_relative_destination_path(
-                        remote_workspace,
-                        &file_addition.file_path,
-                    )
-                    .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
-                    if user_dst_path.exists() {
-                        info!(
-                            "Skipping copy for existing file {}",
-                            user_dst_path.to_string_lossy()
-                        );
-                    } else {
-                        if let Some(parent) = user_dst_path.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-
-                        fs::copy(&dst_path, &user_dst_path).map_err(|_| {
-                            RemoteOperationError::FileTransferError(
-                                file_addition.file_path.clone(),
-                                dst_path.to_string_lossy().to_string(),
-                                user_dst_path.to_string_lossy().to_string(),
-                            )
-                        })?;
-                    }
-                }
+                materialize_operation_file(remote_workspace, file_addition, &dst_path)?;
             }
         }
 
@@ -1151,7 +1119,7 @@ fn ingest_manifest_operation(
                     &operation.hash,
                     &local_file_addition,
                     &file_addition.filename,
-                    &file_addition.file_path,
+                    &operation_file_destination(file_addition),
                 )?;
             }
             for annotation_file in &manifest_operation.annotation_file_additions {
@@ -1267,35 +1235,7 @@ fn copy_operation_from_remote_fs(
                 )
             })?;
 
-            if file_addition.file_path != file_addition.file_addition.file_path()
-                && LocalAssetUri::is_asset_relative_path(
-                    local_workspace,
-                    file_addition.file_addition.file_path(),
-                )?
-            {
-                let user_dst_path = LocalAssetUri::repo_relative_destination_path(
-                    local_workspace,
-                    &file_addition.file_path,
-                )
-                .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
-                if user_dst_path.exists() {
-                    info!(
-                        "Skipping copy for existing file {}",
-                        user_dst_path.to_string_lossy()
-                    );
-                } else {
-                    if let Some(parent) = user_dst_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::copy(&dst_path, &user_dst_path).map_err(|_| {
-                        RemoteOperationError::FileTransferError(
-                            file_addition.file_path.clone(),
-                            dst_path.to_string_lossy().to_string(),
-                            user_dst_path.to_string_lossy().to_string(),
-                        )
-                    })?;
-                }
-            }
+            materialize_operation_file(local_workspace, file_addition, &dst_path)?;
         }
     }
     for annotation_file in &manifest_operation.annotation_file_additions {
@@ -1334,6 +1274,62 @@ fn copy_operation_from_remote_fs(
     Ok(())
 }
 
+fn materialize_operation_file(
+    workspace: &Workspace,
+    file_addition: &ManifestOperationFileAddition,
+    stored_asset_path: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let operation_file_path = operation_file_destination(file_addition);
+    if operation_file_path == file_addition.file_addition.file_path()
+        || !LocalAssetUri::is_asset_relative_path(
+            workspace,
+            file_addition.file_addition.file_path(),
+        )?
+    {
+        return Ok(());
+    }
+
+    let user_dst_path =
+        LocalAssetUri::repo_relative_destination_path(workspace, &operation_file_path)
+            .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
+    if user_dst_path.exists() {
+        info!(
+            "Skipping copy for existing file {}",
+            user_dst_path.to_string_lossy()
+        );
+        return Ok(());
+    }
+
+    if let Some(parent) = user_dst_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(stored_asset_path, &user_dst_path).map_err(|_| {
+        RemoteOperationError::FileTransferError(
+            operation_file_path,
+            stored_asset_path.to_string_lossy().to_string(),
+            user_dst_path.to_string_lossy().to_string(),
+        )
+    })?;
+
+    Ok(())
+}
+
+fn operation_file_destination(file_addition: &ManifestOperationFileAddition) -> String {
+    if file_addition.file_path != file_addition.file_addition.file_path() {
+        return file_addition.file_path.clone();
+    }
+
+    let asset_filename = FilePath::new(file_addition.file_addition.file_path())
+        .file_name()
+        .and_then(|filename| filename.to_str());
+    if !file_addition.filename.is_empty() && Some(file_addition.filename.as_str()) != asset_filename
+    {
+        return file_addition.filename.clone();
+    }
+
+    file_addition.file_path.clone()
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteOperationAssetResponse {
     changeset: String,
@@ -1345,7 +1341,6 @@ struct RemoteOperationAssetResponse {
 #[derive(Debug, Deserialize)]
 struct RemoteFileAsset {
     asset_path: String,
-    file_path: String,
     url: String,
 }
 
@@ -1396,25 +1391,46 @@ fn download_remote_operation_assets(
     )?;
 
     let asset_dir = workspace.asset_dir()?;
-    let gen_path = FilePath::new(&asset_dir);
     for file in asset_response.files {
-        let destination = gen_path.join(&file.asset_path);
-        let user_destination = repo_root.join(&file.file_path);
+        let destination = remote_asset_destination(&asset_dir, &file.asset_path)?;
         if !destination.exists() {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
             download_binary(
                 client,
                 &file.url,
                 destination.as_path(),
                 Some(auth_token),
-                &file.file_path,
+                &file.asset_path,
             )?;
         }
-        if !user_destination.exists() {
-            std::fs::copy(destination.as_path(), user_destination.as_path())?;
+    }
+
+    for file_addition in &manifest_operation.file_additions {
+        let stored_asset_path = repo_root.join(file_addition.file_addition.file_path());
+        if stored_asset_path.exists() {
+            materialize_operation_file(&workspace, file_addition, &stored_asset_path)?;
         }
     }
 
     Ok(())
+}
+
+fn remote_asset_destination(
+    asset_dir: &FilePath,
+    asset_path: &str,
+) -> Result<PathBuf, RemoteOperationError> {
+    let filename = FilePath::new(asset_path)
+        .file_name()
+        .ok_or_else(|| {
+            RemoteOperationError::IOError(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Remote asset path has no filename: {asset_path}"),
+            ))
+        })?
+        .to_os_string();
+    Ok(asset_dir.join(filename))
 }
 
 fn download_binary(
@@ -2620,6 +2636,67 @@ mod tests {
         }
 
         #[test]
+        fn test_pull_from_file_remote_materializes_asset_to_operation_path() {
+            let context = setup_gen();
+            let local_workspace = context.workspace();
+            let conn = context.graph().conn();
+            let op_conn = context.operations().conn();
+            track_database(conn, op_conn).unwrap();
+
+            let remote_context = setup_gen_on_disk();
+            let remote_conn = remote_context.graph().conn();
+            let remote_op_conn = remote_context.operations().conn();
+            track_database(remote_conn, remote_op_conn).unwrap();
+
+            let remote_operation = create_operation(
+                &remote_context,
+                "fastas/remote_file.fa",
+                FileTypes::Fasta,
+                "remote operation",
+                HashId::random_str(),
+            );
+            let remote_branch = Branch::get_by_name(remote_op_conn, "main").unwrap();
+            let remote_manifest = ManifestGenerator::new(remote_op_conn)
+                .generate_manifest("main", remote_branch.current_operation_hash.as_ref())
+                .unwrap();
+            let manifest_operation = remote_manifest
+                .operations
+                .iter()
+                .find(|op| op.operation.hash == remote_operation.hash)
+                .unwrap();
+            let remote_asset_path = remote_context.workspace().repo_root().unwrap().join(
+                manifest_operation.file_additions[0]
+                    .file_addition
+                    .file_path(),
+            );
+            fs::remove_file(
+                remote_context
+                    .workspace()
+                    .repo_root()
+                    .unwrap()
+                    .join("fastas/remote_file.fa"),
+            )
+            .unwrap();
+
+            let remote_url = format!(
+                "file://{}",
+                remote_context.workspace().base_dir().to_string_lossy()
+            );
+            let branch = Branch::get_by_name(op_conn, "main").unwrap();
+            pull_from_file_remote(&context, &remote_url, &branch).unwrap();
+
+            let local_file_path = local_workspace
+                .repo_root()
+                .unwrap()
+                .join("fastas/remote_file.fa");
+            assert!(local_file_path.exists());
+            assert_eq!(
+                fs::read(local_file_path).unwrap(),
+                fs::read(remote_asset_path).unwrap()
+            );
+        }
+
+        #[test]
         fn test_pull_from_file_remote_missing_branch_errors() {
             let context = setup_gen();
             let conn = context.graph().conn();
@@ -2823,6 +2900,57 @@ mod tests {
             );
 
             assert!(matches!(result, Err(RemoteOperationError::IOError(_))));
+        }
+
+        #[test]
+        fn test_remote_asset_destination_uses_asset_filename() {
+            let context = setup_gen();
+            let asset_dir = context.workspace().asset_dir().unwrap();
+
+            assert_eq!(
+                remote_asset_destination(&asset_dir, "abc123.fa").unwrap(),
+                asset_dir.join("abc123.fa")
+            );
+            assert_eq!(
+                remote_asset_destination(&asset_dir, "assets/abc123.fa").unwrap(),
+                asset_dir.join("abc123.fa")
+            );
+            assert_eq!(
+                remote_asset_destination(&asset_dir, ".gen/assets/abc123.fa").unwrap(),
+                asset_dir.join("abc123.fa")
+            );
+        }
+
+        #[test]
+        fn test_materialize_operation_file_uses_filename_for_legacy_asset_path() {
+            let context = setup_gen();
+            let workspace = context.workspace();
+            let checksum = HashId::convert_str("legacy-asset");
+            let asset_path = format!(".gen/assets/{checksum}.gbk");
+            let stored_asset_path = workspace.repo_root().unwrap().join(&asset_path);
+            fs::write(&stored_asset_path, b"legacy asset").unwrap();
+            let file_addition = ManifestOperationFileAddition {
+                file_addition: FileAddition {
+                    id: HashId::random_str(),
+                    asset_uri: LocalAssetUri::asset_uri(&asset_path),
+                    file_type: FileTypes::GenBank,
+                    checksum,
+                },
+                filename: "addgene-plasmid-122028-sequence-238860.gbk".to_string(),
+                file_path: asset_path,
+            };
+
+            materialize_operation_file(workspace, &file_addition, &stored_asset_path).unwrap();
+
+            let user_file_path = workspace
+                .repo_root()
+                .unwrap()
+                .join("addgene-plasmid-122028-sequence-238860.gbk");
+            assert_eq!(fs::read(user_file_path).unwrap(), b"legacy asset");
+            assert_eq!(
+                operation_file_destination(&file_addition),
+                "addgene-plasmid-122028-sequence-238860.gbk"
+            );
         }
     }
 }
