@@ -8,7 +8,7 @@ use std::{
 use r#gen::{
     get_connection,
     views::{
-        annotation_groups::load_annotation_group_entries,
+        annotation_groups::{annotation_group_names, load_annotation_group_entries},
         annotation_track::{
             AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
             graph_locus_from_annotation_span,
@@ -24,7 +24,10 @@ use r#gen::{
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice, project_path};
 use gen_models::{
-    annotations::AnnotationError, block_group::BlockGroup, db::GraphConnection, locus::GraphLocus,
+    annotations::{Annotation, AnnotationError},
+    block_group::BlockGroup,
+    db::GraphConnection,
+    locus::GraphLocus,
 };
 use gen_tui::{
     LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
@@ -45,8 +48,9 @@ use ratatui::{
 use serde::Serialize;
 
 use crate::python_api::{
+    annotation::{PyAnnotation, annotation_segments},
     block_group::PySequenceGraph,
-    graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
+    graph_search::{PyGraphLocus, PyGraphPos},
     repository::PyRepository,
     utils::block_group_err_to_pyerr,
 };
@@ -237,6 +241,24 @@ fn locus_from_span_and_pos_map(
     GraphLocus { slices }
 }
 
+fn annotation_to_span(annotation: &PyAnnotation) -> AnnotationSpan {
+    use r#gen::views::annotation_track::AnnotationSegment as ViewSegment;
+    AnnotationSpan {
+        id: annotation.inner.id,
+        name: annotation.inner.name.clone(),
+        segments: annotation
+            .ann_segments
+            .iter()
+            .map(|s| ViewSegment {
+                node_id: s.node_id,
+                start: s.range.start,
+                end: s.range.end,
+                strand: s.strand,
+            })
+            .collect(),
+    }
+}
+
 /// A span annotated onto the graph canvas, with or without a label (highlight), optionally associated with a specific track.
 #[derive(Clone)]
 struct GraphOverlay {
@@ -335,13 +357,9 @@ impl PyGraphController {
         let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id) else {
             return;
         };
-        let entries = load_annotation_group_entries(conn, &current_block_group);
-        let mut seen_names = HashSet::new();
-        for entry in &entries {
-            if seen_names.insert(entry.name.clone()) {
-                if let Ok(track) = self.load_group_as_track(conn, &entry.name) {
-                    self.track_annotations.push(track);
-                }
+        for name in annotation_group_names(conn, &current_block_group) {
+            if let Ok(track) = self.load_group_as_track(conn, &name) {
+                self.track_annotations.push(track);
             }
         }
     }
@@ -681,7 +699,8 @@ impl PyGraphController {
     /// Build a track panel from a list of `Annotation` objects.
     /// Each `Annotation` becomes one span; all are grouped under `name`.
     pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
-        let spans: Vec<AnnotationSpan> = annotations.iter().map(|a| a.inner.clone()).collect();
+        let spans: Vec<AnnotationSpan> =
+            annotations.iter().map(|a| annotation_to_span(a)).collect();
         self.track_annotations
             .push(AnnotationTrack::new(name, spans));
     }
@@ -781,7 +800,8 @@ impl PyGraphController {
 
     /// Navigate to an `Annotation` object.
     pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation) {
-        self.navigate_to_span(&annotation.inner);
+        let span = annotation_to_span(annotation);
+        self.navigate_to_span(&span);
     }
 
     /// Highlight an `Annotation` on the graph as a nameless inline annotation,
@@ -795,9 +815,16 @@ impl PyGraphController {
         let style = PathStyle::new(c)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        highlight_match_range(&mut self.controller, &annotation.locus, style);
+        let span = annotation_to_span(annotation);
+        let locus = annotation
+            .locus
+            .clone()
+            .or_else(|| graph_locus_from_annotation_span(&span, self.controller.graph()));
+        if let Some(locus) = locus {
+            highlight_match_range(&mut self.controller, &locus, style);
+        }
         self.overlays.push(GraphOverlay {
-            span: annotation.inner.clone(),
+            span,
             track: None,
             style,
         });
@@ -810,29 +837,43 @@ impl PyGraphController {
         self.go_to_pos(&PyGraphPos::new(slice.block, slice.start));
     }
 
-    /// Return all annotations (track and inline) as a flat list of `Annotation` objects.
-    pub fn list_annotations(&self) -> Vec<PyAnnotation> {
-        let mut annotations = Vec::new();
-        let graph = self.controller.graph();
-        for track in &self.track_annotations {
-            for span in &track.annotations {
-                let locus = graph_locus_from_annotation_span(span, graph)
-                    .expect("annotation references nodes not in graph");
-                annotations.push(PyAnnotation {
-                    inner: span.clone(),
-                    locus,
-                });
-            }
-        }
-        for overlay in self.overlays.iter().filter(|o| o.track.is_some()) {
-            let locus = graph_locus_from_annotation_span(&overlay.span, graph)
-                .expect("annotation references nodes not in graph");
-            annotations.push(PyAnnotation {
-                inner: overlay.span.clone(),
-                locus,
-            });
-        }
-        annotations
+    /// Return all gene annotations for this sequence graph.
+    ///
+    /// Delegates to the database, returning every annotation stored for this
+    /// block group — independent of which tracks are currently loaded in the
+    /// widget.
+    ///
+    /// The returned ``Annotation`` objects carry no repository context. To
+    /// translate one, pass it to
+    /// ``SequenceGraph.translate_annotation(region=ann)``, which resolves the
+    /// annotation through its own context.
+    pub fn list_annotations(&self) -> PyResult<Vec<PyAnnotation>> {
+        let bg_id = self.block_group_id.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "list_annotations() requires a block group; \
+                 create the widget via SequenceGraph.plot()",
+            )
+        })?;
+        let conn = self.open_conn()?;
+        let block_group = BlockGroup::get_by_id(&conn, bg_id)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let annotations = Annotation::list_in_block_group_lineage(
+            &conn,
+            &block_group.collection_name,
+            &block_group.sample_name,
+            &block_group.name,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(annotations
+            .into_iter()
+            .map(|a| PyAnnotation {
+                ann_segments: annotation_segments(&conn, &a),
+                inner: a,
+                context: None,
+                source_block_group_id: Some(*bg_id),
+                locus: None,
+            })
+            .collect())
     }
 
     /// Return a JSON list of track-panel annotation names currently loaded.
@@ -874,17 +915,26 @@ impl PyGraphController {
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
-        let loci: Vec<Option<GraphLocus>> = annotations
+        // Collect spans and loci with immutable graph borrow, then apply with mutable controller borrow.
+        let spans_and_loci: Vec<(AnnotationSpan, Option<GraphLocus>)> = annotations
             .iter()
-            .map(|ann| graph_locus_from_annotation_span(&ann.inner, self.controller.graph()))
+            .map(|ann| {
+                let span = annotation_to_span(ann);
+                let locus = ann
+                    .locus
+                    .clone()
+                    .or_else(|| graph_locus_from_annotation_span(&span, self.controller.graph()));
+                (span, locus)
+            })
             .collect();
-        for locus in loci.into_iter().flatten() {
-            highlight_match_range(&mut self.controller, &locus, style);
+        for (_, locus) in &spans_and_loci {
+            if let Some(locus) = locus {
+                highlight_match_range(&mut self.controller, locus, style);
+            }
         }
-        for ann in &annotations {
+        for (span, _) in spans_and_loci {
             self.overlays.push(GraphOverlay {
-                span: ann.inner.clone(),
+                span,
                 track: track_name.clone(),
                 style,
             });

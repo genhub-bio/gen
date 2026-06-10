@@ -66,22 +66,22 @@ gbk_path <- system.file("extdata", "puc19.gbk", package = "genr")
 repo$import_genbank(gbk_path, sample = "wt")
 ```
 
-List the block groups in the repository to confirm the import:
+List the sequence graphs in the repository to confirm the import:
 
-```{r list-bgs}
-bgs <- repo$get_sequence_graphs()
-bg_wt <- bgs[[1]]
-cat("Sequence graph:", bg_wt$name(), "| sample:", bg_wt$sample_name(), "\n")
+```{r list-sgs}
+sgs <- repo$get_sequence_graphs()
+sg_wt <- sgs[[1]]
+cat("Sequence graph:", sg_wt$name(), "| sample:", sg_wt$sample_name(), "\n")
 ```
 
 ## Visualise the reference
 
 ```{r plot-wt}
-p <- plot(bg_wt)
+p <- plot(sg_wt)
 
 # Navigate to the MCS — annotated features are first-class, so you can
 # jump directly to any named feature rather than specifying coordinates.
-annotations <- p$list_annotations()
+annotations <- sg_wt$list_annotations()
 mcs <- Filter(function(a) grepl("MCS|misc_feature|multiple.cloning", a$name, ignore.case = TRUE), annotations)
 if (length(mcs) > 0) p$go_to(mcs[[1]])
 
@@ -90,7 +90,7 @@ p
 
 The viewer renders a static snapshot of the sequence graph. Annotations
 from the GenBank file (lacZα, bla, the MCS) appear as coloured tracks
-below the sequence. `list_annotations()` returns all named features in
+below the sequence. `sg_wt$list_annotations()` returns all named features in
 the database; passing one to `go_to()` centres the viewport on that
 feature — no coordinate look-up required.
 
@@ -134,7 +134,7 @@ diverges through the new MCS nodes.
 ## Inspect the design
 
 ```{r get-gg-bg}
-bg_gg <- Filter(function(x) x$sample_name() == "gg_design", repo$get_sequence_graphs())[[1]]
+sg_gg <- Filter(function(x) x$sample_name() == "gg_design", repo$get_sequence_graphs())[[1]]
 ```
 
 ### Confirm the BsaI sites with search
@@ -147,12 +147,12 @@ the reverse complement as well as the forward sequence.
 ```{r search-bsai}
 # GGTCTC is the BsaI recognition sequence (cuts 1 nt downstream on sense strand).
 # DNA-mode search finds both the forward site and its reverse-complement counterpart.
-hits <- repo$search("GGTCTC", c(bg_gg$id()), "dna")
+hits <- repo$search("GGTCTC", c(sg_gg$id()), "dna")
 cat("BsaI sites found:", length(hits[[1]]$matches), "\n")
 ```
 
 ```{r plot-gg}
-p_gg <- plot(bg_gg)
+p_gg <- plot(sg_gg)
 p_gg$go_to(hits[[1]]$matches[[1]])
 p_gg
 ```
@@ -166,7 +166,7 @@ Three hits. To understand why, run the same search against the
 wild-type:
 
 ```{r search-wt}
-hits_wt <- repo$search("GGTCTC", c(bg_wt$id()), "dna")
+hits_wt <- repo$search("GGTCTC", c(sg_wt$id()), "dna")
 wt_count <- if (length(hits_wt) > 0) length(hits_wt[[1]]$matches) else 0L
 cat("BsaI sites in wild-type:", wt_count, "\n")   # 1
 ```
@@ -187,7 +187,7 @@ possible hexamers — pass the IUPAC string and `search()` matches all of
 them:
 
 ```{r search-iupac}
-hits_hincii <- repo$search("GTYRAC", c(bg_gg$id()), "dna")
+hits_hincii <- repo$search("GTYRAC", c(sg_gg$id()), "dna")
 cat("HincII sites found:", length(hits_hincii[[1]]$matches), "\n")
 ```
 
@@ -252,11 +252,11 @@ repo$update_with_vcf(
 Plot the sequenced sample:
 
 ```{r get-sequenced-bg}
-bg_seq <- Filter(function(x) x$sample_name() == "sequenced", repo$get_sequence_graphs())[[1]]
+sg_seq <- Filter(function(x) x$sample_name() == "sequenced", repo$get_sequence_graphs())[[1]]
 ```
 
 ```{r plot-sequenced}
-p_seq <- plot(bg_seq)
+p_seq <- plot(sg_seq)
 p_seq
 ```
 
@@ -489,24 +489,24 @@ Sequence graphs expose `subgraph()` as a shorthand that returns the new
 sequence graph immediately:
 
 ```{r bg-subgraph, eval=FALSE}
-mcs_bg <- bg_gg$subgraph("mcs_v2", 390L, 460L, NULL)
-plot(mcs_bg)
+mcs_sg <- sg_gg$subgraph("mcs_v2", 390L, 460L, NULL)
+plot(mcs_sg)
 ```
 
 #### Chunks and stitching
 
-`bg$chunks()` splits a block group into contiguous fragments and returns
-them as a list of block groups. Supply `chunk_size` for uniform splits
+`sg$chunks()` splits a sequence graph into contiguous fragments and returns
+them as a list of sequence graphs. Supply `chunk_size` for uniform splits
 or `breakpoints` (an integer vector of positions) for explicit cut
 points:
 
 ```{r derive-chunks, eval=FALSE}
-chunks <- bg_gg$chunks("gg_500bp_chunks", integer(0), 500L, NULL)
+chunks <- sg_gg$chunks("gg_500bp_chunks", integer(0), 500L, NULL)
 cat("Chunks created:", length(chunks), "\n")
 ```
 
 `stitch()` reverses the operation, concatenating a list of
-same-sample block groups end-to-end into a new block group:
+same-sample sequence graphs end-to-end into a new sequence graph:
 
 ```{r stitch, eval=FALSE}
 reassembled <- stitch(
@@ -537,13 +537,5 @@ GenBank import) can be added by group name:
 
 ```{r add-track-group, eval=FALSE}
 p_gg$add_track_group("GenBank annotations")
-p_gg
-```
-
-`clear_tracks()` removes all track panels without affecting the viewport
-or highlights:
-
-```{r clear-tracks, eval=FALSE}
-p_gg$clear_tracks()
 p_gg
 ```

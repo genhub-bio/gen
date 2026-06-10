@@ -9,10 +9,13 @@ use r#gen::{
     graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
 };
 use gen_graph::GraphNode;
-use gen_models::{block_group::BlockGroup, db::DbContext, node::Node, sample::Sample};
+use gen_models::{
+    annotations::Annotation, block_group::BlockGroup, db::DbContext, node::Node, sample::Sample,
+};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
+    annotation::{PyAnnotation, annotation_segments},
     graph_node::PyGraphNode,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
@@ -492,6 +495,34 @@ impl PySequenceGraph {
         export_genbank(conn, &self.collection_name, &self.sample_name, writer).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to export GenBank '{}': {e}", filename))
         })
+    }
+
+    /// Return all gene annotations associated with this sequence graph.
+    ///
+    /// Returns
+    /// -------
+    /// list[GeneAnnotation]
+    fn list_annotations(&self) -> PyResult<Vec<PyAnnotation>> {
+        let ctx = self.require_context("list_annotations()")?;
+        let conn = ctx.graph().conn();
+        let bg_id = self.id;
+        let annotations = Annotation::list_in_block_group_lineage(
+            conn,
+            &self.collection_name,
+            &self.sample_name,
+            &self.name,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(annotations
+            .into_iter()
+            .map(|a| PyAnnotation {
+                ann_segments: annotation_segments(conn, &a),
+                inner: a,
+                context: Some(ctx.clone()),
+                source_block_group_id: Some(bg_id),
+                locus: None,
+            })
+            .collect())
     }
 }
 

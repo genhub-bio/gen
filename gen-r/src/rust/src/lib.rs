@@ -22,10 +22,11 @@ use r#gen::{
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
     },
     views::{
-        annotation_groups::{
-            AnnotationGroupEntry, AnnotationGroupOrigin, load_annotation_group_entries,
+        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
+        annotation_track::{
+            AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
+            graph_locus_from_annotation_span,
         },
-        annotation_track::{AnnotationTrack, graph_locus_from_annotation_span},
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
@@ -33,10 +34,15 @@ use r#gen::{
         gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer, highlight_match_range},
     },
 };
-use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
+use gen_annotations::{
+    projection::{AnnotationSegment, accession_edges_to_segments},
+    translate::{bed::translate_bed, gff::translate_gff},
+};
 use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
+    accession::Accession,
+    annotations::Annotation,
     block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
     errors::OperationError,
@@ -136,6 +142,89 @@ fn strand_str(strand: Strand) -> &'static str {
         Strand::Reverse => "-",
         _ => ".",
     }
+}
+
+/// Genomic segments covered by an annotation.
+fn annotation_segments(conn: &GraphConnection, annotation: &Annotation) -> Vec<AnnotationSegment> {
+    let edges = Accession::get_edges_by_id(conn, &annotation.accession_id);
+    accession_edges_to_segments(&edges)
+}
+
+/// Build a `gen_annotation` R record (id, name, group, kind, segments, length, locus).
+fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &GenGraph) -> Robj {
+    let segments = annotation_segments(conn, annotation);
+    let span = AnnotationSpan {
+        id: annotation.id,
+        name: annotation.name.clone(),
+        segments: segments
+            .iter()
+            .map(|s| ViewAnnotationSegment {
+                node_id: s.node_id,
+                start: s.range.start,
+                end: s.range.end,
+                strand: s.strand,
+            })
+            .collect(),
+    };
+    let locus_robj: Robj = match graph_locus_from_annotation_span(&span, graph) {
+        Some(locus) => graph_locus_record(&locus),
+        None => r!(NULL),
+    };
+    let length: i64 = segments.iter().map(|s| s.range.end - s.range.start).sum();
+    let segment_records: Vec<Robj> = segments
+        .iter()
+        .map(|s| {
+            let mut seg = r!(list!(
+                node_id = s.node_id.to_string(),
+                start = s.range.start,
+                end = s.range.end,
+                strand = strand_str(s.strand)
+            ));
+            seg.set_class(&["gen_annotation_segment"]).unwrap();
+            seg
+        })
+        .collect();
+    let kind = annotation
+        .extra
+        .as_ref()
+        .and_then(|e| e.genbank.as_ref())
+        .map(|g| g.kind.clone());
+    let kind_robj: Robj = match kind {
+        Some(k) => r!(k),
+        None => r!(NULL),
+    };
+    let mut obj = r!(list!(
+        id = annotation.id.to_string(),
+        name = annotation.name.as_str(),
+        group = annotation.group.as_str(),
+        kind = kind_robj,
+        segments = List::from_values(segment_records),
+        length = length,
+        locus = locus_robj
+    ));
+    obj.set_class(&["gen_annotation"]).unwrap();
+    obj
+}
+
+/// Rich `gen_annotation` records for a block group, following the sample
+/// lineage. Single listing route shared by `SequenceGraph` and `Repository`.
+fn list_annotation_records(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+    collection_name: &str,
+    sample_name: &str,
+    name: &str,
+) -> std::result::Result<List, Error> {
+    let graph =
+        BlockGroup::get_graph(conn, block_group_id).map_err(|e| Error::Other(e.to_string()))?;
+    let annotations =
+        Annotation::list_in_block_group_lineage(conn, collection_name, sample_name, name)
+            .map_err(|e| Error::Other(e.to_string()))?;
+    let records: Vec<Robj> = annotations
+        .iter()
+        .map(|a| annotation_record(conn, a, &graph))
+        .collect();
+    Ok(List::from_values(records))
 }
 
 fn node_slice_record(
@@ -1793,7 +1882,7 @@ impl Repository {
         Ok("Derived chunks.".to_string())
     }
 
-    fn get_annotation_group_names(
+    fn auto_load_annotation_groups(
         &self,
         sequence_graph_id: String,
     ) -> std::result::Result<Vec<String>, Error> {
@@ -1801,13 +1890,7 @@ impl Repository {
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
-        let entries = load_annotation_group_entries(conn, &bg);
-        let mut seen = HashSet::new();
-        Ok(entries
-            .into_iter()
-            .filter(|e| seen.insert(e.name.clone()))
-            .map(|e| e.name)
-            .collect())
+        Ok(annotation_group_names(conn, &bg))
     }
 
     fn list_annotations(&self, sequence_graph_id: String) -> std::result::Result<List, Error> {
@@ -1815,40 +1898,7 @@ impl Repository {
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
-        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
-
-        let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = graph
-            .nodes()
-            .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
-            .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
-            .collect();
-
-        let entries = load_annotation_group_entries(conn, &bg);
-        let mut seen = HashSet::new();
-        let mut result: Vec<Robj> = Vec::new();
-
-        for entry in &entries {
-            if !seen.insert(entry.name.clone()) {
-                continue;
-            }
-            let Ok(spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
-                conn,
-                current_block_group: &bg,
-                entry,
-                visible_ranges_by_node: &node_ranges,
-            }) else {
-                continue;
-            };
-            for span in &spans {
-                let Some(locus) = graph_locus_from_annotation_span(span, &graph) else {
-                    continue;
-                };
-                let locus_rec = graph_locus_record(&locus);
-                result.push(list!(name = span.name.as_str(), locus = locus_rec).into());
-            }
-        }
-
-        Ok(List::from_values(result))
+        list_annotation_records(conn, &bg.id, &bg.collection_name, &bg.sample_name, &bg.name)
     }
 
     fn render_frame(
@@ -2217,6 +2267,24 @@ impl SequenceGraph {
             nodes = List::from_values(nodes),
             edges = List::from_values(edges)
         ))
+    }
+
+    /// List the gene annotations associated with this sequence graph.
+    ///
+    /// Reads persisted annotations from the database (including those inherited
+    /// from ancestor samples), so it does not depend on the viewer/widget.
+    ///
+    /// @return A list of `gen_annotation` records, each with `id`, `name`,
+    ///   `group`, `kind`, `segments`, `length`, and `locus` fields.
+    fn list_annotations(&self) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        list_annotation_records(
+            conn,
+            &self.id,
+            &self.collection_name,
+            &self.sample_name,
+            &self.name,
+        )
     }
 }
 
