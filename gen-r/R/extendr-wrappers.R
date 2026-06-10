@@ -68,7 +68,7 @@ Repository$derive_subgraph <- function(collection, sample, new_sample, region, b
 
 Repository$derive_chunks <- function(collection, sample, new_sample, region, backbone, breakpoints, chunk_size) .Call("wrap__Repository__derive_chunks", self, collection, sample, new_sample, region, backbone, breakpoints, chunk_size, PACKAGE = "genr")
 
-Repository$get_annotation_group_names <- function(sequence_graph_id) .Call("wrap__Repository__get_annotation_group_names", self, sequence_graph_id, PACKAGE = "genr")
+Repository$auto_load_annotation_groups <- function(sequence_graph_id) .Call("wrap__Repository__auto_load_annotation_groups", self, sequence_graph_id, PACKAGE = "genr")
 
 Repository$list_annotations <- function(sequence_graph_id) .Call("wrap__Repository__list_annotations", self, sequence_graph_id, PACKAGE = "genr")
 
@@ -82,6 +82,20 @@ Repository$handle_click <- function(sequence_graph_id, detail, ops, col, row) .C
 #' @export
 `[[.Repository` <- `$.Repository`
 
+#'
+#' @section Methods:
+#'\subsection{Method `list_annotations`}{
+#'List the gene annotations associated with this sequence graph.
+#'
+#'Reads persisted annotations from the database (including those inherited
+#'from ancestor samples), so it does not depend on the viewer/widget.
+#'
+#' \subsection{return}{
+#'A list of `gen_annotation` records, each with `id`, `name`,
+#'`group`, `kind`, `segments`, `length`, and `locus` fields.
+#'}
+#'}
+#'
 SequenceGraph <- new.env(parent = emptyenv())
 
 SequenceGraph$id <- function() .Call("wrap__SequenceGraph__id", self, PACKAGE = "genr")
@@ -115,6 +129,8 @@ SequenceGraph$subgraph <- function(new_sample, start, end, backbone) .Call("wrap
 SequenceGraph$chunks <- function(new_sample, breakpoints, chunk_size, backbone) .Call("wrap__SequenceGraph__chunks", self, new_sample, breakpoints, chunk_size, backbone, PACKAGE = "genr")
 
 SequenceGraph$to_dict <- function() .Call("wrap__SequenceGraph__to_dict", self, PACKAGE = "genr")
+
+SequenceGraph$list_annotations <- function() .Call("wrap__SequenceGraph__list_annotations", self, PACKAGE = "genr")
 
 #' @export
 `$.SequenceGraph` <- function (self, name) { func <- SequenceGraph[[name]]; environment(func) <- environment(); func }

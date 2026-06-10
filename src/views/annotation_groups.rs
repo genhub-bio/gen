@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gen_core::HashId;
 use gen_models::{
@@ -110,6 +110,18 @@ pub fn load_annotation_group_entries(
     });
     entries.dedup_by(|left, right| left.id == right.id);
     entries
+}
+
+/// Distinct annotation-group names visible from a block group, in the order
+/// produced by [`load_annotation_group_entries`]. Shared discovery used by the
+/// Python and R auto-load paths so the logic lives in one place.
+pub fn annotation_group_names(conn: &GraphConnection, block_group: &BlockGroup) -> Vec<String> {
+    let mut seen = HashSet::new();
+    load_annotation_group_entries(conn, block_group)
+        .into_iter()
+        .filter(|entry| seen.insert(entry.name.clone()))
+        .map(|entry| entry.name)
+        .collect()
 }
 
 fn origin_rank(origin: AnnotationGroupOrigin) -> usize {

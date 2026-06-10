@@ -38,8 +38,7 @@ A \code{gen_plot} environment with methods:
 \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
 \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
 \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
-\item{\code{clear_tracks()}}{Remove all annotation track panels. Returns self invisibly.}
-\item{\code{list_annotations()}}{Return a list of annotation records from the database. Each record has \code{name} and \code{locus} fields.}
+\item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{segments}, \code{length}, and \code{locus} fields.}
 \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 }
 }

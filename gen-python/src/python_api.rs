@@ -1,5 +1,6 @@
 use pyo3::{Bound, prelude::*, types::PyModule};
 
+pub mod annotation;
 pub mod block_group;
 pub mod graph_node;
 pub mod graph_search;
@@ -10,9 +11,10 @@ pub mod sequence_part;
 pub mod utils;
 
 use crate::python_api::{
+    annotation::PyAnnotation,
     block_group::PySequenceGraph,
     graph_node::{PyGraphNode, PyGraphNodeSlice},
-    graph_search::{PyAnnotation, PyGraphLocus, PyGraphPos},
+    graph_search::{PyGraphLocus, PyGraphPos},
     hash_id::PyHashId,
     jupyter_widget::PyGraphController,
     repository::PyRepository,
@@ -26,12 +28,12 @@ use crate::python_api::{
 pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRepository>()?;
     m.add_class::<PySequenceGraph>()?;
+    m.add_class::<PyAnnotation>()?;
     m.add_class::<PyHashId>()?;
     m.add_class::<PyGraphNode>()?;
     m.add_class::<PyGraphNodeSlice>()?;
     m.add_class::<PyGraphPos>()?;
     m.add_class::<PyGraphLocus>()?;
-    m.add_class::<PyAnnotation>()?;
     m.add_class::<PySequencePart>()?;
     m.add_class::<PyGraphController>()?;
 
