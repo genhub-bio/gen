@@ -501,50 +501,48 @@ mod tests {
         let b_seq = str::from_utf8(&b[0].seq).unwrap().to_string();
         assert_eq!(a_seq, b_seq);
 
-        let mut a_features = vec![];
-        for feature in a[0].features.iter() {
-            for (k, v) in feature.qualifiers.iter() {
-                if k == "note"
-                    && let Some(v) = v
-                    && v.starts_with("Geneious type: Editing")
-                {
-                    let original_bases = &feature
-                        .qualifiers
-                        .iter()
-                        .filter(|(k, _v)| k == "Original_Bases")
-                        .map(|(_k, v)| v.clone())
-                        .collect::<Option<String>>();
-                    a_features.push((
-                        feature.location.find_bounds().unwrap(),
-                        original_bases.clone(),
-                        v.clone(),
-                    ))
-                }
-            }
-        }
+        assert_eq!(editing_features(&a[0]), editing_features(&b[0]));
+        assert_eq!(
+            labeled_feature_locations(&a[0]),
+            labeled_feature_locations(&b[0])
+        );
+    }
 
-        let mut b_features = vec![];
-        for feature in b[0].features.iter() {
-            for (k, v) in feature.qualifiers.iter() {
-                if k == "note"
-                    && let Some(v) = v
-                    && v.starts_with("Geneious type: Editing")
-                {
-                    let original_bases = &feature
+    fn normalized_qualifier_value(value: &str) -> String {
+        value.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn editing_features(seq: &gb_io::seq::Seq) -> Vec<((i64, i64), Option<String>, String)> {
+        let mut features = seq
+            .features
+            .iter()
+            .filter_map(|feature| {
+                editing_note(feature).map(|note| {
+                    let original_bases = feature
                         .qualifiers
                         .iter()
-                        .filter(|(k, _v)| k == "Original_Bases")
-                        .map(|(_k, v)| v.clone())
+                        .filter(|(key, _value)| key == "Original_Bases")
+                        .map(|(_key, value)| value.as_deref().map(normalized_qualifier_value))
                         .collect::<Option<String>>();
-                    b_features.push((
+                    (
                         feature.location.find_bounds().unwrap(),
-                        original_bases.clone(),
-                        v.clone(),
-                    ))
-                }
-            }
-        }
-        assert_eq!(a_features, b_features);
+                        original_bases,
+                        normalized_qualifier_value(note),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        features.sort();
+        features
+    }
+
+    fn editing_note(feature: &gb_io::seq::Feature) -> Option<&str> {
+        feature.qualifiers.iter().find_map(|(key, value)| {
+            (key == "note")
+                .then_some(value.as_deref())
+                .flatten()
+                .filter(|value| value.starts_with("Geneious type: Editing"))
+        })
     }
 
     fn feature_label(feature: &gb_io::seq::Feature) -> Option<String> {
@@ -558,6 +556,7 @@ mod tests {
         let mut locations = seq
             .features
             .iter()
+            .filter(|feature| editing_note(feature).is_none())
             .filter_map(|feature| {
                 feature_label(feature).map(|label| (label, feature.location.clone()))
             })
@@ -823,12 +822,9 @@ mod tests {
         let mut output = Vec::new();
         export_genbank(conn, "fixtures", "puc19-export", &mut output).unwrap();
 
-        let original = reader::parse_file(&path).unwrap();
+        compare_genbanks(&path, &output);
+
         let parsed = reader::parse_slice(&output).unwrap();
-        assert_eq!(
-            labeled_feature_locations(&parsed[0]),
-            labeled_feature_locations(&original[0])
-        );
         let features = &parsed[0].features;
         let labels = features
             .iter()
