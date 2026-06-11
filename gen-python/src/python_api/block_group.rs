@@ -6,7 +6,13 @@ use r#gen::{
     },
     core::HashId,
     exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa},
-    graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
+    graphs::{
+        graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
+        translation::{
+            translate_annotation, translate_block_group, translate_path_range,
+            with_translation_operation,
+        },
+    },
 };
 use gen_graph::GraphNode;
 use gen_models::{
@@ -19,6 +25,7 @@ use super::{
     graph_node::PyGraphNode,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
+    translation::build_translation_params,
     utils::block_group_err_to_pyerr,
 };
 
@@ -524,6 +531,184 @@ impl PySequenceGraph {
             })
             .collect())
     }
+
+    /// Translate a sequence graph or annotation into a protein ``SequenceGraph``.
+    ///
+    /// When ``region`` is a string it is resolved against this sequence graph
+    /// only, in priority order: named path within this graph first, then
+    /// annotation in this graph's lineage. No other sequence graphs are
+    /// searched.
+    ///
+    /// Parameters
+    /// ----------
+    /// region : str or Annotation, optional
+    ///     - ``str``: a path name or annotation name scoped to this sequence
+    ///       graph. Path names take priority over annotation names.
+    ///     - ``Annotation``: an object returned by ``list_annotations()``.
+    ///       Identified by database id, so unambiguous.
+    ///     - omitted: translates the entire sequence graph.
+    /// start : int, optional
+    ///     0-based start coordinate in path space. Defaults to 0 when omitted.
+    ///     Must be >= 0 and <= ``end``.
+    /// end : int, optional
+    ///     Exclusive end coordinate in path space. Defaults to path length when
+    ///     omitted. Must be <= path length.
+    /// output_collection : str, optional
+    ///     Collection for the protein block group. Defaults to this graph's collection.
+    /// output_sample : str
+    ///     Sample name for the protein block group. Required.
+    /// strand : str, optional
+    ///     ``"forward"`` or ``"reverse"``. Inferred from the annotation when omitted.
+    /// frame : int
+    ///     Initial reading frame offset (0, 1, or 2). Default: 0.
+    /// codon_table : int
+    ///     NCBI codon table ID. Default: 1 (Standard).
+    #[pyo3(signature = (region=None, output_collection=None, output_sample=None, strand=None, frame=0, codon_table=1, start=None, end=None))]
+    fn translate_annotation(
+        &self,
+        region: Option<Bound<'_, PyAny>>,
+        output_collection: Option<&str>,
+        output_sample: Option<String>,
+        strand: Option<&str>,
+        frame: u8,
+        codon_table: u8,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> PyResult<PySequenceGraph> {
+        let ctx = self.require_context("translate_annotation()")?;
+        let conn = ctx.graph().conn();
+
+        let out_collection = output_collection.unwrap_or(&self.collection_name);
+        let out_sample =
+            output_sample.ok_or_else(|| PyRuntimeError::new_err("output_sample is required"))?;
+
+        let params =
+            build_translation_params(out_collection, &out_sample, strand, frame, codon_table)?;
+
+        let protein_bg = match region {
+            None => {
+                let label = self.name.clone();
+                let bg_id = self.id;
+                if start.is_some() || end.is_some() {
+                    let path = BlockGroup::get_current_path(conn, &bg_id)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    let len = path
+                        .length(conn)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    let (s, e) = resolve_start_end(start, end, len)?;
+                    with_translation_operation(ctx, &label, || {
+                        translate_path_range(conn, &bg_id, s, e, params)
+                    })
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                } else {
+                    with_translation_operation(ctx, &label, || {
+                        translate_block_group(conn, &bg_id, params)
+                    })
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                }
+            }
+            Some(any) => {
+                if let Ok(ann) = any.extract::<PyRef<PyAnnotation>>() {
+                    let annotation = ann.inner.clone();
+                    if start.is_some() || end.is_some() {
+                        let path = BlockGroup::get_current_path(conn, &self.id)
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                        let len = path
+                            .length(conn)
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                        let (s, e) = resolve_start_end(start, end, len)?;
+                        with_translation_operation(ctx, &annotation.name, || {
+                            translate_path_range(conn, &self.id, s, e, params)
+                        })
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    } else {
+                        with_translation_operation(ctx, &annotation.name, || {
+                            translate_annotation(conn, &annotation, Some(&self.id), params)
+                        })
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    }
+                } else if let Ok(region_str) = any.extract::<&str>() {
+                    // Resolution scoped to self: named path first, then annotation in lineage.
+                    let path = BlockGroup::get_path_by_name(conn, &self.id, region_str)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+                    if let Some(path) = path {
+                        let len = path
+                            .length(conn)
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                        let (s, e) = resolve_start_end(start, end, len)?;
+                        with_translation_operation(ctx, region_str, || {
+                            translate_path_range(conn, &self.id, s, e, params)
+                        })
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    } else {
+                        let annotation = Annotation::list_in_block_group_lineage(
+                            conn,
+                            &self.collection_name,
+                            &self.sample_name,
+                            &self.name,
+                        )
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter()
+                        .find(|a| a.name.eq_ignore_ascii_case(region_str))
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err(format!(
+                                "no path or annotation named '{region_str}' in sequence graph '{}'",
+                                self.name
+                            ))
+                        })?;
+
+                        if start.is_some() || end.is_some() {
+                            let path = BlockGroup::get_current_path(conn, &self.id)
+                                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                            let len = path
+                                .length(conn)
+                                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                            let (s, e) = resolve_start_end(start, end, len)?;
+                            with_translation_operation(ctx, region_str, || {
+                                translate_path_range(conn, &self.id, s, e, params)
+                            })
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        } else {
+                            with_translation_operation(ctx, region_str, || {
+                                translate_annotation(conn, &annotation, Some(&self.id), params)
+                            })
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        }
+                    }
+                } else {
+                    return Err(PyRuntimeError::new_err(
+                        "region must be a string or Annotation object",
+                    ));
+                }
+            }
+        };
+
+        Ok(self.into_py_block_group(protein_bg))
+    }
+}
+
+fn resolve_start_end(
+    start: Option<i64>,
+    end: Option<i64>,
+    path_length: i64,
+) -> PyResult<(i64, i64)> {
+    let s = start.unwrap_or(0);
+    let e = end.unwrap_or(path_length);
+    if s < 0 {
+        return Err(PyRuntimeError::new_err(format!("start ({s}) must be >= 0")));
+    }
+    if e > path_length {
+        return Err(PyRuntimeError::new_err(format!(
+            "end ({e}) must be <= path length ({path_length})"
+        )));
+    }
+    if s > e {
+        return Err(PyRuntimeError::new_err(format!(
+            "start ({s}) must be <= end ({e})"
+        )));
+    }
+    Ok((s, e))
 }
 
 impl PySequenceGraph {

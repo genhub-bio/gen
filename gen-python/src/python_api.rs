@@ -8,6 +8,7 @@ pub mod hash_id;
 pub mod jupyter_widget;
 pub mod repository;
 pub mod sequence_part;
+pub mod translation;
 pub mod utils;
 
 use crate::python_api::{
