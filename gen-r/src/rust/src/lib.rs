@@ -20,6 +20,10 @@ use r#gen::{
     graphs::{
         combinatorial_library::{SequencePart, parse_library},
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
+        translation::{
+            CodonTable, TranslationParams, translate_annotation, translate_block_group,
+            translate_path_range, with_translation_operation,
+        },
     },
     views::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
@@ -144,6 +148,33 @@ fn strand_str(strand: Strand) -> &'static str {
     }
 }
 
+/// Read a length-1 character value out of an R object, if it is one.
+fn robj_scalar_string(obj: &Robj) -> Option<String> {
+    obj.as_str()
+        .map(String::from)
+        .or_else(|| obj.as_string_vector().and_then(|v| v.into_iter().next()))
+}
+
+/// If `obj` is a `gen_annotation` record (a named list with an `id` field),
+/// return the parsed annotation hash id.
+fn gen_annotation_record_id(obj: &Robj) -> std::result::Result<Option<HashId>, Error> {
+    let Some(list) = obj.as_list() else {
+        return Ok(None);
+    };
+    let Some(names) = call!("names", obj).ok().and_then(|r| r.as_string_vector()) else {
+        return Ok(None);
+    };
+    let id_value = list
+        .values()
+        .zip(names)
+        .find(|(_, name)| name == "id")
+        .map(|(value, _)| value);
+    match id_value.and_then(|v| robj_scalar_string(&v)) {
+        Some(id) => Ok(Some(hash_id_from_string(&id).map_err(Error::Other)?)),
+        None => Ok(None),
+    }
+}
+
 /// Genomic segments covered by an annotation.
 fn annotation_segments(conn: &GraphConnection, annotation: &Annotation) -> Vec<AnnotationSegment> {
     let edges = Accession::get_edges_by_id(conn, &annotation.accession_id);
@@ -225,6 +256,21 @@ fn list_annotation_records(
         .map(|a| annotation_record(conn, a, &graph))
         .collect();
     Ok(List::from_values(records))
+}
+
+fn run_translation_operation<F>(
+    context: &GenDbContext,
+    label: &str,
+    f: F,
+) -> std::result::Result<BlockGroup, Error>
+where
+    F: FnOnce() -> std::result::Result<BlockGroup, r#gen::graphs::translation::TranslationError>,
+{
+    let graph_conn = context.graph().conn();
+    let operations_conn = context.operations().conn();
+    r#gen::track_database(graph_conn, operations_conn)
+        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
+    with_translation_operation(context, label, f).map_err(|e| Error::Other(e.to_string()))
 }
 
 fn node_slice_record(
@@ -1986,6 +2032,27 @@ struct SequenceGraph {
 unsafe impl Send for SequenceGraph {}
 unsafe impl Sync for SequenceGraph {}
 
+fn resolve_start_end(
+    start: Option<i64>,
+    end: Option<i64>,
+    path_length: i64,
+) -> Result<(i64, i64), Error> {
+    let s = start.unwrap_or(0);
+    let e = end.unwrap_or(path_length);
+    if s < 0 {
+        return Err(Error::Other(format!("start ({s}) must be >= 0")));
+    }
+    if e > path_length {
+        return Err(Error::Other(format!(
+            "end ({e}) must be <= path length ({path_length})"
+        )));
+    }
+    if s > e {
+        return Err(Error::Other(format!("start ({s}) must be <= end ({e})")));
+    }
+    Ok((s, e))
+}
+
 #[extendr]
 impl SequenceGraph {
     fn id(&self) -> String {
@@ -2285,6 +2352,160 @@ impl SequenceGraph {
             &self.sample_name,
             &self.name,
         )
+    }
+
+    /// Translate a sequence graph or annotation into a protein SequenceGraph.
+    ///
+    /// When `region` is a character string it is resolved against this sequence
+    /// graph only, in priority order: a named path within this graph first,
+    /// then an annotation in this graph's lineage. No other sequence graphs
+    /// are searched.
+    ///
+    /// @param region One of: `NULL` to translate the entire sequence graph; a
+    ///   path name or annotation name scoped to this sequence graph (path names
+    ///   take priority); or a `gen_annotation` record from `list_annotations()`
+    ///   (matched by database id, so unambiguous).
+    /// @param start 0-based start coordinate in path space. Defaults to 0 when
+    ///   NULL. Must be >= 0 and <= `end`. Default: NULL.
+    /// @param end Exclusive end coordinate in path space. Defaults to path
+    ///   length when NULL. Must be <= path length. Default: NULL.
+    /// @param output_collection Collection for the protein block group.
+    ///   Defaults to this graph's collection.
+    /// @param output_sample Sample name for the protein block group. Required.
+    /// @param strand `"forward"` or `"reverse"`. NULL infers from the annotation.
+    /// @param frame Initial reading frame offset: 0, 1, or 2.
+    /// @param codon_table NCBI codon table ID (default: 1 = Standard).
+    /// @return A new SequenceGraph containing the protein sequence.
+    fn translate_annotation(
+        &self,
+        region: Robj,
+        start: Nullable<i64>,
+        end: Nullable<i64>,
+        output_collection: Nullable<String>,
+        output_sample: String,
+        strand: Nullable<String>,
+        frame: i32,
+        codon_table: i32,
+    ) -> std::result::Result<SequenceGraph, Error> {
+        let start = nullable_i64_to_option(start);
+        let end = nullable_i64_to_option(end);
+
+        let conn = self.context.graph().conn();
+
+        let resolved_strand = match nullable_string_to_option(strand).as_deref() {
+            None => None,
+            Some("forward") => Some(Strand::Forward),
+            Some("reverse") => Some(Strand::Reverse),
+            Some(s) => {
+                return Err(Error::Other(format!(
+                    "Unknown strand '{s}'; use 'forward' or 'reverse'"
+                )));
+            }
+        };
+
+        let table_id = codon_table as u8;
+        let table = CodonTable::ncbi(table_id)
+            .ok_or_else(|| Error::Other(format!("Unknown NCBI codon table id {table_id}")))?;
+
+        let out_collection = nullable_string_to_option(output_collection)
+            .unwrap_or_else(|| self.collection_name.clone());
+
+        let mut tr_params = TranslationParams::new(&out_collection, &output_sample)
+            .initial_frame(frame as u8)
+            .map_err(|e| Error::Other(e.to_string()))?
+            .codon_table(table);
+        if let Some(s) = resolved_strand {
+            tr_params = tr_params.strand(s);
+        }
+
+        let bg_id = self.id;
+        let protein_bg = if region.is_null() {
+            let label = self.name.clone();
+            if start.is_some() || end.is_some() {
+                let path = BlockGroup::get_current_path(conn, &bg_id)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
+                let (s, e) = resolve_start_end(start, end, len)?;
+                run_translation_operation(&self.context, &label, || {
+                    translate_path_range(conn, &bg_id, s, e, tr_params)
+                })?
+            } else {
+                run_translation_operation(&self.context, &label, || {
+                    translate_block_group(conn, &bg_id, tr_params)
+                })?
+            }
+        } else if let Some(name) = robj_scalar_string(&region) {
+            // Resolution scoped to self: named path first, then annotation in lineage.
+            let path = BlockGroup::get_path_by_name(conn, &bg_id, &name)
+                .map_err(|e| Error::Other(e.to_string()))?;
+
+            if let Some(path) = path {
+                let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
+                let (s, e) = resolve_start_end(start, end, len)?;
+                run_translation_operation(&self.context, &name, || {
+                    translate_path_range(conn, &bg_id, s, e, tr_params)
+                })?
+            } else {
+                let annotation = Annotation::list_in_block_group_lineage(
+                    conn,
+                    &self.collection_name,
+                    &self.sample_name,
+                    &self.name,
+                )
+                .map_err(|e| Error::Other(e.to_string()))?
+                .into_iter()
+                .find(|a| a.name.eq_ignore_ascii_case(&name))
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "no path or annotation named '{name}' in sequence graph '{}'",
+                        self.name
+                    ))
+                })?;
+
+                if start.is_some() || end.is_some() {
+                    let path = BlockGroup::get_current_path(conn, &bg_id)
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
+                    let (s, e) = resolve_start_end(start, end, len)?;
+                    run_translation_operation(&self.context, &name, || {
+                        translate_path_range(conn, &bg_id, s, e, tr_params)
+                    })?
+                } else {
+                    run_translation_operation(&self.context, &name, || {
+                        translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
+                    })?
+                }
+            }
+        } else if let Some(id) = gen_annotation_record_id(&region)? {
+            let annotation = Annotation::get_by_id(conn, &id)
+                .ok_or_else(|| Error::Other(format!("Annotation with id '{id}' not found")))?;
+            let label = annotation.name.clone();
+            if start.is_some() || end.is_some() {
+                let path = BlockGroup::get_current_path(conn, &bg_id)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
+                let (s, e) = resolve_start_end(start, end, len)?;
+                run_translation_operation(&self.context, &label, || {
+                    translate_path_range(conn, &bg_id, s, e, tr_params)
+                })?
+            } else {
+                run_translation_operation(&self.context, &label, || {
+                    translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
+                })?
+            }
+        } else {
+            return Err(Error::Other(
+                "region must be NULL, an annotation name, or a gen_annotation record".to_string(),
+            ));
+        };
+
+        Ok(SequenceGraph {
+            context: self.context.clone(),
+            id: protein_bg.id,
+            collection_name: protein_bg.collection_name,
+            sample_name: protein_bg.sample_name,
+            name: protein_bg.name,
+        })
     }
 }
 

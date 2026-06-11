@@ -96,6 +96,23 @@ Repository$handle_click <- function(sequence_graph_id, detail, ops, col, row) .C
 #'}
 #'}
 #'
+#'\subsection{Method `translate_annotation`}{
+#'Translate a gene annotation into a protein SequenceGraph.
+#'
+#' \subsection{Arguments}{
+#'\describe{
+#'\item{`region`}{One of: `NULL` to translate the entire block group; an annotation name; or a `gen_annotation` record from `list_annotations()` (matched by its database id, avoiding any name-collision ambiguity).}
+#'\item{`output_collection`}{Collection for the protein block group. Defaults to this graph's collection.}
+#'\item{`output_sample`}{Sample name for the protein block group. Required.}
+#'\item{`strand`}{`"forward"` or `"reverse"`. NULL infers from the annotation.}
+#'\item{`frame`}{Initial reading frame offset: 0, 1, or 2.}
+#'\item{`codon_table`}{NCBI codon table ID (default: 1 = Standard).}
+#'}}
+#' \subsection{return}{
+#'A new SequenceGraph containing the protein sequence.
+#'}
+#'}
+#'
 SequenceGraph <- new.env(parent = emptyenv())
 
 SequenceGraph$id <- function() .Call("wrap__SequenceGraph__id", self, PACKAGE = "genr")
@@ -131,6 +148,8 @@ SequenceGraph$chunks <- function(new_sample, breakpoints, chunk_size, backbone) 
 SequenceGraph$to_dict <- function() .Call("wrap__SequenceGraph__to_dict", self, PACKAGE = "genr")
 
 SequenceGraph$list_annotations <- function() .Call("wrap__SequenceGraph__list_annotations", self, PACKAGE = "genr")
+
+SequenceGraph$translate_annotation <- function(region, output_collection, output_sample, strand, frame, codon_table) .Call("wrap__SequenceGraph__translate_annotation", self, region, output_collection, output_sample, strand, frame, codon_table, PACKAGE = "genr")
 
 #' @export
 `$.SequenceGraph` <- function (self, name) { func <- SequenceGraph[[name]]; environment(func) <- environment(); func }
