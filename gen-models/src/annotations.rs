@@ -379,6 +379,60 @@ impl Annotation {
         Ok(Annotation::query(conn, query, params![group]))
     }
 
+    /// List every annotation on a block group, following the sample lineage.
+    ///
+    /// Collects annotations attached to the block group named `block_group_name`
+    /// in `collection_name`, considering `sample_name` together with all of its
+    /// ancestor samples. This mirrors how a block group inherits its parents'
+    /// annotations. Results are de-duplicated by annotation id and ordered from
+    /// the closest sample in the lineage outward.
+    ///
+    /// # Arguments
+    ///
+    /// * `collection_name` - Collection the block group belongs to.
+    /// * `sample_name` - Sample whose lineage is walked, including the sample
+    ///   itself.
+    /// * `block_group_name` - Name shared by the block group across the lineage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnnotationError::DatabaseError`] if the query fails.
+    pub fn list_in_block_group_lineage(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        block_group_name: &str,
+    ) -> Result<Vec<Annotation>, AnnotationError> {
+        let query = "WITH RECURSIVE visible_samples(name, depth, path) AS (
+                 SELECT ?2, 0, ',' || ?2 || ','
+                 UNION ALL
+                 SELECT sl.parent_sample_name,
+                        visible.depth + 1,
+                        visible.path || sl.parent_sample_name || ','
+                 FROM sample_lineage sl
+                 JOIN visible_samples visible ON sl.child_sample_name = visible.name
+                 WHERE instr(visible.path, ',' || sl.parent_sample_name || ',') = 0
+             )
+             SELECT a.id,
+                    a.name,
+                    a.annotation_group,
+                    a.accession_id,
+                    a.extra \
+             FROM annotations a \
+             JOIN accessions acc ON a.accession_id = acc.id \
+             JOIN block_groups bg ON acc.block_group_id = bg.id \
+             JOIN visible_samples visible ON bg.sample_name = visible.name \
+             WHERE bg.collection_name = ?1 \
+               AND bg.name = ?3
+             GROUP BY a.id, a.name, a.annotation_group, a.accession_id, a.extra
+             ORDER BY min(visible.depth), a.name, a.id";
+        Ok(Annotation::query(
+            conn,
+            query,
+            params![collection_name, sample_name, block_group_name],
+        ))
+    }
+
     pub fn intervaltree(
         &self,
         conn: &GraphConnection,
@@ -930,14 +984,14 @@ impl AnnotationFile {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashSet, fs};
 
     use gen_core::{HashId, region::RegionResolutionError};
 
     use super::*;
     use crate::{
         block_group::{BlockGroup, PathCache},
-        block_group_edge::BlockGroupEdgeData,
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         errors::OperationError,
         files::GenDatabase,
         metadata,
@@ -1115,6 +1169,161 @@ mod tests {
             let resolved = Annotation::resolve(&region, &conn, "test", "child").unwrap();
 
             assert_eq!(resolved.id, parent_annotation.id);
+        }
+    }
+
+    mod lineage_listing {
+        use super::*;
+
+        /// Attach a block group that shares `parent_path`'s edges, give it its
+        /// own path and accession, and annotate it. Returns the annotation.
+        #[expect(clippy::too_many_arguments, reason = "test helper wiring")]
+        fn annotate_block_group(
+            conn: &GraphConnection,
+            parent_path: &Path,
+            cache: &mut PathCache,
+            collection_name: &str,
+            sample_name: &str,
+            block_group_name: &str,
+            accession_name: &str,
+            annotation_name: &str,
+        ) -> Annotation {
+            let block_group = create_bg(conn, collection_name, sample_name, block_group_name);
+            let edge_ids = PathEdge::edges_for_path(conn, &parent_path.id)
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            let block_group_edges = edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>();
+            BlockGroupEdge::bulk_create(conn, &block_group_edges);
+            let path = Path::create(conn, accession_name, &block_group.id, &edge_ids).unwrap();
+            let accession =
+                BlockGroup::add_accession(conn, &path, accession_name, 0, 5, cache).unwrap();
+            Annotation::get_or_create(conn, annotation_name, "genes", &accession.id, None).unwrap()
+        }
+
+        #[test]
+        fn lists_annotations_on_block_group() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let accession =
+                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+
+            let listed =
+                Annotation::list_in_block_group_lineage(&conn, "test", "test", "chr1").unwrap();
+
+            assert_eq!(listed, vec![annotation]);
+        }
+
+        #[test]
+        fn includes_parent_annotations_via_lineage() {
+            let conn = get_connection(None).unwrap();
+            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
+                .unwrap();
+            let parent_accession = BlockGroup::add_accession(
+                &conn,
+                &parent_path,
+                "parent-accession",
+                0,
+                5,
+                &mut cache,
+            )
+            .unwrap();
+            let parent_annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
+                    .unwrap();
+
+            let child_annotation = annotate_block_group(
+                &conn,
+                &parent_path,
+                &mut cache,
+                "test",
+                "child",
+                "chr1",
+                "child-accession",
+                "ftsZ",
+            );
+            SampleLineage::create(&conn, "test", "child").unwrap();
+
+            let listed =
+                Annotation::list_in_block_group_lineage(&conn, "test", "child", "chr1").unwrap();
+
+            let ids: HashSet<HashId> = listed.iter().map(|a| a.id).collect();
+            assert_eq!(
+                ids,
+                HashSet::from([parent_annotation.id, child_annotation.id])
+            );
+        }
+
+        #[test]
+        fn excludes_annotations_on_other_block_group_names() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let accession =
+                BlockGroup::add_accession(&conn, &path, "chr1-accession", 0, 5, &mut cache)
+                    .unwrap();
+            let chr1_annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+
+            let _chr2_annotation = annotate_block_group(
+                &conn,
+                &path,
+                &mut cache,
+                "test",
+                "test",
+                "chr2",
+                "chr2-accession",
+                "ftsZ",
+            );
+
+            let listed =
+                Annotation::list_in_block_group_lineage(&conn, "test", "test", "chr1").unwrap();
+
+            assert_eq!(listed, vec![chr1_annotation]);
+        }
+
+        #[test]
+        fn excludes_annotations_from_samples_outside_the_lineage() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let accession =
+                BlockGroup::add_accession(&conn, &path, "test-accession", 0, 5, &mut cache)
+                    .unwrap();
+            let test_annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+
+            let _unrelated_annotation = annotate_block_group(
+                &conn,
+                &path,
+                &mut cache,
+                "test",
+                "unrelated",
+                "chr1",
+                "unrelated-accession",
+                "ftsZ",
+            );
+
+            let listed =
+                Annotation::list_in_block_group_lineage(&conn, "test", "test", "chr1").unwrap();
+
+            assert_eq!(listed, vec![test_annotation]);
         }
     }
 
