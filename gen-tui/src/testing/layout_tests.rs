@@ -1471,6 +1471,235 @@ fn test_asymmetric_diamond_4_2() {
     insta::assert_snapshot!("asymmetric_diamond_4_2", snapshot);
 }
 
+/// Build a dense all-to-all grid with a bypass node.
+///
+/// Structure (`layer_count` + 2 layers):
+/// Layer 0: single source node (index 0)
+/// Layers 1..=layer_count: `nodes_per_layer` nodes each, connected all-to-all
+///   between consecutive layers
+/// Last layer: single sink node
+/// Bypass: source -> bypass (highest index) -> sink, skipping the grid entirely
+#[cfg(test)]
+fn make_grid_all_to_all_with_bypass(layer_count: usize, nodes_per_layer: usize) -> MockDomainGraph {
+    let mut domain_graph = MockDomainGraph::new();
+
+    let source = domain_graph.add_node(());
+
+    let grid_layers: Vec<Vec<_>> = (0..layer_count)
+        .map(|_| {
+            (0..nodes_per_layer)
+                .map(|_| domain_graph.add_node(()))
+                .collect()
+        })
+        .collect();
+
+    let sink = domain_graph.add_node(());
+    let bypass = domain_graph.add_node(());
+
+    // Source fans out to the first grid layer
+    for &node in &grid_layers[0] {
+        domain_graph.add_edge(source, node, ());
+    }
+
+    // All-to-all between consecutive grid layers
+    for pair in grid_layers.windows(2) {
+        for &from in &pair[0] {
+            for &to in &pair[1] {
+                domain_graph.add_edge(from, to, ());
+            }
+        }
+    }
+
+    // Last grid layer fans in to the sink
+    for &node in &grid_layers[layer_count - 1] {
+        domain_graph.add_edge(node, sink, ());
+    }
+
+    // Bypass: source -> bypass -> sink
+    domain_graph.add_edge(source, bypass, ());
+    domain_graph.add_edge(bypass, sink, ());
+
+    domain_graph
+}
+
+#[test]
+fn test_grid_all_to_all_with_bypass() {
+    let _ = env_logger::try_init();
+
+    let domain_graph = make_grid_all_to_all_with_bypass(4, 4);
+    let snapshot = make_snapshot(domain_graph, 120, 40, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("grid_all_to_all_with_bypass", snapshot);
+}
+
+/// Zoom (disperse/contract adjusts the minimum inter-node distance) must
+/// survive dead-space compression: dispersed layouts keep their wider gaps
+/// uniformly, and contracting returns to the original layout.
+#[test]
+fn test_grid_disperse_zoom_preserves_spacing() {
+    let _ = env_logger::try_init();
+
+    use crate::{
+        geometry::WorldPos,
+        graph_controller::{GraphConfig, GraphController},
+        testing::mocks::FixedNodeSizer,
+    };
+
+    let domain_graph = make_grid_all_to_all_with_bypass(4, 4);
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = usize::MAX;
+    config.partition.node_count = usize::MAX;
+
+    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+    controller.set_detail_level(VisualDetail::Full);
+    controller.viewport_state.viewport_bounds =
+        ratatui::layout::Rect::new(0, 0, u16::MAX / 2, u16::MAX / 2);
+    controller.viewport_state.camera_current = WorldPos::new(0, 0);
+    controller.viewport_state.camera_target = WorldPos::new(0, 0);
+
+    // First grid layer (domain indices 1-4) plus the bypass node (index 18)
+    // span all distinct rows of the layout.
+    let row_node_indices = [1u32, 2, 3, 4, 18];
+
+    let collect_row_ys = |controller: &mut GraphController<MockDomainGraph, FixedNodeSizer>| {
+        controller
+            .ensure_camera_coverage()
+            .expect("Failed to ensure camera coverage");
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph");
+        let viewport_graph = controller.get_viewport_graph();
+        let mut ys: Vec<i64> = row_node_indices
+            .iter()
+            .map(|&i| {
+                viewport_graph
+                    .node_positions
+                    .get(&petgraph::graph::NodeIndex::new(i as usize))
+                    .expect("Node missing from viewport graph")
+                    .y
+            })
+            .collect();
+        ys.sort();
+        ys
+    };
+
+    let uniform_gaps = |ys: &[i64]| -> Vec<i64> { ys.windows(2).map(|w| w[1] - w[0]).collect() };
+
+    // Default spacing: rows must be uniformly spaced (no dead space)
+    let initial_ys = collect_row_ys(&mut controller);
+    let initial_gaps = uniform_gaps(&initial_ys);
+    assert!(
+        initial_gaps.iter().all(|&g| g == initial_gaps[0]),
+        "Rows must be uniformly spaced at default zoom, got gaps {:?}",
+        initial_gaps
+    );
+
+    // Disperse twice: vertex spacing 1 -> 3 -> 5, so row gaps grow to height + spacing
+    controller.disperse();
+    controller.disperse();
+
+    let dispersed_ys = collect_row_ys(&mut controller);
+    let dispersed_gaps = uniform_gaps(&dispersed_ys);
+    assert!(
+        dispersed_gaps.iter().all(|&g| g == dispersed_gaps[0]),
+        "Rows must stay uniformly spaced when dispersed, got gaps {:?}",
+        dispersed_gaps
+    );
+    assert!(
+        dispersed_gaps[0] > initial_gaps[0],
+        "Dispersing must increase row spacing: {} -> {}",
+        initial_gaps[0],
+        dispersed_gaps[0]
+    );
+
+    // Contract back to the default spacing: layout must return to the original
+    controller.contract();
+    controller.contract();
+
+    let contracted_ys = collect_row_ys(&mut controller);
+    assert_eq!(
+        contracted_ys, initial_ys,
+        "Contracting back to default spacing must restore the original row positions"
+    );
+}
+
+/// 5 grid layers of 4 nodes: probes whether the dead space around the bypass
+/// node depends on an odd number of layers.
+#[test]
+fn test_grid_5_layers_by_4_with_bypass() {
+    let _ = env_logger::try_init();
+
+    let domain_graph = make_grid_all_to_all_with_bypass(5, 4);
+    let snapshot = make_snapshot(domain_graph, 120, 40, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("grid_5_layers_by_4_with_bypass", snapshot);
+}
+
+/// 4 grid layers of 5 nodes: probes whether the dead space around the bypass
+/// node depends on an odd number of nodes per layer.
+#[test]
+fn test_grid_4_layers_by_5_with_bypass() {
+    let _ = env_logger::try_init();
+
+    let domain_graph = make_grid_all_to_all_with_bypass(4, 5);
+    let snapshot = make_snapshot(domain_graph, 120, 40, usize::MAX, usize::MAX);
+
+    insta::assert_snapshot!("grid_4_layers_by_5_with_bypass", snapshot);
+}
+
+/// Same grid-with-bypass structure, but with variable node widths where the
+/// bypass node is wider than every other node.
+#[test]
+fn test_grid_all_to_all_with_bypass_variable_widths() {
+    let _ = env_logger::try_init();
+
+    use crate::plotter::NodeSizer;
+
+    #[derive(Debug, Clone)]
+    struct WideBypassSizer;
+
+    impl NodeSizer<MockDomainGraph> for WideBypassSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) -> (u64, u64) {
+            match node.index() {
+                // Bypass node: wider than everything else
+                18 => (13, 3),
+                // Source and sink: medium width
+                0 | 17 => (5, 3),
+                // Grid nodes: alternating widths
+                i if i % 2 == 0 => (7, 3),
+                _ => (4, 3),
+            }
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    let domain_graph = make_grid_all_to_all_with_bypass(4, 4);
+    let renderer = TestRenderers::debug();
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        120,
+        40,
+        usize::MAX,
+        usize::MAX,
+        WideBypassSizer,
+        renderer,
+    );
+
+    insta::assert_snapshot!("grid_all_to_all_with_bypass_variable_widths", snapshot);
+}
+
 /// Test rendering and positioning of very large nodes during zoom operations.
 ///
 /// This test verifies that nodes with extreme widths (1000+ characters) are rendered
