@@ -160,10 +160,8 @@ pub fn derive_chunks(
         let end_block = blocks[blocks.len() - 1];
         let end_node_coordinate = end_coordinate - end_block.start + end_block.sequence_start;
 
-        let new_node_ids_by_old = BlockGroup::derive_subgraph(
+        BlockGroup::derive_subgraph(
             conn,
-            collection_name,
-            new_sample_name,
             &parent_block_group_id,
             &start_block,
             &end_block,
@@ -194,16 +192,10 @@ pub fn derive_chunks(
             })
             .collect::<HashMap<_, _>>();
 
-        // The block group method to derive a subgraph creates copies of the nodes from the parent
-        // block group, to make it easier to then stitch them together later.  So we need to use the
-        // map returned by derive_subgraph to find the edges in the child graph that correspond to
-        // path edges in the parent graph, and create a new path from the child edges.
         let mut new_path_edge_ids = vec![];
 
-        let new_start_target_node_id = new_node_ids_by_old.get(&start_block.node_id).unwrap();
-
         let start_node_point = NodePoint {
-            id: *new_start_target_node_id,
+            id: start_block.node_id,
             coordinate: start_node_coordinate,
             strand: Strand::Forward,
         };
@@ -213,7 +205,7 @@ pub fn derive_chunks(
                 .iter()
                 .find(|e| {
                     is_start_node(e.edge.source_node_id)
-                        && e.edge.target_node_id == *new_start_target_node_id
+                        && e.edge.target_node_id == start_block.node_id
                         && e.edge.target_coordinate == start_node_coordinate
                 })
                 .unwrap();
@@ -221,30 +213,26 @@ pub fn derive_chunks(
         }
 
         for edge in &current_path_edges {
-            let new_source_node_id = new_node_ids_by_old.get(&edge.source_node_id);
-            let new_target_node_id = new_node_ids_by_old.get(&edge.target_node_id);
+            if is_start_node(edge.source_node_id) || is_end_node(edge.target_node_id) {
+                continue;
+            }
 
-            if let Some(new_source_node_id) = new_source_node_id
-                && let Some(new_target_node_id) = new_target_node_id
-            {
-                let key = &(
-                    *new_source_node_id,
-                    edge.source_coordinate,
-                    edge.source_strand,
-                    *new_target_node_id,
-                    edge.target_coordinate,
-                    edge.target_strand,
-                );
-                let child_edge_id = child_edge_ids_by_key.get(key);
-                if let Some(child_edge_id) = child_edge_id {
-                    new_path_edge_ids.push(*child_edge_id);
-                }
+            let key = &(
+                edge.source_node_id,
+                edge.source_coordinate,
+                edge.source_strand,
+                edge.target_node_id,
+                edge.target_coordinate,
+                edge.target_strand,
+            );
+            let child_edge_id = child_edge_ids_by_key.get(key);
+            if let Some(child_edge_id) = child_edge_id {
+                new_path_edge_ids.push(*child_edge_id);
             }
         }
 
-        let new_end_source_node_id = new_node_ids_by_old.get(&end_block.node_id).unwrap();
         let end_node_point = NodePoint {
-            id: *new_end_source_node_id,
+            id: end_block.node_id,
             coordinate: end_node_coordinate,
             strand: Strand::Forward,
         };
@@ -254,7 +242,7 @@ pub fn derive_chunks(
                 .iter()
                 .find(|e| {
                     is_end_node(e.edge.target_node_id)
-                        && e.edge.source_node_id == *new_end_source_node_id
+                        && e.edge.source_node_id == end_block.node_id
                         && e.edge.source_coordinate == end_node_coordinate
                 })
                 .unwrap();
