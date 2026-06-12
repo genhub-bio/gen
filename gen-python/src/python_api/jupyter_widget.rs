@@ -11,7 +11,7 @@ use r#gen::{
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
         annotation_track::{
             AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
-            graph_locus_from_annotation_span,
+            graph_locus_from_annotation_span, span_covered_by_later,
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
@@ -504,20 +504,30 @@ impl PyGraphController {
         }
 
         // Draw overlay labels. Midpoints are recomputed each render because the viewport may have changed.
-        let labeled_overlays: Vec<_> = self
+        let mut labeled_overlays: Vec<_> = self
             .overlays
             .iter()
             .filter(|o| !o.span.name.is_empty())
             .collect();
         if !labeled_overlays.is_empty() {
+            // Sort longest-first so the covered-by-later check matches highlight order.
+            labeled_overlays
+                .sort_by_key(|o| -(o.span.segments.iter().map(|s| s.end - s.start).sum::<i64>()));
+            let span_refs: Vec<&AnnotationSpan> =
+                labeled_overlays.iter().map(|o| &o.span).collect();
             let theme = current_theme();
             let pos_map = viewport_pos_map(&self.controller);
             let detail_level = self.controller.get_detail_level();
-            for overlay in labeled_overlays {
+            let mut not_shown_count: u32 = 0;
+            for (idx, overlay) in labeled_overlays.iter().enumerate() {
                 let color = match overlay.style.color {
                     ratatui::style::Color::Reset => theme[0x06],
                     c => c,
                 };
+                if span_covered_by_later(&overlay.span, idx, &span_refs) {
+                    not_shown_count += 1;
+                    continue;
+                }
                 let locus = locus_from_span_and_pos_map(&overlay.span, &pos_map);
                 let Some((left_pos, right_pos)) = locus_label_bounds(
                     &locus,
@@ -543,11 +553,16 @@ impl PyGraphController {
                 )
                 .is_none()
                 {
-                    eprintln!(
-                        "warning: annotation '{}' label could not be placed (obscured)",
-                        overlay.span.name
-                    );
+                    not_shown_count += 1;
                 }
+            }
+            if not_shown_count > 0 {
+                let note = format!(" +{not_shown_count} not labeled ");
+                let note_style = ratatui::style::Style::default()
+                    .fg(theme[0x09])
+                    .bg(theme[0x00]);
+                let y = graph_area.bottom().saturating_sub(1);
+                buf.set_string(graph_area.x, y, &note, note_style);
             }
         }
 

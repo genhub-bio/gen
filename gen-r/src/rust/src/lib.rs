@@ -29,7 +29,7 @@ use r#gen::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
         annotation_track::{
             AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
-            graph_locus_from_annotation_span,
+            graph_locus_from_annotation_span, span_covered_by_later,
         },
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
@@ -2025,39 +2025,56 @@ impl Repository {
         // Step 2: Draw floating labels after graph render.
         let pos_map = viewport_pos_map(&controller);
         let detail_level = controller.get_detail_level();
+        let mut not_shown_count: u32 = 0;
         {
             let loci: Vec<Option<_>> = all_spans
                 .iter()
                 .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
                 .collect();
-            for ((span, &color), locus) in all_spans
+            for (idx, ((span, &color), locus)) in all_spans
                 .iter()
                 .zip(annotation_colors.iter())
                 .zip(loci.iter())
+                .enumerate()
             {
                 if span.name.is_empty() {
                     continue;
                 }
-                if let Some(l) = locus
-                    && let Some(bounds) =
-                        locus_label_bounds(l, &pos_map, detail_level, &controller.viewport_state)
-                    && draw_label_near_pos(
-                        &mut buf,
-                        area,
-                        bounds,
-                        &span.name,
-                        color,
-                        &controller.viewport_state,
-                        5,
-                    )
-                    .is_none()
+                // Count spans whose every segment is covered by a later (shorter) span.
+                if locus.is_some() && span_covered_by_later(span, idx, &all_spans) {
+                    not_shown_count += 1;
+                    continue;
+                }
+                let Some(l) = locus else {
+                    continue;
+                };
+                let Some(bounds) =
+                    locus_label_bounds(l, &pos_map, detail_level, &controller.viewport_state)
+                else {
+                    continue;
+                };
+                if draw_label_near_pos(
+                    &mut buf,
+                    area,
+                    bounds,
+                    &span.name,
+                    color,
+                    &controller.viewport_state,
+                    5,
+                )
+                .is_none()
                 {
-                    eprintln!(
-                        "warning: annotation '{}' label could not be placed (obscured)",
-                        span.name
-                    );
+                    not_shown_count += 1;
                 }
             }
+        }
+        if not_shown_count > 0 {
+            let note = format!(" +{not_shown_count} not labeled ");
+            let note_style = ratatui::style::Style::default()
+                .fg(current_theme()[0x09])
+                .bg(current_theme()[0x00]);
+            let y = area.bottom().saturating_sub(1);
+            buf.set_string(area.x, y, &note, note_style);
         }
 
         serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))

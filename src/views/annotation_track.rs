@@ -79,6 +79,31 @@ impl AnnotationTrack {
     }
 }
 
+/// Return `true` if every segment of `span` at `idx` is fully contained within
+/// at least one segment from a later span (higher index = shorter = painted on top).
+/// Used to count annotations that are completely obscured by other highlights.
+pub fn span_covered_by_later(
+    span: &AnnotationSpan,
+    idx: usize,
+    all_spans: &[&AnnotationSpan],
+) -> bool {
+    if span.segments.is_empty() {
+        return false;
+    }
+    'outer: for seg in &span.segments {
+        for later_span in &all_spans[idx + 1..] {
+            for other in &later_span.segments {
+                if other.node_id == seg.node_id && other.start <= seg.start && other.end >= seg.end
+                {
+                    continue 'outer;
+                }
+            }
+        }
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use gen_graph::{GenGraph, GraphNode};

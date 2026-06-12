@@ -22,7 +22,10 @@ use rusqlite::params;
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        annotation_track::{AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span},
+        annotation_track::{
+            AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
+            span_covered_by_later,
+        },
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
             load_annotations_for_group,
@@ -1013,35 +1016,51 @@ pub fn view_block_group(
                 // Step 2: Draw floating labels after graph render.
                 let pos_map = viewport_pos_map(&graph_controller);
                 let detail_level = graph_controller.get_detail_level();
-                for (span, &color) in all_spans.iter().zip(annotation_colors.iter()) {
+                let mut not_shown_count: u32 = 0;
+                for (idx, (span, &color)) in
+                    all_spans.iter().zip(annotation_colors.iter()).enumerate()
+                {
                     if span.name.is_empty() {
                         continue;
                     }
                     let locus =
                         graph_locus_from_annotation_span(span, graph_controller.graph());
-                    if let Some(locus) = locus
-                        && let Some(bounds) = locus_label_bounds(
-                            &locus,
-                            &pos_map,
-                            detail_level,
-                            &graph_controller.viewport_state,
-                        )
-                        && draw_label_near_pos(
-                            frame.buffer_mut(),
-                            canvas_area,
-                            bounds,
-                            &span.name,
-                            color,
-                            &graph_controller.viewport_state,
-                            5,
-                        )
-                        .is_none()
-                    {
-                        eprintln!(
-                            "warning: annotation '{}' label could not be placed (obscured)",
-                            span.name
-                        );
+                    let Some(locus) = locus else {
+                        continue;
+                    };
+                    // Skip spans whose every segment is covered by a shorter annotation on top.
+                    if span_covered_by_later(span, idx, &all_spans) {
+                        not_shown_count += 1;
+                        continue;
                     }
+                    let Some(bounds) = locus_label_bounds(
+                        &locus,
+                        &pos_map,
+                        detail_level,
+                        &graph_controller.viewport_state,
+                    ) else {
+                        continue;
+                    };
+                    if draw_label_near_pos(
+                        frame.buffer_mut(),
+                        canvas_area,
+                        bounds,
+                        &span.name,
+                        color,
+                        &graph_controller.viewport_state,
+                        5,
+                    )
+                    .is_none()
+                    {
+                        not_shown_count += 1;
+                    }
+                }
+                if not_shown_count > 0 {
+                    let note = format!(" +{not_shown_count} not labeled ");
+                    let note_style =
+                        Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
+                    let y = canvas_area.bottom().saturating_sub(1);
+                    frame.buffer_mut().set_string(canvas_area.x, y, &note, note_style);
                 }
             }
 
