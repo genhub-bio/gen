@@ -950,14 +950,28 @@ pub fn apply_changeset(
             &accession.block_group_id,
             accession.parent_accession_id.as_ref(),
         )?;
-        let edges = changeset
-            .accession_edges
-            .iter()
-            .filter(|edge| edge.accession_id == accession.id)
-            .sorted_by(|e1, e2| Ord::cmp(&e1.index_in_path, &e2.index_in_path))
+    }
+    let accession_ids = changeset
+        .accessions
+        .iter()
+        .map(|accession| accession.id)
+        .collect::<HashSet<_>>();
+    for (accession_id, accession_edges) in &changeset
+        .accession_edges
+        .iter()
+        .filter(|edge| accession_ids.contains(&edge.accession_id))
+        .sorted_by(|left, right| {
+            Ord::cmp(
+                &(left.accession_id, left.index_in_path),
+                &(right.accession_id, right.index_in_path),
+            )
+        })
+        .chunk_by(|edge| edge.accession_id)
+    {
+        let edges = accession_edges
             .map(AccessionEdgeData::from)
             .collect::<Vec<_>>();
-        AccessionEdge::bulk_create(conn, &accession.id, &edges);
+        AccessionEdge::bulk_create(conn, &accession_id, &edges);
     }
 
     for annotation_group in &changeset.annotation_groups {
