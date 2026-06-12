@@ -148,9 +148,9 @@ pub fn test_simple_adapter_pipeline() -> Result<(), Box<dyn std::error::Error>> 
 
     // Test the router
     println!("🔄 Running call_rust_router...");
-    match call_rust_router(input_graph.clone(), 1.0) {
+    match call_rust_router(input_graph.clone()) {
         Ok(output_graph) => {
-            println!("✅ Router completed successfully!");
+            println!("Router completed successfully!");
             println!(
                 "📊 Output graph: {} nodes, {} edges",
                 output_graph.node_count(),
@@ -257,7 +257,7 @@ mod tests {
 
         // First run
         let result1 =
-            call_rust_router(input_graph.clone(), 1.0).expect("First router call should succeed");
+            call_rust_router(input_graph.clone()).expect("First router call should succeed");
         let node_count1 = result1.node_count();
         let edge_count1 = result1.edge_count();
 
@@ -286,7 +286,7 @@ mod tests {
 
         // Run multiple times and verify consistency
         for i in 2..=10 {
-            let result = call_rust_router(input_graph.clone(), 1.0)
+            let result = call_rust_router(input_graph.clone())
                 .unwrap_or_else(|_| panic!("Router call {} should succeed", i));
 
             println!(

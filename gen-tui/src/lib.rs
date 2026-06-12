@@ -2,6 +2,7 @@
 //! the Gen version control system for graph genome sequences.
 
 pub mod animation;
+pub mod compaction;
 pub mod cursor;
 pub mod distribute_nodes;
 pub mod dot_export;

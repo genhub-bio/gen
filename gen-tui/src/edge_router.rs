@@ -48,14 +48,13 @@ pub struct NodeData {
 }
 
 /// Call the Rust edge router using adapter functions to convert between LayoutNode/LayoutEdge and NodeData/LayoutEdge
-pub fn call_rust_router(
+pub(crate) fn call_rust_router(
     mut graph: petgraph::stable_graph::StableGraph<
         crate::layout::LayoutNode,
         crate::layout::LayoutEdge,
         petgraph::Undirected,
         u32,
     >,
-    vertex_spacing: f64,
 ) -> Result<
     petgraph::stable_graph::StableGraph<
         crate::layout::LayoutNode,
@@ -66,7 +65,7 @@ pub fn call_rust_router(
     LayoutError,
 > {
     // Call make_rectilinear directly with the LayoutNode graph - no conversion needed!
-    crate::edge_router::route_graph::make_rectilinear(&mut graph, vertex_spacing)?;
+    crate::edge_router::route_graph::make_rectilinear(&mut graph)?;
 
     Ok(graph)
 }

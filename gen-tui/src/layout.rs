@@ -13,7 +13,7 @@ use rstar::{AABB, RTree};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    distribute_nodes::{compress_dead_space, redistribute_horizontal_chains},
+    distribute_nodes::{compact_layout, compact_layout_horizontal},
     edge_router::route_graph::make_rectilinear,
     geometry::{BigRect, LayoutObject, LayoutPos, LocalPos, PartitionIndex},
     partition::{PartitionEdge, PartitionNode, StitchSide},
@@ -247,22 +247,14 @@ impl PartitionLayout {
             layout_graph.edge_count()
         );
 
-        if let Err(e) = make_rectilinear(&mut layout_graph, vertex_spacing) {
+        if let Err(e) = make_rectilinear(&mut layout_graph) {
             log::warn!("Edge routing failed: {:?}", e);
         }
 
-        // Remove dead space left behind by the Brandes-Köpf averaging step and
-        // by raw routing channel positions. This must happen before
-        // redistribution: once nodes are re-centered along their chains they
-        // straddle inter-column gaps and block compression.
-        compress_dead_space(&mut layout_graph, vertex_spacing);
-
-        // Redistribute nodes along horizontal chains after edge routing
-        redistribute_horizontal_chains(&mut layout_graph, vertex_spacing);
-
-        // Compress again: redistribution can vacate bands (e.g. a wide node
-        // moving out of an inflated column), reopening dead space.
-        compress_dead_space(&mut layout_graph, vertex_spacing);
+        // Rebuild all coordinates with the separation-constraint solver:
+        // removes dead space (Brandes-Köpf averaging artifacts, raw routing
+        // channel positions) and centers nodes within their slack in one pass.
+        compact_layout(&mut layout_graph, vertex_spacing);
 
         let (dx, dy) = align_partition_to_origin(&mut layout_graph);
 
@@ -296,9 +288,13 @@ impl PartitionLayout {
             layout_graph.edge_count()
         );
 
-        if let Err(e) = make_rectilinear(&mut layout_graph, vertex_spacing) {
+        if let Err(e) = make_rectilinear(&mut layout_graph) {
             log::warn!("Edge routing failed: {:?}", e);
         }
+
+        // Compact horizontally only: bridge endpoints keep the y coordinates
+        // inherited from the adjacent section layouts.
+        compact_layout_horizontal(&mut layout_graph, vertex_spacing);
 
         let spatial_index = Self::build_spatial_index(&layout_graph);
 

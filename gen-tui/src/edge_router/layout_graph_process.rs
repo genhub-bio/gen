@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use itertools::Itertools;
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
 use super::LayoutError;
@@ -197,109 +196,6 @@ pub fn simplify_graph(
         {
             let layout_edge = LayoutEdge { bundle };
             graph.add_edge(source, target, layout_edge);
-        }
-    }
-
-    Ok(())
-}
-
-/// Compresses a graph along a specified axis (0 for x-axis/horizontal, 1 for y-axis/vertical)
-/// by reducing gaps between consecutive layers.
-/// Modifies the graph in place.
-///
-/// Note: complementary to, not redundant with,
-/// `crate::distribute_nodes::compress_dead_space`. With
-/// `account_for_node_dimensions` this function is a normalizer that may also
-/// *increase* spacing so routing channels clear wide node labels — the raw
-/// channel tracks from routing are not label-aware. `compress_dead_space` is
-/// shrink-only and global, so it can never take over that clearance role;
-/// removing this call makes junctions land inside wide nodes.
-///
-/// # Arguments
-/// * `graph` - The graph to compress
-/// * `axis` - 0 for x-axis/horizontal, 1 for y-axis/vertical
-/// * `minimum_spacing` - Minimum spacing between layers
-/// * `account_for_node_dimensions` - If true, adds spacing based on node sizes (legacy behavior).
-///   If false, only uses minimum_spacing (avoids double-counting when layout already accounts for dimensions).
-pub fn compress_graph(
-    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>,
-    axis: i64,
-    minimum_spacing: i64,
-    account_for_node_dimensions: bool,
-) -> Result<(), LayoutError> {
-    if graph.node_count() == 0 {
-        return Ok(());
-    }
-
-    // Group nodes by their position as projected on the x or y axis
-    let mut nodes_by_layer: HashMap<i64, Vec<NodeIndex>> = HashMap::new();
-    for node_index in graph.node_indices() {
-        let node = graph.node_weight(node_index).unwrap();
-        let layer_pos = if axis == 0 { node.pos.x } else { node.pos.y };
-
-        nodes_by_layer
-            .entry(layer_pos)
-            .or_default()
-            .push(node_index);
-    }
-
-    // Get sorted layer positions
-    let layer_positions: Vec<i64> = nodes_by_layer.keys().copied().sorted().collect();
-
-    if layer_positions.len() <= 1 {
-        return Ok(());
-    }
-
-    // Find the maximum node size in each layer
-    let layer_max_sizes: Vec<i64> = layer_positions
-        .iter()
-        .map(|&layer_pos| {
-            nodes_by_layer[&layer_pos]
-                .iter()
-                .map(|&idx| {
-                    let node = graph.node_weight(idx).unwrap();
-                    if axis == 0 {
-                        node.size.0 as i64
-                    } else {
-                        node.size.1 as i64
-                    }
-                })
-                .max()
-                .unwrap_or(1)
-        })
-        .collect();
-
-    // Compute new positions for each layer
-    let mut new_positions: Vec<i64> = Vec::new();
-    new_positions.push(layer_positions[0]);
-
-    for i in 1..layer_positions.len() {
-        let required_spacing = if account_for_node_dimensions {
-            // Nodes are positioned asymmetrically by BigRect::from_center_and_size:
-            // For even widths, they extend more to the right than left.
-            // Right extent (side facing next layer) = width / 2 (floor division)
-            // Left extent (side facing prev layer) = div_ceil(width, 2) - 1
-            let prev_layer_half_size = layer_max_sizes[i - 1] / 2; // Right extent
-            let curr_layer_half_size = (layer_max_sizes[i] + 1) / 2 - 1; // Left extent (div_ceil - 1)
-            // Add 1 to ensure at least one cell gap between nodes for edge routing
-            prev_layer_half_size + curr_layer_half_size + 1 + minimum_spacing
-        } else {
-            minimum_spacing
-        };
-        let new_pos = new_positions[i - 1] + required_spacing;
-        new_positions.push(new_pos);
-    }
-
-    // Update all nodes in each layer to their new positions
-    for (old_pos, new_pos) in layer_positions.iter().zip(new_positions.iter()) {
-        for &node_index in &nodes_by_layer[old_pos] {
-            if let Some(node) = graph.node_weight_mut(node_index) {
-                if axis == 0 {
-                    node.pos.x = *new_pos;
-                } else {
-                    node.pos.y = *new_pos;
-                }
-            }
         }
     }
 

@@ -10,9 +10,7 @@ use petgraph::{
 };
 
 use super::{
-    LayoutError,
-    center_doglegs::center_doglegs,
-    layout_graph_process::{compress_graph, simplify_graph},
+    LayoutError, center_doglegs::center_doglegs, layout_graph_process::simplify_graph,
     route_layer::layout_layer,
 };
 use crate::{
@@ -20,9 +18,8 @@ use crate::{
     layout::{LayoutEdge, LayoutNode, NodeRole},
 };
 
-pub fn make_rectilinear(
+pub(crate) fn make_rectilinear(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>,
-    vertex_spacing: f64,
 ) -> Result<(), LayoutError> {
     info!(
         "layout_graph: Starting with {} nodes, {} edges",
@@ -295,12 +292,6 @@ pub fn make_rectilinear(
             simplify_graph(&mut layer_graph)?;
             // Label the rectilinear edges with a reference to original edge(s) they represent
             make_bundles(&mut layer_graph, graph)?;
-            compress_graph(
-                &mut layer_graph,
-                0,                             // axis (horizontal compression)
-                vertex_spacing.round() as i64, // minimum_spacing from layout configuration
-                true,                          // account_for_node_dimensions
-            )?;
             center_doglegs(&mut layer_graph)?;
 
             // Measure the space required for the rectilinear edge routing
@@ -688,7 +679,7 @@ mod tests {
             graph.node_count(),
             graph.edge_count()
         );
-        let result = make_rectilinear(&mut graph, 1.0);
+        let result = make_rectilinear(&mut graph);
         println!("=== layout_graph call completed ===");
 
         match result {

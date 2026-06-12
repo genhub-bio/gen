@@ -1471,6 +1471,147 @@ fn test_asymmetric_diamond_4_2() {
     insta::assert_snapshot!("asymmetric_diamond_4_2", snapshot);
 }
 
+/// Test a complex multi-level DAG with dense intermediate connectivity.
+///
+/// Uses alphabetic single-character labels (node N → Nth letter A-Z) with 1×1 cells,
+/// except N17 (4×1) and N3 (6×1) which are wider to stress horizontal spacing.
+#[test]
+fn test_complex_multipath_dag() {
+    let _ = env_logger::try_init();
+
+    use crate::{
+        geometry::WorldPos,
+        plotter::{NodeRenderer, NodeSizer},
+    };
+
+    #[derive(Debug, Clone)]
+    struct AlphabeticSizer;
+
+    impl NodeSizer<MockDomainGraph> for AlphabeticSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) -> (u64, u64) {
+            match node.index() {
+                17 => (4, 1),
+                3 => (6, 1),
+                _ => (1, 1),
+            }
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct AlphabeticRenderer;
+
+    impl NodeRenderer<MockDomainGraph> for AlphabeticRenderer {
+        fn render_node(
+            &mut self,
+            buffer: &mut crate::graph_controller::WorldBuffer,
+            area: crate::geometry::WorldRect,
+            node_id: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) {
+            let letter = char::from_u32(b'A' as u32 + node_id.index() as u32).unwrap_or('?');
+            let Some(visible) = buffer.calculate_visible_area(area) else {
+                return;
+            };
+            for y in visible.min.y..=visible.max.y {
+                let width = (visible.max.x - visible.min.x + 1) as usize;
+                let content = letter.to_string().repeat(width);
+                buffer.set_string(WorldPos::new(visible.min.x, y), &content);
+            }
+        }
+    }
+
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..22).map(|_| domain_graph.add_node(())).collect();
+
+    let edges: &[(usize, usize)] = &[
+        (0, 10),
+        (0, 11),
+        (0, 8),
+        (0, 19),
+        (1, 7),
+        (1, 12),
+        (1, 13),
+        (1, 18),
+        (2, 11),
+        (2, 10),
+        (2, 19),
+        (2, 8),
+        (3, 21),
+        (4, 10),
+        (4, 8),
+        (4, 11),
+        (4, 19),
+        (5, 11),
+        (5, 19),
+        (5, 10),
+        (5, 8),
+        (6, 21),
+        (7, 2),
+        (7, 0),
+        (7, 5),
+        (7, 4),
+        (8, 6),
+        (9, 7),
+        (9, 18),
+        (9, 13),
+        (9, 12),
+        (10, 6),
+        (11, 6),
+        (12, 2),
+        (12, 4),
+        (12, 0),
+        (12, 5),
+        (13, 0),
+        (13, 4),
+        (13, 2),
+        (13, 5),
+        (14, 18),
+        (14, 13),
+        (14, 12),
+        (14, 7),
+        (15, 1),
+        (15, 17),
+        (15, 14),
+        (15, 9),
+        (15, 16),
+        (16, 7),
+        (16, 12),
+        (16, 18),
+        (16, 13),
+        (17, 6),
+        (18, 2),
+        (18, 4),
+        (18, 0),
+        (18, 5),
+        (19, 6),
+        (20, 3),
+        (20, 15),
+    ];
+
+    for &(from, to) in edges {
+        domain_graph.add_edge(nodes[from], nodes[to], ());
+    }
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        160,
+        50,
+        usize::MAX,
+        usize::MAX,
+        AlphabeticSizer,
+        AlphabeticRenderer,
+    );
+    insta::assert_snapshot!("complex_multipath_dag", snapshot);
+}
+
 /// Build a dense all-to-all grid with a bypass node.
 ///
 /// Structure (`layer_count` + 2 layers):
