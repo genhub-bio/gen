@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     edge::Edge,
     gen_models_capnp::{accession, accession_edge},
@@ -34,6 +35,16 @@ pub enum AccessionError {
     Duplicate(String),
     #[error("Accession {0} has no edges in accession_edges")]
     MissingPath(HashId),
+    #[error("Accession span cannot be empty")]
+    EmptySpan,
+    #[error("Accession span edge {0} does not exist")]
+    MissingEdge(HashId),
+    #[error("Invalid accession span: {0}")]
+    InvalidSpan(String),
+    #[error("No accession span walk found: {0}")]
+    NoWalk(String),
+    #[error("Ambiguous accession span walk: {0}")]
+    AmbiguousWalk(String),
 }
 
 impl<'a> Capnp<'a> for Accession {
@@ -176,6 +187,49 @@ pub struct AccessionEdgeData {
     pub target_offset: Option<i64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessionSpanBlock {
+    pub node_id: HashId,
+    pub sequence_start: i64,
+    pub sequence_end: i64,
+    pub strand: Strand,
+    pub source_edge_id: HashId,
+    pub target_edge_id: HashId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedAccessionSpan {
+    pub blocks: Vec<AccessionSpanBlock>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessionSpanCreate<'a> {
+    pub name: &'a str,
+    pub block_group_id: &'a HashId,
+    pub parent_accession_id: Option<&'a HashId>,
+    pub spans: &'a [ResolvedAccessionSpan],
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NodeSlice {
+    pub node_id: HashId,
+    pub sequence_start: i64,
+    pub sequence_end: i64,
+    pub strand: Strand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessionSpanSearch<'a> {
+    pub block_group_id: &'a HashId,
+    pub anchors: Vec<NodeSlice>,
+    pub policy: SearchPolicy,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SearchPolicy {
+    ExactAdjacentOnly,
+}
+
 impl AccessionEdgeData {
     pub fn id_hash(&self, accession_id: &HashId, index_in_path: i64) -> HashId {
         HashId(calculate_hash(&format!(
@@ -299,6 +353,261 @@ impl Accession {
             }
             Err(e) => Err(e),
         }
+    }
+
+    pub fn create_from_spans(
+        conn: &GraphConnection,
+        create: AccessionSpanCreate,
+    ) -> Result<Accession, AccessionError> {
+        let accession = Accession::create(
+            conn,
+            create.name,
+            create.block_group_id,
+            create.parent_accession_id,
+        )?;
+        let accession_edges = Accession::edge_data_from_spans(conn, create.spans)?;
+        AccessionEdge::bulk_create(conn, &accession.id, &accession_edges);
+        Ok(accession)
+    }
+
+    pub fn get_or_create_from_spans(
+        conn: &GraphConnection,
+        create: AccessionSpanCreate,
+    ) -> Result<Accession, AccessionError> {
+        let accession = Accession::get_or_create(
+            conn,
+            create.name,
+            create.block_group_id,
+            create.parent_accession_id,
+        )?;
+        if Accession::get_edges_by_id(conn, &accession.id)?.is_empty() {
+            let accession_edges = Accession::edge_data_from_spans(conn, create.spans)?;
+            AccessionEdge::bulk_create(conn, &accession.id, &accession_edges);
+        }
+        Ok(accession)
+    }
+
+    pub fn edge_data_from_spans(
+        conn: &GraphConnection,
+        spans: &[ResolvedAccessionSpan],
+    ) -> Result<Vec<AccessionEdgeData>, AccessionError> {
+        if spans.is_empty() {
+            return Err(AccessionError::EmptySpan);
+        }
+        let mut edge_ids = HashSet::new();
+        for span in spans {
+            if span.blocks.is_empty() {
+                return Err(AccessionError::EmptySpan);
+            }
+            for block in &span.blocks {
+                if block.sequence_end <= block.sequence_start {
+                    return Err(AccessionError::InvalidSpan(format!(
+                        "block {} has non-positive length {}..{}",
+                        block.node_id, block.sequence_start, block.sequence_end
+                    )));
+                }
+                edge_ids.insert(block.source_edge_id);
+                edge_ids.insert(block.target_edge_id);
+            }
+        }
+
+        let edge_ids = edge_ids.into_iter().collect::<Vec<_>>();
+        let edges = Edge::query_by_ids(conn, &edge_ids)
+            .into_iter()
+            .map(|edge| (edge.id, edge))
+            .collect::<HashMap<_, _>>();
+        for edge_id in &edge_ids {
+            if !edges.contains_key(edge_id) {
+                return Err(AccessionError::MissingEdge(*edge_id));
+            }
+        }
+
+        let mut accession_edges = Vec::new();
+        for span in spans {
+            let first_block = span.blocks.first().ok_or(AccessionError::EmptySpan)?;
+            let source_edge = edges
+                .get(&first_block.source_edge_id)
+                .ok_or(AccessionError::MissingEdge(first_block.source_edge_id))?;
+            Accession::validate_source_edge(source_edge, first_block)?;
+            accession_edges.push(AccessionEdgeData {
+                edge_id: source_edge.id,
+                source_offset: None,
+                target_offset: Some(first_block.sequence_start - source_edge.target_coordinate),
+            });
+
+            for (index, block) in span.blocks.iter().enumerate() {
+                let target_edge = edges
+                    .get(&block.target_edge_id)
+                    .ok_or(AccessionError::MissingEdge(block.target_edge_id))?;
+                Accession::validate_target_edge(target_edge, block)?;
+                let next_block = span.blocks.get(index + 1);
+                let target_offset = match next_block {
+                    Some(next_block) => {
+                        if next_block.source_edge_id != block.target_edge_id {
+                            return Err(AccessionError::InvalidSpan(format!(
+                                "block {} exits on edge {}, but next block {} enters on edge {}",
+                                block.node_id,
+                                block.target_edge_id,
+                                next_block.node_id,
+                                next_block.source_edge_id
+                            )));
+                        }
+                        Accession::validate_source_edge(target_edge, next_block)?;
+                        Some(next_block.sequence_start - target_edge.target_coordinate)
+                    }
+                    None => None,
+                };
+                accession_edges.push(AccessionEdgeData {
+                    edge_id: target_edge.id,
+                    source_offset: Some(block.sequence_end - target_edge.source_coordinate),
+                    target_offset,
+                });
+            }
+        }
+
+        Ok(accession_edges)
+    }
+
+    pub fn search_span(
+        conn: &GraphConnection,
+        search: AccessionSpanSearch,
+    ) -> Result<ResolvedAccessionSpan, AccessionError> {
+        match search.policy {
+            SearchPolicy::ExactAdjacentOnly => {
+                Accession::search_exact_adjacent_span(conn, search.block_group_id, &search.anchors)
+            }
+        }
+    }
+
+    fn search_exact_adjacent_span(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        anchors: &[NodeSlice],
+    ) -> Result<ResolvedAccessionSpan, AccessionError> {
+        if anchors.is_empty() {
+            return Err(AccessionError::EmptySpan);
+        }
+        for anchor in anchors {
+            if anchor.sequence_end <= anchor.sequence_start {
+                return Err(AccessionError::InvalidSpan(format!(
+                    "anchor {} has non-positive length {}..{}",
+                    anchor.node_id, anchor.sequence_start, anchor.sequence_end
+                )));
+            }
+        }
+
+        let mut seen_edge_ids = HashSet::new();
+        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id)
+            .into_iter()
+            .filter_map(|augmented_edge| {
+                if seen_edge_ids.insert(augmented_edge.edge.id) {
+                    Some(augmented_edge.edge)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let first_anchor = anchors.first().ok_or(AccessionError::EmptySpan)?;
+        let first_source_edge =
+            Accession::unique_search_edge(&edges, "entering first anchor", |edge| {
+                edge.target_node_id == first_anchor.node_id
+                    && edge.target_strand == first_anchor.strand
+                    && edge.target_coordinate <= first_anchor.sequence_start
+            })?;
+
+        let mut blocks = Vec::new();
+        let mut source_edge_id = first_source_edge.id;
+        for (index, anchor) in anchors.iter().enumerate() {
+            let target_edge = match anchors.get(index + 1) {
+                Some(next_anchor) => {
+                    Accession::unique_search_edge(&edges, "between adjacent anchors", |edge| {
+                        edge.source_node_id == anchor.node_id
+                            && edge.source_strand == anchor.strand
+                            && edge.source_coordinate == anchor.sequence_end
+                            && edge.target_node_id == next_anchor.node_id
+                            && edge.target_strand == next_anchor.strand
+                            && edge.target_coordinate == next_anchor.sequence_start
+                    })?
+                }
+                None => Accession::unique_search_edge(&edges, "leaving final anchor", |edge| {
+                    edge.source_node_id == anchor.node_id
+                        && edge.source_strand == anchor.strand
+                        && edge.source_coordinate >= anchor.sequence_end
+                })?,
+            };
+            blocks.push(AccessionSpanBlock {
+                node_id: anchor.node_id,
+                sequence_start: anchor.sequence_start,
+                sequence_end: anchor.sequence_end,
+                strand: anchor.strand,
+                source_edge_id,
+                target_edge_id: target_edge.id,
+            });
+            source_edge_id = target_edge.id;
+        }
+
+        Ok(ResolvedAccessionSpan { blocks })
+    }
+
+    fn unique_search_edge(
+        edges: &[Edge],
+        description: &str,
+        predicate: impl Fn(&Edge) -> bool,
+    ) -> Result<Edge, AccessionError> {
+        let matches = edges
+            .iter()
+            .filter(|edge| predicate(edge))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => Err(AccessionError::NoWalk(description.to_string())),
+            [edge] => Ok((*edge).clone()),
+            _ => Err(AccessionError::AmbiguousWalk(description.to_string())),
+        }
+    }
+
+    fn validate_source_edge(edge: &Edge, block: &AccessionSpanBlock) -> Result<(), AccessionError> {
+        if edge.target_node_id != block.node_id {
+            return Err(AccessionError::InvalidSpan(format!(
+                "edge {} targets node {}, not block node {}",
+                edge.id, edge.target_node_id, block.node_id
+            )));
+        }
+        if edge.target_strand != block.strand {
+            return Err(AccessionError::InvalidSpan(format!(
+                "edge {} target strand {:?} does not match block strand {:?}",
+                edge.id, edge.target_strand, block.strand
+            )));
+        }
+        if edge.target_coordinate > block.sequence_start {
+            return Err(AccessionError::InvalidSpan(format!(
+                "edge {} enters at {}, after block start {}",
+                edge.id, edge.target_coordinate, block.sequence_start
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_target_edge(edge: &Edge, block: &AccessionSpanBlock) -> Result<(), AccessionError> {
+        if edge.source_node_id != block.node_id {
+            return Err(AccessionError::InvalidSpan(format!(
+                "edge {} sources node {}, not block node {}",
+                edge.id, edge.source_node_id, block.node_id
+            )));
+        }
+        if edge.source_strand != block.strand {
+            return Err(AccessionError::InvalidSpan(format!(
+                "edge {} source strand {:?} does not match block strand {:?}",
+                edge.id, edge.source_strand, block.strand
+            )));
+        }
+        if edge.source_coordinate < block.sequence_end {
+            return Err(AccessionError::InvalidSpan(format!(
+                "edge {} exits at {}, before block end {}",
+                edge.id, edge.source_coordinate, block.sequence_end
+            )));
+        }
+        Ok(())
     }
 
     pub fn get_edges_by_id(
@@ -611,6 +920,141 @@ mod tests {
                 RegionResolutionError::Ambiguous(name) if name == "multiple accessions named mreB"
             ));
         }
+    }
+
+    #[test]
+    fn create_from_spans_indexes_single_node_fragment() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let path_edges = PathEdge::edges_for_path(conn, &path.id);
+        let accession = Accession::create_from_spans(
+            conn,
+            AccessionSpanCreate {
+                name: "a-fragment",
+                block_group_id: &block_group_id,
+                parent_accession_id: None,
+                spans: &[ResolvedAccessionSpan {
+                    blocks: vec![AccessionSpanBlock {
+                        node_id: HashId::convert_str("test-a-node"),
+                        sequence_start: 3,
+                        sequence_end: 8,
+                        strand: Strand::Forward,
+                        source_edge_id: path_edges[0].id,
+                        target_edge_id: path_edges[1].id,
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let edges = Accession::get_edges_by_id(conn, &accession.id).unwrap();
+        assert_eq!(accession.length(conn).unwrap(), 5);
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].edge_id, path_edges[0].id);
+        assert_eq!(edges[0].source_offset, None);
+        assert_eq!(edges[0].target_offset, Some(3));
+        assert_eq!(edges[1].edge_id, path_edges[1].id);
+        assert_eq!(edges[1].source_offset, Some(-2));
+        assert_eq!(edges[1].target_offset, None);
+    }
+
+    #[test]
+    fn create_from_spans_indexes_explicit_existing_walk() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let path_edges = PathEdge::edges_for_path(conn, &path.id);
+        let accession = Accession::create_from_spans(
+            conn,
+            AccessionSpanCreate {
+                name: "explicit-walk",
+                block_group_id: &block_group_id,
+                parent_accession_id: None,
+                spans: &[ResolvedAccessionSpan {
+                    blocks: vec![
+                        AccessionSpanBlock {
+                            node_id: HashId::convert_str("test-a-node"),
+                            sequence_start: 5,
+                            sequence_end: 10,
+                            strand: Strand::Forward,
+                            source_edge_id: path_edges[0].id,
+                            target_edge_id: path_edges[1].id,
+                        },
+                        AccessionSpanBlock {
+                            node_id: HashId::convert_str("test-t-node"),
+                            sequence_start: 0,
+                            sequence_end: 6,
+                            strand: Strand::Forward,
+                            source_edge_id: path_edges[1].id,
+                            target_edge_id: path_edges[2].id,
+                        },
+                    ],
+                }],
+            },
+        )
+        .unwrap();
+
+        let edges = Accession::get_edges_by_id(conn, &accession.id).unwrap();
+        assert_eq!(accession.length(conn).unwrap(), 11);
+        assert_eq!(
+            edges.iter().map(|edge| edge.edge_id).collect::<Vec<_>>(),
+            vec![path_edges[0].id, path_edges[1].id, path_edges[2].id]
+        );
+        assert_eq!(edges[0].target_offset, Some(5));
+        assert_eq!(edges[1].source_offset, Some(0));
+        assert_eq!(edges[1].target_offset, Some(0));
+        assert_eq!(edges[2].source_offset, Some(-4));
+    }
+
+    #[test]
+    fn search_spans_finds_exact_adjacent_existing_walk() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let path_edges = PathEdge::edges_for_path(conn, &path.id);
+
+        let span = Accession::search_span(
+            conn,
+            AccessionSpanSearch {
+                block_group_id: &block_group_id,
+                anchors: vec![
+                    NodeSlice {
+                        node_id: HashId::convert_str("test-a-node"),
+                        sequence_start: 5,
+                        sequence_end: 10,
+                        strand: Strand::Forward,
+                    },
+                    NodeSlice {
+                        node_id: HashId::convert_str("test-t-node"),
+                        sequence_start: 0,
+                        sequence_end: 6,
+                        strand: Strand::Forward,
+                    },
+                ],
+                policy: SearchPolicy::ExactAdjacentOnly,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            span.blocks
+                .iter()
+                .map(|block| (block.source_edge_id, block.target_edge_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (path_edges[0].id, path_edges[1].id),
+                (path_edges[1].id, path_edges[2].id)
+            ]
+        );
+        let accession = Accession::create_from_spans(
+            conn,
+            AccessionSpanCreate {
+                name: "searched-walk",
+                block_group_id: &block_group_id,
+                parent_accession_id: None,
+                spans: &[span],
+            },
+        )
+        .unwrap();
+        assert_eq!(accession.length(conn).unwrap(), 11);
     }
 
     #[test]

@@ -52,6 +52,7 @@ use gen_models::{
         add_files_operation, parse_hash,
     },
     reference_alias::ReferenceAlias,
+    region as model_region,
     sample::Sample,
     traits::Query,
 };
@@ -592,14 +593,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             region,
         }) => {
             let collection_name = get_default_collection(operation_conn)?;
-            let operation = add_annotation(
-                &db_context,
+            let resolved_region = model_region::resolve(
+                &Region::parse(&region)?,
+                graph_conn,
                 &collection_name,
-                &name,
-                group.as_deref(),
                 sample.as_str(),
-                &region,
             )?;
+            let operation = add_annotation(&db_context, &name, group.as_deref(), &resolved_region)?;
             println!("Annotation {name} added in operation {}", operation.hash);
             Ok(())
         }

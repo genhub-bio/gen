@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionError},
-    block_group::{BlockGroup, PathCache},
+    accession::{Accession, AccessionError, AccessionSpanCreate, ResolvedAccessionSpan},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, GraphConnection, OperationsConnection},
     errors::{FileAdditionError, OperationError},
@@ -27,7 +26,7 @@ use crate::{
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     metadata,
     operations::{FileAddition, Operation, OperationInfo, OperationSummary},
-    sample::Sample,
+    region::ResolvedGenRegion,
     session_operations::{DependencyModels, end_operation, start_operation},
     traits::Query,
 };
@@ -116,6 +115,17 @@ pub struct AnnotationExtra {
     pub genbank: Option<GenBankExtra>,
     pub gff: Option<GffExtra>,
     pub bed: Option<BedExtra>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotationSpanCreate<'a> {
+    pub name: &'a str,
+    pub group: &'a str,
+    pub block_group_id: &'a HashId,
+    pub parent_accession_id: Option<&'a HashId>,
+    pub spans: &'a [ResolvedAccessionSpan],
+    pub extra: Option<&'a AnnotationExtra>,
+    pub sample_names: &'a [&'a str],
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -331,6 +341,29 @@ impl Annotation {
         let annotation = Annotation::get_or_create(conn, name, group, accession_id, extra)?;
         annotation.add_samples(conn, sample_names)?;
         Ok(annotation)
+    }
+
+    pub fn create_from_spans(
+        conn: &GraphConnection,
+        create: AnnotationSpanCreate,
+    ) -> Result<Annotation, AnnotationError> {
+        let accession = Accession::create_from_spans(
+            conn,
+            AccessionSpanCreate {
+                name: create.name,
+                block_group_id: create.block_group_id,
+                parent_accession_id: create.parent_accession_id,
+                spans: create.spans,
+            },
+        )?;
+        Annotation::create_with_samples(
+            conn,
+            create.name,
+            create.group,
+            &accession.id,
+            create.extra,
+            create.sample_names,
+        )
     }
 
     pub fn add_samples(
@@ -598,40 +631,31 @@ pub fn annotation_index_file_path(
 
 pub fn add_annotation(
     context: &DbContext,
-    collection: &str,
     name: &str,
     group: Option<&str>,
-    sample: &str,
-    region: &str,
+    region: &ResolvedGenRegion,
 ) -> Result<Operation, Box<dyn std::error::Error>> {
     let graph_conn = context.graph().conn();
     let operation_conn = context.operations().conn();
-    let parsed_region = Region::parse(region)?;
-    let (start, end) = parsed_region.require_coordinates()?;
-
-    let block_groups = Sample::get_block_groups(graph_conn, collection, sample);
-    let block_group = block_groups
-        .iter()
-        .find(|bg| bg.name == parsed_region.name)
-        .ok_or_else(|| anyhow!("Graph {} not found for sample {sample}", parsed_region.name))?;
-    let path = BlockGroup::get_current_path(graph_conn, &block_group.id);
-    let path_length = path.length(graph_conn)?;
-    if start < 0 || end < 0 || start > path_length || end > path_length {
-        return Err(anyhow!("Region {region} is outside the path bounds (0-{path_length})").into());
-    }
 
     let mut session = start_operation(graph_conn);
     graph_conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;
 
-    let mut cache = PathCache::new(graph_conn);
-    let _ = PathCache::lookup(&mut cache, &block_group.id, path.name.clone())?;
-    let accession = BlockGroup::add_accession(graph_conn, &path, name, start, end, &mut cache)?;
-
     let annotation_group = group.unwrap_or("default");
-    let annotation =
-        Annotation::get_or_create(graph_conn, name, annotation_group, &accession.id, None)?;
-    AnnotationGroupSample::create(graph_conn, &annotation.group, sample)?;
+    let span = region.accession_span(graph_conn)?;
+    let _annotation = Annotation::create_from_spans(
+        graph_conn,
+        AnnotationSpanCreate {
+            name,
+            group: annotation_group,
+            block_group_id: &region.block_group.id,
+            parent_accession_id: None,
+            spans: &[span],
+            extra: None,
+            sample_names: &[region.block_group.sample_name.as_str()],
+        },
+    )?;
 
     let operation = end_operation(
         context,
@@ -1289,17 +1313,12 @@ mod tests {
         let operation_conn = context.operations().conn();
         let db_uuid = metadata::get_db_uuid(graph_conn);
         let _ = GenDatabase::create(operation_conn, &db_uuid, "test-db", "test-db-path").unwrap();
-        let _ = setup_block_group(graph_conn);
+        let (block_group_id, path) = setup_block_group(graph_conn);
+        let region =
+            crate::region::ResolvedGenRegion::from_path(graph_conn, block_group_id, &path, 1, 5)
+                .unwrap();
 
-        let operation = add_annotation(
-            &context,
-            "test",
-            "gene-a",
-            Some("track-1"),
-            "test",
-            "chr1:1-5",
-        )
-        .unwrap();
+        let operation = add_annotation(&context, "gene-a", Some("track-1"), &region).unwrap();
         assert_eq!(operation.change_type, "add annotation gene-a");
 
         let annotations = Annotation::query_by_group(graph_conn, "track-1").unwrap();

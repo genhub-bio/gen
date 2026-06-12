@@ -312,7 +312,14 @@ mod tests {
             false,
         )
         .unwrap();
-        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+        let annotation_region = gen_models::region::resolve(
+            &Region::parse("m123:5-20").unwrap(),
+            conn,
+            &collection,
+            "simple",
+        )
+        .unwrap();
+        add_annotation(&context, "foobar", None, &annotation_region).unwrap();
         assert!(
             resolve_annotation(
                 &Region::parse("foobar:-3-5").unwrap(),

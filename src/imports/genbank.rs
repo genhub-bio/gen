@@ -6,13 +6,13 @@ use gen_core::{
     calculate_hash,
 };
 use gen_models::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData},
+    accession::{Accession, AccessionSpanBlock, AccessionSpanCreate, ResolvedAccessionSpan},
     annotations::Annotation,
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::DbContext,
-    edge::Edge,
+    edge::{Edge, EdgeData},
     errors::CollectionError,
     node::Node,
     operations::{Operation, OperationInfo},
@@ -21,7 +21,9 @@ use gen_models::{
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
+    traits::Query,
 };
+use itertools::Itertools;
 
 use crate::{
     genbank::{
@@ -86,11 +88,11 @@ fn blocks_at_coordinate(
         .collect()
 }
 
-fn annotation_segment_edges(
+fn annotation_segment_span(
     segment: &GenBankAnnotationSegment,
     tree: &intervaltree::IntervalTree<i64, NodeIntervalBlock>,
     all_path_edges: &[Edge],
-) -> Vec<AccessionEdgeData> {
+) -> ResolvedAccessionSpan {
     let start_blocks = blocks_at_coordinate(tree, segment.start);
     assert_eq!(start_blocks.len(), 1);
     let start_block = start_blocks[0];
@@ -98,9 +100,7 @@ fn annotation_segment_edges(
     assert_eq!(end_blocks.len(), 1);
     let end_block = end_blocks[0];
 
-    let start_coordinate = segment.start - start_block.start + start_block.sequence_start;
-    let end_coordinate = segment.end - end_block.start + end_block.sequence_start;
-    let (start_edge_index, start_edge) = all_path_edges
+    let (start_edge_index, _) = all_path_edges
         .iter()
         .enumerate()
         .find(|(_, edge)| {
@@ -108,7 +108,7 @@ fn annotation_segment_edges(
                 && edge.target_coordinate == start_block.sequence_start
         })
         .expect("should find path edge entering annotation start block");
-    let (end_edge_index, end_edge) = all_path_edges
+    let (end_edge_index, _) = all_path_edges
         .iter()
         .enumerate()
         .find(|(_, edge)| {
@@ -121,45 +121,37 @@ fn annotation_segment_edges(
         "annotation start edge should precede end edge"
     );
 
-    if start_edge_index == end_edge_index {
-        return vec![
-            AccessionEdgeData {
-                edge_id: start_edge.id,
-                source_offset: None,
-                target_offset: Some(start_coordinate - start_edge.target_coordinate),
-            },
-            AccessionEdgeData {
-                edge_id: end_edge.id,
-                source_offset: Some(end_coordinate - end_edge.source_coordinate),
-                target_offset: None,
-            },
-        ];
-    }
-
-    all_path_edges[start_edge_index..=end_edge_index]
-        .iter()
-        .enumerate()
-        .map(|(relative_index, edge)| {
-            let path_index = start_edge_index + relative_index;
-            AccessionEdgeData {
-                edge_id: edge.id,
-                source_offset: if path_index == start_edge_index {
-                    None
-                } else if path_index == end_edge_index {
-                    Some(end_coordinate - end_edge.source_coordinate)
-                } else {
-                    Some(0)
-                },
-                target_offset: if path_index == start_edge_index {
-                    Some(start_coordinate - start_edge.target_coordinate)
-                } else if path_index == end_edge_index {
-                    None
-                } else {
-                    Some(0)
-                },
+    let blocks = tree
+        .query(segment.start..segment.end)
+        .map(|item| item.value)
+        .filter(|block| block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID)
+        .sorted_by(|a, b| a.start.cmp(&b.start))
+        .map(|block| {
+            let source_edge = all_path_edges
+                .iter()
+                .find(|edge| {
+                    edge.target_node_id == block.node_id
+                        && edge.target_coordinate == block.sequence_start
+                })
+                .expect("should find edge entering annotation block");
+            let target_edge = all_path_edges
+                .iter()
+                .find(|edge| {
+                    edge.source_node_id == block.node_id
+                        && edge.source_coordinate == block.sequence_end
+                })
+                .expect("should find edge leaving annotation block");
+            AccessionSpanBlock {
+                node_id: block.node_id,
+                sequence_start: block.sequence_start + (segment.start - block.start).max(0),
+                sequence_end: block.sequence_end - (block.end - segment.end).max(0),
+                strand: block.strand,
+                source_edge_id: source_edge.id,
+                target_edge_id: target_edge.id,
             }
         })
-        .collect()
+        .collect();
+    ResolvedAccessionSpan { blocks }
 }
 
 fn annotation_sequence(annotation: &GenBankAnnotation, sequence: &str) -> String {
@@ -245,55 +237,58 @@ fn updated_sequence_blocks(
 fn updated_sequence_edges(
     conn: &gen_models::db::GraphConnection,
     blocks: &[PathBlock],
-) -> Vec<Edge> {
+) -> Result<Vec<Edge>, GenBankError> {
     if blocks.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut edges = Vec::new();
     let first = blocks.first().expect("should contain first updated block");
-    edges.push(
-        Edge::create(
-            conn,
-            PATH_START_NODE_ID,
-            0,
-            Strand::Forward,
-            first.node_id,
-            first.sequence_start,
-            Strand::Forward,
-        )
-        .expect("should create edge entering updated annotation path"),
-    );
+    edges.push(EdgeData {
+        source_node_id: PATH_START_NODE_ID,
+        source_coordinate: 0,
+        source_strand: Strand::Forward,
+        target_node_id: first.node_id,
+        target_coordinate: first.sequence_start,
+        target_strand: Strand::Forward,
+    });
     for window in blocks.windows(2) {
         let source = &window[0];
         let target = &window[1];
-        edges.push(
-            Edge::create(
-                conn,
-                source.node_id,
-                source.sequence_end,
-                Strand::Forward,
-                target.node_id,
-                target.sequence_start,
-                Strand::Forward,
-            )
-            .expect("should create edge within updated annotation path"),
-        );
+        edges.push(EdgeData {
+            source_node_id: source.node_id,
+            source_coordinate: source.sequence_end,
+            source_strand: Strand::Forward,
+            target_node_id: target.node_id,
+            target_coordinate: target.sequence_start,
+            target_strand: Strand::Forward,
+        });
     }
     let last = blocks.last().expect("should contain last updated block");
-    edges.push(
-        Edge::create(
-            conn,
-            last.node_id,
-            last.sequence_end,
-            Strand::Forward,
-            PATH_END_NODE_ID,
-            0,
-            Strand::Forward,
-        )
-        .expect("should create edge leaving updated annotation path"),
-    );
-    edges
+    edges.push(EdgeData {
+        source_node_id: last.node_id,
+        source_coordinate: last.sequence_end,
+        source_strand: Strand::Forward,
+        target_node_id: PATH_END_NODE_ID,
+        target_coordinate: 0,
+        target_strand: Strand::Forward,
+    });
+    let edge_ids = edges.iter().map(EdgeData::id_hash).collect::<Vec<_>>();
+    let existing_edges = Edge::query_by_ids(conn, &edge_ids);
+    if existing_edges.len() != edge_ids.len() {
+        let existing_edge_ids = existing_edges
+            .iter()
+            .map(|edge| edge.id)
+            .collect::<std::collections::HashSet<_>>();
+        let missing = edge_ids
+            .into_iter()
+            .find(|edge_id| !existing_edge_ids.contains(edge_id))
+            .expect("should find missing edge id");
+        return Err(GenBankError::LookupError(format!(
+            "Annotation walk edge {missing} was not found in existing graph topology"
+        )));
+    }
+    Ok(existing_edges)
 }
 
 fn updated_sequence_intervaltree(
@@ -520,23 +515,27 @@ where
                     let annotation_blocks =
                         updated_sequence_blocks(wt_node_id, sequence.length, &edited_blocks);
                     let path_tree = updated_sequence_intervaltree(&annotation_blocks);
-                    let all_path_edges = updated_sequence_edges(conn, &annotation_blocks);
+                    let all_path_edges = updated_sequence_edges(conn, &annotation_blocks)?;
                     for annotation in locus.annotations.iter() {
                         let sequence_hash = annotation_sequence_hash(annotation, &locus.sequence);
                         let accession_name =
                             annotation_accession_name(&annotation_group, &sequence_hash);
-                        let accession =
-                            Accession::get_or_create(conn, &accession_name, &block_group.id, None)?;
-                        let accession_edges = annotation
+                        let spans = annotation
                             .segments
                             .iter()
-                            .flat_map(|segment| {
-                                annotation_segment_edges(segment, &path_tree, &all_path_edges)
+                            .map(|segment| {
+                                annotation_segment_span(segment, &path_tree, &all_path_edges)
                             })
                             .collect::<Vec<_>>();
-                        if Accession::get_edges_by_id(conn, &accession.id)?.is_empty() {
-                            AccessionEdge::bulk_create(conn, &accession.id, &accession_edges);
-                        }
+                        let accession = Accession::get_or_create_from_spans(
+                            conn,
+                            AccessionSpanCreate {
+                                name: &accession_name,
+                                block_group_id: &block_group.id,
+                                parent_accession_id: None,
+                                spans: &spans,
+                            },
+                        )?;
                         Annotation::create_with_samples(
                             conn,
                             &annotation.name,

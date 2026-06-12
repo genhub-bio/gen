@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData},
+    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionSpanCreate},
     annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
@@ -625,83 +625,21 @@ impl BlockGroup {
         name: &str,
         start: i64,
         end: i64,
-        cache: &mut PathCache,
+        _cache: &mut PathCache,
     ) -> Result<Accession, BlockGroupError> {
-        let tree = PathCache::get_intervaltree(cache, path)?;
-        let start_blocks: Vec<&NodeIntervalBlock> =
-            tree.query_point(start).map(|x| &x.value).collect();
-        assert_eq!(start_blocks.len(), 1);
-        let start_block = start_blocks[0];
-        let end_blocks: Vec<&NodeIntervalBlock> =
-            tree.query_point(end - 1).map(|x| &x.value).collect();
-        assert_eq!(end_blocks.len(), 1);
-        let end_block = end_blocks[0];
-        let all_path_edges = PathEdge::edges_for_path(conn, &path.id);
-        let start_coordinate = start - start_block.start + start_block.sequence_start;
-        let end_coordinate = end - end_block.start + end_block.sequence_start;
-        let (start_edge_index, start_edge) = all_path_edges
-            .iter()
-            .enumerate()
-            .find(|(_, edge)| {
-                edge.target_node_id == start_block.node_id
-                    && edge.target_coordinate == start_block.sequence_start
-            })
-            .expect("should find path edge entering accession start block");
-        let (end_edge_index, end_edge) = all_path_edges
-            .iter()
-            .enumerate()
-            .find(|(_, edge)| {
-                edge.source_node_id == end_block.node_id
-                    && edge.source_coordinate == end_block.sequence_end
-            })
-            .expect("should find path edge leaving accession end block");
-        assert!(
-            start_edge_index <= end_edge_index,
-            "accession start edge should precede end edge"
-        );
-        let accession = Accession::create(conn, name, &path.block_group_id, None)
-            .expect("Unable to create accession.");
-
-        let accession_path_edges = if start_edge_index == end_edge_index {
-            vec![
-                AccessionEdgeData {
-                    edge_id: start_edge.id,
-                    source_offset: None,
-                    target_offset: Some(start_coordinate - start_edge.target_coordinate),
-                },
-                AccessionEdgeData {
-                    edge_id: end_edge.id,
-                    source_offset: Some(end_coordinate - end_edge.source_coordinate),
-                    target_offset: None,
-                },
-            ]
-        } else {
-            all_path_edges[start_edge_index..=end_edge_index]
-                .iter()
-                .enumerate()
-                .map(|(relative_index, edge)| {
-                    let path_index = start_edge_index + relative_index;
-                    AccessionEdgeData {
-                        edge_id: edge.id,
-                        source_offset: if path_index == start_edge_index {
-                            None
-                        } else if path_index == end_edge_index {
-                            Some(end_coordinate - end_edge.source_coordinate)
-                        } else {
-                            Some(0)
-                        },
-                        target_offset: if path_index == start_edge_index {
-                            Some(start_coordinate - start_edge.target_coordinate)
-                        } else if path_index == end_edge_index {
-                            None
-                        } else {
-                            Some(0)
-                        },
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        AccessionEdge::bulk_create(conn, &accession.id, &accession_path_edges);
+        let region = ResolvedGenRegion::from_path(conn, path.block_group_id, path, start, end)?;
+        let span = region
+            .accession_span(conn)
+            .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?;
+        let accession = Accession::create_from_spans(
+            conn,
+            AccessionSpanCreate {
+                name,
+                block_group_id: &path.block_group_id,
+                parent_accession_id: None,
+                spans: &[span],
+            },
+        )?;
         Ok(accession)
     }
 
