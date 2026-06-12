@@ -8,7 +8,7 @@ use intervaltree::IntervalTree;
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionError, AccessionSpanBlock, ResolvedAccessionSpan},
+    accession::{Accession, AccessionError, ResolvedAccessionSpan},
     annotations::{Annotation, AnnotationError},
     block_group::{BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource},
     block_group_edge::AugmentedEdgeData,
@@ -501,57 +501,60 @@ impl ResolvedGenRegion {
         &self,
         conn: &GraphConnection,
     ) -> Result<ResolvedAccessionSpan, GenRegionError> {
-        match self.kind {
+        let path_edges = match self.kind {
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
                 let path = self
                     .path
                     .as_ref()
                     .ok_or_else(|| GenRegionError::NotFound("No path for region".to_string()))?;
-                let tree = self.intervaltree(conn)?;
-                let all_path_edges = PathEdge::edges_for_path(conn, &path.id);
-                let mut node_blocks = tree
-                    .query(self.start..self.end)
-                    .map(|item| item.value)
-                    .filter(|block| !is_terminal(block.node_id))
-                    .collect::<Vec<_>>();
-                node_blocks.sort_by(|a, b| a.start.cmp(&b.start));
-                let span_blocks = node_blocks
-                    .iter()
-                    .map(|block| {
-                        let source_edge = all_path_edges
-                            .iter()
-                            .find(|edge| {
-                                edge.target_node_id == block.node_id
-                                    && edge.target_coordinate == block.sequence_start
-                            })
-                            .expect("should find path edge entering accession block");
-                        let target_edge = all_path_edges
-                            .iter()
-                            .find(|edge| {
-                                edge.source_node_id == block.node_id
-                                    && edge.source_coordinate == block.sequence_end
-                            })
-                            .expect("should find path edge leaving accession block");
-                        AccessionSpanBlock {
-                            node_id: block.node_id,
-                            sequence_start: block.sequence_start + (self.start - block.start).max(0),
-                            sequence_end: block.sequence_end - (block.end - self.end).max(0),
-                            strand: block.strand,
-                            source_edge_id: source_edge.id,
-                            target_edge_id: target_edge.id,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                Ok(ResolvedAccessionSpan {
-                    blocks: span_blocks,
-                })
+                Some(PathEdge::edges_for_path(conn, &path.id))
             }
-            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {
-                Err(GenRegionError::Unmappable(
-                    "Accession and annotation regions do not currently expose edge provenance for nested accession creation".to_string(),
-                ))
-            }
-        }
+            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => None,
+        };
+        let tree = self.intervaltree(conn)?;
+        let mut node_blocks = tree
+            .query(self.start..self.end)
+            .map(|item| item.value)
+            .filter(|block| !is_terminal(block.node_id))
+            .collect::<Vec<_>>();
+        node_blocks.sort_by(|a, b| a.start.cmp(&b.start));
+        let span_blocks = node_blocks
+            .iter()
+            .map(|block| {
+                let (source_edge_id, target_edge_id) = if let Some(path_edges) = &path_edges {
+                    let source_edge = path_edges
+                        .iter()
+                        .find(|edge| {
+                            edge.target_node_id == block.node_id
+                                && edge.target_coordinate == block.sequence_start
+                        })
+                        .expect("should find path edge entering accession block");
+                    let target_edge = path_edges
+                        .iter()
+                        .find(|edge| {
+                            edge.source_node_id == block.node_id
+                                && edge.source_coordinate == block.sequence_end
+                        })
+                        .expect("should find path edge leaving accession block");
+                    (Some(source_edge.id), Some(target_edge.id))
+                } else {
+                    (block.source_edge_id, block.target_edge_id)
+                };
+                NodeIntervalBlock {
+                    node_id: block.node_id,
+                    start: block.start.max(self.start),
+                    end: block.end.min(self.end),
+                    sequence_start: block.sequence_start + (self.start - block.start).max(0),
+                    sequence_end: block.sequence_end - (block.end - self.end).max(0),
+                    strand: block.strand,
+                    source_edge_id,
+                    target_edge_id,
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(ResolvedAccessionSpan {
+            blocks: span_blocks,
+        })
     }
 
     pub fn find_graph_positions(

@@ -1327,6 +1327,28 @@ mod tests {
     }
 
     #[test]
+    fn add_annotation_accepts_accession_region() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
+        let db_uuid = metadata::get_db_uuid(graph_conn);
+        let _ = GenDatabase::create(operation_conn, &db_uuid, "test-db", "test-db-path").unwrap();
+        let (_block_group_id, path) = setup_block_group(graph_conn);
+        let mut cache = PathCache::new(graph_conn);
+        let accession =
+            BlockGroup::add_accession(graph_conn, &path, "source-acc", 1, 8, &mut cache).unwrap();
+        let region =
+            crate::region::ResolvedGenRegion::from_accession(graph_conn, &accession, 1, 5).unwrap();
+
+        let operation = add_annotation(&context, "nested-gene", Some("track-1"), &region).unwrap();
+        assert_eq!(operation.change_type, "add annotation nested-gene");
+
+        let annotations = Annotation::query_by_group(graph_conn, "track-1").unwrap();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].name, "nested-gene");
+    }
+
+    #[test]
     fn add_annotation_file_creates_operation() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();

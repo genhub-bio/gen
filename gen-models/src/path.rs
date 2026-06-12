@@ -387,6 +387,8 @@ impl Path {
                         sequence_start: block.sequence_start,
                         sequence_end: block.sequence_end,
                         strand: block.strand,
+                        source_edge_id: None,
+                        target_edge_id: None,
                     },
                 )
             })
@@ -809,6 +811,8 @@ impl Path {
             sequence_start: node_blocks[0].sequence_start + start_offset,
             sequence_end: node_blocks[0].sequence_end,
             strand: node_blocks[0].strand,
+            source_edge_id: node_blocks[0].source_edge_id,
+            target_edge_id: node_blocks[0].target_edge_id,
         };
 
         for block in &node_blocks[1..] {
@@ -823,6 +827,8 @@ impl Path {
                     sequence_start: consolidated_block.sequence_start,
                     sequence_end: block.sequence_end,
                     strand: consolidated_block.strand,
+                    source_edge_id: consolidated_block.source_edge_id,
+                    target_edge_id: block.target_edge_id,
                 };
             } else {
                 result_node_blocks.push(consolidated_block);
@@ -843,6 +849,8 @@ impl Path {
             sequence_start: consolidated_block.sequence_start,
             sequence_end: consolidated_block.sequence_end - end_offset,
             strand: consolidated_block.strand,
+            source_edge_id: consolidated_block.source_edge_id,
+            target_edge_id: consolidated_block.target_edge_id,
         });
 
         result_node_blocks
@@ -4062,6 +4070,8 @@ mod tests {
             sequence_start: 0,
             sequence_end: 8,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         }];
         assert_eq!(node_blocks1, expected_node_blocks1);
 
@@ -4073,6 +4083,8 @@ mod tests {
             sequence_start: 0,
             sequence_end: 4,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         }];
         assert_eq!(node_blocks2, expected_node_blocks2);
 
@@ -4084,6 +4096,8 @@ mod tests {
             sequence_start: 2,
             sequence_end: 6,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         }];
         assert_eq!(node_blocks3, expected_node_blocks3);
 
@@ -4095,6 +4109,8 @@ mod tests {
             sequence_start: 3,
             sequence_end: 8,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         }];
         assert_eq!(node_blocks4, expected_node_blocks4);
 
@@ -4107,6 +4123,8 @@ mod tests {
                 sequence_start: 6,
                 sequence_end: 8,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
             NodeIntervalBlock {
                 node_id: node2_id,
@@ -4115,6 +4133,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 2,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
         ];
         assert_eq!(node_blocks5, expected_node_blocks5);
@@ -4127,6 +4147,8 @@ mod tests {
             sequence_start: 4,
             sequence_end: 8,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         }];
         assert_eq!(node_blocks6, expected_node_blocks6);
     }
@@ -4214,6 +4236,8 @@ mod tests {
             sequence_start: 0,
             sequence_end: 8,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         }];
         assert_eq!(node_blocks1, expected_node_blocks1);
 
@@ -4228,6 +4252,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 5,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
             NodeIntervalBlock {
                 node_id: node2_id,
@@ -4236,6 +4262,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 3,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
         ];
         assert_eq!(node_blocks2, expected_node_blocks2);
@@ -4249,6 +4277,8 @@ mod tests {
                 sequence_start: 4,
                 sequence_end: 5,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
             NodeIntervalBlock {
                 node_id: node2_id,
@@ -4257,6 +4287,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 8,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
             NodeIntervalBlock {
                 node_id: node1_id,
@@ -4265,6 +4297,8 @@ mod tests {
                 sequence_start: 6,
                 sequence_end: 7,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
         ];
         assert_eq!(node_blocks3, expected_node_blocks3);

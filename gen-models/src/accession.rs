@@ -188,18 +188,8 @@ pub struct AccessionEdgeData {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccessionSpanBlock {
-    pub node_id: HashId,
-    pub sequence_start: i64,
-    pub sequence_end: i64,
-    pub strand: Strand,
-    pub source_edge_id: HashId,
-    pub target_edge_id: HashId,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedAccessionSpan {
-    pub blocks: Vec<AccessionSpanBlock>,
+    pub blocks: Vec<NodeIntervalBlock>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -406,8 +396,20 @@ impl Accession {
                         block.node_id, block.sequence_start, block.sequence_end
                     )));
                 }
-                edge_ids.insert(block.source_edge_id);
-                edge_ids.insert(block.target_edge_id);
+                let source_edge_id = block.source_edge_id.ok_or_else(|| {
+                    AccessionError::InvalidSpan(format!(
+                        "block {} is missing source edge provenance",
+                        block.node_id
+                    ))
+                })?;
+                let target_edge_id = block.target_edge_id.ok_or_else(|| {
+                    AccessionError::InvalidSpan(format!(
+                        "block {} is missing target edge provenance",
+                        block.node_id
+                    ))
+                })?;
+                edge_ids.insert(source_edge_id);
+                edge_ids.insert(target_edge_id);
             }
         }
 
@@ -425,9 +427,15 @@ impl Accession {
         let mut accession_edges = Vec::new();
         for span in spans {
             let first_block = span.blocks.first().ok_or(AccessionError::EmptySpan)?;
+            let first_source_edge_id = first_block.source_edge_id.ok_or_else(|| {
+                AccessionError::InvalidSpan(format!(
+                    "block {} is missing source edge provenance",
+                    first_block.node_id
+                ))
+            })?;
             let source_edge = edges
-                .get(&first_block.source_edge_id)
-                .ok_or(AccessionError::MissingEdge(first_block.source_edge_id))?;
+                .get(&first_source_edge_id)
+                .ok_or(AccessionError::MissingEdge(first_source_edge_id))?;
             Accession::validate_source_edge(source_edge, first_block)?;
             accession_edges.push(AccessionEdgeData {
                 edge_id: source_edge.id,
@@ -436,20 +444,32 @@ impl Accession {
             });
 
             for (index, block) in span.blocks.iter().enumerate() {
+                let block_target_edge_id = block.target_edge_id.ok_or_else(|| {
+                    AccessionError::InvalidSpan(format!(
+                        "block {} is missing target edge provenance",
+                        block.node_id
+                    ))
+                })?;
                 let target_edge = edges
-                    .get(&block.target_edge_id)
-                    .ok_or(AccessionError::MissingEdge(block.target_edge_id))?;
+                    .get(&block_target_edge_id)
+                    .ok_or(AccessionError::MissingEdge(block_target_edge_id))?;
                 Accession::validate_target_edge(target_edge, block)?;
                 let next_block = span.blocks.get(index + 1);
                 let target_offset = match next_block {
                     Some(next_block) => {
-                        if next_block.source_edge_id != block.target_edge_id {
+                        let next_source_edge_id = next_block.source_edge_id.ok_or_else(|| {
+                            AccessionError::InvalidSpan(format!(
+                                "block {} is missing source edge provenance",
+                                next_block.node_id
+                            ))
+                        })?;
+                        if next_source_edge_id != block_target_edge_id {
                             return Err(AccessionError::InvalidSpan(format!(
                                 "block {} exits on edge {}, but next block {} enters on edge {}",
                                 block.node_id,
-                                block.target_edge_id,
+                                block_target_edge_id,
                                 next_block.node_id,
-                                next_block.source_edge_id
+                                next_source_edge_id
                             )));
                         }
                         Accession::validate_source_edge(target_edge, next_block)?;
@@ -536,13 +556,15 @@ impl Accession {
                         && edge.source_coordinate >= anchor.sequence_end
                 })?,
             };
-            blocks.push(AccessionSpanBlock {
+            blocks.push(NodeIntervalBlock {
                 node_id: anchor.node_id,
+                start: 0,
+                end: anchor.sequence_end - anchor.sequence_start,
                 sequence_start: anchor.sequence_start,
                 sequence_end: anchor.sequence_end,
                 strand: anchor.strand,
-                source_edge_id,
-                target_edge_id: target_edge.id,
+                source_edge_id: Some(source_edge_id),
+                target_edge_id: Some(target_edge.id),
             });
             source_edge_id = target_edge.id;
         }
@@ -566,7 +588,7 @@ impl Accession {
         }
     }
 
-    fn validate_source_edge(edge: &Edge, block: &AccessionSpanBlock) -> Result<(), AccessionError> {
+    fn validate_source_edge(edge: &Edge, block: &NodeIntervalBlock) -> Result<(), AccessionError> {
         if edge.target_node_id != block.node_id {
             return Err(AccessionError::InvalidSpan(format!(
                 "edge {} targets node {}, not block node {}",
@@ -588,7 +610,7 @@ impl Accession {
         Ok(())
     }
 
-    fn validate_target_edge(edge: &Edge, block: &AccessionSpanBlock) -> Result<(), AccessionError> {
+    fn validate_target_edge(edge: &Edge, block: &NodeIntervalBlock) -> Result<(), AccessionError> {
         if edge.source_node_id != block.node_id {
             return Err(AccessionError::InvalidSpan(format!(
                 "edge {} sources node {}, not block node {}",
@@ -635,6 +657,8 @@ impl Accession {
             sequence_start: 0,
             sequence_end: 0,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         }];
 
         for (into, out_of) in edges.iter().tuple_windows() {
@@ -657,6 +681,8 @@ impl Accession {
                 sequence_start,
                 sequence_end,
                 strand: into.edge.target_strand,
+                source_edge_id: Some(into.accession_edge.edge_id),
+                target_edge_id: Some(out_of.accession_edge.edge_id),
             });
             offset += block_len;
         }
@@ -668,6 +694,8 @@ impl Accession {
             sequence_start: 0,
             sequence_end: 0,
             strand: Strand::Forward,
+            source_edge_id: None,
+            target_edge_id: None,
         });
 
         Ok(blocks)
@@ -934,13 +962,15 @@ mod tests {
                 block_group_id: &block_group_id,
                 parent_accession_id: None,
                 spans: &[ResolvedAccessionSpan {
-                    blocks: vec![AccessionSpanBlock {
+                    blocks: vec![NodeIntervalBlock {
                         node_id: HashId::convert_str("test-a-node"),
+                        start: 0,
+                        end: 5,
                         sequence_start: 3,
                         sequence_end: 8,
                         strand: Strand::Forward,
-                        source_edge_id: path_edges[0].id,
-                        target_edge_id: path_edges[1].id,
+                        source_edge_id: Some(path_edges[0].id),
+                        target_edge_id: Some(path_edges[1].id),
                     }],
                 }],
             },
@@ -971,21 +1001,25 @@ mod tests {
                 parent_accession_id: None,
                 spans: &[ResolvedAccessionSpan {
                     blocks: vec![
-                        AccessionSpanBlock {
+                        NodeIntervalBlock {
                             node_id: HashId::convert_str("test-a-node"),
+                            start: 0,
+                            end: 5,
                             sequence_start: 5,
                             sequence_end: 10,
                             strand: Strand::Forward,
-                            source_edge_id: path_edges[0].id,
-                            target_edge_id: path_edges[1].id,
+                            source_edge_id: Some(path_edges[0].id),
+                            target_edge_id: Some(path_edges[1].id),
                         },
-                        AccessionSpanBlock {
+                        NodeIntervalBlock {
                             node_id: HashId::convert_str("test-t-node"),
+                            start: 5,
+                            end: 11,
                             sequence_start: 0,
                             sequence_end: 6,
                             strand: Strand::Forward,
-                            source_edge_id: path_edges[1].id,
-                            target_edge_id: path_edges[2].id,
+                            source_edge_id: Some(path_edges[1].id),
+                            target_edge_id: Some(path_edges[2].id),
                         },
                     ],
                 }],
@@ -1040,8 +1074,8 @@ mod tests {
                 .map(|block| (block.source_edge_id, block.target_edge_id))
                 .collect::<Vec<_>>(),
             vec![
-                (path_edges[0].id, path_edges[1].id),
-                (path_edges[1].id, path_edges[2].id)
+                (Some(path_edges[0].id), Some(path_edges[1].id)),
+                (Some(path_edges[1].id), Some(path_edges[2].id))
             ]
         );
         let accession = Accession::create_from_spans(
@@ -1196,6 +1230,7 @@ mod tests {
         let mut path_cache = PathCache::new(conn);
         let accession =
             BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+        let path_edges = PathEdge::edges_for_path(conn, &path.id);
 
         let tree = accession.intervaltree(conn).unwrap();
         interval_tree_verify(
@@ -1208,6 +1243,8 @@ mod tests {
                 sequence_start: 5,
                 sequence_end: 10,
                 strand: Strand::Forward,
+                source_edge_id: Some(path_edges[0].id),
+                target_edge_id: Some(path_edges[1].id),
             }],
         );
         interval_tree_verify(
@@ -1220,6 +1257,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 10,
                 strand: Strand::Forward,
+                source_edge_id: Some(path_edges[1].id),
+                target_edge_id: Some(path_edges[2].id),
             }],
         );
         interval_tree_verify(
@@ -1232,6 +1271,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 10,
                 strand: Strand::Forward,
+                source_edge_id: Some(path_edges[2].id),
+                target_edge_id: Some(path_edges[3].id),
             }],
         );
         interval_tree_verify(
@@ -1244,6 +1285,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 5,
                 strand: Strand::Forward,
+                source_edge_id: Some(path_edges[3].id),
+                target_edge_id: Some(path_edges[4].id),
             }],
         );
     }

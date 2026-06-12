@@ -355,6 +355,8 @@ pub fn flatten_to_interval_tree(
                         sequence_start: source_node.sequence_start,
                         sequence_end: source_node.sequence_end,
                         strand: edge.source_strand,
+                        source_edge_id: None,
+                        target_edge_id: Some(edge.edge_id),
                     });
                     spans.insert(NodeIntervalBlock {
                         node_id: target_node.node_id,
@@ -363,6 +365,8 @@ pub fn flatten_to_interval_tree(
                         sequence_start: target_node.sequence_start,
                         sequence_end: target_node.sequence_end,
                         strand: edge.target_strand,
+                        source_edge_id: Some(edge.edge_id),
+                        target_edge_id: None,
                     });
                     if remove_ambiguous_positions {
                         for (node_id, node_range) in [
@@ -902,6 +906,8 @@ mod tests {
                 sequence_start: seq_start,
                 sequence_end: seq_end,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
         )
     }
@@ -1128,6 +1134,8 @@ mod tests {
                     sequence_start: 0,
                     sequence_end: 0,
                     strand: Strand::Forward,
+                    source_edge_id: None,
+                    target_edge_id: None,
                 },
             ),
             make_block("node-a", 0, 5, 0, 5),
@@ -1141,6 +1149,8 @@ mod tests {
                     sequence_start: 0,
                     sequence_end: 0,
                     strand: Strand::Forward,
+                    source_edge_id: None,
+                    target_edge_id: None,
                 },
             ),
         ]

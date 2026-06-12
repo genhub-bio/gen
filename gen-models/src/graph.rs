@@ -437,6 +437,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 5,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
         )]
         .into_iter()
@@ -623,6 +625,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 3,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
         )]
         .into_iter()
@@ -661,6 +665,8 @@ mod tests {
                 sequence_start: 2,
                 sequence_end: 5,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             },
         )]
         .into_iter()

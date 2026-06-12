@@ -6,7 +6,7 @@ use gen_core::{
     calculate_hash,
 };
 use gen_models::{
-    accession::{Accession, AccessionSpanBlock, AccessionSpanCreate, ResolvedAccessionSpan},
+    accession::{Accession, AccessionSpanCreate, ResolvedAccessionSpan},
     annotations::Annotation,
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -141,13 +141,15 @@ fn annotation_segment_span(
                         && edge.source_coordinate == block.sequence_end
                 })
                 .expect("should find edge leaving annotation block");
-            AccessionSpanBlock {
+            NodeIntervalBlock {
                 node_id: block.node_id,
+                start: block.start.max(segment.start),
+                end: block.end.min(segment.end),
                 sequence_start: block.sequence_start + (segment.start - block.start).max(0),
                 sequence_end: block.sequence_end - (block.end - segment.end).max(0),
                 strand: block.strand,
-                source_edge_id: source_edge.id,
-                target_edge_id: target_edge.id,
+                source_edge_id: Some(source_edge.id),
+                target_edge_id: Some(target_edge.id),
             }
         })
         .collect();
@@ -306,6 +308,8 @@ fn updated_sequence_intervaltree(
                     sequence_start: block.sequence_start,
                     sequence_end: block.sequence_end,
                     strand: block.strand,
+                    source_edge_id: None,
+                    target_edge_id: None,
                 },
             )
         })

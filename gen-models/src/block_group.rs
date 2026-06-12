@@ -3345,6 +3345,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 10,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             }],
         );
         interval_tree_verify(
@@ -3357,6 +3359,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 10,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             }],
         );
         interval_tree_verify(
@@ -3369,6 +3373,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 10,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             }],
         );
         interval_tree_verify(
@@ -3381,6 +3387,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 10,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             }],
         );
 
@@ -3397,6 +3405,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 7,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             }],
         );
         interval_tree_verify(
@@ -3409,6 +3419,8 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 7,
                 strand: Strand::Forward,
+                source_edge_id: None,
+                target_edge_id: None,
             }],
         );
         interval_tree_verify(
@@ -3422,6 +3434,8 @@ mod tests {
                     sequence_start: 0,
                     sequence_end: 10,
                     strand: Strand::Forward,
+                    source_edge_id: None,
+                    target_edge_id: None,
                 },
                 NodeIntervalBlock {
                     node_id: HashId::convert_str("test-g-node"),
@@ -3430,6 +3444,8 @@ mod tests {
                     sequence_start: 0,
                     sequence_end: 10,
                     strand: Strand::Forward,
+                    source_edge_id: None,
+                    target_edge_id: None,
                 },
             ],
         );
@@ -3447,6 +3463,8 @@ mod tests {
                     sequence_start: 0,
                     sequence_end: 4,
                     strand: Strand::Forward,
+                    source_edge_id: None,
+                    target_edge_id: None,
                 },
                 NodeIntervalBlock {
                     node_id: HashId::convert_str("test-a-node"),
@@ -3455,6 +3473,8 @@ mod tests {
                     sequence_start: 7,
                     sequence_end: 10,
                     strand: Strand::Forward,
+                    source_edge_id: None,
+                    target_edge_id: None,
                 },
             ],
         );

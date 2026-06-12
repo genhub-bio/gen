@@ -1,4 +1,9 @@
-use std::{convert::TryFrom, fmt, hash::Hash};
+use std::{
+    cmp::Ordering,
+    convert::TryFrom,
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 use rand::Rng;
 use sha2::{Digest, Sha256};
@@ -253,7 +258,7 @@ impl HashId {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Copy, Clone, Debug)]
 pub struct NodeIntervalBlock {
     pub node_id: HashId,
     pub start: i64,
@@ -261,6 +266,47 @@ pub struct NodeIntervalBlock {
     pub sequence_start: i64,
     pub sequence_end: i64,
     pub strand: Strand,
+    pub source_edge_id: Option<HashId>,
+    pub target_edge_id: Option<HashId>,
+}
+
+impl NodeIntervalBlock {
+    fn identity_tuple(&self) -> (HashId, i64, i64, i64, i64, Strand) {
+        (
+            self.node_id,
+            self.start,
+            self.end,
+            self.sequence_start,
+            self.sequence_end,
+            self.strand,
+        )
+    }
+}
+
+impl PartialEq for NodeIntervalBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity_tuple() == other.identity_tuple()
+    }
+}
+
+impl Eq for NodeIntervalBlock {}
+
+impl Hash for NodeIntervalBlock {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.identity_tuple().hash(state);
+    }
+}
+
+impl Ord for NodeIntervalBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.identity_tuple().cmp(&other.identity_tuple())
+    }
+}
+
+impl PartialOrd for NodeIntervalBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 pub fn calculate_hash(t: &str) -> [u8; 32] {
