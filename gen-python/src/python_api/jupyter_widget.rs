@@ -15,7 +15,7 @@ use r#gen::{
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_match_range, locus_label_bounds,
+            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
             viewport_pos_map,
         },
         inline_label_placement::draw_label_near_pos,
@@ -286,7 +286,6 @@ pub struct PyGraphController {
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
-    track_annotations: Vec<AnnotationTrack>,
     overlays: Vec<GraphOverlay>,
 }
 
@@ -299,7 +298,6 @@ impl PyGraphController {
             db_path,
             block_group_id: None,
             controller,
-            track_annotations: Vec::new(),
             overlays: Vec::new(),
         }
     }
@@ -359,8 +357,45 @@ impl PyGraphController {
         };
         for name in annotation_group_names(conn, &current_block_group) {
             if let Ok(track) = self.load_group_as_track(conn, &name) {
-                self.track_annotations.push(track);
+                self.push_track_as_overlays(track);
             }
+        }
+    }
+
+    fn push_track_as_overlays(&mut self, track: AnnotationTrack) {
+        let track_name = track.name;
+        let mut spans = track.annotations;
+        // Sort longest-first so shorter (inner) annotations paint on top.
+        spans.sort_by_key(|s| {
+            -(s.segments
+                .iter()
+                .map(|seg| seg.end - seg.start)
+                .sum::<i64>())
+        });
+        let theme = current_theme();
+        let accent_base = self.overlays.iter().filter(|o| o.track.is_some()).count();
+        let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
+            .into_iter()
+            .enumerate()
+            .map(|(i, span)| (span, PathStyle::new(theme[0x08 + ((accent_base + i) % 8)])))
+            .collect();
+        // Resolve loci with immutable graph borrow.
+        let loci: Vec<Option<GraphLocus>> = spans_with_styles
+            .iter()
+            .map(|(span, _)| graph_locus_from_annotation_span(span, self.controller.graph()))
+            .collect();
+        // Apply highlights with mutable controller borrow.
+        for (locus, (_, style)) in loci.iter().zip(spans_with_styles.iter()) {
+            if let Some(l) = locus {
+                highlight_locus(&mut self.controller, l, *style);
+            }
+        }
+        for (span, style) in spans_with_styles {
+            self.overlays.push(GraphOverlay {
+                span,
+                track: Some(track_name.clone()),
+                style,
+            });
         }
     }
 
@@ -484,9 +519,12 @@ impl PyGraphController {
                     c => c,
                 };
                 let locus = locus_from_span_and_pos_map(&overlay.span, &pos_map);
-                let Some((left_pos, right_pos)) =
-                    locus_label_bounds(&locus, &pos_map, detail_level)
-                else {
+                let Some((left_pos, right_pos)) = locus_label_bounds(
+                    &locus,
+                    &pos_map,
+                    detail_level,
+                    &self.controller.viewport_state,
+                ) else {
                     continue;
                 };
                 let max_distance = if detail_level == gen_tui::layout::VisualDetail::Minimal {
@@ -494,7 +532,7 @@ impl PyGraphController {
                 } else {
                     5
                 };
-                draw_label_near_pos(
+                if draw_label_near_pos(
                     &mut buf,
                     graph_area,
                     (left_pos, right_pos),
@@ -502,18 +540,15 @@ impl PyGraphController {
                     color,
                     &self.controller.viewport_state,
                     max_distance,
-                );
+                )
+                .is_none()
+                {
+                    eprintln!(
+                        "warning: annotation '{}' label could not be placed (obscured)",
+                        overlay.span.name
+                    );
+                }
             }
-        }
-
-        // Overlay annotation tracks at the bottom of the canvas area.
-        let mut remaining = Rect::new(0, 0, cols, rows);
-        for track in self.track_annotations.iter_mut().rev() {
-            let height = track.draw(&mut buf, remaining, &self.controller);
-            if height == 0 {
-                break;
-            }
-            remaining.height = remaining.height.saturating_sub(height);
         }
 
         let frame = serialize_buffer(&buf, cols, rows);
@@ -539,7 +574,7 @@ impl PyGraphController {
             })
             .collect();
         for (locus, style) in &loci_with_styles {
-            highlight_match_range(&mut self.controller, locus, *style);
+            highlight_locus(&mut self.controller, locus, *style);
         }
     }
 
@@ -606,7 +641,7 @@ impl PyGraphController {
         let style = PathStyle::new(c)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        highlight_match_range(&mut self.controller, &locus.inner, style);
+        highlight_locus(&mut self.controller, &locus.inner, style);
         self.overlays.push(GraphOverlay {
             span: annotation_span_from_graph_locus(&locus.inner, ""),
             track: None,
@@ -685,24 +720,21 @@ impl PyGraphController {
         self.reapply_highlights(); // restore overlays cleared by clear_all_highlights
     }
 
-    /// Load annotations from the database by group name and add them as a
-    /// horizontal track panel below the graph.
+    /// Load annotations from the database by group name and add them as inline graph overlays.
     pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
         let conn = self.open_conn()?;
         let track = self
             .load_group_as_track(&conn, group)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        self.track_annotations.push(track);
+        self.push_track_as_overlays(track);
         Ok(())
     }
 
-    /// Build a track panel from a list of `Annotation` objects.
-    /// Each `Annotation` becomes one span; all are grouped under `name`.
+    /// Add a list of `Annotation` objects as inline graph overlays grouped under `name`.
     pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
         let spans: Vec<AnnotationSpan> =
             annotations.iter().map(|a| annotation_to_span(a)).collect();
-        self.track_annotations
-            .push(AnnotationTrack::new(name, spans));
+        self.push_track_as_overlays(AnnotationTrack::new(name, spans));
     }
 
     /// Load annotations from a GFF3 or BED file and add them as a
@@ -794,7 +826,7 @@ impl PyGraphController {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
 
-        self.track_annotations.push(track);
+        self.push_track_as_overlays(track);
         Ok(())
     }
 
@@ -821,7 +853,7 @@ impl PyGraphController {
             .clone()
             .or_else(|| graph_locus_from_annotation_span(&span, self.controller.graph()));
         if let Some(locus) = locus {
-            highlight_match_range(&mut self.controller, &locus, style);
+            highlight_locus(&mut self.controller, &locus, style);
         }
         self.overlays.push(GraphOverlay {
             span,
@@ -876,24 +908,48 @@ impl PyGraphController {
             .collect())
     }
 
-    /// Return a JSON list of track-panel annotation names currently loaded.
+    /// Return a JSON list of track annotation names currently loaded.
     pub fn get_track_names(&self) -> PyResult<String> {
+        let mut seen = std::collections::HashSet::new();
         let names: Vec<&str> = self
-            .track_annotations
+            .overlays
             .iter()
-            .map(|t| t.name.as_str())
+            .filter_map(|o| o.track.as_deref())
+            .filter(|n| seen.insert(*n))
             .collect();
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Remove a track-panel annotation by name.
+    /// Remove all annotation overlays whose track name matches `name`.
     pub fn remove_track(&mut self, name: &str) {
-        self.track_annotations.retain(|t| t.name != name);
+        let mut styles_to_clear: Vec<PathStyle> = Vec::new();
+        self.overlays.retain(|o| {
+            if o.track.as_deref() == Some(name) {
+                styles_to_clear.push(o.style);
+                false
+            } else {
+                true
+            }
+        });
+        for style in styles_to_clear {
+            self.controller.clear_highlight(&style);
+        }
     }
 
-    /// Clear all track-panel annotations.
+    /// Clear all track annotations.
     pub fn clear_all_annotations(&mut self) {
-        self.track_annotations.clear();
+        let mut styles_to_clear: Vec<PathStyle> = Vec::new();
+        self.overlays.retain(|o| {
+            if o.track.is_some() {
+                styles_to_clear.push(o.style);
+                false
+            } else {
+                true
+            }
+        });
+        for style in styles_to_clear {
+            self.controller.clear_highlight(&style);
+        }
     }
 
     /// Add inline annotations rendered directly on the graph canvas.
@@ -929,7 +985,7 @@ impl PyGraphController {
             .collect();
         for (_, locus) in &spans_and_loci {
             if let Some(locus) = locus {
-                highlight_match_range(&mut self.controller, locus, style);
+                highlight_locus(&mut self.controller, locus, style);
             }
         }
         for (span, _) in spans_and_loci {

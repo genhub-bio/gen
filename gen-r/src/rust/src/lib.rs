@@ -35,7 +35,11 @@ use r#gen::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
         },
-        gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer, highlight_match_range},
+        gen_graph_widget::{
+            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
+            viewport_pos_map,
+        },
+        inline_label_placement::draw_label_near_pos,
     },
 };
 use gen_annotations::{
@@ -58,7 +62,7 @@ use gen_models::{
 };
 use gen_tui::{
     LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    plotter::PathStyle,
+    plotter::PathStyle, theme::current_theme,
 };
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
@@ -844,7 +848,7 @@ fn apply_graph_ops(
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        highlight_match_range(controller, &locus, style);
+        highlight_locus(controller, &locus, style);
     }
 
     Ok(())
@@ -1983,17 +1987,77 @@ impl Repository {
 
         let area = Rect::new(0, 0, cols as u16, rows as u16);
         let mut buf = Buffer::empty(area);
+
+        let tracks = load_tracks_from_specs(conn, &controller, &bg_id, &tracks_json);
+
+        // Step 1: Apply annotation highlights before graph render.
+        // Sort spans longest-first so shorter annotations paint on top.
+        let mut all_spans: Vec<&AnnotationSpan> =
+            tracks.iter().flat_map(|t| t.annotations.iter()).collect();
+        all_spans.sort_by_key(|s| {
+            -(s.segments
+                .iter()
+                .map(|seg| seg.end - seg.start)
+                .sum::<i64>())
+        });
+        let annotation_colors: Vec<ratatui::style::Color> = {
+            let theme = current_theme();
+            (0..all_spans.len())
+                .map(|i| theme[0x08 + (i % 8)])
+                .collect()
+        };
+        {
+            let loci: Vec<Option<_>> = all_spans
+                .iter()
+                .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
+                .collect();
+            for (locus, &color) in loci.iter().zip(annotation_colors.iter()) {
+                if let Some(l) = locus {
+                    highlight_locus(&mut controller, l, PathStyle::new(color));
+                }
+            }
+        }
+
+        // Render graph with highlights applied.
         let renderer = GenGraphNodeRenderer::new(conn);
         GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
 
-        let tracks = load_tracks_from_specs(conn, &controller, &bg_id, &tracks_json);
-        let mut remaining = area;
-        for track in tracks.iter().rev() {
-            let height = track.draw(&mut buf, remaining, &controller);
-            if height == 0 {
-                break;
+        // Step 2: Draw floating labels after graph render.
+        let pos_map = viewport_pos_map(&controller);
+        let detail_level = controller.get_detail_level();
+        {
+            let loci: Vec<Option<_>> = all_spans
+                .iter()
+                .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
+                .collect();
+            for ((span, &color), locus) in all_spans
+                .iter()
+                .zip(annotation_colors.iter())
+                .zip(loci.iter())
+            {
+                if span.name.is_empty() {
+                    continue;
+                }
+                if let Some(l) = locus
+                    && let Some(bounds) =
+                        locus_label_bounds(l, &pos_map, detail_level, &controller.viewport_state)
+                    && draw_label_near_pos(
+                        &mut buf,
+                        area,
+                        bounds,
+                        &span.name,
+                        color,
+                        &controller.viewport_state,
+                        5,
+                    )
+                    .is_none()
+                {
+                    eprintln!(
+                        "warning: annotation '{}' label could not be placed (obscured)",
+                        span.name
+                    );
+                }
             }
-            remaining.height = remaining.height.saturating_sub(height);
         }
 
         serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))

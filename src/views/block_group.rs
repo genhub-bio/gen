@@ -22,7 +22,7 @@ use rusqlite::params;
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        annotation_track::AnnotationTrack,
+        annotation_track::{AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span},
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
             load_annotations_for_group,
@@ -30,7 +30,9 @@ use crate::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
+            highlight_locus, locus_label_bounds, viewport_pos_map,
         },
+        inline_label_placement::draw_label_near_pos,
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
     },
@@ -973,6 +975,34 @@ pub fn view_block_group(
                 render_with_optional_clear(frame, canvas_area, splash_area, true, splash_para);
             } else {
                 graph_controller.viewport_state.focus();
+
+                // Step 1: Apply annotation highlights before graph render.
+                // Sort spans longest-first so shorter (inner) annotations paint on top.
+                let mut all_spans: Vec<&AnnotationSpan> =
+                    annotation_file_tracks
+                        .values()
+                        .chain(annotation_group_tracks.values())
+                        .flat_map(|t| t.annotations.iter())
+                        .collect();
+                all_spans.sort_by_key(|s| {
+                    -(s.segments.iter().map(|seg| seg.end - seg.start).sum::<i64>())
+                });
+                let annotation_colors: Vec<ratatui::style::Color> = {
+                    let theme = current_theme();
+                    (0..all_spans.len())
+                        .map(|i| theme[0x08 + (i % 8)])
+                        .collect()
+                };
+                for (span, &color) in all_spans.iter().zip(annotation_colors.iter()) {
+                    let style = PathStyle::new(color);
+                    graph_controller.clear_highlight(&style);
+                    let locus =
+                        graph_locus_from_annotation_span(span, graph_controller.graph());
+                    if let Some(locus) = locus {
+                        highlight_locus(&mut graph_controller, &locus, style);
+                    }
+                }
+
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)
                     .detail_level(graph_controller.get_detail_level())
@@ -980,17 +1010,38 @@ pub fn view_block_group(
                     .cursor();
                 frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
 
-                // Overlay annotation tracks at the bottom of the canvas.
-                // Prepare after graph render so viewport state is accurate.
-                let mut remaining = canvas_area;
-                let tracks: Vec<&mut AnnotationTrack> = annotation_file_tracks
-                    .values_mut()
-                    .chain(annotation_group_tracks.values_mut())
-                    .collect();
-                for track in tracks.into_iter().rev() {
-                    let height = track.draw(frame.buffer_mut(), remaining, &graph_controller);
-                    if height == 0 { break; }
-                    remaining.height = remaining.height.saturating_sub(height);
+                // Step 2: Draw floating labels after graph render.
+                let pos_map = viewport_pos_map(&graph_controller);
+                let detail_level = graph_controller.get_detail_level();
+                for (span, &color) in all_spans.iter().zip(annotation_colors.iter()) {
+                    if span.name.is_empty() {
+                        continue;
+                    }
+                    let locus =
+                        graph_locus_from_annotation_span(span, graph_controller.graph());
+                    if let Some(locus) = locus
+                        && let Some(bounds) = locus_label_bounds(
+                            &locus,
+                            &pos_map,
+                            detail_level,
+                            &graph_controller.viewport_state,
+                        )
+                        && draw_label_near_pos(
+                            frame.buffer_mut(),
+                            canvas_area,
+                            bounds,
+                            &span.name,
+                            color,
+                            &graph_controller.viewport_state,
+                            5,
+                        )
+                        .is_none()
+                    {
+                        eprintln!(
+                            "warning: annotation '{}' label could not be placed (obscured)",
+                            span.name
+                        );
+                    }
                 }
             }
 
