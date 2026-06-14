@@ -506,8 +506,8 @@ class GraphWidget(anywidget.AnyWidget):
         self._controller.add_inline_annotation([annotation], annotation.name)
         self._render()
 
-    def add_inline_annotation(self, annotations, group: str = "") -> None:
-        """Render a list of annotations inline on the graph canvas under a shared group label.
+    def add_annotation_group(self, annotations, group: str = "") -> None:
+        """Render a list of annotations on the graph canvas under a shared group label.
 
         Parameters
         ----------
