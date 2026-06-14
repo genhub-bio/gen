@@ -244,7 +244,7 @@ impl PyRepository {
     // Plot
     // -------------------------------------------------------------------------
 
-    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None))]
+    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None))]
     fn plot(
         &self,
         py: Python<'_>,
@@ -252,6 +252,7 @@ impl PyRepository {
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
+        colors: Option<PyObject>,
     ) -> PyResult<PyObject> {
         let graph_conn = self.context.graph().conn();
         let db_path = graph_conn
@@ -262,12 +263,11 @@ impl PyRepository {
             .map_err(block_group_err_to_pyerr)?;
         let mut ctrl = PyGraphController::new(db_path, graph);
         ctrl.block_group_id = Some(sequence_graph.id);
-        ctrl.auto_load_annotation_groups(graph_conn);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
         let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols)
+        build_widget(py, ctrl, rows, cols, colors)
     }
 
     fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {

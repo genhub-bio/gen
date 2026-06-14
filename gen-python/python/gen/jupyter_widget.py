@@ -56,13 +56,23 @@ class GraphWidget(anywidget.AnyWidget):
     cols: int = traitlets.Int(DEFAULT_COLS).tag(sync=True)
     rows: int = traitlets.Int(DEFAULT_ROWS).tag(sync=True)
 
-    def __init__(self, controller, **kwargs):
+    def __init__(self, controller, *, colors=None, **kwargs):
         """
         Parameters
         ----------
         controller:
             A ``gen.PyGraphController`` instance.  Normally obtained via
             ``repo.plot(sg)`` or ``sg.plot()``.
+        colors : callable | dict | list, optional
+            Controls annotation colours loaded from the repository.
+
+            - **callable** ``(ann: Annotation) -> str | None`` — called once per
+              annotation; return a CSS hex colour to paint it, or ``None`` to hide it.
+            - **dict** ``{name: color}`` — maps ``ann.name`` to a colour; annotations
+              absent from the dict are hidden.
+            - **list** ``[color, ...]`` — assigns colours from the list cyclically.
+
+            When omitted the theme accent palette is used automatically.
         """
         super().__init__(**kwargs)
         self._controller = controller
@@ -75,6 +85,9 @@ class GraphWidget(anywidget.AnyWidget):
 
         # Handle custom messages from the frontend (keyboard / mouse).
         self.on_msg(self._on_frontend_msg)
+
+        # Load annotation groups (skipped if controller is a clone with groups already loaded).
+        self._load_initial_annotations(colors)
 
         # Initial render.
         self._render()
@@ -104,6 +117,49 @@ class GraphWidget(anywidget.AnyWidget):
         snapshot._display_handle = display(data, raw=True, display_id=True)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _load_initial_annotations(self, colors) -> None:
+        """Load annotation groups from the repository, applying the colors mapping.
+
+        Skips if the controller already has groups loaded (e.g. it is a clone).
+        """
+        if self._controller.annotations_loaded:
+            return
+
+        if colors is None:
+            self._controller.trigger_auto_load()
+            return
+
+        color_fn = self._build_color_fn(colors)
+        annotations = self._controller.list_annotations()
+        color_map = {ann.id: color_fn(ann) for ann in annotations}
+        self._controller.load_annotation_groups_with_colors(color_map)
+
+    @staticmethod
+    def _build_color_fn(colors):
+        """Return a callable ``(Annotation) -> str | None`` from any supported colors value."""
+        if callable(colors):
+            return colors
+        if isinstance(colors, dict):
+            return lambda ann: colors.get(ann.name)
+        if isinstance(colors, list):
+            palette = list(colors)
+            n = len(palette)
+            if n == 0:
+                raise ValueError("colors list must not be empty")
+            assigned: dict = {}
+            counter = [0]
+
+            def _cyclic(ann):
+                if ann.id not in assigned:
+                    assigned[ann.id] = palette[counter[0] % n]
+                    counter[0] += 1
+                return assigned[ann.id]
+
+            return _cyclic
+        raise TypeError(
+            f"colors must be a callable, dict, or list; got {type(colors).__name__}"
+        )
 
     def _render(self) -> None:
         """Ask Rust to render a frame and push it to the frontend."""

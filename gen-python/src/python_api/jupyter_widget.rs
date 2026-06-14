@@ -287,6 +287,9 @@ pub struct PyGraphController {
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     overlays: Vec<GraphOverlay>,
+    /// Set to `true` once annotation groups have been loaded (auto or with colors).
+    /// Survives cloning so that cell-display clones do not double-load.
+    annotation_groups_loaded: bool,
 }
 
 impl PyGraphController {
@@ -299,6 +302,7 @@ impl PyGraphController {
             block_group_id: None,
             controller,
             overlays: Vec::new(),
+            annotation_groups_loaded: false,
         }
     }
 
@@ -359,6 +363,86 @@ impl PyGraphController {
             if let Ok(track) = self.load_group_as_track(conn, &name) {
                 self.push_track_as_overlays(track);
             }
+        }
+        self.annotation_groups_loaded = true;
+    }
+
+    /// Load annotation groups applying per-annotation colors supplied by the Python layer.
+    ///
+    /// `color_map` maps annotation ID hex strings to an optional CSS hex color.
+    /// `Some(color)` → paint with that color; `None` → skip the annotation entirely.
+    /// Annotations whose ID is absent from the map fall back to the auto theme palette.
+    fn load_annotation_groups_with_colors_inner(
+        &mut self,
+        conn: &GraphConnection,
+        color_map: &HashMap<String, Option<String>>,
+    ) {
+        let Some(bg_id) = self.block_group_id else {
+            return;
+        };
+        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id) else {
+            return;
+        };
+        for name in annotation_group_names(conn, &current_block_group) {
+            if let Ok(track) = self.load_group_as_track(conn, &name) {
+                self.push_track_as_overlays_with_colors(track, color_map);
+            }
+        }
+        self.annotation_groups_loaded = true;
+    }
+
+    fn push_track_as_overlays_with_colors(
+        &mut self,
+        track: AnnotationTrack,
+        color_map: &HashMap<String, Option<String>>,
+    ) {
+        let track_name = track.name;
+        let mut spans = track.annotations;
+        spans.sort_by_key(|s| {
+            -(s.segments
+                .iter()
+                .map(|seg| seg.end - seg.start)
+                .sum::<i64>())
+        });
+        let theme = current_theme();
+        let accent_base = self.overlays.iter().filter(|o| o.track.is_some()).count();
+        let mut accent_offset = 0usize;
+        let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
+            .into_iter()
+            .filter_map(|span| {
+                let id_hex = span.id.to_string();
+                match color_map.get(&id_hex) {
+                    Some(None) => None, // caller requested this annotation be hidden
+                    Some(Some(hex)) => {
+                        let color = parse_hex_color(hex)
+                            .unwrap_or_else(|_| theme[0x08 + ((accent_base + accent_offset) % 8)]);
+                        accent_offset += 1;
+                        Some((span, PathStyle::new(color)))
+                    }
+                    None => {
+                        // not in map → auto theme color
+                        let color = theme[0x08 + ((accent_base + accent_offset) % 8)];
+                        accent_offset += 1;
+                        Some((span, PathStyle::new(color)))
+                    }
+                }
+            })
+            .collect();
+        let loci: Vec<Option<GraphLocus>> = spans_with_styles
+            .iter()
+            .map(|(span, _)| graph_locus_from_annotation_span(span, self.controller.graph()))
+            .collect();
+        for (locus, (_, style)) in loci.iter().zip(spans_with_styles.iter()) {
+            if let Some(l) = locus {
+                highlight_locus(&mut self.controller, l, *style);
+            }
+        }
+        for (span, style) in spans_with_styles {
+            self.overlays.push(GraphOverlay {
+                span,
+                track: Some(track_name.clone()),
+                style,
+            });
         }
     }
 
@@ -432,6 +516,52 @@ impl PyGraphController {
     /// Deep-clone this controller (graph topology + computed layouts + view state).
     fn clone_controller(&self) -> Self {
         self.clone()
+    }
+
+    /// Whether annotation groups have already been loaded into this controller.
+    ///
+    /// Returns ``True`` after either :meth:`trigger_auto_load` or
+    /// :meth:`load_annotation_groups_with_colors` has been called.  Cloned
+    /// controllers inherit this flag, preventing double-loads on cell re-display.
+    #[getter]
+    fn annotations_loaded(&self) -> bool {
+        self.annotation_groups_loaded
+    }
+
+    /// Load all annotation groups using the automatic theme-colour palette.
+    ///
+    /// Called by ``GraphWidget`` when no ``colors`` mapping is provided to
+    /// ``plot()``.  No-op if annotations have already been loaded.
+    fn trigger_auto_load(&mut self) -> PyResult<()> {
+        if self.annotation_groups_loaded {
+            return Ok(());
+        }
+        let conn = self.open_conn()?;
+        self.auto_load_annotation_groups(&conn);
+        Ok(())
+    }
+
+    /// Load annotation groups applying per-annotation colours from a Python-resolved map.
+    ///
+    /// Parameters
+    /// ----------
+    /// color_map : dict[str, str | None]
+    ///     Maps annotation ID hex strings to a CSS hex colour string (e.g.
+    ///     ``"#ff4444"``) or ``None`` to hide that annotation entirely.
+    ///     Annotations absent from the map fall back to the auto theme palette.
+    ///
+    /// Called by ``GraphWidget`` after it evaluates the ``colors`` callable/dict/list
+    /// provided to ``plot()``.  No-op if annotations have already been loaded.
+    fn load_annotation_groups_with_colors(
+        &mut self,
+        color_map: HashMap<String, Option<String>>,
+    ) -> PyResult<()> {
+        if self.annotation_groups_loaded {
+            return Ok(());
+        }
+        let conn = self.open_conn()?;
+        self.load_annotation_groups_with_colors_inner(&conn, &color_map);
+        Ok(())
     }
 
     /// Create a `GraphController` from a `Repository` and a `PySequenceGraph`.
@@ -1176,6 +1306,7 @@ pub fn build_widget(
     ctrl: Py<PyGraphController>,
     rows: Option<u32>,
     cols: Option<u32>,
+    colors: Option<PyObject>,
 ) -> PyResult<PyObject> {
     let gen_module = py.import("gen")?;
     let widget_cls = gen_module.getattr("GraphWidget")?;
@@ -1185,6 +1316,9 @@ pub fn build_widget(
     }
     if let Some(c) = cols {
         kwargs.set_item("cols", c)?;
+    }
+    if let Some(c) = colors {
+        kwargs.set_item("colors", c)?;
     }
     let widget = widget_cls.call((ctrl,), Some(&kwargs))?;
     Ok(widget.into())
