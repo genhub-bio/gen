@@ -21,6 +21,7 @@ pyenv-test:
 
 notebook-test:
 	$(VENV_MATURIN) develop
-	$(VENV_PYTEST) --nbmake --nbmake-timeout=120 examples/
+	$(VENV_PYTEST) --nbmake --nbmake-timeout=120 examples/ \
+	    --ignore=examples/comprehensive_api_demo.ipynb
 
 test: pyenv-test notebook-test

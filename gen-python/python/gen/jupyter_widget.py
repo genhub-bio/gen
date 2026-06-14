@@ -353,6 +353,14 @@ class GraphWidget(anywidget.AnyWidget):
         self._controller.highlight_match(locus, color)
         self._render()
 
+    def freeze(self) -> None:
+        """Freeze the widget, preventing further updates.
+
+        After freezing, all mutation methods (``show``, ``go_to``, etc.)
+        become no-ops.  Equivalent to clicking the freeze button in the UI.
+        """
+        self._frozen = True
+
     def clear_highlights(self) -> None:
         """Remove all highlights from the graph."""
         if self._frozen:
