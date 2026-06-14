@@ -64,7 +64,10 @@ where
     match op(context) {
         Ok(val) => {
             if managed {
-                tx_commit(context)?;
+                if let Err(e) = tx_commit(context) {
+                    tx_rollback(context);
+                    return Err(e);
+                }
             }
             Ok(val)
         }
@@ -183,8 +186,9 @@ impl PyRepository {
         slf.in_transaction = false;
         if exc_type.is_some() {
             tx_rollback(&slf.context);
-        } else {
-            tx_commit(&slf.context)?;
+        } else if let Err(e) = tx_commit(&slf.context) {
+            tx_rollback(&slf.context);
+            return Err(e);
         }
         Ok(false)
     }
