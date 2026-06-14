@@ -135,8 +135,12 @@ pub fn draw_label_near_pos(
     }
 
     let (left_pos, right_pos) = area_of_interest;
-    let (term_x_a, term_y_a) = viewport_state.world_to_terminal(left_pos)?;
-    let (term_x_b, term_y_b) = viewport_state.world_to_terminal(right_pos)?;
+    let (term_x_a, term_y_a) = viewport_state
+        .world_to_terminal(left_pos)
+        .expect("should convert visible left corner to terminal coords");
+    let (term_x_b, term_y_b) = viewport_state
+        .world_to_terminal(right_pos)
+        .expect("should convert visible right corner to terminal coords");
 
     let x_min = term_x_a.min(term_x_b);
     let x_max = term_x_a.max(term_x_b);
@@ -203,7 +207,12 @@ pub fn draw_label_near_pos(
             return Some(above);
         }
 
-        for (x, y) in nearby_candidates(below, search, width) {
+        let center = (
+            center_x.saturating_sub(width / 2),
+            annotation.y + annotation.height / 2,
+        );
+
+        for (x, y) in nearby_candidates(center, search, width) {
             if (x, y) == below || (x, y) == above {
                 continue;
             }

@@ -385,31 +385,24 @@ pub fn locus_label_bounds(
     Some((left_pos, right_pos))
 }
 
-/// Apply detail-level clamping to a raw column offset.
+/// Clamp a raw column offset to the correct visual cell, accounting for the
+/// `...` region shown in Truncated mode.
 ///
-/// In `Truncated` mode, interior columns of long nodes map to the `...` region.
+/// Truncated nodes render 13 cells: `AAAAA...BBBBB` — first 5 bases (0-4),
+/// `...` (5-7), last 5 bases (8-12). Interior positions map to cell 6.
 fn clamp_col(col_raw: i64, block_seq_len: i64, detail_level: VisualDetail) -> i64 {
     match detail_level {
         VisualDetail::Minimal => 0,
         VisualDetail::Truncated if block_seq_len > 13 => {
-            clamp_truncated_col(col_raw, block_seq_len)
+            if col_raw < 5 {
+                col_raw
+            } else if block_seq_len - col_raw <= 5 {
+                13 - (block_seq_len - col_raw)
+            } else {
+                6
+            }
         }
         _ => col_raw,
-    }
-}
-
-/// Map a sequence offset to a visual cell column inside a 13-cell truncated node.
-///
-/// Display layout: `AAAAA...BBBBB` — first 5 bases (cells 0-4), `...` (cells 5-7),
-/// last 5 bases (cells 8-12). Interior positions that fall in the `...` region clamp
-/// to cell 6 (the centre dot).
-fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
-    if value < 5 {
-        value
-    } else if block_seq_len - value <= 5 {
-        13 - (block_seq_len - value)
-    } else {
-        6
     }
 }
 

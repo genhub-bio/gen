@@ -58,49 +58,29 @@ pub enum CombinatorialLibraryCreationError {
 const GEN_ANNOTATION_START: &str = "GEN_annotation_start";
 const GEN_ANNOTATION_END: &str = "GEN_annotation_end";
 
-struct ParsedFastaDescription {
-    extra: FastaExtra,
-    annotation_start: Option<i64>,
-    annotation_end: Option<i64>,
-}
-
-fn parse_fasta_description(desc: &[u8]) -> ParsedFastaDescription {
+fn parse_fasta_description(desc: &[u8]) -> FastaExtra {
     let raw = String::from_utf8_lossy(desc);
     let description = Some(raw.to_string());
     let mut modifiers = vec![];
-    let mut annotation_start: Option<i64> = None;
-    let mut annotation_end: Option<i64> = None;
     let mut rest = raw.as_ref();
     while let Some(open) = rest.find('[') {
         rest = &rest[open + 1..];
         if let Some(close) = rest.find(']') {
             let token = &rest[..close];
             if let Some(eq) = token.find('=') {
-                let key = token[..eq].trim();
-                let value = token[eq + 1..].trim();
-                if key == GEN_ANNOTATION_START {
-                    annotation_start = value.parse().ok();
-                } else if key == GEN_ANNOTATION_END {
-                    annotation_end = value.parse().ok();
-                } else {
-                    modifiers.push(FastaModifier {
-                        key: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
+                modifiers.push(FastaModifier {
+                    key: token[..eq].trim().to_string(),
+                    value: token[eq + 1..].trim().to_string(),
+                });
             }
             rest = &rest[close + 1..];
         } else {
             break;
         }
     }
-    ParsedFastaDescription {
-        extra: FastaExtra {
-            description,
-            modifiers,
-        },
-        annotation_start,
-        annotation_end,
+    FastaExtra {
+        description,
+        modifiers,
     }
 }
 
@@ -119,11 +99,26 @@ pub fn parse_library(
         let sequence = str::from_utf8(record.sequence().as_ref())
             .map_err(|e| CombinatorialLibraryParseError::FastaParseFailed(e.to_string()))?;
         let name = String::from_utf8(record.name().to_vec()).unwrap();
-        let parsed = record
+        let (fasta_extra, annotation_start, annotation_end) = match record
             .description()
-            .map(|d| parse_fasta_description(d.as_ref()));
-        let (fasta_extra, annotation_start, annotation_end) = match parsed {
-            Some(p) => (Some(p.extra), p.annotation_start, p.annotation_end),
+            .map(|d| parse_fasta_description(d.as_ref()))
+        {
+            Some(mut extra) => {
+                let annotation_start = extra
+                    .modifiers
+                    .iter()
+                    .find(|m| m.key == GEN_ANNOTATION_START)
+                    .and_then(|m| m.value.parse().ok());
+                let annotation_end = extra
+                    .modifiers
+                    .iter()
+                    .find(|m| m.key == GEN_ANNOTATION_END)
+                    .and_then(|m| m.value.parse().ok());
+                extra
+                    .modifiers
+                    .retain(|m| m.key != GEN_ANNOTATION_START && m.key != GEN_ANNOTATION_END);
+                (Some(extra), annotation_start, annotation_end)
+            }
             None => (None, None, None),
         };
         sequence_parts_by_name.insert(
