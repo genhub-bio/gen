@@ -506,6 +506,21 @@ class GraphWidget(anywidget.AnyWidget):
         self._controller.add_inline_annotation([annotation], annotation.name)
         self._render()
 
+    def add_inline_annotation(self, annotations, group: str = "") -> None:
+        """Render a list of annotations inline on the graph canvas under a shared group label.
+
+        Parameters
+        ----------
+        annotations : list[Annotation]
+            Annotations built with ``Annotation(locus, name)``.
+        group : str
+            Optional shared label displayed above the annotation group.
+        """
+        if self._frozen:
+            return
+        self._controller.add_inline_annotation(annotations, group)
+        self._render()
+
     def inline_annotations(self) -> list:
         """Return list of inline annotation names currently displayed."""
         return json.loads(self._controller.get_inline_annotation_names())

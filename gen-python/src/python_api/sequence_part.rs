@@ -13,6 +13,16 @@ pub struct PySequencePart {
 
 #[pymethods]
 impl PySequencePart {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn sequence(&self) -> &str {
+        &self.sequence
+    }
+
     #[new]
     #[pyo3(signature = (name, sequence, metadata=None, annotation_start=None, annotation_end=None))]
     fn new(
