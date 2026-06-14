@@ -354,12 +354,14 @@ class GraphWidget(anywidget.AnyWidget):
         self._render()
 
     def freeze(self) -> None:
-        """Freeze the widget, preventing further updates.
+        """Freeze the widget as a static PNG.
 
-        After freezing, all mutation methods (``show``, ``go_to``, etc.)
-        become no-ops.  Equivalent to clicking the freeze button in the UI.
+        Triggers the same flow as clicking the freeze button: the frontend
+        captures a hi-res PNG, replaces the canvas with the image, and sends
+        the PNG back to Python so it is embedded in the saved notebook.
+        Has no effect when called outside a live Jupyter session.
         """
-        self._frozen = True
+        self.send({"type": "freeze"})
 
     def clear_highlights(self) -> None:
         """Remove all highlights from the graph."""
