@@ -340,7 +340,7 @@ repo$import_reference_fasta("hg38.fa", reference = "hg38")
 
 `update_with_genbank()` applies sequence edits and annotation changes
 encoded in a GenBank file to an existing sample. Set
-`create_missing = TRUE` to auto-create block groups for features not yet
+`create_missing = TRUE` to auto-create sequence graphs for features not yet
 in the database:
 
 ```{r update-genbank, eval=FALSE}
@@ -378,7 +378,7 @@ import_bioconductor(seqs, sample = "constructs", repo = repo)
 
 #### Genomic regions (GRanges)
 
-`import_granges()` imports a list of genomic intervals as block groups.
+`import_granges()` imports a list of genomic intervals as sequence graphs.
 Coordinates follow Bioconductor convention (1-based, closed start-end)
 and are converted to 0-based half-open storage internally. Each unique
 reference sequence is stored once as a shared node, so overlapping
@@ -404,7 +404,7 @@ import_granges(gr, genome, sample = "hg38", repo = repo)
 
 ### Combinatorial library design
 
-`import_library()` builds a combinatorial block group from a list of
+`import_library()` builds a combinatorial sequence graph from a list of
 named part vectors. Each element of `parts_list` is one column of the
 design: a named character vector (or `DNAStringSet`) where each name is
 a part label and each value its sequence. Every combination of one part
@@ -441,8 +441,8 @@ repo$import_library(
   sample       = "design-v1"
 )
 
-cassette_bgs <- Filter(function(x) x$name() == "expression-cassette", repo$get_sequence_graphs())
-plot(cassette_bgs[[1]])
+cassette_sgs <- Filter(function(x) x$name() == "expression-cassette", repo$get_sequence_graphs())
+plot(cassette_sgs[[1]])
 ```
 
 `DNAStringSet` columns work identically to named character vectors and
@@ -473,7 +473,7 @@ repo$update_with_library(
 
 #### Subgraphs
 
-`derive_subgraph()` creates a new block group that is a coordinate slice
+`derive_subgraph()` creates a new sequence graph that is a coordinate slice
 of an existing one. The `region` argument uses `"<name>:<start>-<end>"`
 (0-based half-open) or just `"<name>"` for the full sequence:
 
