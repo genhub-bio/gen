@@ -2013,7 +2013,6 @@ impl Repository {
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
         controller.hide_cursor();
-        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
 
         let area = Rect::new(0, 0, cols as u16, rows as u16);
         let mut buf = Buffer::empty(area);
@@ -2076,6 +2075,9 @@ impl Repository {
                 }
             }
         }
+
+        // Apply match highlights after annotations so they render on top.
+        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
 
         // Render graph with highlights applied.
         let renderer = GenGraphNodeRenderer::new(conn);

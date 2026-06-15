@@ -141,8 +141,8 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #'     \item{\code{goto_match(match_locus)}}{Center the viewport on a search result locus. Sets detail to \code{"full"}. Returns self invisibly.}
 #'     \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
 #'     \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
-#'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
-#'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
+#'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file and render annotations as inline graph highlights with floating labels. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
+#'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as inline graph highlights with floating labels.}
 #'     \item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{metadata}, \code{segments}, \code{length}, and \code{locus} fields. \code{metadata} is an R list parsed from the stored JSON (populated via \code{mcols} on import), or \code{NULL}.}
 #'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 #'   }

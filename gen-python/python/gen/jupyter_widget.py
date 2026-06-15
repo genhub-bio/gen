@@ -397,7 +397,7 @@ class GraphWidget(anywidget.AnyWidget):
         from_sample: str | None = None,
         filter=None,
     ) -> None:
-        """Add an annotation track panel below the graph.
+        """Add annotations as inline graph highlights with floating labels.
 
         Exactly one of *annotations*, *file*, or *group* must be supplied.
 

@@ -882,8 +882,8 @@ impl PyGraphController {
         self.push_track_as_overlays(AnnotationTrack::new(name, spans));
     }
 
-    /// Load annotations from a GFF3 or BED file and add them as a
-    /// horizontal track panel below the graph.
+    /// Load annotations from a GFF3 or BED file and render them as
+    /// inline graph highlights with floating labels.
     ///
     /// Accepts both standard files (chromosome/contig names as reference) and
     /// pre-translated files (node hash-IDs as reference).  Standard files are
