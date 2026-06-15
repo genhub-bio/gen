@@ -406,10 +406,11 @@ fn parse_column(column: &Robj) -> std::result::Result<Vec<SequencePart>, String>
         return Err("Library column names and sequences have different lengths.".to_string());
     }
     let metadata_strings: Vec<Option<String>> = if is_xstringset(column) {
-        match call!(".gen_serialize_mcols", column)
-            .ok()
-            .and_then(|r| r.as_string_vector())
-        {
+        let f = R!("genr:::.gen_serialize_mcols").ok();
+        let result = f
+            .and_then(|f| f.call(pairlist!(column.clone())).ok())
+            .and_then(|r| r.as_string_vector());
+        match result {
             Some(v) => v.into_iter().map(Some).collect(),
             None => vec![None; sequences.len()],
         }

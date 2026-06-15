@@ -97,11 +97,18 @@ Repository$handle_click <- function(sequence_graph_id, detail, ops, col, row) .C
 #'}
 #'
 #'\subsection{Method `translate_annotation`}{
-#'Translate a gene annotation into a protein SequenceGraph.
+#'Translate a sequence graph or annotation into a protein SequenceGraph.
+#'
+#'When `region` is a character string it is resolved against this sequence
+#'graph only, in priority order: a named path within this graph first,
+#'then an annotation in this graph's lineage. No other sequence graphs
+#'are searched.
 #'
 #' \subsection{Arguments}{
 #'\describe{
-#'\item{`region`}{One of: `NULL` to translate the entire block group; an annotation name; or a `gen_annotation` record from `list_annotations()` (matched by its database id, avoiding any name-collision ambiguity).}
+#'\item{`region`}{One of: `NULL` to translate the entire sequence graph; a path name or annotation name scoped to this sequence graph (path names take priority); or a `gen_annotation` record from `list_annotations()` (matched by database id, so unambiguous).}
+#'\item{`start`}{0-based start coordinate in path space. Defaults to 0 when NULL. Must be >= 0 and <= `end`. Default: NULL.}
+#'\item{`end`}{Exclusive end coordinate in path space. Defaults to path length when NULL. Must be <= path length. Default: NULL.}
 #'\item{`output_collection`}{Collection for the protein block group. Defaults to this graph's collection.}
 #'\item{`output_sample`}{Sample name for the protein block group. Required.}
 #'\item{`strand`}{`"forward"` or `"reverse"`. NULL infers from the annotation.}
@@ -149,7 +156,7 @@ SequenceGraph$to_dict <- function() .Call("wrap__SequenceGraph__to_dict", self, 
 
 SequenceGraph$list_annotations <- function() .Call("wrap__SequenceGraph__list_annotations", self, PACKAGE = "genr")
 
-SequenceGraph$translate_annotation <- function(region, output_collection, output_sample, strand, frame, codon_table) .Call("wrap__SequenceGraph__translate_annotation", self, region, output_collection, output_sample, strand, frame, codon_table, PACKAGE = "genr")
+SequenceGraph$translate_annotation <- function(region, start, end, output_collection, output_sample, strand, frame, codon_table) .Call("wrap__SequenceGraph__translate_annotation", self, region, start, end, output_collection, output_sample, strand, frame, codon_table, PACKAGE = "genr")
 
 #' @export
 `$.SequenceGraph` <- function (self, name) { func <- SequenceGraph[[name]]; environment(func) <- environment(); func }
