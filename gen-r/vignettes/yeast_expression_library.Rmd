@@ -21,32 +21,29 @@ sequence `CGTCTC`) as their Golden Gate enzyme: each cassette is flanked
 by outward-facing BsmBI sites that expose 4-nt overhangs for modular
 ligation. If an internal BsmBI site exists anywhere in the assembled
 construct, the enzyme will cut it during the Golden Gate reaction and
-shatter the cassette.
+shatter the cassette, hence it's important to use parts that have been
+'domesticated' so they are free from restriction sites.
 
-The insidious version of this problem is the *junction-emergent* site:
+One issue that is harder to prevent is the junction-emergent site:
 neither part carries BsmBI on its own, but when two specific parts are
-placed in sequence the recognition site appears at their boundary — split
-across the junction and invisible to any PCR screen of isolated parts.
-
-Gen's graph model stores all combinations as paths through a single
-graph, so one `search()` call screens every junction simultaneously.
+placed in sequence the recognition site appears at their boundary.
+One way to prevent this is by generating all possible combinations to
+screen one at a time, which can quickly go exponential. We do not have
+to do that, however, and can use `search()` directly on the sequence
+graph and find matches across any combination of junctions.
 
 **Scenario:** Expressing the bacterial geranylgeranyl pyrophosphate (GGPP)
-synthase *crtE* — the committed step in carotenoid biosynthesis — in
-*Saccharomyces cerevisiae* as part of a lycopene production strain. Three
+synthase crtE, the committed step in carotenoid biosynthesis, in
+Saccharomyces cerevisiae as part of a lycopene production strain. Three
 constitutive promoters and two terminators drawn from the YTK part
-collection are combined with two *crtE* variants (native and
+collection are combined with two crtE variants (native and
 codon-optimised) in a 3 × 2 × 2 factorial design of 12 expression
-cassettes.
-
-The twist: TEF1p ends `...GCGTCT` and the native *crtE* ORF begins with
-`CATG...`. Together they complete the BsmBI octamer `CGTCTC` at the
-promoter–CDS boundary, condemning two of the twelve cassettes to be
-shredded during Golden Gate assembly.
+cassettes. During cloning, you notice that some combinations appear to
+assemble much more efficiently than others.
 
 ## Setup
 
-```{r setup}
+```{r setup, message=FALSE, warning=FALSE}
 library(genr)
 library(Biostrings)
 library(S4Vectors)
@@ -61,7 +58,7 @@ repo <- Repository(NULL)
 ## Define parts
 
 Parts are `DNAStringSet` objects. The `mcols()` metadata carries a `role`
-column — promoter, cds, terminator, or scar — that will colour each
+column (promoter, cds, terminator, or scar) that will colour each
 annotation group in the viewer.
 
 Backbone scars are single-part columns so every path through the graph
@@ -166,9 +163,10 @@ cat(paste(lengths(parts_list), collapse = " × "), "=", n_combos, "combinations\
 
 ## Import the library
 
-`import_library()` accepts a list of `DNAStringSet` columns. Every
-combination of one part per column becomes a distinct path through the
-graph — 12 paths stored compactly as a single sequence graph.
+`import_library()` accepts a list of `DNAStringSet` columns and builds a
+compact sequence graph where parts are shared nodes. Search traverses the
+graph directly, screening every junction simultaneously without enumerating
+individual constructs.
 
 ```{r import-library}
 repo$import_library("lycopene-cassette", parts_list)
@@ -233,7 +231,7 @@ n_sites <- length(hits[[1]]$matches)
 cat("BsmBI sites found in the library graph:", n_sites, "\n")
 ```
 
-The search returns unique site occurrences in the sequence graph — one
+The search returns unique site occurrences in the sequence graph, one
 per distinct location in the shared graph structure. That one site sits
 at the TEF1p→crtE_native junction and will be traversed by every
 construct that pairs those two parts, regardless of which terminator
@@ -277,8 +275,8 @@ cat("BsmBI at TEF1p + crtE_coopt junction: ", count_bsmbi(junction_good), "\n")
 
 The recognition sequence `CGTCTC` is split across the junction:
 
-- TEF1p ends `...GCGTCT` — the first six bases of the BsmBI octamer
-- crtE_native begins `CATG...` — supplying the terminal `C`
+- TEF1p ends `...GCGTCT` (the first six bases of the BsmBI octamer)
+- crtE_native begins `CATG...` (supplying the terminal `C`)
 
 Together they complete `CGTCTC`. This site exists on every path through
 the graph that pairs TEF1p with crtE_native, regardless of which
@@ -299,7 +297,7 @@ p2
 
 The highlighted region straddles the TEF1p→crtE_native edge. Because
 the site is stored once in the shared graph structure, a single highlight
-marks all paths that would be cut — here, both the CYC1t and the ADH1t
+marks all paths that would be cut: here, both the CYC1t and the ADH1t
 variants of the TEF1p×crtE_native cassette.
 
 ## Flag blocked constructs
@@ -319,58 +317,36 @@ cat("\n", nrow(clean), "clean constructs proceed to synthesis.\n")
 The two blocked cassettes (TEF1p × crtE_native, regardless of terminator)
 cannot be assembled by Golden Gate. The remaining ten are safe.
 
-## Check experimental estimability
+## Next steps
 
-With 10 clean constructs from a 3 × 2 × 2 factorial (minus the 2 blocked
-cells), confirm that all main effects are still independently estimable
-before committing to a fermentation campaign.
+In practice, each part would be flanked by inward-facing BsmBI recognition
+sequences plus enough additional handle sequence to seat PCR primers and
+give the enzyme room to cut cleanly. The library graph holds the internal
+part content; the flanking architecture is applied at the cloning design
+stage.
 
-```{r estimability}
-X <- model.matrix(~ promoter + cds + terminator, data = clean)
-rank_X <- qr(X)$rank
-n_params <- ncol(X)
+Gen records every import and update as an operation. To attach the
+screening conclusion to the `import_library` operation, open the
+operations browser from the terminal:
 
-cat(sprintf(
-  "Clean design: %d constructs, %d parameters, rank %d\n",
-  nrow(clean), n_params, rank_X
-))
-cat("  →", if (rank_X == n_params) "all main effects estimable" else "rank-deficient — review design", "\n")
-
-# Pilot: fix CYC1t, test all 5 remaining promoter × CDS combinations.
-pilot <- clean[clean$terminator == "CYC1t", ]
-X_pilot <- model.matrix(~ promoter + cds, data = pilot)
-rank_pilot <- qr(X_pilot)$rank
-cat(sprintf(
-  "\nPilot (CYC1t only): %d constructs, %d parameters, rank %d\n",
-  nrow(pilot), ncol(X_pilot), rank_pilot
-))
-cat("  →", if (rank_pilot == ncol(X_pilot)) "promoter + CDS effects estimable" else "rank-deficient", "\n")
-pilot[, c("construct_id", "promoter", "cds", "terminator")]
+``` sh
+gen operations --interactive
 ```
 
-All main effects remain estimable from the 10-construct clean design.
-Even a CYC1t-only pilot with five constructs separates promoter and CDS
-contributions, which means codon optimisation and promoter strength can
-be deconfounded from a single small-scale shake-flask experiment before
-scaling to bioreactors.
+Select the lycopene-cassette import entry to add a message, for example:
+"Screening complete: TEF1p×crtE_native blocked by junction-emergent
+BsmBI site at promoter-CDS boundary. Ten combinations cleared."
 
-## Export clean constructs
+To redesign the library with a different set of parts, create a new
+branch from the operation just before the import. `HEAD~1` is shorthand
+for "one step back from the current operation" (analogous to `HEAD~1` in
+git):
 
-```{r export}
-out_fa <- file.path(ws, "lycopene_cassettes_v1.fa")
-repo$export_fasta(out_fa)
-cat("Exported to:", out_fa, "\n")
-
-headers <- grep("^>", readLines(out_fa), value = TRUE)
-cat(length(headers), "sequence(s) exported:\n")
-cat(paste(" ", headers, collapse = "\n"), "\n")
+``` sh
+gen checkout -b lycopene-v2 HEAD~1
 ```
 
-The exported FASTA contains one sequence per path in the reference
-sample. The two blocked TEF1p × crtE_native combinations were never
-assigned to a synthesis-ready sample, so only the 10 clean cassettes
-appear in the output.
-
-Send `lycopene_cassettes_v1.fa` to your synthesis provider; the ten
-cassettes are ready for Golden Gate assembly into pYTK001.
+Then modify the parts list in R and call `import_library()` again on the
+new branch. The original branch and all its screening history remain
+intact; you can pick up that experiment again at any point.
 ```
