@@ -68,6 +68,7 @@ use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use rusqlite::{Connection, types::ValueRef};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 fn nullable_string_to_option(value: Nullable<String>) -> Option<String> {
     match value {
@@ -186,6 +187,26 @@ fn annotation_segments(conn: &GraphConnection, annotation: &Annotation) -> Vec<A
 }
 
 /// Build a `gen_annotation` R record (id, name, group, kind, segments, length, locus).
+fn json_value_to_robj(v: &JsonValue) -> Robj {
+    match v {
+        JsonValue::Null => r!(NULL),
+        JsonValue::Bool(b) => r!(*b),
+        JsonValue::Number(n) => r!(n.as_f64().unwrap_or(f64::NAN)),
+        JsonValue::String(s) => r!(s.as_str()),
+        JsonValue::Array(arr) => {
+            let items: Vec<Robj> = arr.iter().map(json_value_to_robj).collect();
+            r!(List::from_values(items))
+        }
+        JsonValue::Object(obj) => {
+            let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+            let vals: Vec<Robj> = obj.values().map(json_value_to_robj).collect();
+            let mut list = r!(List::from_values(vals));
+            list.set_names(keys).unwrap();
+            list
+        }
+    }
+}
+
 fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &GenGraph) -> Robj {
     let segments = annotation_segments(conn, annotation);
     let span = AnnotationSpan {
@@ -228,11 +249,19 @@ fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &Ge
         Some(k) => r!(k),
         None => r!(NULL),
     };
+    let metadata_robj: Robj = annotation
+        .extra
+        .as_ref()
+        .and_then(|e| e.part.as_ref())
+        .and_then(|p| p.metadata.as_ref())
+        .map(json_value_to_robj)
+        .unwrap_or_else(|| r!(NULL));
     let mut obj = r!(list!(
         id = annotation.id.to_string(),
         name = annotation.name.as_str(),
         group = annotation.group.as_str(),
         kind = kind_robj,
+        metadata = metadata_robj,
         segments = List::from_values(segment_records),
         length = length,
         locus = locus_robj
@@ -1975,6 +2004,7 @@ impl Repository {
         rows: i32,
         ops: String,
         tracks_json: String,
+        annotation_colors_json: String,
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
@@ -2000,10 +2030,38 @@ impl Repository {
                 .map(|seg| seg.end - seg.start)
                 .sum::<i64>())
         });
-        let annotation_colors: Vec<ratatui::style::Color> = {
+        // Parse the caller-supplied color map: id_hex → Some(color) to use that
+        // color, None to hide the annotation entirely. Empty map means use the
+        // default theme cycle for every annotation.
+        let color_overrides: HashMap<String, Option<String>> =
+            serde_json::from_str(&annotation_colors_json).unwrap_or_default();
+        let use_overrides = !color_overrides.is_empty();
+
+        // Resolve per-span colors. None means the span should be hidden.
+        let annotation_colors: Vec<Option<ratatui::style::Color>> = {
             let theme = current_theme();
-            (0..all_spans.len())
-                .map(|i| theme[0x08 + (i % 8)])
+            let mut theme_idx = 0usize;
+            all_spans
+                .iter()
+                .map(|span| {
+                    let id_hex = span.id.to_string();
+                    if use_overrides {
+                        match color_overrides.get(&id_hex) {
+                            Some(Some(hex)) => parse_op_color(hex).ok(),
+                            Some(None) => None,
+                            // Unknown span (e.g. from a file track) → theme cycle
+                            None => {
+                                let c = theme[0x08 + (theme_idx % 8)];
+                                theme_idx += 1;
+                                Some(c)
+                            }
+                        }
+                    } else {
+                        let c = theme[0x08 + (theme_idx % 8)];
+                        theme_idx += 1;
+                        Some(c)
+                    }
+                })
                 .collect()
         };
         {
@@ -2011,9 +2069,10 @@ impl Repository {
                 .iter()
                 .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
                 .collect();
-            for (locus, &color) in loci.iter().zip(annotation_colors.iter()) {
+            for (locus, color_opt) in loci.iter().zip(annotation_colors.iter()) {
+                let Some(color) = color_opt else { continue };
                 if let Some(l) = locus {
-                    highlight_locus(&mut controller, l, PathStyle::new(color));
+                    highlight_locus(&mut controller, l, PathStyle::new(*color));
                 }
             }
         }
@@ -2031,12 +2090,15 @@ impl Repository {
                 .iter()
                 .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
                 .collect();
-            for (idx, ((span, &color), locus)) in all_spans
+            for (idx, ((span, color_opt), locus)) in all_spans
                 .iter()
                 .zip(annotation_colors.iter())
                 .zip(loci.iter())
                 .enumerate()
             {
+                let Some(&color) = color_opt.as_ref() else {
+                    continue;
+                };
                 if span.name.is_empty() {
                     continue;
                 }

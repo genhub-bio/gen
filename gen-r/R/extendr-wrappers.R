@@ -72,7 +72,7 @@ Repository$auto_load_annotation_groups <- function(sequence_graph_id) .Call("wra
 
 Repository$list_annotations <- function(sequence_graph_id) .Call("wrap__Repository__list_annotations", self, sequence_graph_id, PACKAGE = "genr")
 
-Repository$render_frame <- function(sequence_graph_id, detail, cols, rows, ops, tracks_json) .Call("wrap__Repository__render_frame", self, sequence_graph_id, detail, cols, rows, ops, tracks_json, PACKAGE = "genr")
+Repository$render_frame <- function(sequence_graph_id, detail, cols, rows, ops, tracks_json, annotation_colors_json) .Call("wrap__Repository__render_frame", self, sequence_graph_id, detail, cols, rows, ops, tracks_json, annotation_colors_json, PACKAGE = "genr")
 
 Repository$handle_click <- function(sequence_graph_id, detail, ops, col, row) .Call("wrap__Repository__handle_click", self, sequence_graph_id, detail, ops, col, row, PACKAGE = "genr")
 
