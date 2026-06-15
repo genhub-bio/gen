@@ -715,7 +715,7 @@ mod tests {
             false,
         )
         .unwrap();
-        update_with_vcf(
+        let _operation = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -769,7 +769,7 @@ mod tests {
             false,
         )
         .unwrap();
-        update_with_vcf(
+        let _operation = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -829,7 +829,7 @@ mod tests {
             false,
         )
         .unwrap();
-        update_with_vcf(
+        let _operation = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -922,7 +922,7 @@ mod tests {
             false,
         )
         .unwrap();
-        update_with_vcf(
+        let _operation = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -1245,7 +1245,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Unable to create accession")]
     fn test_disallows_creating_accession_nodes_that_exist() {
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/accession.vcf");
@@ -1268,7 +1267,7 @@ mod tests {
         )
         .unwrap();
 
-        update_with_vcf(
+        let _operation = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -1293,7 +1292,7 @@ mod tests {
         // This is invalid because lp1 already exists from accession.vcf
         vcf_path.push("fixtures/accession_2_invalid.vcf");
 
-        update_with_vcf(
+        let err = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -1302,7 +1301,13 @@ mod tests {
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            VcfError::BlockGroupError(BlockGroupError::AccessionError(
+                gen_models::accession::AccessionError::Duplicate(_)
+            ))
+        ));
     }
 
     #[test]

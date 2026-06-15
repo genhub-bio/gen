@@ -45,7 +45,7 @@ pub fn end_operation(
     let mut output = Vec::new();
     session.changeset_strm(&mut output).unwrap();
 
-    let (changeset_models, dependencies) = process_changesetiter(conn, &output);
+    let (changeset_models, dependencies) = process_changesetiter(conn, &output)?;
 
     let hash = if let Some(hash) = force_hash.into() {
         hash

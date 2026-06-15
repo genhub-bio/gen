@@ -10,9 +10,7 @@ use std::{
 };
 
 use gb_io::{self, seq::Location};
-use gen_annotations::projection::{
-    AnnotationSegment, accession_nodes_to_segments, project_annotation_segments,
-};
+use gen_annotations::projection::{AnnotationSegment, project_annotation_segments};
 use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
@@ -101,10 +99,10 @@ fn export_annotations(
             continue;
         }
 
-        let accession_segments = accession_nodes_to_segments(&Accession::get_nodes_by_id(
-            conn,
-            &annotation.accession_id,
-        ));
+        let accession_segments = Accession::get_nodes_by_id(conn, &annotation.accession_id)
+            .iter()
+            .map(AnnotationSegment::from)
+            .collect::<Vec<_>>();
         let genbank_extra = annotation
             .extra
             .as_ref()
@@ -553,7 +551,7 @@ mod tests {
                 index_in_path: index as i64,
             })
             .collect::<Vec<_>>();
-        AccessionNode::bulk_create(conn, &nodes);
+        AccessionNode::bulk_create(conn, &nodes).unwrap();
         Annotation::create_with_samples(
             conn,
             name,

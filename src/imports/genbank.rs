@@ -355,7 +355,7 @@ fn create_accession_for_segments(
             index_in_path: index as i64,
         })
         .collect::<Vec<_>>();
-    AccessionNode::bulk_create(conn, &nodes);
+    AccessionNode::bulk_create(conn, &nodes)?;
     Ok(accession.id)
 }
 
@@ -679,7 +679,6 @@ where
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_annotations::projection::accession_nodes_to_segments;
     use gen_models::{
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
@@ -1128,19 +1127,19 @@ mod tests {
             .iter()
             .find(|annotation| annotation.name == "M13 Forward")
             .unwrap();
-        let m13_forward_segments = accession_nodes_to_segments(&Accession::get_nodes_by_id(
-            conn,
-            &m13_forward.accession_id,
-        ));
+        let m13_forward_segments = Accession::get_nodes_by_id(conn, &m13_forward.accession_id)
+            .iter()
+            .map(AnnotationSegment::from)
+            .collect::<Vec<_>>();
         assert_eq!(m13_forward_segments.len(), 1);
         assert_eq!(m13_forward_segments[0].range.start, 688);
         assert_eq!(m13_forward_segments[0].range.end, 706);
         assert_eq!(m13_forward_segments[0].strand, Strand::Reverse);
 
-        let ori_segments = accession_nodes_to_segments(&Accession::get_nodes_by_id(
-            conn,
-            &ori_annotation.accession_id,
-        ));
+        let ori_segments = Accession::get_nodes_by_id(conn, &ori_annotation.accession_id)
+            .iter()
+            .map(AnnotationSegment::from)
+            .collect::<Vec<_>>();
         assert_eq!(ori_segments.len(), 2);
         assert!(
             ori_segments

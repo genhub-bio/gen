@@ -27,19 +27,17 @@ impl OrderedMerge for AnnotationSegment {
     }
 }
 
-pub fn accession_nodes_to_segments(nodes: &[AccessionNode]) -> Vec<AnnotationSegment> {
-    nodes
-        .iter()
-        .filter(|node| node.sequence_end > node.sequence_start)
-        .map(|node| AnnotationSegment {
+impl From<&AccessionNode> for AnnotationSegment {
+    fn from(node: &AccessionNode) -> Self {
+        AnnotationSegment {
             node_id: node.node_id,
             range: Range {
                 start: node.sequence_start,
                 end: node.sequence_end,
             },
             strand: node.strand,
-        })
-        .collect()
+        }
+    }
 }
 
 pub fn project_annotation_segments(

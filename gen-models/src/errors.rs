@@ -29,6 +29,8 @@ pub enum ChangesetError {
     StrandError(#[from] StrandError),
     #[error("Missing Model: {0}")]
     MissingModel(String),
+    #[error("Query error: {0}")]
+    QueryError(#[from] QueryError),
     #[error("Serialization Error: {0}")]
     SerializationError(String),
     #[error("SQLite Error: {0}")]

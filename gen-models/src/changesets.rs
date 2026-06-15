@@ -404,7 +404,7 @@ pub fn parse_maybe_number(item: &ChangesetItem, col: usize) -> Option<i64> {
 pub fn process_changesetiter(
     conn: &GraphConnection,
     mut changes: &[u8],
-) -> (ChangesetModels, DependencyModels) {
+) -> Result<(ChangesetModels, DependencyModels), ChangesetError> {
     use fallible_streaming_iterator::FallibleStreamingIterator;
     use gen_core::is_terminal;
     use itertools::Itertools;
@@ -768,6 +768,12 @@ pub fn process_changesetiter(
         annotation_group_samples: created_annotation_group_samples,
     };
 
+    let previous_accession_ids = previous_accessions.iter().copied().collect::<Vec<_>>();
+    let previous_accession_nodes = AccessionNode::query_accessions(conn, &previous_accession_ids)?
+        .into_values()
+        .flatten()
+        .collect::<Vec<_>>();
+
     let dependency_models = DependencyModels {
         collections: Collection::query_by_ids(conn, &previous_collections),
         samples: Sample::query_by_ids(conn, &previous_samples),
@@ -777,10 +783,10 @@ pub fn process_changesetiter(
         edges: Edge::query_by_ids(conn, &previous_edges),
         paths: Path::query_by_ids(conn, &previous_paths),
         accessions: Accession::query_by_ids(conn, &previous_accessions),
-        accession_nodes: vec![],
+        accession_nodes: previous_accession_nodes,
     };
 
-    (changeset_models, dependency_models)
+    Ok((changeset_models, dependency_models))
 }
 
 pub fn apply_changeset(
@@ -853,6 +859,14 @@ pub fn apply_changeset(
             accession.parent_accession_id.as_ref(),
         )?;
     }
+    AccessionNode::bulk_create(
+        conn,
+        &dependencies
+            .accession_nodes
+            .iter()
+            .map(AccessionNodeData::from)
+            .collect::<Vec<_>>(),
+    )?;
 
     for collection in &changeset.collections {
         Collection::create(conn, &collection.name)?;
@@ -935,7 +949,7 @@ pub fn apply_changeset(
             .iter()
             .map(AccessionNodeData::from)
             .collect::<Vec<_>>(),
-    );
+    )?;
 
     for annotation_group in &changeset.annotation_groups {
         AnnotationGroup::get_or_create(conn, &annotation_group.name).map_err(|err| match err {
@@ -1573,6 +1587,10 @@ mod tests {
         assert_eq!(dependencies.samples[0].name, "sample-1");
         assert_eq!(dependencies.accessions.len(), 1);
         assert_eq!(dependencies.accessions[0].id, accession.id);
+        assert_eq!(
+            dependencies.accession_nodes,
+            Accession::get_nodes_by_id(conn, &accession.id)
+        );
     }
 
     #[test]

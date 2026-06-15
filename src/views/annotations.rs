@@ -7,12 +7,12 @@ use std::{
 };
 
 use gen_annotations::{
-    projection::accession_nodes_to_segments as projection_accession_nodes_to_segments,
+    projection as annotation_projection,
     translate::{bed::translate_bed, gff::translate_gff},
 };
 use gen_core::{HashId, Strand, Workspace};
 use gen_models::{
-    accession::{Accession, AccessionNode},
+    accession::Accession,
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
@@ -28,18 +28,6 @@ use crate::views::{
     annotation_groups::AnnotationGroupEntry,
     annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
 };
-
-fn accession_nodes_to_segments(nodes: &[AccessionNode]) -> Vec<AnnotationSegment> {
-    projection_accession_nodes_to_segments(nodes)
-        .into_iter()
-        .map(|segment| AnnotationSegment {
-            node_id: segment.node_id,
-            start: segment.range.start,
-            end: segment.range.end,
-            strand: segment.strand,
-        })
-        .collect()
-}
 
 pub struct AnnotationGroupTrackRequest<'a> {
     pub conn: &'a GraphConnection,
@@ -67,8 +55,15 @@ fn load_group_annotations(
         .filter_map(|annotation| {
             let _ = Accession::get_by_id(conn, &annotation.accession_id)?;
             let nodes = Accession::get_nodes_by_id(conn, &annotation.accession_id);
-            let segments = accession_nodes_to_segments(&nodes)
-                .into_iter()
+            let segments = nodes
+                .iter()
+                .map(annotation_projection::AnnotationSegment::from)
+                .map(|segment| AnnotationSegment {
+                    node_id: segment.node_id,
+                    start: segment.range.start,
+                    end: segment.range.end,
+                    strand: segment.strand,
+                })
                 .filter(|segment| {
                     visible_ranges_by_node
                         .get(&segment.node_id)

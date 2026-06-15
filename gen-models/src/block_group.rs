@@ -648,8 +648,7 @@ impl BlockGroup {
         let end_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(end - 1).map(|x| &x.value).collect();
         assert_eq!(end_blocks.len(), 1);
-        let accession = Accession::create(conn, name, &path.block_group_id, None)
-            .expect("Unable to create accession.");
+        let accession = Accession::create(conn, name, &path.block_group_id, None)?;
         let accession_nodes = tree
             .iter_sorted()
             .map(|entry| &entry.value)
@@ -668,7 +667,7 @@ impl BlockGroup {
                 }
             })
             .collect::<Vec<_>>();
-        AccessionNode::bulk_create(conn, &accession_nodes);
+        AccessionNode::bulk_create(conn, &accession_nodes)?;
         Ok(accession)
     }
 
@@ -783,37 +782,17 @@ impl BlockGroup {
                     );
                 }
                 Err(_) => {
-                    let acc = Accession::create(conn, &accession_name, &block_group_id, None)
-                        .expect("Accession could not be created.");
-                    let accession_nodes =
-                        Self::accession_nodes_from_augmented_edges(&acc.id, &path_edges);
-                    AccessionNode::bulk_create(conn, &accession_nodes);
+                    Accession::create_from_edges(
+                        conn,
+                        &accession_name,
+                        &block_group_id,
+                        None,
+                        &path_edges,
+                    )?;
                 }
             }
         }
         Ok(())
-    }
-
-    fn accession_nodes_from_augmented_edges(
-        accession_id: &HashId,
-        edges: &[AugmentedEdgeData],
-    ) -> Vec<AccessionNodeData> {
-        edges
-            .windows(2)
-            .enumerate()
-            .map(|(index, edge_pair)| {
-                let into = &edge_pair[0].edge_data;
-                let out_of = &edge_pair[1].edge_data;
-                AccessionNodeData {
-                    accession_id: *accession_id,
-                    node_id: into.target_node_id,
-                    sequence_start: into.target_coordinate,
-                    sequence_end: out_of.source_coordinate,
-                    strand: into.target_strand,
-                    index_in_path: index as i64,
-                }
-            })
-            .collect()
     }
 
     pub fn set_up_new_edges(
@@ -2286,7 +2265,7 @@ mod tests {
     }
 
     #[test]
-    fn accession_end_coordinate_is_not_included() {
+    fn test_accession_end_coordinate_is_not_included() {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, path) = setup_block_group(conn);
         let mut path_cache = PathCache::new(conn);

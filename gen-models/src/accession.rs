@@ -1,15 +1,19 @@
+use std::{collections::HashMap, rc::Rc};
+
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params};
+use rusqlite::{Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
+    errors::QueryError,
     gen_models_capnp::{accession, accession_node},
     traits::*,
 };
@@ -26,6 +30,8 @@ pub struct Accession {
 pub enum AccessionError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Accession node creation error: {0}")]
+    AccessionNodeError(#[from] AccessionNodeError),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
     #[error("Accession {0} has no nodes in accession_nodes")]
@@ -194,6 +200,20 @@ impl From<&AccessionNode> for AccessionNodeData {
     }
 }
 
+impl From<AccessionNodeData> for AccessionNode {
+    fn from(item: AccessionNodeData) -> Self {
+        AccessionNode {
+            id: item.id_hash(),
+            accession_id: item.accession_id,
+            node_id: item.node_id,
+            sequence_start: item.sequence_start,
+            sequence_end: item.sequence_end,
+            strand: item.strand,
+            index_in_path: item.index_in_path,
+        }
+    }
+}
+
 impl Accession {
     fn id_hash(
         block_group_id: &HashId,
@@ -234,6 +254,34 @@ impl Accession {
             }
             Err(e) => Err(AccessionError::DatabaseError(e)),
         }
+    }
+
+    pub fn create_from_edges(
+        conn: &GraphConnection,
+        name: &str,
+        block_group_id: &HashId,
+        parent_accession_id: Option<&HashId>,
+        edges: &[AugmentedEdgeData],
+    ) -> Result<Accession, AccessionError> {
+        let accession = Self::create(conn, name, block_group_id, parent_accession_id)?;
+        let accession_nodes = edges
+            .windows(2)
+            .enumerate()
+            .map(|(index, edge_pair)| {
+                let into = &edge_pair[0].edge_data;
+                let out_of = &edge_pair[1].edge_data;
+                AccessionNodeData {
+                    accession_id: accession.id,
+                    node_id: into.target_node_id,
+                    sequence_start: into.target_coordinate,
+                    sequence_end: out_of.source_coordinate,
+                    strand: into.target_strand,
+                    index_in_path: index as i64,
+                }
+            })
+            .collect::<Vec<_>>();
+        AccessionNode::bulk_create(conn, &accession_nodes)?;
+        Ok(accession)
     }
 
     pub fn get_or_create(
@@ -307,8 +355,15 @@ impl Accession {
     }
 
     pub fn length(&self, conn: &GraphConnection) -> Result<i64, AccessionError> {
-        let blocks = self.blocks(conn)?;
-        Ok(blocks.last().unwrap().start)
+        let nodes = Self::get_nodes_by_id(conn, &self.id);
+        if nodes.is_empty() {
+            return Err(AccessionError::MissingPath(self.id));
+        }
+
+        Ok(nodes
+            .iter()
+            .map(|node| node.sequence_end - node.sequence_start)
+            .sum())
     }
 
     pub fn intervaltree(
@@ -346,7 +401,13 @@ impl RegionResolver for Accession {
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),
-            1 => Ok(matches.into_iter().next().unwrap()),
+            1 => {
+                if let Some(accession) = matches.into_iter().next() {
+                    Ok(accession)
+                } else {
+                    Err(RegionResolutionError::NotFound(region.name.clone()))
+                }
+            }
             _ => Err(RegionResolutionError::Ambiguous(format!(
                 "multiple accessions named {}",
                 region.name
@@ -371,13 +432,41 @@ impl Query for Accession {
 }
 
 impl AccessionNode {
+    pub fn query_accessions(
+        conn: &GraphConnection,
+        accession_ids: &[HashId],
+    ) -> Result<HashMap<HashId, Vec<AccessionNode>>, QueryError> {
+        if accession_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let accession_values = accession_ids
+            .iter()
+            .copied()
+            .map(SQLValue::from)
+            .collect::<Vec<_>>();
+        let nodes = AccessionNode::try_query(
+            conn,
+            "select * from accession_nodes where accession_id in rarray(?1) order by accession_id, index_in_path;",
+            params![Rc::new(accession_values)],
+        )?;
+        let mut nodes_by_accession = HashMap::new();
+        for node in nodes {
+            nodes_by_accession
+                .entry(node.accession_id)
+                .or_insert_with(Vec::new)
+                .push(node);
+        }
+        Ok(nodes_by_accession)
+    }
+
     pub fn create(
         conn: &GraphConnection,
         node: AccessionNodeData,
     ) -> Result<AccessionNode, AccessionNodeError> {
         let hash = node.id_hash();
         let insert_statement = "INSERT INTO accession_nodes (id, accession_id, node_id, sequence_start, sequence_end, strand, index_in_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
-        let mut stmt = conn.prepare(insert_statement).unwrap();
+        let mut stmt = conn.prepare(insert_statement)?;
         match stmt.execute(params![
             hash,
             node.accession_id,
@@ -393,18 +482,13 @@ impl AccessionNode {
             }
             Err(err) => return Err(AccessionNodeError::DatabaseError(err)),
         };
-        Ok(AccessionNode {
-            id: hash,
-            accession_id: node.accession_id,
-            node_id: node.node_id,
-            sequence_start: node.sequence_start,
-            sequence_end: node.sequence_end,
-            strand: node.strand,
-            index_in_path: node.index_in_path,
-        })
+        Ok(AccessionNode::from(node))
     }
 
-    pub fn bulk_create(conn: &GraphConnection, nodes: &[AccessionNodeData]) -> Vec<HashId> {
+    pub fn bulk_create(
+        conn: &GraphConnection,
+        nodes: &[AccessionNodeData],
+    ) -> Result<Vec<HashId>, AccessionNodeError> {
         let node_ids = nodes
             .iter()
             .map(AccessionNodeData::id_hash)
@@ -428,10 +512,9 @@ impl AccessionNode {
                 "INSERT OR IGNORE INTO accession_nodes (id, accession_id, node_id, sequence_start, sequence_end, strand, index_in_path) VALUES {};",
                 rows.join(",")
             );
-            conn.execute(&sql, rusqlite::params_from_iter(params))
-                .unwrap();
+            conn.execute(&sql, rusqlite::params_from_iter(params))?;
         }
-        node_ids
+        Ok(node_ids)
     }
 
     pub fn bulk_delete(conn: &GraphConnection, nodes: &[AccessionNodeData]) {
@@ -440,10 +523,6 @@ impl AccessionNode {
             .map(AccessionNodeData::id_hash)
             .collect::<Vec<_>>();
         AccessionNode::delete_by_ids(conn, &ids);
-    }
-
-    pub fn to_data(node: AccessionNode) -> AccessionNodeData {
-        AccessionNodeData::from(&node)
     }
 }
 
@@ -473,7 +552,8 @@ mod tests {
     use super::*;
     use crate::{
         block_group::{BlockGroup, PathCache},
-        block_group_edge::BlockGroupEdgeData,
+        block_group_edge::{AugmentedEdgeData, BlockGroupEdgeData},
+        edge::EdgeData,
         path::Path,
         path_edge::PathEdge,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
@@ -693,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn accession_blocks_are_direct_node_slices() {
+    fn test_accession_blocks_are_direct_node_slices() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let accession = Accession::create(conn, "test", &block_group_id, None).unwrap();
@@ -718,7 +798,8 @@ mod tests {
                     index_in_path: 1,
                 },
             ],
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             accession.blocks(conn).unwrap(),
@@ -756,6 +837,133 @@ mod tests {
                     strand: Strand::Forward,
                 },
             ],
+        );
+    }
+
+    #[test]
+    fn test_query_accessions_groups_nodes_by_accession() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let accession_1 = Accession::create(conn, "test-1", &block_group_id, None).unwrap();
+        let accession_2 = Accession::create(conn, "test-2", &block_group_id, None).unwrap();
+        let accession_1_nodes = vec![
+            AccessionNodeData {
+                accession_id: accession_1.id,
+                node_id: HashId::convert_str("test-a-node"),
+                sequence_start: 2,
+                sequence_end: 4,
+                strand: Strand::Forward,
+                index_in_path: 0,
+            },
+            AccessionNodeData {
+                accession_id: accession_1.id,
+                node_id: HashId::convert_str("test-t-node"),
+                sequence_start: 0,
+                sequence_end: 2,
+                strand: Strand::Reverse,
+                index_in_path: 1,
+            },
+        ];
+        let accession_2_nodes = vec![AccessionNodeData {
+            accession_id: accession_2.id,
+            node_id: HashId::convert_str("test-c-node"),
+            sequence_start: 1,
+            sequence_end: 3,
+            strand: Strand::Forward,
+            index_in_path: 0,
+        }];
+        AccessionNode::bulk_create(conn, &accession_1_nodes).unwrap();
+        AccessionNode::bulk_create(conn, &accession_2_nodes).unwrap();
+
+        let grouped =
+            AccessionNode::query_accessions(conn, &[accession_2.id, accession_1.id]).unwrap();
+
+        assert_eq!(
+            grouped.get(&accession_1.id).unwrap(),
+            &accession_1_nodes
+                .into_iter()
+                .map(AccessionNode::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            grouped.get(&accession_2.id).unwrap(),
+            &accession_2_nodes
+                .into_iter()
+                .map(AccessionNode::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_create_from_edges_persists_accession_nodes() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let path_edges = vec![
+            AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: PATH_START_NODE_ID,
+                    source_coordinate: -1,
+                    source_strand: Strand::Forward,
+                    target_node_id: HashId::convert_str("test-a-node"),
+                    target_coordinate: 2,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index: 0,
+                phased: 0,
+            },
+            AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: HashId::convert_str("test-a-node"),
+                    source_coordinate: 4,
+                    source_strand: Strand::Forward,
+                    target_node_id: HashId::convert_str("test-t-node"),
+                    target_coordinate: 0,
+                    target_strand: Strand::Reverse,
+                },
+                chromosome_index: 0,
+                phased: 0,
+            },
+            AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: HashId::convert_str("test-t-node"),
+                    source_coordinate: 2,
+                    source_strand: Strand::Reverse,
+                    target_node_id: PATH_END_NODE_ID,
+                    target_coordinate: -1,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index: 0,
+                phased: 0,
+            },
+        ];
+
+        let accession =
+            Accession::create_from_edges(conn, "test", &block_group_id, None, &path_edges).unwrap();
+        let expected_nodes = vec![
+            AccessionNodeData {
+                accession_id: accession.id,
+                node_id: HashId::convert_str("test-a-node"),
+                sequence_start: 2,
+                sequence_end: 4,
+                strand: Strand::Forward,
+                index_in_path: 0,
+            },
+            AccessionNodeData {
+                accession_id: accession.id,
+                node_id: HashId::convert_str("test-t-node"),
+                sequence_start: 0,
+                sequence_end: 2,
+                strand: Strand::Reverse,
+                index_in_path: 1,
+            },
+        ];
+
+        assert_eq!(
+            Accession::get_nodes_by_id(conn, &accession.id),
+            expected_nodes
+                .into_iter()
+                .map(AccessionNode::from)
+                .collect::<Vec<_>>(),
         );
     }
 
