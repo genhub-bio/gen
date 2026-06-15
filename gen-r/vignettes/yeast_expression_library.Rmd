@@ -184,8 +184,22 @@ The annotation group added automatically on import labels every part.
 Because `GenPlot` calls `auto_load_annotation_groups()` at construction
 time, the track appears without an explicit `add_track_group()` call.
 
+The `colors` parameter accepts a function that receives each annotation
+and returns a hex color string.  Here we map the `role` field stored in
+`ann$metadata` (propagated from `mcols()$role` on import) to a fixed palette.
+
+```{r role-colors}
+ROLE_COLORS <- c(
+  scar       = "#aaaaaa",
+  promoter   = "#4393c3",
+  cds        = "#1a9850",
+  terminator = "#e08214"
+)
+```
+
 ```{r plot-library}
-p <- plot(sg, rows = 20L)
+p <- plot(sg, rows = 20L,
+          colors = function(ann) ROLE_COLORS[[ann$metadata$role]])
 p
 ```
 
@@ -273,7 +287,8 @@ terminator is chosen.
 ## Highlight the BsmBI site on the graph
 
 ```{r highlight-site}
-p2 <- plot(sg, rows = 20L)
+p2 <- plot(sg, rows = 20L,
+           colors = function(ann) ROLE_COLORS[[ann$metadata$role]])
 
 m <- hits[[1]]$matches[[1]]
 p2$goto_match(m)
