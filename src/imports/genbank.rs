@@ -12,7 +12,7 @@ use gen_core::{
     range::{Range, merge_ordered_items},
 };
 use gen_models::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    accession::{Accession, AccessionNode, AccessionNodeData},
     annotations::Annotation,
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -338,48 +338,24 @@ fn create_accession_for_segments(
         Ok(accession) => accession,
         Err(err) => return Err(GenBankError::AccessionError(err)),
     };
-    let mut edges = Vec::with_capacity(segments.len() + 1);
-
-    let first = segments.first().ok_or_else(|| {
-        GenBankError::ParseError("Annotation has no mappable segments".to_string())
-    })?;
-    edges.push(AccessionEdgeData {
-        source_node_id: PATH_START_NODE_ID,
-        source_coordinate: -1,
-        source_strand: Strand::Forward,
-        target_node_id: first.node_id,
-        target_coordinate: first.range.start,
-        target_strand: first.strand,
-        chromosome_index: 0,
-    });
-
-    for window in segments.windows(2) {
-        let current = &window[0];
-        let next = &window[1];
-        edges.push(AccessionEdgeData {
-            source_node_id: current.node_id,
-            source_coordinate: current.range.end,
-            source_strand: current.strand,
-            target_node_id: next.node_id,
-            target_coordinate: next.range.start,
-            target_strand: next.strand,
-            chromosome_index: 0,
-        });
+    if segments.is_empty() {
+        return Err(GenBankError::ParseError(
+            "Annotation has no mappable segments".to_string(),
+        ));
     }
-
-    let last = segments.last().unwrap();
-    edges.push(AccessionEdgeData {
-        source_node_id: last.node_id,
-        source_coordinate: last.range.end,
-        source_strand: last.strand,
-        target_node_id: PATH_END_NODE_ID,
-        target_coordinate: -1,
-        target_strand: Strand::Forward,
-        chromosome_index: 0,
-    });
-
-    let edge_ids = AccessionEdge::bulk_create(conn, &edges);
-    AccessionPath::create(conn, &accession.id, &edge_ids)?;
+    let nodes = segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| AccessionNodeData {
+            accession_id: accession.id,
+            node_id: segment.node_id,
+            sequence_start: segment.range.start,
+            sequence_end: segment.range.end,
+            strand: segment.strand,
+            index_in_path: index as i64,
+        })
+        .collect::<Vec<_>>();
+    AccessionNode::bulk_create(conn, &nodes);
     Ok(accession.id)
 }
 
@@ -703,7 +679,7 @@ where
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_annotations::projection::accession_edges_to_segments;
+    use gen_annotations::projection::accession_nodes_to_segments;
     use gen_models::{
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         file_types::FileTypes,
@@ -1152,7 +1128,7 @@ mod tests {
             .iter()
             .find(|annotation| annotation.name == "M13 Forward")
             .unwrap();
-        let m13_forward_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
+        let m13_forward_segments = accession_nodes_to_segments(&Accession::get_nodes_by_id(
             conn,
             &m13_forward.accession_id,
         ));
@@ -1161,7 +1137,7 @@ mod tests {
         assert_eq!(m13_forward_segments[0].range.end, 706);
         assert_eq!(m13_forward_segments[0].strand, Strand::Reverse);
 
-        let ori_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
+        let ori_segments = accession_nodes_to_segments(&Accession::get_nodes_by_id(
             conn,
             &ori_annotation.accession_id,
         ));

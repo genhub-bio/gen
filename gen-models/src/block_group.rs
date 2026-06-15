@@ -21,13 +21,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    accession::{Accession, AccessionNode, AccessionNodeData},
     annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{Edge, EdgeData, GroupBlock},
     errors::{
-        AccessionError, AccessionPathError, EdgeError, NodeError, PathError, QueryError,
+        AccessionError, AccessionNodeError, EdgeError, NodeError, PathError, QueryError,
         SequenceError,
     },
     gen_models_capnp::block_group,
@@ -62,8 +62,8 @@ pub enum BlockGroupError {
     NodeError(#[from] NodeError),
     #[error("Accession creation error: {0}")]
     AccessionError(#[from] AccessionError),
-    #[error("Accession path creation error: {0}")]
-    AccessionPathError(#[from] AccessionPathError),
+    #[error("Accession node creation error: {0}")]
+    AccessionNodeError(#[from] AccessionNodeError),
     #[error("Annotation error: {0}")]
     AnnotationError(#[from] AnnotationError),
     #[error("Query error: {0}")]
@@ -645,67 +645,30 @@ impl BlockGroup {
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
-        let start_block = start_blocks[0];
         let end_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(end - 1).map(|x| &x.value).collect();
         assert_eq!(end_blocks.len(), 1);
-        let end_block = end_blocks[0];
-        let start_edge = AccessionEdgeData {
-            source_node_id: PATH_START_NODE_ID,
-            source_coordinate: -1,
-            source_strand: Strand::Forward,
-            target_node_id: start_block.node_id,
-            target_coordinate: start - start_block.start + start_block.sequence_start,
-            target_strand: Strand::Forward,
-            chromosome_index: 0,
-        };
-        let end_edge = AccessionEdgeData {
-            source_node_id: end_block.node_id,
-            source_coordinate: end - end_block.start + end_block.sequence_start,
-            source_strand: Strand::Forward,
-            target_node_id: PATH_END_NODE_ID,
-            target_coordinate: -1,
-            target_strand: Strand::Forward,
-            chromosome_index: 0,
-        };
         let accession = Accession::create(conn, name, &path.block_group_id, None)
             .expect("Unable to create accession.");
-        let mut path_edges = vec![start_edge];
-        if start_block == end_block {
-            path_edges.push(end_edge);
-        } else {
-            let mut in_range = false;
-            let path_blocks: Vec<&NodeIntervalBlock> = tree
-                .iter_sorted()
-                .map(|x| &x.value)
-                .filter(|block| {
-                    if *block == start_block {
-                        in_range = true;
-                    } else if *block == end_block {
-                        in_range = false;
-                        return true;
-                    }
-                    in_range
-                })
-                .collect::<Vec<_>>();
-            for (block, next_block) in path_blocks.iter().zip(path_blocks[1..].iter()) {
-                path_edges.push(AccessionEdgeData {
-                    source_node_id: block.node_id,
-                    source_coordinate: block.sequence_end,
-                    source_strand: block.strand,
-                    target_node_id: next_block.node_id,
-                    target_coordinate: next_block.sequence_start,
-                    target_strand: next_block.strand,
-                    chromosome_index: 0,
-                })
-            }
-            path_edges.push(end_edge);
-        }
-        AccessionPath::create(
-            conn,
-            &accession.id,
-            &AccessionEdge::bulk_create(conn, &path_edges),
-        )?;
+        let accession_nodes = tree
+            .iter_sorted()
+            .map(|entry| &entry.value)
+            .filter(|block| !is_terminal(block.node_id) && block.start < end && block.end > start)
+            .enumerate()
+            .map(|(index, block)| {
+                let clipped_start = start.max(block.start);
+                let clipped_end = end.min(block.end);
+                AccessionNodeData {
+                    accession_id: accession.id,
+                    node_id: block.node_id,
+                    sequence_start: clipped_start - block.start + block.sequence_start,
+                    sequence_end: clipped_end - block.start + block.sequence_start,
+                    strand: block.strand,
+                    index_in_path: index as i64,
+                }
+            })
+            .collect::<Vec<_>>();
+        AccessionNode::bulk_create(conn, &accession_nodes);
         Ok(accession)
     }
 
@@ -716,7 +679,8 @@ impl BlockGroup {
     ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
-        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
+        let mut new_accession_path_edges =
+            HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
         let mut local_tree_map = HashMap::new();
         let tree_map = match tree_map {
             Some(tree_map) => tree_map,
@@ -741,7 +705,7 @@ impl BlockGroup {
                 .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
                 .or_insert_with(|| new_augmented_edges.clone());
             if let Some(accession) = &change.path_accession {
-                new_accession_edges
+                new_accession_path_edges
                     .entry((change.region.block_group.id, accession.clone()))
                     .and_modify(|new_edge_data: &mut Vec<AugmentedEdgeData>| {
                         new_edge_data.extend(new_augmented_edges.clone())
@@ -752,7 +716,7 @@ impl BlockGroup {
         Self::persist_insert_changes(
             conn,
             new_augmented_edges_by_block_group,
-            new_accession_edges,
+            new_accession_path_edges,
         )
     }
 
@@ -764,9 +728,9 @@ impl BlockGroup {
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
             .insert(change.region.block_group.id, new_augmented_edges.clone());
-        let mut new_accession_edges = HashMap::new();
+        let mut new_accession_path_edges = HashMap::new();
         if let Some(accession) = &change.path_accession {
-            new_accession_edges.insert(
+            new_accession_path_edges.insert(
                 (change.region.block_group.id, accession.clone()),
                 new_augmented_edges,
             );
@@ -774,14 +738,14 @@ impl BlockGroup {
         Self::persist_insert_changes(
             conn,
             new_augmented_edges_by_block_group,
-            new_accession_edges,
+            new_accession_path_edges,
         )
     }
 
     fn persist_insert_changes(
         conn: &GraphConnection,
         new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
-        new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
+        new_accession_path_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
     ) -> Result<(), BlockGroupError> {
         let mut edge_data_map = HashMap::new();
 
@@ -807,7 +771,7 @@ impl BlockGroup {
             BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
         }
 
-        for ((block_group_id, accession_name), path_edges) in new_accession_edges {
+        for ((block_group_id, accession_name), path_edges) in new_accession_path_edges {
             match Accession::get(
                 conn,
                 "select * from accessions where name = ?1 AND block_group_id = ?2",
@@ -819,20 +783,37 @@ impl BlockGroup {
                     );
                 }
                 Err(_) => {
-                    let acc_edges = AccessionEdge::bulk_create(
-                        conn,
-                        &path_edges
-                            .iter()
-                            .map(AccessionEdgeData::from)
-                            .collect::<Vec<_>>(),
-                    );
                     let acc = Accession::create(conn, &accession_name, &block_group_id, None)
                         .expect("Accession could not be created.");
-                    AccessionPath::create(conn, &acc.id, &acc_edges)?;
+                    let accession_nodes =
+                        Self::accession_nodes_from_augmented_edges(&acc.id, &path_edges);
+                    AccessionNode::bulk_create(conn, &accession_nodes);
                 }
             }
         }
         Ok(())
+    }
+
+    fn accession_nodes_from_augmented_edges(
+        accession_id: &HashId,
+        edges: &[AugmentedEdgeData],
+    ) -> Vec<AccessionNodeData> {
+        edges
+            .windows(2)
+            .enumerate()
+            .map(|(index, edge_pair)| {
+                let into = &edge_pair[0].edge_data;
+                let out_of = &edge_pair[1].edge_data;
+                AccessionNodeData {
+                    accession_id: *accession_id,
+                    node_id: into.target_node_id,
+                    sequence_start: into.target_coordinate,
+                    sequence_end: out_of.source_coordinate,
+                    strand: into.target_strand,
+                    index_in_path: index as i64,
+                }
+            })
+            .collect()
     }
 
     pub fn set_up_new_edges(
@@ -2312,13 +2293,13 @@ mod tests {
 
         let accession =
             BlockGroup::add_accession(conn, &path, "test", 3, 10, &mut path_cache).unwrap();
-        let edges = Accession::get_edges_by_id(conn, &accession.id);
+        let nodes = Accession::get_nodes_by_id(conn, &accession.id);
 
         assert_eq!(accession.length(conn).unwrap(), 7);
-        assert_eq!(edges.len(), 2);
-        assert_eq!(edges[1].source_node_id, HashId::convert_str("test-a-node"));
-        assert_eq!(edges[1].source_coordinate, 10);
-        assert_eq!(edges[1].target_node_id, PATH_END_NODE_ID);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, HashId::convert_str("test-a-node"));
+        assert_eq!(nodes[0].sequence_start, 3);
+        assert_eq!(nodes[0].sequence_end, 10);
     }
 
     #[test]

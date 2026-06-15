@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn test_table_name_constants() {
         use crate::{
-            accession::{Accession, AccessionEdge, AccessionPath},
+            accession::{Accession, AccessionNode},
             annotations::Annotation,
             block_group::BlockGroup,
             block_group_edge::BlockGroupEdge,
@@ -111,8 +111,7 @@ mod tests {
 
         // Test accession models
         assert_eq!(Accession::table_name(), "accessions");
-        assert_eq!(AccessionEdge::table_name(), "accession_edges");
-        assert_eq!(AccessionPath::table_name(), "accession_paths");
+        assert_eq!(AccessionNode::table_name(), "accession_nodes");
         assert_eq!(Annotation::table_name(), "annotations");
 
         // Test operation models

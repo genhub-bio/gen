@@ -315,7 +315,7 @@ mod tests {
             edges: vec![],
             paths: vec![],
             accessions: vec![],
-            accession_edges: vec![],
+            accession_nodes: vec![],
         }
     }
 
@@ -376,8 +376,7 @@ mod tests {
             paths: vec![],
             path_edges: vec![],
             accessions: vec![],
-            accession_edges: vec![],
-            accession_paths: vec![],
+            accession_nodes: vec![],
             annotation_groups: vec![],
             annotations: vec![],
             annotation_group_samples: vec![],

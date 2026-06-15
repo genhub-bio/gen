@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_creates_accession_paths() {
+    fn test_creates_accession_nodes() {
         let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/accession.vcf");
@@ -1246,7 +1246,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Unable to create accession")]
-    fn test_disallows_creating_accession_paths_that_exist() {
+    fn test_disallows_creating_accession_nodes_that_exist() {
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/accession.vcf");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

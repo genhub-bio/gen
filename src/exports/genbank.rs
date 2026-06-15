@@ -11,7 +11,7 @@ use std::{
 
 use gb_io::{self, seq::Location};
 use gen_annotations::projection::{
-    AnnotationSegment, accession_edges_to_segments, project_annotation_segments,
+    AnnotationSegment, accession_nodes_to_segments, project_annotation_segments,
 };
 use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
@@ -101,7 +101,7 @@ fn export_annotations(
             continue;
         }
 
-        let accession_segments = accession_edges_to_segments(&Accession::get_edges_by_id(
+        let accession_segments = accession_nodes_to_segments(&Accession::get_nodes_by_id(
             conn,
             &annotation.accession_id,
         ));
@@ -437,11 +437,9 @@ mod tests {
     use std::{fs::File, io, io::BufReader, path::PathBuf, str};
 
     use gb_io::reader;
-    use gen_core::{
-        HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal, strand::Strand::Forward,
-    };
+    use gen_core::{HashId, Strand, is_terminal, strand::Strand::Forward};
     use gen_models::{
-        accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+        accession::{Accession, AccessionNode, AccessionNodeData},
         annotations::{Annotation, AnnotationExtra, GenBankExtra, GenBankLocationOperator},
         block_group::BlockGroup,
         file_types::FileTypes,
@@ -542,47 +540,20 @@ mod tests {
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
-        let first = segments
-            .first()
-            .expect("should contain at least one annotation segment");
-        let mut edges = vec![AccessionEdgeData {
-            source_node_id: PATH_START_NODE_ID,
-            source_coordinate: -1,
-            source_strand: Strand::Forward,
-            target_node_id: blocks[first.0].node_id,
-            target_coordinate: first.1,
-            target_strand: first.3,
-            chromosome_index: 0,
-        }];
-        for window in segments.windows(2) {
-            let current = window[0];
-            let next = window[1];
-            edges.push(AccessionEdgeData {
-                source_node_id: blocks[current.0].node_id,
-                source_coordinate: current.2,
-                source_strand: current.3,
-                target_node_id: blocks[next.0].node_id,
-                target_coordinate: next.1,
-                target_strand: next.3,
-                chromosome_index: 0,
-            });
-        }
-        let last = segments
-            .last()
-            .expect("should contain at least one annotation segment");
-        edges.push(AccessionEdgeData {
-            source_node_id: blocks[last.0].node_id,
-            source_coordinate: last.2,
-            source_strand: last.3,
-            target_node_id: PATH_END_NODE_ID,
-            target_coordinate: -1,
-            target_strand: Strand::Forward,
-            chromosome_index: 0,
-        });
-
         let accession = Accession::get_or_create(conn, name, &path.block_group_id, None).unwrap();
-        let edge_ids = AccessionEdge::bulk_create(conn, &edges);
-        AccessionPath::create(conn, &accession.id, &edge_ids);
+        let nodes = segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| AccessionNodeData {
+                accession_id: accession.id,
+                node_id: blocks[segment.0].node_id,
+                sequence_start: segment.1,
+                sequence_end: segment.2,
+                strand: segment.3,
+                index_in_path: index as i64,
+            })
+            .collect::<Vec<_>>();
+        AccessionNode::bulk_create(conn, &nodes);
         Annotation::create_with_samples(
             conn,
             name,

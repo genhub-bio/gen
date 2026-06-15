@@ -112,22 +112,14 @@ struct Accession {
   }
 }
 
-struct AccessionEdge {
-  id @0 :List(UInt8);
-  sourceNodeId @1 :List(UInt8);
-  sourceCoordinate @2 :Int64;
-  sourceStrand @3 :Core.Strand;
-  targetNodeId @4 :List(UInt8);
-  targetCoordinate @5 :Int64;
-  targetStrand @6 :Core.Strand;
-  chromosomeIndex @7 :Int64;
-}
-
-struct AccessionPath {
+struct AccessionNode {
   id @0 :List(UInt8);
   accessionId @1 :List(UInt8);
-  indexInPath @2 :Int64;
-  edgeId @3 :List(UInt8);
+  nodeId @2 :List(UInt8);
+  sequenceStart @3 :Int64;
+  sequenceEnd @4 :Int64;
+  strand @5 :Core.Strand;
+  indexInPath @6 :Int64;
 }
 
 # Operation and version control models
@@ -298,12 +290,11 @@ struct ChangesetModels {
   paths @7 :List(Path);
   pathEdges @8 :List(PathEdge);
   accessions @9 :List(Accession);
-  accessionEdges @10 :List(AccessionEdge);
-  accessionPaths @11 :List(AccessionPath);
-  annotationGroups @12 :List(AnnotationGroup);
-  annotations @13 :List(Annotation);
-  annotationGroupSamples @14 :List(AnnotationGroupSample);
-  sampleLineages @15 :List(SampleLineage);
+  accessionNodes @10 :List(AccessionNode);
+  annotationGroups @11 :List(AnnotationGroup);
+  annotations @12 :List(Annotation);
+  annotationGroupSamples @13 :List(AnnotationGroupSample);
+  sampleLineages @14 :List(SampleLineage);
 }
 
 struct DependencyModels {
@@ -315,5 +306,5 @@ struct DependencyModels {
   edges @5 :List(Edge);
   paths @6 :List(Path);
   accessions @7 :List(Accession);
-  accessionEdges @8 :List(AccessionEdge);
+  accessionNodes @8 :List(AccessionNode);
 }
