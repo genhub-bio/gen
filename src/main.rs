@@ -73,7 +73,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(Commands::Clone { url }) = &cli.command {
-        return r#gen::commands::clone::execute(url);
+        return r#gen::commands::clone::execute(url, &workspace);
     }
 
     let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;

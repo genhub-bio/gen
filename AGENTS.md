@@ -107,6 +107,7 @@ Use the narrowest reliable validation for the change, then broaden when touching
   ```bash
   make r-test
   ```
+- Give each new unit test a name that starts with `test_`.
 
 Some builds and tests need the Cap'n Proto compiler (`capnp`) installed. Python packaging targets may need `maturin`, and R targets may need Docker, R, and npm depending on the path exercised.
 

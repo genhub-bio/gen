@@ -19,13 +19,16 @@ use crate::{
 
 const ORIGIN: &str = "origin";
 
-pub fn execute(url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    execute_in_parent(url, Path::new("."))
+pub fn execute(url: &str, workspace: &Workspace) -> Result<(), Box<dyn std::error::Error>> {
+    execute_in_parent(url, workspace)
 }
 
-fn execute_in_parent(url: &str, parent_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_in_parent(
+    url: &str,
+    parent_workspace: &Workspace,
+) -> Result<(), Box<dyn std::error::Error>> {
     let repo_name = infer_repo_name(url)?;
-    let repo_path = parent_path.join(&repo_name);
+    let repo_path = parent_workspace.base_dir().join(&repo_name);
 
     create_clone_directory(&repo_path)?;
 
@@ -115,7 +118,7 @@ mod tests {
     use crate::test_helpers::{create_operation, setup_gen_on_disk};
 
     #[test]
-    fn infer_repo_name_from_genhub_url() {
+    fn test_infer_repo_name_from_genhub_url() {
         assert_eq!(
             infer_repo_name("https://www.genhub.bio/api/repos/foo/bar").unwrap(),
             "bar"
@@ -123,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn infer_repo_name_ignores_trailing_slash() {
+    fn test_infer_repo_name_ignores_trailing_slash() {
         assert_eq!(
             infer_repo_name("https://www.genhub.bio/api/repos/foo/bar/").unwrap(),
             "bar"
@@ -131,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn create_clone_directory_errors_when_directory_exists() {
+    fn test_create_clone_directory_errors_when_directory_exists() {
         let temp_dir = tempdir().unwrap();
         let repo_path = temp_dir.path().join("existing-repo");
         fs::create_dir(&repo_path).unwrap();
@@ -142,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn create_clone_directory_creates_missing_directory() {
+    fn test_create_clone_directory_creates_missing_directory() {
         let temp_dir = tempdir().unwrap();
         let repo_path = temp_dir.path().join("new-repo");
 
@@ -152,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_from_file_remote_materializes_asset_files() {
+    fn test_clone_from_file_remote_materializes_asset_files() {
         let remote_context = setup_gen_on_disk();
         let remote_conn = remote_context.graph().conn();
         let remote_op_conn = remote_context.operations().conn();
@@ -193,7 +196,8 @@ mod tests {
             "file://{}",
             remote_context.workspace().base_dir().to_string_lossy()
         );
-        execute_in_parent(&remote_url, clone_parent.path()).unwrap();
+        let clone_parent_workspace = Workspace::new(clone_parent.path());
+        execute_in_parent(&remote_url, &clone_parent_workspace).unwrap();
 
         let cloned_repo_path = clone_parent
             .path()
@@ -212,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_without_login_when_initial_pull_succeeds() {
+    fn test_pull_without_login_when_initial_pull_succeeds() {
         let pull_count = Cell::new(0);
         let login_count = Cell::new(0);
 
@@ -233,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn login_and_retry_pull_after_auth_error() {
+    fn test_login_and_retry_pull_after_auth_error() {
         let pull_count = Cell::new(0);
         let login_count = Cell::new(0);
 
@@ -258,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn non_auth_pull_errors_do_not_login() {
+    fn test_non_auth_pull_errors_do_not_login() {
         let pull_count = Cell::new(0);
         let login_count = Cell::new(0);
 
@@ -281,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn login_errors_stop_before_retrying_pull() {
+    fn test_login_errors_stop_before_retrying_pull() {
         let pull_count = Cell::new(0);
         let login_count = Cell::new(0);
 
