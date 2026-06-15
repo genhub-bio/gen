@@ -1119,7 +1119,7 @@ fn ingest_manifest_operation(
                     &operation.hash,
                     &local_file_addition,
                     &file_addition.filename,
-                    &operation_file_destination(file_addition),
+                    &file_addition.file_path,
                 )?;
             }
             for annotation_file in &manifest_operation.annotation_file_additions {
@@ -1390,9 +1390,17 @@ fn download_remote_operation_assets(
         "dependencies",
     )?;
 
-    let asset_dir = workspace.asset_dir()?;
-    for file in asset_response.files {
-        let destination = remote_asset_destination(&asset_dir, &file.asset_path)?;
+    for file_addition in &manifest_operation.file_additions {
+        let stored_asset_path = file_addition.file_addition.file_path();
+        if !LocalAssetUri::is_asset_relative_path(&workspace, stored_asset_path)? {
+            continue;
+        }
+        let Some(file) = remote_asset_response_file(&asset_response.files, file_addition) else {
+            continue;
+        };
+        let destination =
+            LocalAssetUri::repo_relative_destination_path(&workspace, stored_asset_path)
+                .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
         if !destination.exists() {
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent)?;
@@ -1402,7 +1410,7 @@ fn download_remote_operation_assets(
                 &file.url,
                 destination.as_path(),
                 Some(auth_token),
-                &file.asset_path,
+                stored_asset_path,
             )?;
         }
     }
@@ -1417,20 +1425,18 @@ fn download_remote_operation_assets(
     Ok(())
 }
 
-fn remote_asset_destination(
-    asset_dir: &FilePath,
-    asset_path: &str,
-) -> Result<PathBuf, RemoteOperationError> {
-    let filename = FilePath::new(asset_path)
-        .file_name()
-        .ok_or_else(|| {
-            RemoteOperationError::IOError(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Remote asset path has no filename: {asset_path}"),
-            ))
-        })?
-        .to_os_string();
-    Ok(asset_dir.join(filename))
+fn remote_asset_response_file<'a>(
+    files: &'a [RemoteFileAsset],
+    file_addition: &ManifestOperationFileAddition,
+) -> Option<&'a RemoteFileAsset> {
+    let stored_asset_path = file_addition.file_addition.file_path();
+    let manifest_asset_path = file_addition.file_path.as_str();
+    let stored_asset_filename = FilePath::new(stored_asset_path).file_name();
+    files.iter().find(|file| {
+        file.asset_path == manifest_asset_path
+            || file.asset_path == stored_asset_path
+            || FilePath::new(&file.asset_path).file_name() == stored_asset_filename
+    })
 }
 
 fn download_binary(
@@ -2685,10 +2691,7 @@ mod tests {
             let branch = Branch::get_by_name(op_conn, "main").unwrap();
             pull_from_file_remote(&context, &remote_url, &branch).unwrap();
 
-            let local_file_path = local_workspace
-                .repo_root()
-                .unwrap()
-                .join("fastas/remote_file.fa");
+            let local_file_path = local_workspace.repo_root().unwrap().join("remote_file.fa");
             assert!(local_file_path.exists());
             assert_eq!(
                 fs::read(local_file_path).unwrap(),
@@ -2903,22 +2906,27 @@ mod tests {
         }
 
         #[test]
-        fn test_remote_asset_destination_uses_asset_filename() {
-            let context = setup_gen();
-            let asset_dir = context.workspace().asset_dir().unwrap();
+        fn test_remote_asset_response_file_matches_asset_filename() {
+            let checksum = HashId::convert_str("asset");
+            let asset_path = format!(".gen/assets/{checksum}.fa");
+            let file_addition = ManifestOperationFileAddition {
+                file_addition: FileAddition {
+                    id: HashId::random_str(),
+                    asset_uri: LocalAssetUri::asset_uri(&asset_path),
+                    file_type: FileTypes::Fasta,
+                    checksum,
+                },
+                filename: "reference.fa".to_string(),
+                file_path: asset_path,
+            };
+            let files = vec![RemoteFileAsset {
+                asset_path: format!("assets/{checksum}.fa"),
+                url: "https://example.com/asset".to_string(),
+            }];
 
-            assert_eq!(
-                remote_asset_destination(&asset_dir, "abc123.fa").unwrap(),
-                asset_dir.join("abc123.fa")
-            );
-            assert_eq!(
-                remote_asset_destination(&asset_dir, "assets/abc123.fa").unwrap(),
-                asset_dir.join("abc123.fa")
-            );
-            assert_eq!(
-                remote_asset_destination(&asset_dir, ".gen/assets/abc123.fa").unwrap(),
-                asset_dir.join("abc123.fa")
-            );
+            let matched = remote_asset_response_file(&files, &file_addition).unwrap();
+
+            assert_eq!(matched.url, "https://example.com/asset");
         }
 
         #[test]

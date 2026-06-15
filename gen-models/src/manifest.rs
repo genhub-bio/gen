@@ -50,15 +50,6 @@ impl<'a> Capnp<'a> for ManifestOperationFileAddition {
 }
 
 impl ManifestOperationFileAddition {
-    fn from_legacy_file_addition(file_addition: FileAddition) -> Self {
-        let operation_file = OperationFile::new(file_addition.file_path());
-        Self {
-            file_addition,
-            filename: operation_file.filename,
-            file_path: operation_file.file_path,
-        }
-    }
-
     pub fn get_files_for_operation(
         conn: &OperationsConnection,
         operation_hash: &HashId,
@@ -66,15 +57,18 @@ impl ManifestOperationFileAddition {
         Ok(
             OperationFile::get_files_for_operation(conn, operation_hash)?
                 .into_iter()
-                .map(|file| Self {
-                    file_addition: FileAddition {
+                .map(|file| {
+                    let file_addition = FileAddition {
                         id: file.id,
                         asset_uri: file.asset_uri,
                         file_type: file.file_type,
                         checksum: file.checksum,
-                    },
-                    filename: file.filename,
-                    file_path: file.file_path,
+                    };
+                    Self {
+                        file_path: file_addition.file_path().to_string(),
+                        file_addition,
+                        filename: file.filename,
+                    }
                 })
                 .collect(),
         )
@@ -147,16 +141,6 @@ impl<'a> Capnp<'a> for ManifestOperation {
         let mut operation_builder = builder.reborrow().init_operation();
         self.operation.write_capnp(&mut operation_builder);
 
-        let mut legacy_file_additions_builder = builder
-            .reborrow()
-            .init_file_additions(self.file_additions.len() as u32);
-        for (i, file_addition) in self.file_additions.iter().enumerate() {
-            let mut file_addition_builder = legacy_file_additions_builder.reborrow().get(i as u32);
-            file_addition
-                .file_addition
-                .write_capnp(&mut file_addition_builder);
-        }
-
         let mut operation_file_additions_builder = builder
             .reborrow()
             .init_operation_file_additions(self.file_additions.len() as u32);
@@ -198,20 +182,11 @@ impl<'a> Capnp<'a> for ManifestOperation {
 
     fn read_capnp(reader: Self::Reader) -> Self {
         let operation = Operation::read_capnp(reader.get_operation().unwrap());
-        let file_additions = if reader.has_operation_file_additions() {
-            let file_additions_reader = reader.get_operation_file_additions().unwrap();
-            file_additions_reader
-                .iter()
-                .map(ManifestOperationFileAddition::read_capnp)
-                .collect()
-        } else {
-            let file_additions_reader = reader.get_file_additions().unwrap();
-            file_additions_reader
-                .iter()
-                .map(FileAddition::read_capnp)
-                .map(ManifestOperationFileAddition::from_legacy_file_addition)
-                .collect()
-        };
+        let file_additions_reader = reader.get_operation_file_additions().unwrap();
+        let file_additions = file_additions_reader
+            .iter()
+            .map(ManifestOperationFileAddition::read_capnp)
+            .collect();
 
         let annotation_file_additions = if reader.has_annotation_file_details() {
             let annotation_file_details_reader = reader.get_annotation_file_details().unwrap();
@@ -491,7 +466,7 @@ mod tests {
     use crate::{
         annotations::{AnnotationFile, AnnotationFileAdditionInput},
         file_types::FileTypes,
-        operations::OperationInfo,
+        operations::{OperationFile, OperationInfo},
         session_operations::{end_operation, start_operation},
         test_helpers::setup_gen,
     };
@@ -552,60 +527,6 @@ mod tests {
 
         let deserialized = ManifestOperation::read_capnp(root.into_reader());
         assert_eq!(manifest_operation, deserialized);
-    }
-
-    #[test]
-    fn test_manifest_operation_reads_legacy_file_additions() {
-        let context = setup_gen();
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        let db_uuid = crate::metadata::get_db_uuid(conn);
-        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
-
-        let mut session = start_operation(conn);
-        crate::sequence::Sequence::new()
-            .sequence("ACGT")
-            .sequence_type("DNA")
-            .save(conn)
-            .unwrap();
-        let operation = end_operation(
-            &context,
-            &mut session,
-            &OperationInfo {
-                files: vec![],
-                description: "test op".to_string(),
-            },
-            "test",
-            None,
-        )
-        .unwrap();
-
-        let legacy_file_addition = FileAddition {
-            id: HashId([1u8; 32]),
-            asset_uri: "s3://bucket/path/reference.fa".to_string(),
-            file_type: FileTypes::Fasta,
-            checksum: HashId([2u8; 32]),
-        };
-
-        let mut message = TypedBuilder::<manifest_operation::Owned>::new_default();
-        let mut root = message.init_root();
-        operation.write_capnp(&mut root.reborrow().init_operation());
-        let mut legacy_file_additions = root.reborrow().init_file_additions(1);
-        legacy_file_addition.write_capnp(&mut legacy_file_additions.reborrow().get(0));
-        root.reborrow().get_operation_summary().set_none(());
-
-        let deserialized = ManifestOperation::read_capnp(root.into_reader());
-        assert_eq!(deserialized.file_additions.len(), 1);
-        assert_eq!(
-            deserialized.file_additions[0].file_addition,
-            legacy_file_addition
-        );
-        assert_eq!(
-            deserialized.file_additions[0].file_path,
-            "s3://bucket/path/reference.fa"
-        );
-        assert_eq!(deserialized.file_additions[0].filename, "reference.fa");
     }
 
     #[test]
@@ -738,6 +659,49 @@ mod tests {
             .unwrap();
         assert_eq!(manifest.operations.len(), 1);
         assert_eq!(manifest.operations[0].operation.hash, op1.hash);
+    }
+
+    #[test]
+    fn test_manifest_generator_uses_asset_path_for_operation_files() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let repo_root = context.workspace().repo_root().unwrap();
+        let input_path = repo_root.join("fastas").join("input.fa");
+        fs::create_dir_all(input_path.parent().unwrap()).unwrap();
+        fs::write(&input_path, ">seq\nACGT\n").unwrap();
+
+        let mut session = start_operation(conn);
+        crate::sequence::Sequence::new()
+            .sequence("ACGT")
+            .sequence_type("DNA")
+            .save(conn)
+            .unwrap();
+        let operation = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![OperationFile::new("fastas/input.fa")],
+                description: "file op".to_string(),
+            },
+            "test",
+            None,
+        )
+        .unwrap();
+
+        let generator = ManifestGenerator::new(op_conn);
+        let manifest = generator
+            .generate_manifest("main", Some(&operation.hash))
+            .unwrap();
+        let file = &manifest.operations[0].file_additions[0];
+
+        assert_eq!(file.filename, "input.fa");
+        assert_eq!(file.file_path, file.file_addition.file_path());
+        assert!(file.file_path.starts_with(".gen/assets/"));
     }
 
     #[test]

@@ -202,7 +202,7 @@ mod tests {
         let cloned_repo_path = clone_parent
             .path()
             .join(remote_context.workspace().base_dir().file_name().unwrap());
-        let cloned_file_path = cloned_repo_path.join("fastas/clone_file.fa");
+        let cloned_file_path = cloned_repo_path.join("clone_file.fa");
         assert!(cloned_file_path.exists());
         assert_eq!(
             fs::read(cloned_file_path).unwrap(),
