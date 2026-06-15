@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionNode, AccessionNodeData},
+    accession::{Accession, AccessionSpan, NewAccession},
     annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
@@ -648,26 +648,31 @@ impl BlockGroup {
         let end_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(end - 1).map(|x| &x.value).collect();
         assert_eq!(end_blocks.len(), 1);
-        let accession = Accession::create(conn, name, &path.block_group_id, None)?;
-        let accession_nodes = tree
+        let spans = tree
             .iter_sorted()
             .map(|entry| &entry.value)
             .filter(|block| !is_terminal(block.node_id) && block.start < end && block.end > start)
-            .enumerate()
-            .map(|(index, block)| {
+            .map(|block| {
                 let clipped_start = start.max(block.start);
                 let clipped_end = end.min(block.end);
-                AccessionNodeData {
-                    accession_id: accession.id,
+                AccessionSpan {
                     node_id: block.node_id,
                     sequence_start: clipped_start - block.start + block.sequence_start,
                     sequence_end: clipped_end - block.start + block.sequence_start,
                     strand: block.strand,
-                    index_in_path: index as i64,
                 }
             })
             .collect::<Vec<_>>();
-        AccessionNode::bulk_create(conn, &accession_nodes)?;
+        let accession = Accession::create(
+            conn,
+            &NewAccession {
+                name: name.to_string(),
+                block_group_id: path.block_group_id,
+                parent_accession_id: None,
+                spans,
+            },
+        )
+        .expect("should create accession from path spans");
         Ok(accession)
     }
 

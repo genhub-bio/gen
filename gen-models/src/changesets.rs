@@ -16,7 +16,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    accession::{Accession, AccessionNode, AccessionNodeData},
+    accession::{Accession, AccessionNode, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationGroup, AnnotationGroupSample},
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -854,19 +854,9 @@ pub fn apply_changeset(
     for accession in dependencies.accessions.iter() {
         Accession::get_or_create(
             conn,
-            &accession.name,
-            &accession.block_group_id,
-            accession.parent_accession_id.as_ref(),
+            &new_accession_from_nodes(accession, &dependencies.accession_nodes),
         )?;
     }
-    AccessionNode::bulk_create(
-        conn,
-        &dependencies
-            .accession_nodes
-            .iter()
-            .map(AccessionNodeData::from)
-            .collect::<Vec<_>>(),
-    )?;
 
     for collection in &changeset.collections {
         Collection::create(conn, &collection.name)?;
@@ -937,19 +927,9 @@ pub fn apply_changeset(
     for accession in &changeset.accessions {
         Accession::get_or_create(
             conn,
-            &accession.name,
-            &accession.block_group_id,
-            accession.parent_accession_id.as_ref(),
+            &new_accession_from_nodes(accession, &changeset.accession_nodes),
         )?;
     }
-    AccessionNode::bulk_create(
-        conn,
-        &changeset
-            .accession_nodes
-            .iter()
-            .map(AccessionNodeData::from)
-            .collect::<Vec<_>>(),
-    )?;
 
     for annotation_group in &changeset.annotation_groups {
         AnnotationGroup::get_or_create(conn, &annotation_group.name).map_err(|err| match err {
@@ -1005,6 +985,27 @@ pub fn apply_changeset(
         })?;
     }
     Ok(())
+}
+
+fn new_accession_from_nodes(accession: &Accession, nodes: &[AccessionNode]) -> NewAccession {
+    let spans = nodes
+        .iter()
+        .filter(|node| node.accession_id == accession.id)
+        .sorted_by(|a, b| Ord::cmp(&a.index_in_path, &b.index_in_path))
+        .map(|node| AccessionSpan {
+            node_id: node.node_id,
+            sequence_start: node.sequence_start,
+            sequence_end: node.sequence_end,
+            strand: node.strand,
+        })
+        .collect::<Vec<_>>();
+
+    NewAccession {
+        name: accession.name.clone(),
+        block_group_id: accession.block_group_id,
+        parent_accession_id: accession.parent_accession_id,
+        spans,
+    }
 }
 
 pub fn revert_changeset(

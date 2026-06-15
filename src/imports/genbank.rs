@@ -12,7 +12,7 @@ use gen_core::{
     range::{Range, merge_ordered_items},
 };
 use gen_models::{
-    accession::{Accession, AccessionNode, AccessionNodeData},
+    accession::{Accession, AccessionSpan, NewAccession},
     annotations::Annotation,
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -333,29 +333,32 @@ fn create_accession_for_segments(
     accession_name: &str,
     segments: &[AnnotationSegment],
 ) -> Result<HashId, GenBankError> {
-    let accession = match Accession::get_or_create(conn, accession_name, &path.block_group_id, None)
-    {
-        Ok(accession) => accession,
-        Err(err) => return Err(GenBankError::AccessionError(err)),
-    };
     if segments.is_empty() {
         return Err(GenBankError::ParseError(
             "Annotation has no mappable segments".to_string(),
         ));
     }
-    let nodes = segments
+    let spans = segments
         .iter()
-        .enumerate()
-        .map(|(index, segment)| AccessionNodeData {
-            accession_id: accession.id,
+        .map(|segment| AccessionSpan {
             node_id: segment.node_id,
             sequence_start: segment.range.start,
             sequence_end: segment.range.end,
             strand: segment.strand,
-            index_in_path: index as i64,
         })
         .collect::<Vec<_>>();
-    AccessionNode::bulk_create(conn, &nodes)?;
+    let accession = match Accession::get_or_create(
+        conn,
+        &NewAccession {
+            name: accession_name.to_string(),
+            block_group_id: path.block_group_id,
+            parent_accession_id: None,
+            spans,
+        },
+    ) {
+        Ok(accession) => accession,
+        Err(err) => return Err(GenBankError::AccessionError(err)),
+    };
     Ok(accession.id)
 }
 
