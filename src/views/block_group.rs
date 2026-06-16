@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     error::Error,
     time::{Duration, Instant},
 };
@@ -22,6 +23,7 @@ use rusqlite::params;
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
+        annotation_groups::load_annotation_group_entries,
         annotation_track::{
             AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
             span_covered_by_later,
@@ -130,26 +132,24 @@ fn toggle_path_highlight(
     }
 }
 
-fn visible_ranges_by_node(
-    block_graph: &GenGraph,
-) -> std::collections::HashMap<HashId, Vec<(i64, i64)>> {
-    let mut ranges_by_node: std::collections::HashMap<HashId, Vec<(i64, i64)>> =
-        std::collections::HashMap::new();
-    for node in block_graph.nodes() {
-        if node.sequence_end <= node.sequence_start {
-            continue;
-        }
-        ranges_by_node
-            .entry(node.node_id)
-            .or_default()
-            .push((node.sequence_start, node.sequence_end));
-    }
-    ranges_by_node
+/// Node IDs present in the current viewport (excluding terminal start/end nodes).
+pub(crate) fn extract_viewport_node_ids(
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+) -> HashSet<HashId> {
+    use gen_core::{is_end_node, is_start_node};
+    use petgraph::visit::NodeIndexable;
+    let graph = controller.graph();
+    controller
+        .get_viewport_graph()
+        .data_nodes()
+        .map(|(_, idx, _)| <&GenGraph as NodeIndexable>::from_index(&graph, idx.index()).node_id)
+        .filter(|&id| !is_start_node(id) && !is_end_node(id))
+        .collect()
 }
 
 /// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
 /// in the current viewport, using the graph controller's viewport graph.
-fn current_view_coordinate_window(
+pub(crate) fn current_view_coordinate_window(
     controller: &GraphController<GenGraph, GenGraphNodeSizer>,
 ) -> Option<(i64, i64)> {
     use gen_core::{is_end_node, is_start_node};
@@ -172,9 +172,48 @@ fn current_view_coordinate_window(
     (start <= end).then_some((start, end))
 }
 
-fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
+pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     let span = (window.1 - window.0).max(1);
     (window.0.saturating_sub(span), window.1.saturating_add(span))
+}
+
+fn load_annotation_groups_for_viewport(
+    conn: &GraphConnection,
+    bg: &gen_models::block_group::BlockGroup,
+    node_ids: &HashSet<HashId>,
+    explorer_state: &mut CollectionExplorerState,
+    annotation_group_tracks: &mut std::collections::HashMap<String, AnnotationTrack>,
+    messages: &mut crate::views::messages::MessageBuffer,
+) {
+    for entry in load_annotation_group_entries(conn, bg) {
+        let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            current_block_group: bg,
+            entry: &entry,
+            node_ids,
+        }) {
+            Ok(spans) => spans,
+            Err(err) => {
+                messages.push_warn(format!(
+                    "Failed to load annotations for group {}: {err}",
+                    entry.id
+                ));
+                continue;
+            }
+        };
+        if spans.is_empty() {
+            continue;
+        }
+        let title = if bg.sample_name == entry.sample_name {
+            entry.name.clone()
+        } else {
+            format!("{} ({})", entry.name, entry.sample_name)
+        };
+        explorer_state
+            .active_annotation_groups
+            .insert(entry.id.clone());
+        annotation_group_tracks.insert(entry.id, AnnotationTrack::new(title, spans));
+    }
 }
 
 pub fn view_block_group(
@@ -280,6 +319,8 @@ pub fn view_block_group(
     }
 
     bar.finish();
+
+    let mut annotation_groups_loaded = false;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -507,8 +548,7 @@ pub fn view_block_group(
                             {
                                 if explorer_state.is_annotation_group_active(&toggled_group) {
                                     if current_block_group.is_some() {
-                                        let visible_node_ranges =
-                                            visible_ranges_by_node(&block_graph);
+                                        let node_ids = extract_viewport_node_ids(&graph_controller);
                                         let entry = explorer.annotation_group_entry(&toggled_group);
                                         let spans = match entry.map(|entry| {
                                             load_annotations_for_group(
@@ -518,7 +558,7 @@ pub fn view_block_group(
                                                         .as_ref()
                                                         .expect("current block group should exist"),
                                                     entry,
-                                                    visible_ranges_by_node: &visible_node_ranges,
+                                                    node_ids: &node_ids,
                                                 },
                                             )
                                         }) {
@@ -633,14 +673,14 @@ pub fn view_block_group(
                     {
                         if explorer_state.is_annotation_group_active(&toggled_group) {
                             if let Some(bg) = current_block_group.as_ref() {
-                                let visible_node_ranges = visible_ranges_by_node(&block_graph);
+                                let node_ids = extract_viewport_node_ids(&graph_controller);
                                 let entry = explorer.annotation_group_entry(&toggled_group);
                                 let spans = match entry.map(|entry| {
                                     load_annotations_for_group(&AnnotationGroupTrackRequest {
                                         conn,
                                         current_block_group: bg,
                                         entry,
-                                        visible_ranges_by_node: &visible_node_ranges,
+                                        node_ids: &node_ids,
                                     })
                                 }) {
                                     Some(Ok(spans)) => spans,
@@ -744,11 +784,16 @@ pub fn view_block_group(
             last_refresh = Instant::now();
         }
 
-        // Reload indexed annotation file tracks when the user scrolls past the loaded window
+        // Reload indexed annotation file tracks when the user scrolls past the loaded window.
+        // Annotation group reload piggybacks on the viewport-rebuild signal: when the camera has
+        // moved far enough that the cropped-graph node set changes, invalidate and re-load.
         if !is_loading
             && let Some(bg) = current_block_group.as_ref()
             && let Some(visible_window) = current_view_coordinate_window(&graph_controller)
         {
+            if graph_controller.detect_motion() {
+                annotation_groups_loaded = false;
+            }
             let query_window = expand_query_window(visible_window);
             let node_filter: std::collections::HashSet<HashId> =
                 block_graph.nodes().map(|node| node.node_id).collect();
@@ -1176,6 +1221,25 @@ pub fn view_block_group(
             }
         })?;
 
+        // After the first draw the viewport is populated. Load (or reload) annotation groups
+        // using the viewport node IDs so only on-screen segments are fetched.
+        if !annotation_groups_loaded && let Some(bg) = current_block_group.as_ref() {
+            let node_ids = extract_viewport_node_ids(&graph_controller);
+            if !node_ids.is_empty() {
+                annotation_group_tracks.clear();
+                explorer_state.active_annotation_groups.clear();
+                load_annotation_groups_for_viewport(
+                    conn,
+                    bg,
+                    &node_ids,
+                    &mut explorer_state,
+                    &mut annotation_group_tracks,
+                    &mut messages,
+                );
+                annotation_groups_loaded = true;
+            }
+        }
+
         // Update the graph controller if a new block group was selected.
         // This runs after terminal.draw() so the loading indicator is visible
         // for the full duration of the blocking DB work.
@@ -1211,45 +1275,13 @@ pub fn view_block_group(
             annotation_file_index_available.clear();
             annotation_file_loaded_windows.clear();
             annotation_group_tracks.clear();
+            explorer_state.active_annotation_groups.clear();
+            annotation_groups_loaded = false;
             if let Some(bg) = current_block_group.as_ref() {
                 let node_filter: std::collections::HashSet<HashId> =
                     block_graph.nodes().map(|node| node.node_id).collect();
-                let visible_node_ranges = visible_ranges_by_node(&block_graph);
                 let query_window =
                     current_view_coordinate_window(&graph_controller).map(expand_query_window);
-                for entry in explorer.data.annotation_groups.iter() {
-                    if explorer_state.is_annotation_group_active(&entry.id) {
-                        let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
-                            conn,
-                            current_block_group: bg,
-                            entry,
-                            visible_ranges_by_node: &visible_node_ranges,
-                        }) {
-                            Ok(spans) => spans,
-                            Err(err) => {
-                                messages.push_warn(format!(
-                                    "Failed to load annotations for group {}: {err}",
-                                    entry.id
-                                ));
-                                Vec::new()
-                            }
-                        };
-                        if spans.is_empty() {
-                            continue;
-                        }
-                        annotation_group_tracks.insert(
-                            entry.id.clone(),
-                            AnnotationTrack::new(
-                                if entry.sample_name == bg.sample_name {
-                                    entry.name.clone()
-                                } else {
-                                    format!("{} ({})", entry.name, entry.sample_name)
-                                },
-                                spans,
-                            ),
-                        );
-                    }
-                }
                 for entry in explorer.data.annotation_files.iter() {
                     let id = entry.file_addition.id;
                     if !explorer_state.is_annotation_file_active(&id) {

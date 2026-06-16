@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet}, // HashMap used by GFF/BED parsers below
     error::Error,
     fs::File,
     io::{BufRead, BufReader, Cursor},
@@ -45,20 +45,21 @@ pub struct AnnotationGroupTrackRequest<'a> {
     pub conn: &'a GraphConnection,
     pub current_block_group: &'a BlockGroup,
     pub entry: &'a AnnotationGroupEntry,
-    pub visible_ranges_by_node: &'a HashMap<HashId, Vec<(i64, i64)>>,
+    /// Node IDs to restrict results to — typically the viewport's visible nodes.
+    pub node_ids: &'a HashSet<HashId>,
 }
 
 pub fn load_annotations_for_group(
     request: &AnnotationGroupTrackRequest<'_>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
     let _ = request.current_block_group;
-    load_group_annotations(request.conn, request.entry, request.visible_ranges_by_node)
+    load_group_annotations(request.conn, request.entry, request.node_ids)
 }
 
 fn load_group_annotations(
     conn: &GraphConnection,
     entry: &AnnotationGroupEntry,
-    visible_ranges_by_node: &HashMap<HashId, Vec<(i64, i64)>>,
+    node_ids: &HashSet<HashId>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
     let annotations = Annotation::query_by_group(conn, &entry.name)?;
 
@@ -67,18 +68,10 @@ fn load_group_annotations(
         .filter_map(|annotation| {
             let _ = Accession::get_by_id(conn, &annotation.accession_id)?;
             let edges = Accession::get_edges_by_id(conn, &annotation.accession_id);
-            let segments = accession_edges_to_segments(&edges)
+            let segments: Vec<_> = accession_edges_to_segments(&edges)
                 .into_iter()
-                .filter(|segment| {
-                    visible_ranges_by_node
-                        .get(&segment.node_id)
-                        .is_some_and(|ranges| {
-                            ranges
-                                .iter()
-                                .any(|(start, end)| segment.start < *end && *start < segment.end)
-                        })
-                })
-                .collect::<Vec<_>>();
+                .filter(|seg| node_ids.contains(&seg.node_id))
+                .collect();
             if segments.is_empty() {
                 None
             } else {
@@ -367,6 +360,17 @@ pub struct AnnotationFileTrackRequest<'a> {
     pub workspace: &'a Workspace,
     pub collection_name: &'a str,
     pub sample_name: &'a str,
+    // Used as the tabix reference/contig name. translate_gff/translate_bed re-project the file's
+    // reference-relative coordinates onto each sample's own current path
+    // (BlockGroup::get_current_path), so edits/indels within a lineage don't break the mapping.
+    // Matching purely by name is only ambiguous for unrelated samples that happen to share a
+    // contig name with no common ancestry (e.g. two independently-imported genomes both naming a
+    // contig "chr1"). File-based annotations are linear-space by nature, so the robust fix is to
+    // anchor a file to the node_id of its original reference sequence rather than to a name:
+    // node identity already survives the whole derivation lineage for free (copy_contents_from
+    // rebinds existing edges/nodes rather than duplicating them), so "is this node present in the
+    // current block group" answers applicability correctly without needing a sample_lineage walk
+    // or relying on lineage having been explicitly registered.
     pub block_group_name: Option<&'a str>,
     pub query_window: Option<(i64, i64)>,
     pub node_filter: &'a HashSet<HashId>,

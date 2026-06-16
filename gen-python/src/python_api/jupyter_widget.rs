@@ -319,15 +319,6 @@ impl PyGraphController {
             .collect()
     }
 
-    fn all_node_ranges(&self) -> HashMap<HashId, Vec<(i64, i64)>> {
-        self.controller
-            .graph()
-            .nodes()
-            .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
-            .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
-            .collect()
-    }
-
     fn load_group_as_track(
         &self,
         conn: &GraphConnection,
@@ -338,7 +329,7 @@ impl PyGraphController {
         ))?;
         let current_block_group = BlockGroup::get_by_id(conn, &block_group_id)
             .map_err(|_| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
-        let ranges = self.all_node_ranges();
+        let node_ids = self.all_node_ids();
         let entry = load_annotation_group_entries(conn, &current_block_group)
             .into_iter()
             .find(|entry| entry.name == group)
@@ -347,7 +338,7 @@ impl PyGraphController {
             conn,
             current_block_group: &current_block_group,
             entry: &entry,
-            visible_ranges_by_node: &ranges,
+            node_ids: &node_ids,
         })?;
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }

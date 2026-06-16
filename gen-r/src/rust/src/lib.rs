@@ -581,13 +581,12 @@ fn load_tracks_from_specs(
         return Vec::new();
     }
 
-    let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = controller
+    let node_filter: HashSet<HashId> = controller
         .graph()
         .nodes()
         .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
-        .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
+        .map(|n| n.node_id)
         .collect();
-    let node_filter: HashSet<HashId> = node_ranges.keys().copied().collect();
 
     let mut tracks = Vec::new();
     for spec in specs {
@@ -605,7 +604,7 @@ fn load_tracks_from_specs(
                         conn,
                         current_block_group: &bg,
                         entry: &entry,
-                        visible_ranges_by_node: &node_ranges,
+                        node_ids: &node_filter,
                     };
                     if let Ok(spans) = load_annotations_for_group(&request) {
                         tracks.push(AnnotationTrack::new(name, spans));
