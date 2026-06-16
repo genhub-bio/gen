@@ -572,8 +572,7 @@ where
                     let end = edit.end;
                     let region =
                         ResolvedGenRegion::from_path(conn, block_group.id, &path, start, end)?;
-                    let change_node_id = None;
-                    let change = match edit.edit_type {
+                    let (change, change_node_id) = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()
                                 .sequence(&edit.new_sequence)
@@ -592,39 +591,45 @@ where
                                     new_hash = &change_seq.hash,
                                 )),
                             )?;
+                            (
+                                BlockGroupChange {
+                                    region: region.clone(),
+                                    path_accession: None,
+                                    block: PathBlock {
+                                        node_id: change_node_id,
+                                        block_sequence: edit.new_sequence.clone(),
+                                        sequence_start: 0,
+                                        sequence_end: change_seq.length,
+                                        path_start: start,
+                                        path_end: end + change_seq.length,
+                                        strand: Strand::Forward,
+                                    },
+                                    chromosome_index: 1,
+                                    phased: 0,
+                                    preserve_edge: true,
+                                },
+                                Some(change_node_id),
+                            )
+                        }
+                        EditType::Deletion => (
                             BlockGroupChange {
-                                region: region.clone(),
+                                region,
                                 path_accession: None,
                                 block: PathBlock {
-                                    node_id: change_node_id,
-                                    block_sequence: edit.new_sequence.clone(),
+                                    node_id: wt_node_id,
+                                    block_sequence: "".to_string(),
                                     sequence_start: 0,
-                                    sequence_end: change_seq.length,
+                                    sequence_end: 0,
                                     path_start: start,
-                                    path_end: end + change_seq.length,
+                                    path_end: end,
                                     strand: Strand::Forward,
                                 },
                                 chromosome_index: 1,
                                 phased: 0,
                                 preserve_edge: true,
-                            }
-                        }
-                        EditType::Deletion => BlockGroupChange {
-                            region,
-                            path_accession: None,
-                            block: PathBlock {
-                                node_id: wt_node_id,
-                                block_sequence: "".to_string(),
-                                sequence_start: 0,
-                                sequence_end: 0,
-                                path_start: start,
-                                path_end: end,
-                                strand: Strand::Forward,
                             },
-                            chromosome_index: 1,
-                            phased: 0,
-                            preserve_edge: true,
-                        },
+                            None,
+                        ),
                     };
                     BlockGroup::insert_change(conn, &change).unwrap();
                     applied_changes.push((edit, change_node_id));
