@@ -221,6 +221,10 @@ impl PyRepository {
                         name: p.name.clone(),
                         sequence: p.sequence.clone(),
                         sequence_length: p.sequence_length,
+                        fasta_extra: None,
+                        metadata: p.metadata.clone(),
+                        annotation_start: p.annotation_start,
+                        annotation_end: p.annotation_end,
                     })
                     .collect()
             })

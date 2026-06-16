@@ -5,6 +5,15 @@ NULL
   if (is.null(x)) y else x
 }
 
+.gen_serialize_mcols <- function(xss) {
+  mc <- tryCatch(S4Vectors::mcols(xss), error = function(e) NULL)
+  if (is.null(mc) || ncol(mc) == 0L) return(NULL)
+  df <- as.data.frame(mc)
+  vapply(seq_len(nrow(df)), function(i) {
+    jsonlite::toJSON(df[i, , drop = FALSE], auto_unbox = TRUE)
+  }, character(1))
+}
+
 #' Construct a HashId
 #'
 #' Wraps a raw hash string as a typed \code{gen_hash_id} object used to
