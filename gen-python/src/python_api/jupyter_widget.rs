@@ -981,8 +981,7 @@ impl PyGraphController {
         self.navigate_to_span(&span);
     }
 
-    /// Highlight an `Annotation` on the graph as a nameless inline annotation,
-    /// so the locus is coloured without duplicating the track label.
+    /// Highlight an `Annotation` on the graph without a label.
     pub fn highlight_annotation_obj(
         &mut self,
         annotation: &PyAnnotation,
@@ -1081,7 +1080,7 @@ impl PyGraphController {
         }
     }
 
-    /// Clear all track annotations.
+    /// Clear all annotations from the graph.
     pub fn clear_all_annotations(&mut self) {
         let mut styles_to_clear: Vec<PathStyle> = Vec::new();
         self.overlays.retain(|o| {
@@ -1097,9 +1096,9 @@ impl PyGraphController {
         }
     }
 
-    /// Add inline annotations rendered directly on the graph canvas.
+    /// Add annotations rendered directly on the graph canvas.
     /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_inline_annotation(
+    pub fn add_annotation(
         &mut self,
         annotations: Vec<PyRef<PyAnnotation>>,
         track_name: Option<String>,
@@ -1142,8 +1141,8 @@ impl PyGraphController {
         }
     }
 
-    /// Return a JSON list of inline annotation names currently loaded.
-    pub fn get_inline_annotation_names(&self) -> PyResult<String> {
+    /// Return a JSON list of annotation names currently loaded.
+    pub fn get_annotation_names(&self) -> PyResult<String> {
         let mut seen = std::collections::HashSet::new();
         let names: Vec<&str> = self
             .overlays
@@ -1154,28 +1153,12 @@ impl PyGraphController {
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Remove all inline annotations whose track name matches `name`.
+    /// Remove all annotations whose track name matches `name`.
     /// If the same name was added more than once, all copies are removed.
-    pub fn remove_inline_annotation(&mut self, name: &str) {
+    pub fn remove_annotation(&mut self, name: &str) {
         let mut styles_to_clear: Vec<PathStyle> = Vec::new();
         self.overlays.retain(|o| {
             if o.track.as_deref() == Some(name) {
-                styles_to_clear.push(o.style);
-                false
-            } else {
-                true
-            }
-        });
-        for style in styles_to_clear {
-            self.controller.clear_highlight(&style);
-        }
-    }
-
-    /// Clear all inline annotations (named tracks only; direct highlights are unaffected).
-    pub fn clear_all_inline_annotations(&mut self) {
-        let mut styles_to_clear: Vec<PathStyle> = Vec::new();
-        self.overlays.retain(|o| {
-            if o.track.is_some() {
                 styles_to_clear.push(o.style);
                 false
             } else {

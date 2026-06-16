@@ -26,6 +26,15 @@ pub struct AnnotationTrack {
     pub annotations: Vec<AnnotationSpan>,
 }
 
+impl AnnotationTrack {
+    pub fn new(name: impl Into<String>, annotations: Vec<AnnotationSpan>) -> Self {
+        AnnotationTrack {
+            name: name.into(),
+            annotations,
+        }
+    }
+}
+
 pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> AnnotationSpan {
     let segments = locus
         .slices
@@ -68,15 +77,6 @@ pub fn graph_locus_from_annotation_span(
         })
         .collect();
     Some(GraphLocus { slices: slices? })
-}
-
-impl AnnotationTrack {
-    pub fn new(name: impl Into<String>, annotations: Vec<AnnotationSpan>) -> Self {
-        AnnotationTrack {
-            name: name.into(),
-            annotations,
-        }
-    }
 }
 
 /// Return `true` if every segment of `span` at `idx` is fully contained within

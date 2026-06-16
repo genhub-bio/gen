@@ -414,7 +414,7 @@ class GraphWidget(anywidget.AnyWidget):
         group : str, optional
             Annotation group name stored in the repository.
         name : str, optional
-            Track panel label.  Required when *annotations* is supplied.
+            Display label for this annotation track.  Required when *annotations* is supplied.
         from_sample : str, optional
             Sample whose coordinate space the file uses (file tracks only).
             Defaults to ``"reference"``.
@@ -468,26 +468,18 @@ class GraphWidget(anywidget.AnyWidget):
         return json.loads(self._controller.get_track_names())
 
     def remove_annotation_track(self, name: str) -> None:
-        """Remove an annotation track panel by name."""
+        """Remove an annotation track by name."""
         if self._frozen:
             return
         self._controller.remove_track(name)
         self._render()
 
     def clear_all_annotations(self) -> None:
-        """Clear all annotation track panels and inline annotations."""
+        """Clear all annotations from the graph."""
         if self._frozen:
             return
         self._controller.clear_all_annotations()
-        self._controller.clear_all_inline_annotations()
         self._render()
-
-    # ── Inline annotation API ─────────────────────────────────────────────────
-    #
-    # Inline annotations are rendered directly on the graph — each annotation
-    # is tinted on the nodes it covers and labelled below its bounding box.
-    # Use add_annotation_track() for grouped annotations in a separate aligned
-    # panel below the graph.
 
     def add_annotation(self, annotation) -> None:
         """Render an annotation inline on the graph canvas.
@@ -503,7 +495,7 @@ class GraphWidget(anywidget.AnyWidget):
         """
         if self._frozen:
             return
-        self._controller.add_inline_annotation([annotation], annotation.name)
+        self._controller.add_annotation([annotation], annotation.name)
         self._render()
 
     def add_annotation_group(self, annotations, group: str = "") -> None:
@@ -518,12 +510,12 @@ class GraphWidget(anywidget.AnyWidget):
         """
         if self._frozen:
             return
-        self._controller.add_inline_annotation(annotations, group)
+        self._controller.add_annotation(annotations, group)
         self._render()
 
-    def inline_annotations(self) -> list:
-        """Return list of inline annotation names currently displayed."""
-        return json.loads(self._controller.get_inline_annotation_names())
+    def annotations(self) -> list:
+        """Return list of annotation names currently displayed."""
+        return json.loads(self._controller.get_annotation_names())
 
     def list_annotations(self) -> list:
         """Return all loaded annotations (track and inline) as ``Annotation`` objects.
@@ -539,19 +531,12 @@ class GraphWidget(anywidget.AnyWidget):
         return self._controller.list_annotations()
 
     def remove_annotation(self, name: str) -> None:
-        """Remove all inline annotations with the given name.
+        """Remove all annotations with the given name.
 
         If ``add_annotation`` was called more than once with annotations
         sharing the same name, every copy is removed.
         """
         if self._frozen:
             return
-        self._controller.remove_inline_annotation(name)
-        self._render()
-
-    def clear_all_inline_annotations(self) -> None:
-        """Clear all inline annotations from the graph."""
-        if self._frozen:
-            return
-        self._controller.clear_all_inline_annotations()
+        self._controller.remove_annotation(name)
         self._render()
