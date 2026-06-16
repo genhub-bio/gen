@@ -8,6 +8,7 @@ use std::{
 use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
+    annotations::{FastaExtra, FastaModifier},
     db::GraphConnection,
     errors::{NodeError, PathError, SequenceError},
     node::Node,
@@ -24,6 +25,10 @@ pub struct SequencePart {
     pub name: String,
     pub sequence: String,
     pub sequence_length: i64,
+    pub fasta_extra: Option<FastaExtra>,
+    pub metadata: Option<String>,
+    pub annotation_start: Option<i64>,
+    pub annotation_end: Option<i64>,
 }
 
 #[derive(Error, Debug)]
@@ -50,6 +55,55 @@ pub enum CombinatorialLibraryCreationError {
     SequenceError(#[from] SequenceError),
 }
 
+const GEN_ANNOTATION_START: &str = "GEN_annotation_start";
+const GEN_ANNOTATION_END: &str = "GEN_annotation_end";
+
+struct ParsedFastaDescription {
+    extra: FastaExtra,
+    annotation_start: Option<i64>,
+    annotation_end: Option<i64>,
+}
+
+fn parse_fasta_description(desc: &[u8]) -> ParsedFastaDescription {
+    let raw = String::from_utf8_lossy(desc);
+    let description = Some(raw.to_string());
+    let mut modifiers = vec![];
+    let mut annotation_start: Option<i64> = None;
+    let mut annotation_end: Option<i64> = None;
+    let mut rest = raw.as_ref();
+    while let Some(open) = rest.find('[') {
+        rest = &rest[open + 1..];
+        if let Some(close) = rest.find(']') {
+            let token = &rest[..close];
+            if let Some(eq) = token.find('=') {
+                let key = token[..eq].trim();
+                let value = token[eq + 1..].trim();
+                if key == GEN_ANNOTATION_START {
+                    annotation_start = value.parse().ok();
+                } else if key == GEN_ANNOTATION_END {
+                    annotation_end = value.parse().ok();
+                } else {
+                    modifiers.push(FastaModifier {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+            }
+            rest = &rest[close + 1..];
+        } else {
+            break;
+        }
+    }
+    ParsedFastaDescription {
+        extra: FastaExtra {
+            description,
+            modifiers,
+        },
+        annotation_start,
+        annotation_end,
+    }
+}
+
 pub fn parse_library(
     parts_filename: &str,
     design_filename: &str,
@@ -65,12 +119,23 @@ pub fn parse_library(
         let sequence = str::from_utf8(record.sequence().as_ref())
             .map_err(|e| CombinatorialLibraryParseError::FastaParseFailed(e.to_string()))?;
         let name = String::from_utf8(record.name().to_vec()).unwrap();
+        let parsed = record
+            .description()
+            .map(|d| parse_fasta_description(d.as_ref()));
+        let (fasta_extra, annotation_start, annotation_end) = match parsed {
+            Some(p) => (Some(p.extra), p.annotation_start, p.annotation_end),
+            None => (None, None, None),
+        };
         sequence_parts_by_name.insert(
             name.clone(),
             SequencePart {
                 name: name.to_string(),
                 sequence: sequence.to_string(),
                 sequence_length: sequence.len() as i64,
+                fasta_extra,
+                metadata: None,
+                annotation_start,
+                annotation_end,
             },
         );
     }
@@ -126,7 +191,7 @@ pub fn create_library(
     library_name: &str,
     parts_list: Vec<Vec<SequencePart>>,
     create_block_group: bool,
-) -> Result<BlockGroupChunk, CombinatorialLibraryCreationError> {
+) -> Result<(BlockGroupChunk, Vec<(HashId, SequencePart)>), CombinatorialLibraryCreationError> {
     if parts_list.is_empty() {
         return Err(CombinatorialLibraryCreationError::NoParts(
             "No parts provided for library creation.".to_string(),
@@ -158,13 +223,14 @@ pub fn create_library(
 
     let mut part_nodes_list = vec![];
     let mut sequence_lengths_by_node_id = HashMap::new();
+    let mut part_nodes = vec![];
     if create_block_group {
         part_nodes_list.push(vec![PATH_START_NODE_ID]);
         sequence_lengths_by_node_id.insert(PATH_START_NODE_ID, 0);
     }
 
     for (index, parts) in cleaned_parts_list.iter().enumerate() {
-        let mut part_nodes = vec![];
+        let mut column_part_nodes = vec![];
         for part in parts {
             let part_hash = sequence_hashes_by_name.get(&part.name).ok_or_else(|| {
                 CombinatorialLibraryCreationError::CreationFailed(format!(
@@ -183,10 +249,11 @@ pub fn create_library(
                     sequence_hash = part_hash
                 )),
             )?;
-            part_nodes.push(part_node_id);
+            column_part_nodes.push(part_node_id);
             sequence_lengths_by_node_id.insert(part_node_id, part.sequence_length);
+            part_nodes.push((part_node_id, part.clone()));
         }
-        part_nodes_list.push(part_nodes);
+        part_nodes_list.push(column_part_nodes);
     }
 
     if create_block_group {
@@ -293,7 +360,7 @@ pub fn create_library(
         )?;
     }
 
-    Ok(result_block_group_chunk)
+    Ok((result_block_group_chunk, part_nodes))
 }
 
 #[cfg(test)]

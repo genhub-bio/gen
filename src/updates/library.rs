@@ -1,7 +1,7 @@
 use core::ops::Range;
-use std::str;
 
 use gen_models::{
+    annotations::AnnotationGroupSample,
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
@@ -24,6 +24,7 @@ use crate::{
         operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
         stitch,
     },
+    imports::library::create_part_annotations,
     updates::resolve_update_region,
 };
 
@@ -260,13 +261,18 @@ fn update_path_library(
         false,
     )?;
 
-    let library_block_group_chunk = create_library(
+    let (library_block_group_chunk, part_nodes) = create_library(
         conn,
         target_block_group.id,
         new_sample_name,
         parts_list,
         false,
     )?;
+
+    AnnotationGroupSample::create(conn, new_sample_name, new_sample_name)
+        .map_err(|e| UpdateWithLibraryError::BlockGroupCreationFailed(e.into()))?;
+    create_part_annotations(conn, target_block_group.id, new_sample_name, &part_nodes)
+        .map_err(UpdateWithLibraryError::BlockGroupCreationFailed)?;
 
     let mut block_group_chunks = vec![];
     let mut reference_block_group_chunks = vec![];
@@ -337,13 +343,19 @@ fn update_graph_native_library(
         .map_err(UpdateWithLibraryError::from)?;
     let start_positions = resolved.start_anchors.as_ref().unwrap();
     let end_positions = resolved.end_anchors.as_ref().unwrap();
-    let library_chunk = create_library(
+    let (library_chunk, part_nodes) = create_library(
         conn,
         target_block_group.id,
         new_sample_name,
         parts_list,
         false,
     )?;
+
+    AnnotationGroupSample::create(conn, new_sample_name, new_sample_name)
+        .map_err(|e| UpdateWithLibraryError::BlockGroupCreationFailed(e.into()))?;
+    create_part_annotations(conn, target_block_group.id, new_sample_name, &part_nodes)
+        .map_err(UpdateWithLibraryError::BlockGroupCreationFailed)?;
+
     let start_chunk = BlockGroupChunk {
         entry_node_points: graph_node_positions_to_points(start_positions),
         exit_node_points: graph_node_positions_to_points(start_positions),
