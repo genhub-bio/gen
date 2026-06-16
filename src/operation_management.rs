@@ -1279,7 +1279,7 @@ fn materialize_operation_file(
     file_addition: &ManifestOperationFileAddition,
     stored_asset_path: &FilePath,
 ) -> Result<(), RemoteOperationError> {
-    let operation_file_path = operation_file_destination(file_addition);
+    let operation_file_path = file_addition.file_path.clone();
     if operation_file_path == file_addition.file_addition.file_path()
         || !LocalAssetUri::is_asset_relative_path(
             workspace,
@@ -1312,22 +1312,6 @@ fn materialize_operation_file(
     })?;
 
     Ok(())
-}
-
-fn operation_file_destination(file_addition: &ManifestOperationFileAddition) -> String {
-    if file_addition.file_path != file_addition.file_addition.file_path() {
-        return file_addition.file_path.clone();
-    }
-
-    let asset_filename = FilePath::new(file_addition.file_addition.file_path())
-        .file_name()
-        .and_then(|filename| filename.to_str());
-    if !file_addition.filename.is_empty() && Some(file_addition.filename.as_str()) != asset_filename
-    {
-        return file_addition.filename.clone();
-    }
-
-    file_addition.file_path.clone()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2691,7 +2675,10 @@ mod tests {
             let branch = Branch::get_by_name(op_conn, "main").unwrap();
             pull_from_file_remote(&context, &remote_url, &branch).unwrap();
 
-            let local_file_path = local_workspace.repo_root().unwrap().join("remote_file.fa");
+            let local_file_path = local_workspace
+                .repo_root()
+                .unwrap()
+                .join("fastas/remote_file.fa");
             assert!(local_file_path.exists());
             assert_eq!(
                 fs::read(local_file_path).unwrap(),
@@ -2927,38 +2914,6 @@ mod tests {
             let matched = remote_asset_response_file(&files, &file_addition).unwrap();
 
             assert_eq!(matched.url, "https://example.com/asset");
-        }
-
-        #[test]
-        fn test_materialize_operation_file_uses_filename_for_legacy_asset_path() {
-            let context = setup_gen();
-            let workspace = context.workspace();
-            let checksum = HashId::convert_str("legacy-asset");
-            let asset_path = format!(".gen/assets/{checksum}.gbk");
-            let stored_asset_path = workspace.repo_root().unwrap().join(&asset_path);
-            fs::write(&stored_asset_path, b"legacy asset").unwrap();
-            let file_addition = ManifestOperationFileAddition {
-                file_addition: FileAddition {
-                    id: HashId::random_str(),
-                    asset_uri: LocalAssetUri::asset_uri(&asset_path),
-                    file_type: FileTypes::GenBank,
-                    checksum,
-                },
-                filename: "addgene-plasmid-122028-sequence-238860.gbk".to_string(),
-                file_path: asset_path,
-            };
-
-            materialize_operation_file(workspace, &file_addition, &stored_asset_path).unwrap();
-
-            let user_file_path = workspace
-                .repo_root()
-                .unwrap()
-                .join("addgene-plasmid-122028-sequence-238860.gbk");
-            assert_eq!(fs::read(user_file_path).unwrap(), b"legacy asset");
-            assert_eq!(
-                operation_file_destination(&file_addition),
-                "addgene-plasmid-122028-sequence-238860.gbk"
-            );
         }
     }
 }

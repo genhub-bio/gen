@@ -65,7 +65,7 @@ impl ManifestOperationFileAddition {
                         checksum: file.checksum,
                     };
                     Self {
-                        file_path: file_addition.file_path().to_string(),
+                        file_path: file.file_path,
                         file_addition,
                         filename: file.filename,
                     }
@@ -662,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn test_manifest_generator_uses_asset_path_for_operation_files() {
+    fn test_manifest_generator_preserves_operation_file_path() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -700,8 +700,8 @@ mod tests {
         let file = &manifest.operations[0].file_additions[0];
 
         assert_eq!(file.filename, "input.fa");
-        assert_eq!(file.file_path, file.file_addition.file_path());
-        assert!(file.file_path.starts_with(".gen/assets/"));
+        assert_eq!(file.file_path, "fastas/input.fa");
+        assert!(file.file_addition.file_path().starts_with(".gen/assets/"));
     }
 
     #[test]
