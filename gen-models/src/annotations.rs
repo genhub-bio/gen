@@ -385,7 +385,11 @@ impl Annotation {
     /// in `collection_name`, considering `sample_name` together with all of its
     /// ancestor samples. This mirrors how a block group inherits its parents'
     /// annotations. Results are de-duplicated by annotation id and ordered from
-    /// the closest sample in the lineage outward.
+    /// the closest sample in the lineage outward. Two annotations that share a
+    /// name but come from different samples (e.g. a parent and child both
+    /// annotating "mreB") are both included, since each is a distinct
+    /// annotation record; unlike [`RegionResolver::resolve`], this is a listing
+    /// operation and does not need to disambiguate by name.
     ///
     /// # Arguments
     ///
@@ -397,7 +401,7 @@ impl Annotation {
     /// # Errors
     ///
     /// Returns [`AnnotationError::DatabaseError`] if the query fails.
-    pub fn list_in_block_group_lineage(
+    pub fn query_with_lineage(
         conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
@@ -1210,7 +1214,7 @@ mod tests {
         }
 
         #[test]
-        fn lists_annotations_on_block_group() {
+        fn test_lists_annotations_on_block_group() {
             let conn = get_connection(None).unwrap();
             let (block_group_id, path) = setup_block_group(&conn);
             let mut cache = PathCache::new(&conn);
@@ -1220,14 +1224,13 @@ mod tests {
             let annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
 
-            let listed =
-                Annotation::list_in_block_group_lineage(&conn, "test", "test", "chr1").unwrap();
+            let listed = Annotation::query_with_lineage(&conn, "test", "test", "chr1").unwrap();
 
             assert_eq!(listed, vec![annotation]);
         }
 
         #[test]
-        fn includes_parent_annotations_via_lineage() {
+        fn test_includes_parent_annotations_via_lineage() {
             let conn = get_connection(None).unwrap();
             let (parent_block_group_id, parent_path) = setup_block_group(&conn);
             let mut cache = PathCache::new(&conn);
@@ -1258,8 +1261,7 @@ mod tests {
             );
             SampleLineage::create(&conn, "test", "child").unwrap();
 
-            let listed =
-                Annotation::list_in_block_group_lineage(&conn, "test", "child", "chr1").unwrap();
+            let listed = Annotation::query_with_lineage(&conn, "test", "child", "chr1").unwrap();
 
             let ids: HashSet<HashId> = listed.iter().map(|a| a.id).collect();
             assert_eq!(
@@ -1269,7 +1271,7 @@ mod tests {
         }
 
         #[test]
-        fn excludes_annotations_on_other_block_group_names() {
+        fn test_excludes_annotations_on_other_block_group_names() {
             let conn = get_connection(None).unwrap();
             let (block_group_id, path) = setup_block_group(&conn);
             let mut cache = PathCache::new(&conn);
@@ -1291,14 +1293,13 @@ mod tests {
                 "ftsZ",
             );
 
-            let listed =
-                Annotation::list_in_block_group_lineage(&conn, "test", "test", "chr1").unwrap();
+            let listed = Annotation::query_with_lineage(&conn, "test", "test", "chr1").unwrap();
 
             assert_eq!(listed, vec![chr1_annotation]);
         }
 
         #[test]
-        fn excludes_annotations_from_samples_outside_the_lineage() {
+        fn test_excludes_annotations_from_samples_outside_the_lineage() {
             let conn = get_connection(None).unwrap();
             let (block_group_id, path) = setup_block_group(&conn);
             let mut cache = PathCache::new(&conn);
@@ -1320,10 +1321,49 @@ mod tests {
                 "ftsZ",
             );
 
-            let listed =
-                Annotation::list_in_block_group_lineage(&conn, "test", "test", "chr1").unwrap();
+            let listed = Annotation::query_with_lineage(&conn, "test", "test", "chr1").unwrap();
 
             assert_eq!(listed, vec![test_annotation]);
+        }
+
+        #[test]
+        fn test_keeps_both_when_parent_and_child_share_an_annotation_name() {
+            let conn = get_connection(None).unwrap();
+            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let mut cache = PathCache::new(&conn);
+            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
+                .unwrap();
+            let parent_accession = BlockGroup::add_accession(
+                &conn,
+                &parent_path,
+                "parent-accession",
+                0,
+                5,
+                &mut cache,
+            )
+            .unwrap();
+            let parent_annotation =
+                Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
+                    .unwrap();
+
+            let child_annotation = annotate_block_group(
+                &conn,
+                &parent_path,
+                &mut cache,
+                "test",
+                "child",
+                "chr1",
+                "child-accession",
+                "mreB",
+            );
+            SampleLineage::create(&conn, "test", "child").unwrap();
+
+            let listed = Annotation::query_with_lineage(&conn, "test", "child", "chr1").unwrap();
+
+            // Same name, distinct annotation ids: listing keeps both rather than
+            // collapsing by name. `resolve` would pick only the child's here
+            // since it's the closer match (depth 0 vs. depth 1) and error on tie.
+            assert_eq!(listed, vec![child_annotation, parent_annotation]);
         }
     }
 
