@@ -20,15 +20,8 @@ use crate::{
 const ORIGIN: &str = "origin";
 
 pub fn execute(url: &str, workspace: &Workspace) -> Result<(), Box<dyn std::error::Error>> {
-    execute_in_parent(url, workspace)
-}
-
-fn execute_in_parent(
-    url: &str,
-    parent_workspace: &Workspace,
-) -> Result<(), Box<dyn std::error::Error>> {
     let repo_name = infer_repo_name(url)?;
-    let repo_path = parent_workspace.base_dir().join(&repo_name);
+    let repo_path = workspace.base_dir().join(&repo_name);
 
     create_clone_directory(&repo_path)?;
 
@@ -197,12 +190,12 @@ mod tests {
             remote_context.workspace().base_dir().to_string_lossy()
         );
         let clone_parent_workspace = Workspace::new(clone_parent.path());
-        execute_in_parent(&remote_url, &clone_parent_workspace).unwrap();
+        execute(&remote_url, &clone_parent_workspace).unwrap();
 
         let cloned_repo_path = clone_parent
             .path()
             .join(remote_context.workspace().base_dir().file_name().unwrap());
-        let cloned_file_path = cloned_repo_path.join("clone_file.fa");
+        let cloned_file_path = cloned_repo_path.join("fastas/clone_file.fa");
         assert!(cloned_file_path.exists());
         assert_eq!(
             fs::read(cloned_file_path).unwrap(),

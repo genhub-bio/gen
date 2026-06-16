@@ -157,13 +157,15 @@ impl Operation {
     }
 
     pub fn add_file(
-        _workspace: &Workspace,
+        workspace: &Workspace,
         conn: &OperationsConnection,
         operation_hash: &HashId,
         file_addition: &FileAddition,
         filename: &str,
         file_path: &str,
     ) -> Result<(), FileAdditionError> {
+        let file_path =
+            OperationFile::storage_file_path(workspace, file_path, &file_addition.checksum)?;
         let query = "INSERT INTO operation_files (operation_hash, file_addition_id, filename, file_path) VALUES (?1, ?2, ?3, ?4)";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![
