@@ -163,6 +163,8 @@ impl<'a> Capnp<'a> for AccessionNode {
     }
 }
 
+/// AccessionNodeData is a non-database form of AccessionNode. It allows callers to construct
+/// an AccessionNode without having to calculate the id.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AccessionNodeData {
     pub accession_id: HashId,
@@ -773,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn test_accession_blocks_are_direct_node_slices() {
+    fn test_accession_node_to_accession_blocks_conversion() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let accession = Accession::create(conn, "test", &block_group_id, None).unwrap();
@@ -841,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_accessions_groups_nodes_by_accession() {
+    fn test_query_accessions() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let accession_1 = Accession::create(conn, "test-1", &block_group_id, None).unwrap();
@@ -895,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_from_edges_persists_accession_nodes() {
+    fn test_create_from_edges() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let path_edges = vec![

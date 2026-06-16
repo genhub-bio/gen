@@ -678,8 +678,7 @@ impl BlockGroup {
     ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
-        let mut new_accession_path_edges =
-            HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
+        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
         let mut local_tree_map = HashMap::new();
         let tree_map = match tree_map {
             Some(tree_map) => tree_map,
@@ -704,7 +703,7 @@ impl BlockGroup {
                 .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
                 .or_insert_with(|| new_augmented_edges.clone());
             if let Some(accession) = &change.path_accession {
-                new_accession_path_edges
+                new_accession_edges
                     .entry((change.region.block_group.id, accession.clone()))
                     .and_modify(|new_edge_data: &mut Vec<AugmentedEdgeData>| {
                         new_edge_data.extend(new_augmented_edges.clone())
@@ -715,7 +714,7 @@ impl BlockGroup {
         Self::persist_insert_changes(
             conn,
             new_augmented_edges_by_block_group,
-            new_accession_path_edges,
+            new_accession_edges,
         )
     }
 
@@ -727,9 +726,9 @@ impl BlockGroup {
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
             .insert(change.region.block_group.id, new_augmented_edges.clone());
-        let mut new_accession_path_edges = HashMap::new();
+        let mut new_accession_edges = HashMap::new();
         if let Some(accession) = &change.path_accession {
-            new_accession_path_edges.insert(
+            new_accession_edges.insert(
                 (change.region.block_group.id, accession.clone()),
                 new_augmented_edges,
             );
@@ -737,14 +736,14 @@ impl BlockGroup {
         Self::persist_insert_changes(
             conn,
             new_augmented_edges_by_block_group,
-            new_accession_path_edges,
+            new_accession_edges,
         )
     }
 
     fn persist_insert_changes(
         conn: &GraphConnection,
         new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
-        new_accession_path_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
+        new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
     ) -> Result<(), BlockGroupError> {
         let mut edge_data_map = HashMap::new();
 
@@ -770,7 +769,7 @@ impl BlockGroup {
             BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
         }
 
-        for ((block_group_id, accession_name), path_edges) in new_accession_path_edges {
+        for ((block_group_id, accession_name), path_edges) in new_accession_edges {
             match Accession::get(
                 conn,
                 "select * from accessions where name = ?1 AND block_group_id = ?2",

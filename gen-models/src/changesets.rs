@@ -1587,10 +1587,9 @@ mod tests {
         assert_eq!(dependencies.samples[0].name, "sample-1");
         assert_eq!(dependencies.accessions.len(), 1);
         assert_eq!(dependencies.accessions[0].id, accession.id);
-        assert_eq!(
-            dependencies.accession_nodes,
-            Accession::get_nodes_by_id(conn, &accession.id)
-        );
+        let dep_accession_nodes = Accession::get_nodes_by_id(conn, &accession.id);
+        assert!(!dep_accession_nodes.is_empty());
+        assert_eq!(dependencies.accession_nodes, dep_accession_nodes);
     }
 
     #[test]
