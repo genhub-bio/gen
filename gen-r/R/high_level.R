@@ -123,8 +123,7 @@ resolve_granges_columns <- function(parts_list, seq_containers) {
 #'     \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
 #'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
 #'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
-#'     \item{\code{clear_tracks()}}{Remove all annotation track panels. Returns self invisibly.}
-#'     \item{\code{list_annotations()}}{Return a list of annotation records from the database. Each record has \code{name} and \code{locus} fields.}
+#'     \item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{segments}, \code{length}, and \code{locus} fields.}
 #'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 #'   }
 #' @export
@@ -135,7 +134,7 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
   ctrl$detail <- detail
   ctrl$ops <- character()
   ctrl$track_specs <- tryCatch({
-    group_names <- ctrl$repo$get_annotation_group_names(ctrl$sequence_graph_id)
+    group_names <- ctrl$repo$auto_load_annotation_groups(ctrl$sequence_graph_id)
     lapply(group_names, function(n) list(type = "group", name = n))
   }, error = function(e) list())
   ctrl$rows <- rows %||% 24L
@@ -163,10 +162,6 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
     invisible(ctrl)
   }
 
-  ctrl$clear_tracks <- function() {
-    ctrl$track_specs <- list()
-    invisible(ctrl)
-  }
 
   ctrl$zoom_in <- function() {
     ctrl$ops <- c(ctrl$ops, "zi")
@@ -558,7 +553,7 @@ Repository <- function(path = NULL) {
   repo$render_frame   <- function(sg_id, detail, cols, rows, ops, tracks_json) inner$render_frame(sg_id, detail, cols, rows, ops, tracks_json)
   repo$handle_click   <- function(sg_id, detail, ops, col, row) inner$handle_click(sg_id, detail, ops, col, row)
   repo$list_annotations           <- function(sg_id) inner$list_annotations(sg_id)
-  repo$get_annotation_group_names <- function(sg_id) inner$get_annotation_group_names(sg_id)
+  repo$auto_load_annotation_groups <- function(sg_id) inner$auto_load_annotation_groups(sg_id)
   repo$get_node_sequence          <- function(node_id, sequence_start, sequence_end) inner$get_node_sequence(node_id, as.integer(sequence_start), as.integer(sequence_end))
 
   repo$import_fasta           <- function(filename, sample = "sample", shallow = FALSE, collection = NULL) inner$import_fasta(filename, sample, isTRUE(shallow), collection)

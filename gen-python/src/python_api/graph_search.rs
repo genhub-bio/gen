@@ -1,7 +1,4 @@
-use r#gen::{
-    graphs::graph_search::GraphPos,
-    views::annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
-};
+use r#gen::graphs::graph_search::GraphPos;
 use gen_core::Strand;
 use gen_models::locus::GraphLocus;
 use pyo3::prelude::*;
@@ -205,69 +202,6 @@ impl PyGraphLocus {
             hash = hash.wrapping_mul(31).wrapping_add(s.start as isize);
             hash = hash.wrapping_mul(31).wrapping_add(s.end as isize);
             hash = hash.wrapping_mul(31).wrapping_add(s.strand as isize);
-        }
-        hash
-    }
-}
-
-/// A named annotation in graph space, built from one or more `Locus` objects.
-///
-/// Create with ``Annotation(locus, name)`` for a single hit.
-/// Pass a list of ``Annotation`` objects to ``widget.add_annotation_track()``.
-#[pyclass(name = "Annotation")]
-#[derive(Clone)]
-pub struct PyAnnotation {
-    pub inner: AnnotationSpan,
-    pub(crate) locus: GraphLocus,
-}
-
-#[pymethods]
-impl PyAnnotation {
-    #[new]
-    fn new(locus: PyRef<PyGraphLocus>, name: &str) -> Self {
-        PyAnnotation {
-            inner: annotation_span_from_graph_locus(&locus.inner, name),
-            locus: locus.inner.clone(),
-        }
-    }
-
-    /// The graph-space locus covered by this annotation.
-    ///
-    /// Provides ``.start()`` / ``.end()`` (``Position``) and ``.strand``.
-    #[getter]
-    fn locus(&self) -> PyGraphLocus {
-        PyGraphLocus::from_locus(self.locus.clone())
-    }
-
-    #[getter]
-    fn name(&self) -> &str {
-        &self.inner.name
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "Annotation(name={:?}, segments={})",
-            self.inner.name,
-            self.inner.segments.len()
-        )
-    }
-
-    fn __str__(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    fn __hash__(&self) -> isize {
-        let mut hash: isize = 0;
-        for &b in &self.inner.id.0 {
-            hash = hash.wrapping_mul(31).wrapping_add(b as isize);
-        }
-        for seg in &self.inner.segments {
-            for &b in &seg.node_id.0 {
-                hash = hash.wrapping_mul(31).wrapping_add(b as isize);
-            }
-            hash = hash.wrapping_mul(31).wrapping_add(seg.start as isize);
-            hash = hash.wrapping_mul(31).wrapping_add(seg.end as isize);
-            hash = hash.wrapping_mul(31).wrapping_add(seg.strand as isize);
         }
         hash
     }
