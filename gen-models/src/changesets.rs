@@ -1003,6 +1003,8 @@ pub fn apply_changeset(
     Ok(())
 }
 
+/// AccessionNodes in changeset and dependencies are a single vec of accessionnodes. This groups
+/// them by accession_id
 fn accession_nodes_by_accession_id(
     nodes: &[AccessionNode],
 ) -> HashMap<HashId, Vec<&AccessionNode>> {

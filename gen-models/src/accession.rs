@@ -186,14 +186,6 @@ pub struct AccessionNodeData {
     pub index_in_path: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NewAccession {
-    pub name: String,
-    pub block_group_id: HashId,
-    pub parent_accession_id: Option<HashId>,
-    pub spans: Vec<AccessionSpan>,
-}
-
 /// AccessionSpan is similar to AnnotationSegment in shape, but its primary use is
 /// for creating AccessionNodes
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,6 +234,14 @@ impl From<AccessionNodeData> for AccessionNode {
             index_in_path: item.index_in_path,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewAccession {
+    pub name: String,
+    pub block_group_id: HashId,
+    pub parent_accession_id: Option<HashId>,
+    pub spans: Vec<AccessionSpan>,
 }
 
 impl Accession {
@@ -476,6 +476,11 @@ impl Accession {
 }
 
 impl AccessionSpan {
+    /// Given an intervaltree, create AccessionSpans on the provided range positions.
+    /// For example:
+    /// from_intervaltree_ranges(tree, [(1..3), (5..10)])
+    /// would create 2 AccessionSpans corresponding to the Nodes and positions in the
+    /// input ranges.
     pub fn from_intervaltree_ranges(
         tree: &IntervalTree<i64, NodeIntervalBlock>,
         ranges: &[StdRange<i64>],
@@ -484,8 +489,8 @@ impl AccessionSpan {
         let mut spans = Vec::new();
         for range in ranges {
             if range.start > range.end {
-                // TODO: Resolve circularity from block group metadata and split wrap-around
-                // ranges into start..length plus 0..end when the block group is circular.
+                // TODO: When circular stuff is better supported, this should not be an error. We should
+                // check if the blockgroup is circular and wrap around.
                 return Err(AccessionError::InvalidRange {
                     start: range.start,
                     end: range.end,
@@ -522,6 +527,8 @@ impl AccessionSpan {
         Ok(spans)
     }
 
+    /// convert a ResolvedGenRegion to an AccessionSpan. If no sub-region is selected,
+    /// the entire region is used.
     pub fn from_resolved_region(
         conn: &GraphConnection,
         region: &ResolvedGenRegion,
