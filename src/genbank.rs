@@ -8,7 +8,7 @@ use gen_core::Strand;
 use gen_models::{
     annotations::{AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier},
     errors::{
-        AccessionError, AccessionPathError, AnnotationError, BlockGroupError, CollectionError,
+        AccessionError, AccessionNodeError, AnnotationError, BlockGroupError, CollectionError,
         EdgeError, NodeError, OperationError, PathError, SampleError, SequenceError,
     },
 };
@@ -47,8 +47,8 @@ pub enum GenBankError {
     PathError(#[from] PathError),
     #[error("Accession creation error: {0}")]
     AccessionError(#[from] AccessionError),
-    #[error("Accession path creation error: {0}")]
-    AccessionPathError(#[from] AccessionPathError),
+    #[error("Accession node creation error: {0}")]
+    AccessionNodeError(#[from] AccessionNodeError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    accession::{Accession, AccessionEdge},
+    accession::{Accession, AccessionNode},
     block_group::BlockGroup,
     changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
     collection::Collection,
@@ -45,7 +45,7 @@ pub fn end_operation(
     let mut output = Vec::new();
     session.changeset_strm(&mut output).unwrap();
 
-    let (changeset_models, dependencies) = process_changesetiter(conn, &output);
+    let (changeset_models, dependencies) = process_changesetiter(conn, &output)?;
 
     let hash = if let Some(hash) = force_hash.into() {
         hash
@@ -150,8 +150,7 @@ pub fn attach_session(session: &mut session::Session) {
         "path_edges",
         "block_group_edges",
         "accessions",
-        "accession_edges",
-        "accession_paths",
+        "accession_nodes",
         "annotation_groups",
         "annotations",
         "annotation_group_samples",
@@ -171,7 +170,7 @@ pub struct DependencyModels {
     pub edges: Vec<Edge>,
     pub paths: Vec<Path>,
     pub accessions: Vec<Accession>,
-    pub accession_edges: Vec<AccessionEdge>,
+    pub accession_nodes: Vec<AccessionNode>,
 }
 
 impl<'a> Capnp<'a> for DependencyModels {
@@ -243,13 +242,12 @@ impl<'a> Capnp<'a> for DependencyModels {
             accession.write_capnp(&mut accession_builder);
         }
 
-        // Write accession edges (note: field name is accessionEdges in capnp schema)
-        let mut accession_edges_builder = builder
+        let mut accession_nodes_builder = builder
             .reborrow()
-            .init_accession_edges(self.accession_edges.len() as u32);
-        for (i, accession_edge) in self.accession_edges.iter().enumerate() {
-            let mut accession_edge_builder = accession_edges_builder.reborrow().get(i as u32);
-            accession_edge.write_capnp(&mut accession_edge_builder);
+            .init_accession_nodes(self.accession_nodes.len() as u32);
+        for (i, accession_node) in self.accession_nodes.iter().enumerate() {
+            let mut accession_node_builder = accession_nodes_builder.reborrow().get(i as u32);
+            accession_node.write_capnp(&mut accession_node_builder);
         }
     }
 
@@ -310,11 +308,10 @@ impl<'a> Capnp<'a> for DependencyModels {
             accessions.push(Accession::read_capnp(accession_reader));
         }
 
-        // Read accession edges
-        let accession_edges_reader = reader.get_accession_edges().unwrap();
-        let mut accession_edges = Vec::new();
-        for accession_edge_reader in accession_edges_reader.iter() {
-            accession_edges.push(AccessionEdge::read_capnp(accession_edge_reader));
+        let accession_nodes_reader = reader.get_accession_nodes().unwrap();
+        let mut accession_nodes = Vec::new();
+        for accession_node_reader in accession_nodes_reader.iter() {
+            accession_nodes.push(AccessionNode::read_capnp(accession_node_reader));
         }
 
         DependencyModels {
@@ -326,7 +323,7 @@ impl<'a> Capnp<'a> for DependencyModels {
             edges,
             paths,
             accessions,
-            accession_edges,
+            accession_nodes,
         }
     }
 }
@@ -397,15 +394,14 @@ mod tests {
                 block_group_id: HashId::pad_str(1),
                 parent_accession_id: None,
             }],
-            accession_edges: vec![AccessionEdge {
+            accession_nodes: vec![AccessionNode {
                 id: HashId::pad_str(1),
-                source_node_id: HashId::convert_str("1"),
-                source_coordinate: 0,
-                source_strand: Strand::Forward,
-                target_node_id: HashId::convert_str("2"),
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-                chromosome_index: 0,
+                accession_id: HashId::pad_str(1),
+                node_id: HashId::convert_str("1"),
+                sequence_start: 0,
+                sequence_end: 2,
+                strand: Strand::Forward,
+                index_in_path: 0,
             }],
         };
 

@@ -5,7 +5,7 @@ use gen_core::{
     path::PathBlock,
     range::{OrderedMerge, Range, merge_ordered_items},
 };
-use gen_models::accession::AccessionEdge;
+use gen_models::accession::AccessionNode;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationSegment {
@@ -27,50 +27,17 @@ impl OrderedMerge for AnnotationSegment {
     }
 }
 
-pub fn accession_edges_to_segments(edges: &[AccessionEdge]) -> Vec<AnnotationSegment> {
-    let mut segments = Vec::new();
-    let mut current_node = None;
-    let mut current_start = None;
-    let mut current_strand = None;
-
-    for edge in edges {
-        if edge.source_coordinate < 0 {
-            current_node = Some(edge.target_node_id);
-            current_start = Some(edge.target_coordinate);
-            current_strand = Some(edge.target_strand);
-            continue;
+impl From<&AccessionNode> for AnnotationSegment {
+    fn from(node: &AccessionNode) -> Self {
+        AnnotationSegment {
+            node_id: node.node_id,
+            range: Range {
+                start: node.sequence_start,
+                end: node.sequence_end,
+            },
+            strand: node.strand,
         }
-
-        if let (Some(node_id), Some(start), Some(strand)) =
-            (current_node, current_start, current_strand)
-        {
-            let (segment_start, segment_end) = if start <= edge.source_coordinate {
-                (start, edge.source_coordinate)
-            } else {
-                (edge.source_coordinate, start)
-            };
-            if segment_end > segment_start {
-                segments.push(AnnotationSegment {
-                    node_id,
-                    range: Range {
-                        start: segment_start,
-                        end: segment_end,
-                    },
-                    strand,
-                });
-            }
-        }
-
-        if edge.target_coordinate < 0 {
-            break;
-        }
-
-        current_node = Some(edge.target_node_id);
-        current_start = Some(edge.target_coordinate);
-        current_strand = Some(edge.target_strand);
     }
-
-    segments
 }
 
 pub fn project_annotation_segments(
