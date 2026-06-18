@@ -37,9 +37,10 @@ const VERT_MITO_TABLE: [u8; 64] =
 const MYCOPLASMA_TABLE: [u8; 64] =
     build_table(b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG");
 
-// NCBI table 5 – Invertebrate Mitochondrial
+// NCBI table 5 – Invertebrate Mitochondrial (AAA -> Lys, AGA/AGG -> Ser)
+// https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi
 const INVERT_MITO_TABLE: [u8; 64] =
-    build_table(b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNNKSSRRVVVVAAAADDEEGGGG");
+    build_table(b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG");
 
 // NCBI table 6 – Ciliate Nuclear (TAA/TAG → Gln)
 const CILIATE_TABLE: [u8; 64] =
@@ -1248,6 +1249,34 @@ mod tests {
     fn table6_taa_is_gln() {
         let table = CodonTable::ncbi(6).unwrap();
         assert_eq!(table.translate_codon(b"TAA"), b'Q');
+    }
+
+    #[test]
+    fn all_organism_tables_translate_correctly() {
+        // Controls: ATG (Met) and TTT (Phe) never change across tables.
+        // Variable codons: TGA, ATA, AGA, AGG, TAA, TAG, AAA each get reassigned
+        // in at least one table per the NCBI reference
+        // (https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi).
+        let dna = b"ATGTTTTGAATAAGAAGGTAATAGAAA";
+        let codons: Vec<&[u8]> = dna.chunks(3).collect();
+
+        let expected: [(u8, &str); 6] = [
+            (1, "MF*IRR**K"),  // Standard
+            (2, "MFWM****K"),  // Vertebrate Mitochondrial
+            (4, "MFWIRR**K"),  // Mycoplasma/Spiroplasma
+            (5, "MFWMSS**K"),  // Invertebrate Mitochondrial
+            (6, "MF*IRRQQK"),  // Ciliate Nuclear
+            (11, "MF*IRR**K"), // Bacterial/Archaeal/Plant Plastid
+        ];
+
+        for (id, expected_protein) in expected {
+            let table = CodonTable::ncbi(id).unwrap();
+            let protein: String = codons
+                .iter()
+                .map(|codon| table.translate_codon(codon) as char)
+                .collect();
+            assert_eq!(protein, expected_protein, "mismatch for NCBI table {id}");
+        }
     }
 
     #[test]
