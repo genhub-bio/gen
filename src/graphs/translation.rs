@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal,
+    range::Range,
 };
 use gen_graph::{GraphNode, all_intermediate_edges};
 use gen_models::{
@@ -296,8 +297,10 @@ fn codon_walk(
 
     if pending.is_empty() {
         // At a codon boundary entering `node`: frame 0 for this node on this path.
-        if let Some(&pid) = ctx.protein_node_ids.get(&(node, 0)) {
-            bg_edges.push(make_edge(conn, bg_id, from.id, from.coord, pid, 0, ci)?);
+        if let Some(&protein_id) = ctx.protein_node_ids.get(&(node, 0)) {
+            bg_edges.push(make_edge(
+                conn, bg_id, from.id, from.coord, protein_id, 0, ci,
+            )?);
             return Ok(());
         }
         // No complete codon starts here (node shorter than a codon): consume it and
@@ -362,8 +365,8 @@ fn codon_walk(
     };
     // After the codon, `node`'s entry frame on this path equals the bytes carried in.
     let anchor_frame = pending.len() as u8;
-    if let Some(&pid) = ctx.protein_node_ids.get(&(node, anchor_frame)) {
-        bg_edges.push(make_edge(conn, bg_id, junction_id, 1, pid, 0, ci)?);
+    if let Some(&protein_id) = ctx.protein_node_ids.get(&(node, anchor_frame)) {
+        bg_edges.push(make_edge(conn, bg_id, junction_id, 1, protein_id, 0, ci)?);
         return Ok(());
     }
 
@@ -382,19 +385,19 @@ fn codon_walk(
 fn make_edge(
     conn: &GraphConnection,
     bg_id: &HashId,
-    src: HashId,
-    src_coord: i64,
-    tgt: HashId,
-    tgt_coord: i64,
+    source: HashId,
+    source_coord: i64,
+    target: HashId,
+    target_coord: i64,
     chromosome_index: i64,
 ) -> Result<BlockGroupEdgeData, TranslationError> {
     let edge = Edge::create(
         conn,
-        src,
-        src_coord,
+        source,
+        source_coord,
         Strand::Forward,
-        tgt,
-        tgt_coord,
+        target,
+        target_coord,
         Strand::Forward,
     )
     .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
@@ -428,10 +431,6 @@ struct TranslationSubgraph {
     edge_chromosome_indices: HashMap<(HashId, HashId), Vec<i64>>,
     entry_nodes: Vec<HashId>,
     exit_nodes: Vec<HashId>,
-}
-
-fn is_terminal(node_id: HashId) -> bool {
-    node_id == PATH_START_NODE_ID || node_id == PATH_END_NODE_ID
 }
 
 /// Translate the full block group: the whole sub-DAG between the graph start and
@@ -846,6 +845,7 @@ fn translate_core(
         exit_nodes,
     } = subgraph;
 
+    // Step 1: fetch the DNA sequence for every node in the subgraph (dna_by_node).
     // Collect real node IDs needed for sequence fetch.
     let real_node_ids: Vec<HashId> = {
         let mut seen = HashSet::new();
@@ -870,9 +870,9 @@ fn translate_core(
         dna_by_node.insert(vid, slice);
     }
 
-    // Reverse strand: rev-comp sequences and flip graph edges; swap entry/exit.
-    // Also reverse the direction of keys in edge_chromosome_indices to match the
-    // flipped subgraph.
+    // Step 2: handle reverse-strand orientation. Rev-comp sequences and flip graph
+    // edges; swap entry/exit. Also reverse the direction of keys in
+    // edge_chromosome_indices to match the flipped subgraph.
     let (subgraph, dna_by_node, entry_nodes, exit_nodes, edge_chromosome_indices) =
         if strand == Strand::Reverse {
             let rev_dna: HashMap<HashId, String> = dna_by_node
@@ -978,7 +978,12 @@ fn translate_core(
         }
     }
 
-    // Step 5 & 6: create protein BlockGroup and persist nodes/edges
+    // Create the protein BlockGroup that steps 5 and 6 will populate.
+    //
+    // Deliberately not registered as a SampleLineage child of the DNA sample:
+    // that table backs annotation-name resolution across a sample's ancestors
+    // (see Annotation::resolve), and the protein/DNA relationship isn't an
+    // ancestry relationship in that sense.
     Sample::get_or_create(
         conn,
         NewSample {
@@ -1030,10 +1035,11 @@ fn translate_core(
         }
     }
 
-    // Anchor protein nodes: one per (dna_node, entry_frame) that contains at least
-    // one complete codon. Nodes with no complete codon contribute only to junctions
-    // and get no anchor. Merkle hashing collapses synonymous variants that share
-    // both predecessor protein hashes and amino-acid sequence.
+    // Step 5: create protein node IDs via Merkle-chain hashing (protein_node_ids).
+    // One anchor per (dna_node, entry_frame) that contains at least one complete
+    // codon. Nodes with no complete codon contribute only to junctions and get no
+    // anchor. Merkle hashing collapses synonymous variants that share both
+    // predecessor protein hashes and amino-acid sequence.
     let mut protein_node_ids: HashMap<(HashId, u8), HashId> = HashMap::new();
     let mut protein_merkle_hashes: HashMap<(HashId, u8), HashId> = HashMap::new();
     let mut protein_aa_len: HashMap<(HashId, u8), i64> = HashMap::new();
@@ -1106,8 +1112,16 @@ fn translate_core(
             .map(|fs| fs.iter().copied().collect())
             .unwrap_or_default();
         for frame in frames {
-            if let Some(&pid) = protein_node_ids.get(&(entry_node, frame)) {
-                bg_edges.push(make_edge(conn, &bg_id, PATH_START_NODE_ID, 0, pid, 0, 0)?);
+            if let Some(&protein_id) = protein_node_ids.get(&(entry_node, frame)) {
+                bg_edges.push(make_edge(
+                    conn,
+                    &bg_id,
+                    PATH_START_NODE_ID,
+                    0,
+                    protein_id,
+                    0,
+                    0,
+                )?);
                 continue;
             }
             // No anchor: drop the leading partial codon and walk the remainder forward.
@@ -1140,10 +1154,10 @@ fn translate_core(
 
     // Each anchor's outgoing edges: walk its trailing partial codon into successors,
     // and connect exit anchors to PATH_END.
-    for (&(node, frame), &pid) in &protein_node_ids {
+    for (&(node, frame), &protein_id) in &protein_node_ids {
         let aa_len = protein_aa_len.get(&(node, frame)).copied().unwrap_or(0);
         let from = WalkFrom {
-            id: pid,
+            id: protein_id,
             coord: aa_len,
             merkle: protein_merkle_hashes
                 .get(&(node, frame))
@@ -1167,7 +1181,7 @@ fn translate_core(
             bg_edges.push(make_edge(
                 conn,
                 &bg_id,
-                pid,
+                protein_id,
                 aa_len,
                 PATH_END_NODE_ID,
                 0,
@@ -1176,8 +1190,9 @@ fn translate_core(
         }
     }
 
-    // The walk can reach a junction or anchor from several paths; drop duplicate
-    // (edge, chromosome_index) entries before persisting.
+    // Step 7: dedupe and bulk-insert the edges. The walk can reach a junction or
+    // anchor from several paths; drop duplicate (edge, chromosome_index) entries
+    // before persisting.
     let mut seen: HashSet<(HashId, i64)> = HashSet::new();
     bg_edges.retain(|e| seen.insert((e.edge_id, e.chromosome_index)));
 

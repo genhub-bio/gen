@@ -2038,20 +2038,7 @@ fn resolve_start_end(
     end: Option<i64>,
     path_length: i64,
 ) -> Result<(i64, i64), Error> {
-    let s = start.unwrap_or(0);
-    let e = end.unwrap_or(path_length);
-    if s < 0 {
-        return Err(Error::Other(format!("start ({s}) must be >= 0")));
-    }
-    if e > path_length {
-        return Err(Error::Other(format!(
-            "end ({e}) must be <= path length ({path_length})"
-        )));
-    }
-    if s > e {
-        return Err(Error::Other(format!("start ({s}) must be <= end ({e})")));
-    }
-    Ok((s, e))
+    gen_core::resolve_start_end(start, end, path_length).map_err(Error::Other)
 }
 
 #[extendr]

@@ -607,8 +607,8 @@ impl PySequenceGraph {
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                 }
             }
-            Some(any) => {
-                if let Ok(ann) = any.extract::<PyRef<PyAnnotation>>() {
+            Some(region) => {
+                if let Ok(ann) = region.extract::<PyRef<PyAnnotation>>() {
                     let annotation = ann.inner.clone();
                     if start.is_some() || end.is_some() {
                         let path = BlockGroup::get_current_path(conn, &self.id)
@@ -627,7 +627,7 @@ impl PySequenceGraph {
                         })
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                     }
-                } else if let Ok(region_str) = any.extract::<&str>() {
+                } else if let Ok(region_str) = region.extract::<&str>() {
                     // Resolution scoped to self: named path first, then annotation in lineage.
                     let path = BlockGroup::get_path_by_name(conn, &self.id, region_str)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -693,22 +693,7 @@ fn resolve_start_end(
     end: Option<i64>,
     path_length: i64,
 ) -> PyResult<(i64, i64)> {
-    let s = start.unwrap_or(0);
-    let e = end.unwrap_or(path_length);
-    if s < 0 {
-        return Err(PyRuntimeError::new_err(format!("start ({s}) must be >= 0")));
-    }
-    if e > path_length {
-        return Err(PyRuntimeError::new_err(format!(
-            "end ({e}) must be <= path length ({path_length})"
-        )));
-    }
-    if s > e {
-        return Err(PyRuntimeError::new_err(format!(
-            "start ({s}) must be <= end ({e})"
-        )));
-    }
-    Ok((s, e))
+    gen_core::resolve_start_end(start, end, path_length).map_err(PyRuntimeError::new_err)
 }
 
 impl PySequenceGraph {

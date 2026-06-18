@@ -47,6 +47,28 @@ pub fn is_end_node(node_id: HashId) -> bool {
     node_id == PATH_END_NODE_ID
 }
 
+/// Clamp `start`/`end` to a path of `path_length`, defaulting `start` to 0 and
+/// `end` to `path_length` when omitted. Returns an error message on out-of-range
+/// or inverted bounds; callers wrap it in their own error type.
+pub fn resolve_start_end(
+    start: Option<i64>,
+    end: Option<i64>,
+    path_length: i64,
+) -> Result<(i64, i64), String> {
+    let s = start.unwrap_or(0);
+    let e = end.unwrap_or(path_length);
+    if s < 0 {
+        return Err(format!("start ({s}) must be >= 0"));
+    }
+    if e > path_length {
+        return Err(format!("end ({e}) must be <= path length ({path_length})"));
+    }
+    if s > e {
+        return Err(format!("start ({s}) must be <= end ({e})"));
+    }
+    Ok((s, e))
+}
+
 #[cfg_attr(feature = "python-bindings", pyclass)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HashId(pub [u8; 32]);
