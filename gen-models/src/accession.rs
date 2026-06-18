@@ -217,6 +217,36 @@ impl From<AccessionNodeData> for AccessionNode {
 }
 
 impl Accession {
+    /// An accession is an ordered array of slices of nodes. The purpose
+    /// of an accession is to provide additional layers of information to
+    /// a graph. These extra pieces of information can be features such
+    /// as gene annotations, epigenetic markers, translocations, and so on.
+    ///
+    /// From a modeling stance, there is a table AccessionNodes, which holds
+    /// the positions within a Node the accession covers, its strand, and what
+    /// position it is in the array. Accessions are not meant to be restricted
+    /// to a graph topology. Take the following example of a spliced gene:
+    ///
+    /// AAAAAAAAAAAAAAAATTTTTTTTTTTTCCCCCCCCCCCCCCCCCCCGGGGGGGGGGGGGGGG
+    ///     [part-a]--->[part-b]---->[part-c]-->[part-d]
+    ///
+    /// There are no edges in the primary sequence, but there are 4 accession nodes
+    /// linked together. There is similarly no guarantee that nodes are on the same
+    /// blockgroup, which enables modeling of events such as translocations.
+    ///
+    /// Similarly, we do not model an accession on the edges of the graph
+    /// because the variation in the graph does not impact the accession. Take an example
+    /// where a variant is introduced in the intronic region of a gene:
+    ///
+    ///             A
+    ///            / \
+    /// AAAAAAAAAA-TTT-TTTTTTCCCCCCCCCCC
+    /// [part-1]----------->[part-2]
+    ///
+    /// If we annotated according to edges, the introduction of the A variant questions
+    /// if we should store part-1/part-2 also on the new edge between them. Storing it
+    /// on nodes means it is up to the context the graph is being used to determine how to
+    /// treat the graph topology.
     fn id_hash(
         block_group_id: &HashId,
         parent_accession_id: Option<&HashId>,
