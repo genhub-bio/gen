@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_annotations::projection::{AnnotationSegment, accession_edges_to_segments};
+use gen_annotations::projection::AnnotationSegment;
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range,
 };
@@ -647,8 +647,11 @@ pub fn translate_annotation(
         TranslationError::BlockGroupError("translation requires a block group id".into())
     })?;
 
-    let accession_edges = Accession::get_edges_by_id(conn, &annotation.accession_id);
-    let segments = accession_edges_to_segments(&accession_edges);
+    let accession_nodes = Accession::get_nodes_by_id(conn, &annotation.accession_id);
+    let segments: Vec<AnnotationSegment> = accession_nodes
+        .iter()
+        .map(AnnotationSegment::from)
+        .collect();
     if segments.is_empty() {
         return Err(TranslationError::EmptyAnnotation);
     }
@@ -1189,9 +1192,9 @@ fn translate_core(
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
     use gen_models::{
-        accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+        accession::{Accession, AccessionSpan, NewAccession},
         annotations::{Annotation, AnnotationGroup},
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -1368,34 +1371,27 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         chain: &[(HashId, i64)],
         strand: Strand,
     ) -> Annotation {
-        let mut edge_data = Vec::new();
-        let mut prev = PATH_START_NODE_ID;
-        let mut prev_coord = -1;
-        for (node, len) in chain {
-            edge_data.push(AccessionEdgeData {
-                source_node_id: prev,
-                source_coordinate: prev_coord,
-                source_strand: strand,
-                target_node_id: *node,
-                target_coordinate: 0,
-                target_strand: strand,
-                chromosome_index: 0,
-            });
-            prev = *node;
-            prev_coord = *len;
-        }
-        edge_data.push(AccessionEdgeData {
-            source_node_id: prev,
-            source_coordinate: prev_coord,
-            source_strand: strand,
-            target_node_id: PATH_END_NODE_ID,
-            target_coordinate: -1,
-            target_strand: strand,
-            chromosome_index: 0,
-        });
-        let edge_ids = AccessionEdge::bulk_create(conn, &edge_data);
-        let accession = Accession::create(conn, name, bg_id, None).unwrap();
-        AccessionPath::create(conn, &accession.id, &edge_ids).unwrap();
+        let spans = chain
+            .iter()
+            .map(|(node, len)| AccessionSpan {
+                node_id: *node,
+                range: Range {
+                    start: 0,
+                    end: *len,
+                },
+                strand,
+            })
+            .collect();
+        let accession = Accession::create(
+            conn,
+            &NewAccession {
+                name: name.to_string(),
+                block_group_id: *bg_id,
+                parent_accession_id: None,
+                spans,
+            },
+        )
+        .unwrap();
         AnnotationGroup::create(conn, "gene").unwrap();
         Annotation::create(conn, name, "gene", &accession.id, None).unwrap()
     }
@@ -1713,38 +1709,28 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (n2, l2) = mk_node(&conn, "CCCGGG", "n2");
 
         // Forward first segment, reverse second segment → ambiguous strand.
-        let edge_data = vec![
-            AccessionEdgeData {
-                source_node_id: PATH_START_NODE_ID,
-                source_coordinate: -1,
-                source_strand: Strand::Forward,
-                target_node_id: n1,
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-                chromosome_index: 0,
+        let spans = vec![
+            AccessionSpan {
+                node_id: n1,
+                range: Range { start: 0, end: l1 },
+                strand: Strand::Forward,
             },
-            AccessionEdgeData {
-                source_node_id: n1,
-                source_coordinate: l1,
-                source_strand: Strand::Forward,
-                target_node_id: n2,
-                target_coordinate: 0,
-                target_strand: Strand::Reverse,
-                chromosome_index: 0,
-            },
-            AccessionEdgeData {
-                source_node_id: n2,
-                source_coordinate: l2,
-                source_strand: Strand::Reverse,
-                target_node_id: PATH_END_NODE_ID,
-                target_coordinate: -1,
-                target_strand: Strand::Reverse,
-                chromosome_index: 0,
+            AccessionSpan {
+                node_id: n2,
+                range: Range { start: 0, end: l2 },
+                strand: Strand::Reverse,
             },
         ];
-        let edge_ids = AccessionEdge::bulk_create(&conn, &edge_data);
-        let accession = Accession::create(&conn, "test-gene", &bg.id, None).unwrap();
-        AccessionPath::create(&conn, &accession.id, &edge_ids).unwrap();
+        let accession = Accession::create(
+            &conn,
+            &NewAccession {
+                name: "test-gene".to_string(),
+                block_group_id: bg.id,
+                parent_accession_id: None,
+                spans,
+            },
+        )
+        .unwrap();
         AnnotationGroup::create(&conn, "gene").unwrap();
         let annotation =
             Annotation::create(&conn, "test-gene", "gene", &accession.id, None).unwrap();
