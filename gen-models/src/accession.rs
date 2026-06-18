@@ -1,8 +1,9 @@
-use std::{collections::HashMap, ops::Range, rc::Rc};
+use std::{collections::HashMap, ops::Range as StdRange, rc::Rc};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
     is_terminal,
+    range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
@@ -38,7 +39,7 @@ pub enum AccessionError {
     Duplicate(String),
     #[error("Accession {0} has no nodes in accession_nodes")]
     MissingPath(HashId),
-    #[error("New accession has no spans")]
+    #[error("Accession has no spans")]
     EmptySpans,
     #[error("Invalid accession range: {start}-{end}")]
     InvalidRange { start: i64, end: i64 },
@@ -193,11 +194,12 @@ pub struct NewAccession {
     pub spans: Vec<AccessionSpan>,
 }
 
+/// AccessionSpan is similar to AnnotationSegment in shape, but its primary use is
+/// for creating AccessionNodes
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccessionSpan {
     pub node_id: HashId,
-    pub sequence_start: i64,
-    pub sequence_end: i64,
+    pub range: Range,
     pub strand: Strand,
 }
 
@@ -334,8 +336,10 @@ impl Accession {
                 let out_of = &edge_pair[1].edge_data;
                 AccessionSpan {
                     node_id: into.target_node_id,
-                    sequence_start: into.target_coordinate,
-                    sequence_end: out_of.source_coordinate,
+                    range: Range {
+                        start: into.target_coordinate,
+                        end: out_of.source_coordinate,
+                    },
                     strand: into.target_strand,
                 }
             })
@@ -388,8 +392,8 @@ impl Accession {
             .map(|(index, span)| AccessionNodeData {
                 accession_id: *accession_id,
                 node_id: span.node_id,
-                sequence_start: span.sequence_start,
-                sequence_end: span.sequence_end,
+                sequence_start: span.range.start,
+                sequence_end: span.range.end,
                 strand: span.strand,
                 index_in_path: index as i64,
             })
@@ -474,7 +478,7 @@ impl Accession {
 impl AccessionSpan {
     pub fn from_intervaltree_ranges(
         tree: &IntervalTree<i64, NodeIntervalBlock>,
-        ranges: &[Range<i64>],
+        ranges: &[StdRange<i64>],
     ) -> Result<Vec<AccessionSpan>, AccessionError> {
         let length = intervaltree_length(tree)?;
         let mut spans = Vec::new();
@@ -496,25 +500,24 @@ impl AccessionSpan {
             if range.start == range.end {
                 continue;
             }
-            spans.extend(
-                tree.iter_sorted()
-                    .map(|entry| &entry.value)
-                    .filter(|block| {
-                        !is_terminal(block.node_id)
-                            && block.start < range.end
-                            && block.end > range.start
-                    })
-                    .map(|block| {
-                        let clipped_start = range.start.max(block.start);
-                        let clipped_end = range.end.min(block.end);
-                        AccessionSpan {
-                            node_id: block.node_id,
-                            sequence_start: clipped_start - block.start + block.sequence_start,
-                            sequence_end: clipped_end - block.start + block.sequence_start,
-                            strand: block.strand,
-                        }
-                    }),
-            );
+            let mut blocks = tree
+                .query(range.start..range.end)
+                .map(|entry| &entry.value)
+                .filter(|block| !is_terminal(block.node_id))
+                .collect::<Vec<_>>();
+            blocks.sort_by_key(|block| block.start);
+            spans.extend(blocks.into_iter().map(|block| {
+                let clipped_start = range.start.max(block.start);
+                let clipped_end = range.end.min(block.end);
+                AccessionSpan {
+                    node_id: block.node_id,
+                    range: Range {
+                        start: clipped_start - block.start + block.sequence_start,
+                        end: clipped_end - block.start + block.sequence_start,
+                    },
+                    strand: block.strand,
+                }
+            }));
         }
         Ok(spans)
     }
@@ -522,7 +525,7 @@ impl AccessionSpan {
     pub fn from_resolved_region(
         conn: &GraphConnection,
         region: &ResolvedGenRegion,
-        ranges: Option<&[Range<i64>]>,
+        ranges: Option<&[StdRange<i64>]>,
     ) -> Result<Vec<AccessionSpan>, AccessionError> {
         let tree = region
             .intervaltree(conn)
@@ -539,17 +542,17 @@ impl AccessionSpan {
 
 fn intervaltree_length(tree: &IntervalTree<i64, NodeIntervalBlock>) -> Result<i64, AccessionError> {
     if let Some(end_block) = tree
-        .iter()
+        .query_point(i64::MAX - 2)
         .map(|entry| &entry.value)
         .find(|block| block.node_id == PATH_END_NODE_ID)
     {
         return Ok(end_block.start);
     }
-    tree.iter()
-        .map(|entry| &entry.value)
-        .filter(|block| !is_terminal(block.node_id))
-        .map(|block| block.end)
-        .max()
+
+    tree.iter_sorted()
+        .map(|entry| &entry.value.end)
+        .last()
+        .copied()
         .ok_or(AccessionError::MissingIntervalTreeLength)
 }
 
@@ -738,7 +741,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn resolves_accession_by_name_case_insensitively() {
+        fn test_resolves_accession_by_name_case_insensitively() {
             let conn = &get_connection(None).unwrap();
             let (_bg, path) = setup_block_group(conn);
             let mut path_cache = PathCache::new(conn);
@@ -751,7 +754,7 @@ mod tests {
         }
 
         #[test]
-        fn returns_not_found_for_missing_accession() {
+        fn test_returns_not_found_for_missing_accession() {
             let conn = &get_connection(None).unwrap();
             let (_bg, _path) = setup_block_group(conn);
 
@@ -764,7 +767,7 @@ mod tests {
         }
 
         #[test]
-        fn returns_ambiguous_for_multiple_matching_accessions() {
+        fn test_returns_ambiguous_for_multiple_matching_accessions() {
             let conn = &get_connection(None).unwrap();
             let (_bg, path) = setup_block_group(conn);
             let mut path_cache = PathCache::new(conn);
@@ -879,8 +882,7 @@ mod tests {
                 parent_accession_id: None,
                 spans: vec![AccessionSpan {
                     node_id: HashId::convert_str("test-a-node"),
-                    sequence_start: 0,
-                    sequence_end: 1,
+                    range: Range { start: 0, end: 1 },
                     strand: Strand::Forward,
                 }],
             },
@@ -894,8 +896,7 @@ mod tests {
                 parent_accession_id: None,
                 spans: vec![AccessionSpan {
                     node_id: HashId::convert_str("test-a-node"),
-                    sequence_start: 1,
-                    sequence_end: 2,
+                    range: Range { start: 1, end: 2 },
                     strand: Strand::Forward,
                 }],
             },
@@ -917,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn create_from_new_accession_inserts_ordered_spans() {
+    fn test_create_from_new_accession_inserts_ordered_spans() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let new_accession = NewAccession {
@@ -927,14 +928,12 @@ mod tests {
             spans: vec![
                 AccessionSpan {
                     node_id: HashId::convert_str("test-a-node"),
-                    sequence_start: 2,
-                    sequence_end: 4,
+                    range: Range { start: 2, end: 4 },
                     strand: Strand::Forward,
                 },
                 AccessionSpan {
                     node_id: HashId::convert_str("test-t-node"),
-                    sequence_start: 0,
-                    sequence_end: 2,
+                    range: Range { start: 0, end: 2 },
                     strand: Strand::Forward,
                 },
             ],
@@ -952,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn get_or_create_returns_existing_accession_for_duplicate() {
+    fn test_get_or_create_returns_existing_accession_for_duplicate() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
         let new_accession = NewAccession {
@@ -961,8 +960,7 @@ mod tests {
             parent_accession_id: None,
             spans: vec![AccessionSpan {
                 node_id: HashId::convert_str("test-a-node"),
-                sequence_start: 2,
-                sequence_end: 4,
+                range: Range { start: 2, end: 4 },
                 strand: Strand::Forward,
             }],
         };
@@ -975,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn spans_from_intervaltree_ranges_preserve_range_order_and_clip_blocks() {
+    fn test_spans_from_intervaltree_ranges_preserve_range_order_and_clip_blocks() {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, path) = setup_block_group(conn);
         let tree = path.intervaltree(conn).unwrap();
@@ -987,14 +985,12 @@ mod tests {
             vec![
                 AccessionSpan {
                     node_id: HashId::convert_str("test-t-node"),
-                    sequence_start: 2,
-                    sequence_end: 6,
+                    range: Range { start: 2, end: 6 },
                     strand: Strand::Forward,
                 },
                 AccessionSpan {
                     node_id: HashId::convert_str("test-a-node"),
-                    sequence_start: 2,
-                    sequence_end: 4,
+                    range: Range { start: 2, end: 4 },
                     strand: Strand::Forward,
                 },
             ]
@@ -1002,12 +998,12 @@ mod tests {
     }
 
     #[test]
-    fn spans_from_intervaltree_ranges_errors_on_wraparound_range() {
+    fn test_spans_from_intervaltree_ranges_errors_on_wraparound_range() {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, path) = setup_block_group(conn);
         let tree = path.intervaltree(conn).unwrap();
 
-        let range = Range { start: 35, end: 3 };
+        let range = StdRange { start: 35, end: 3 };
         let err = AccessionSpan::from_intervaltree_ranges(&tree, std::slice::from_ref(&range))
             .unwrap_err();
 
@@ -1089,14 +1085,12 @@ mod tests {
                 spans: vec![
                     AccessionSpan {
                         node_id: HashId::convert_str("test-a-node"),
-                        sequence_start: 2,
-                        sequence_end: 4,
+                        range: Range { start: 2, end: 4 },
                         strand: Strand::Forward,
                     },
                     AccessionSpan {
                         node_id: HashId::convert_str("test-t-node"),
-                        sequence_start: 0,
-                        sequence_end: 2,
+                        range: Range { start: 0, end: 2 },
                         strand: Strand::Forward,
                     },
                 ],
@@ -1156,14 +1150,12 @@ mod tests {
                 spans: vec![
                     AccessionSpan {
                         node_id: HashId::convert_str("test-a-node"),
-                        sequence_start: 2,
-                        sequence_end: 4,
+                        range: Range { start: 2, end: 4 },
                         strand: Strand::Forward,
                     },
                     AccessionSpan {
                         node_id: HashId::convert_str("test-t-node"),
-                        sequence_start: 0,
-                        sequence_end: 2,
+                        range: Range { start: 0, end: 2 },
                         strand: Strand::Reverse,
                     },
                 ],
@@ -1178,8 +1170,7 @@ mod tests {
                 parent_accession_id: None,
                 spans: vec![AccessionSpan {
                     node_id: HashId::convert_str("test-c-node"),
-                    sequence_start: 1,
-                    sequence_end: 3,
+                    range: Range { start: 1, end: 3 },
                     strand: Strand::Forward,
                 }],
             },

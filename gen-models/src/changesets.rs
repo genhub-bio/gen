@@ -7,7 +7,7 @@ use std::{
     str,
 };
 
-use gen_core::{HashId, Strand, config::Workspace, is_terminal, traits::Capnp};
+use gen_core::{HashId, Strand, config::Workspace, is_terminal, range::Range, traits::Capnp};
 use itertools::Itertools;
 use rusqlite::{
     session::{ChangesetItem, ChangesetIter},
@@ -851,10 +851,18 @@ pub fn apply_changeset(
         Path::create(conn, &path.name, &path.block_group_id, &[])?;
     }
 
+    let dependency_accession_nodes_by_id =
+        accession_nodes_by_accession_id(&dependencies.accession_nodes);
     for accession in dependencies.accessions.iter() {
         Accession::get_or_create(
             conn,
-            &new_accession_from_nodes(accession, &dependencies.accession_nodes),
+            &new_accession_from_nodes(
+                accession,
+                dependency_accession_nodes_by_id
+                    .get(&accession.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            ),
         )?;
     }
 
@@ -924,10 +932,18 @@ pub fn apply_changeset(
         let _ = PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
     }
 
+    let changeset_accession_nodes_by_id =
+        accession_nodes_by_accession_id(&changeset.accession_nodes);
     for accession in &changeset.accessions {
         Accession::get_or_create(
             conn,
-            &new_accession_from_nodes(accession, &changeset.accession_nodes),
+            &new_accession_from_nodes(
+                accession,
+                changeset_accession_nodes_by_id
+                    .get(&accession.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            ),
         )?;
     }
 
@@ -987,15 +1003,31 @@ pub fn apply_changeset(
     Ok(())
 }
 
-fn new_accession_from_nodes(accession: &Accession, nodes: &[AccessionNode]) -> NewAccession {
+fn accession_nodes_by_accession_id(
+    nodes: &[AccessionNode],
+) -> HashMap<HashId, Vec<&AccessionNode>> {
+    let mut nodes_by_accession_id: HashMap<HashId, Vec<&AccessionNode>> = HashMap::new();
+    for node in nodes {
+        nodes_by_accession_id
+            .entry(node.accession_id)
+            .or_default()
+            .push(node);
+    }
+    for nodes in nodes_by_accession_id.values_mut() {
+        nodes.sort_by_key(|node| node.index_in_path);
+    }
+    nodes_by_accession_id
+}
+
+fn new_accession_from_nodes(accession: &Accession, nodes: &[&AccessionNode]) -> NewAccession {
     let spans = nodes
         .iter()
-        .filter(|node| node.accession_id == accession.id)
-        .sorted_by(|a, b| Ord::cmp(&a.index_in_path, &b.index_in_path))
         .map(|node| AccessionSpan {
             node_id: node.node_id,
-            sequence_start: node.sequence_start,
-            sequence_end: node.sequence_end,
+            range: Range {
+                start: node.sequence_start,
+                end: node.sequence_end,
+            },
             strand: node.strand,
         })
         .collect::<Vec<_>>();

@@ -542,8 +542,10 @@ mod tests {
             .iter()
             .map(|segment| AccessionSpan {
                 node_id: blocks[segment.0].node_id,
-                sequence_start: segment.1,
-                sequence_end: segment.2,
+                range: Range {
+                    start: segment.1,
+                    end: segment.2,
+                },
                 strand: segment.3,
             })
             .collect::<Vec<_>>();

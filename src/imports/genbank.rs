@@ -342,8 +342,7 @@ fn create_accession_for_segments(
         .iter()
         .map(|segment| AccessionSpan {
             node_id: segment.node_id,
-            sequence_start: segment.range.start,
-            sequence_end: segment.range.end,
+            range: segment.range,
             strand: segment.strand,
         })
         .collect::<Vec<_>>();

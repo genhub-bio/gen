@@ -8,6 +8,7 @@ use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
     PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
     calculate_hash, is_end_node, is_start_node, is_terminal,
+    range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
@@ -657,8 +658,10 @@ impl BlockGroup {
                 let clipped_end = end.min(block.end);
                 AccessionSpan {
                     node_id: block.node_id,
-                    sequence_start: clipped_start - block.start + block.sequence_start,
-                    sequence_end: clipped_end - block.start + block.sequence_start,
+                    range: Range {
+                        start: clipped_start - block.start + block.sequence_start,
+                        end: clipped_end - block.start + block.sequence_start,
+                    },
                     strand: block.strand,
                 }
             })

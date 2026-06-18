@@ -112,7 +112,7 @@ pub fn gfa_sample_diff(
                     end: mapping.source_range.start,
                 });
             }
-            source_ranges.push(mapping.source_range.clone());
+            source_ranges.push(mapping.source_range);
             last_source_position = mapping.source_range.end;
             if mapping.target_range.start > last_target_position {
                 target_ranges.push(Range {
@@ -120,7 +120,7 @@ pub fn gfa_sample_diff(
                     end: mapping.target_range.start,
                 });
             }
-            target_ranges.push(mapping.target_range.clone());
+            target_ranges.push(mapping.target_range);
             last_target_position = mapping.target_range.end;
         }
 

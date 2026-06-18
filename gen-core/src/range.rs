@@ -2,7 +2,7 @@ use std::cmp::{max, min};
 
 use itertools::Itertools;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Range {
     pub start: i64,
     pub end: i64,
@@ -98,7 +98,7 @@ impl Range {
                 },
             ]);
         } else {
-            self_intervals.push(self.clone());
+            self_intervals.push(*self);
         }
 
         if other.is_wraparound() {
@@ -113,7 +113,7 @@ impl Range {
                 },
             ]);
         } else {
-            other_intervals.push(other.clone());
+            other_intervals.push(*other);
         }
 
         let overlaps = Range::find_pairwise_overlaps(self_intervals, other_intervals);
@@ -148,8 +148,8 @@ impl Range {
             .into_iter()
             .sorted_by(|a, b| a.start.cmp(&b.start))
             .collect::<Vec<Range>>();
-        let first = sorted_overlaps.first().unwrap().clone();
-        let last = sorted_overlaps.last().unwrap().clone();
+        let first = *sorted_overlaps.first().unwrap();
+        let last = *sorted_overlaps.last().unwrap();
         if first.start == 0 && last.end == i64::MAX {
             sorted_overlaps.pop();
             sorted_overlaps.push(Range {
