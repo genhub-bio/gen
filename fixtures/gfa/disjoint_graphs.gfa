@@ -1,0 +1,7 @@
+H	VN:Z:1.0
+S	1	AAAA
+S	2	CCCC
+S	3	TTTT
+S	4	GGGG
+L	1	+	2	+	*
+L	3	+	4	+	*

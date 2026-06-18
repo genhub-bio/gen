@@ -76,10 +76,10 @@ test_that("GFA and GenBank import/export work", {
   gfa_out <- tempfile(fileext = ".gfa")
   gb_out  <- tempfile(fileext = ".gb")
 
-  expect_match(
-    repo$import_gfa(fixture_path("simple.gfa"), sample = "sample-a"),
-    "imported", ignore.case = TRUE
-  )
+  result <- repo$import_gfa(fixture_path("simple.gfa"), sample = "sample-a")
+  expect_true(is.list(result))
+  expect_gt(length(result), 0)
+  expect_true(all(sapply(result, inherits, "SequenceGraph")))
   expect_binding_result(try(repo$export_gfa(gfa_out, sample = "sample-a"), silent = TRUE))
 
   expect_binding_result(try(

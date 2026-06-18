@@ -17,7 +17,7 @@ use gen_models::{
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{PyRepository, run_write};
-use crate::python_api::sequence_part::PySequencePart;
+use crate::python_api::{block_group::PySequenceGraph, sequence_part::PySequencePart};
 
 #[pymethods]
 impl PyRepository {
@@ -80,12 +80,17 @@ impl PyRepository {
         filename: String,
         sample: Option<String>,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<Vec<PySequenceGraph>> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_write(&self.context, !self.in_transaction, |ctx| {
             import_gfa(ctx, &PathBuf::from(&filename), &collection, &sample)
-                .map(|_| format!("'{}' imported.", filename))
+                .map(|(_, block_groups)| {
+                    block_groups
+                        .into_iter()
+                        .map(|bg| self.into_py_block_group(bg))
+                        .collect()
+                })
                 .map_err(|e| match e {
                     GFAImportError::OperationError(OperationError::NoChanges) => {
                         PyRuntimeError::new_err(format!("'{}': already exists", filename))

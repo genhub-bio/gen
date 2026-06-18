@@ -911,11 +911,15 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_block_group = Collection::get_block_groups(conn, "test collection 3")
-            .pop()
-            .unwrap();
-        let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+        let all_sequences: HashSet<String> =
+            Collection::get_block_groups(conn, "test collection 3")
+                .iter()
+                .flat_map(|bg| {
+                    BlockGroup::get_all_sequences(conn, &bg.id, false)
+                        .unwrap()
+                        .into_iter()
+                })
+                .collect();
 
         assert_eq!(
             all_sequences,
@@ -1081,11 +1085,15 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_block_group = Collection::get_block_groups(conn, "test collection 3")
-            .pop()
-            .unwrap();
-        let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+        let all_sequences: HashSet<String> =
+            Collection::get_block_groups(conn, "test collection 3")
+                .iter()
+                .flat_map(|bg| {
+                    BlockGroup::get_all_sequences(conn, &bg.id, false)
+                        .unwrap()
+                        .into_iter()
+                })
+                .collect();
 
         assert_eq!(
             all_sequences,
