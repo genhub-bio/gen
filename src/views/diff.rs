@@ -1,6 +1,5 @@
 use std::{collections::HashMap, io, time::Instant};
 
-use crossterm::event::{self, Event, KeyCode};
 use gen_diff::{
     graph::DiffGenGraph,
     operations::{BlockGroupDiff, OperationDiff},
@@ -20,7 +19,7 @@ use crate::views::{
     },
     gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
-    tui_runtime::TuiSession,
+    tui_runtime::{GenKeyCode, GenTuiEvent, TuiSession, graph_controller_handle_key},
 };
 
 struct DiffComponent {
@@ -77,7 +76,6 @@ pub fn view_diff(
     }
 
     let mut session = TuiSession::enter()?;
-    let terminal = session.terminal_mut();
 
     let mut selected = 0usize;
     let mut expanded_db = db_order.first().cloned();
@@ -115,7 +113,7 @@ pub fn view_diff(
         let frame_delta = now.duration_since(last_frame_time);
         last_frame_time = now;
 
-        terminal.draw(|f| {
+        session.terminal_mut().draw(|f| {
             let outer = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -182,29 +180,29 @@ pub fn view_diff(
             render_status_bar(f, outer[1], panel_messages);
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
+        if let Some(GenTuiEvent::Key(key)) =
+            session.poll_event(std::time::Duration::from_millis(100))?
         {
             if panel_focus.is_navigation() {
                 match key.code {
-                    KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                    GenKeyCode::Tab | GenKeyCode::Left | GenKeyCode::Right => {
                         panel_focus.cycle_next();
                     }
-                    KeyCode::Enter => {
+                    GenKeyCode::Enter => {
                         panel_focus.activate();
                     }
-                    KeyCode::Esc | KeyCode::Char('q') => break,
+                    GenKeyCode::Esc | GenKeyCode::Char('q') => break,
                     _ => {}
                 }
-            } else if key.code == KeyCode::Esc {
+            } else if key.code == GenKeyCode::Esc {
                 panel_focus.deactivate();
-            } else if key.code == KeyCode::Tab {
+            } else if key.code == GenKeyCode::Tab {
                 panel_focus.cycle_next();
-            } else if key.code == KeyCode::Char('q') {
+            } else if key.code == GenKeyCode::Char('q') {
                 break;
             } else if panel_focus.current() == DiffPanel::List {
                 match key.code {
-                    KeyCode::Up => {
+                    GenKeyCode::Up => {
                         if selected > 0 {
                             selected -= 1;
                             if let Some(entry) = entries.get(selected) {
@@ -212,7 +210,7 @@ pub fn view_diff(
                             }
                         }
                     }
-                    KeyCode::Down => {
+                    GenKeyCode::Down => {
                         if selected + 1 < entries.len() {
                             selected += 1;
                             if let Some(entry) = entries.get(selected) {
@@ -223,7 +221,7 @@ pub fn view_diff(
                     _ => {}
                 }
             } else {
-                let _ = graph_controller.handle_key_event(key);
+                let _ = graph_controller_handle_key(&mut graph_controller, key);
             }
         }
     }

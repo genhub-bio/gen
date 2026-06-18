@@ -1,50 +1,58 @@
-use std::{
-    collections::HashMap,
-    fs,
-    io::copy,
-    path::{Path as FilePath, PathBuf},
-    str,
-};
+#[cfg(feature = "native-network")]
+use std::{collections::HashMap, io::copy, path::Path as FilePath};
+use std::{fs, path::PathBuf, str};
 
+#[cfg(feature = "native-network")]
+use gen_core::config::Workspace;
+#[cfg(feature = "native-network")]
+use gen_core::traits::Capnp;
 use gen_core::{
     HashId,
-    config::Workspace,
     errors::{ConfigError, ConnectionError},
-    traits::Capnp,
+};
+#[cfg(feature = "native-network")]
+use gen_models::operations::{Defaults, Remote};
+#[cfg(feature = "native-network")]
+use gen_models::{
+    annotations::AnnotationFile,
+    assets::LocalAssetUri,
+    manifest::{ManifestComparer, ManifestDiff, ManifestGenerator, ManifestOperation},
+    metadata::get_db_uuid,
+    operations::FileAddition,
 };
 use gen_models::{
-    annotations::{AnnotationFile, AnnotationFileError},
-    assets::LocalAssetUri,
+    annotations::AnnotationFileError,
     changesets::{apply_changeset, revert_changeset},
     db::{DbContext, OperationsConnection},
     errors::{BranchError, ChangesetError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
-    manifest::{
-        ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
-        ManifestOperation,
-    },
-    metadata::get_db_uuid,
+    manifest::{ManifestDiffError, ManifestError},
     operations::{
-        Branch, Defaults, FileAddition, HashParseError, Operation, OperationFile, OperationInfo,
-        OperationState, Remote, parse_hash,
+        Branch, HashParseError, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
     },
     session_operations::{end_operation, start_operation},
     traits::*,
 };
+#[cfg(feature = "native-network")]
 use log::info;
 use petgraph::Direction;
+#[cfg(feature = "native-network")]
 use reqwest::{
     StatusCode,
     blocking::{Client, multipart},
 };
 use rusqlite::{self, Error as SQLError};
+#[cfg(feature = "native-network")]
 use serde::Deserialize;
 use thiserror::Error;
+#[cfg(feature = "native-network")]
 use url_parse::core::Parser;
 
-use crate::{
-    commands::remote::utils::load_tokens, get_connection, get_operation_connection, track_database,
-};
+#[cfg(feature = "native-network")]
+use crate::commands::remote::utils::load_tokens;
+use crate::get_connection;
+#[cfg(feature = "native-network")]
+use crate::{get_operation_connection, track_database};
 
 /* General information
 
@@ -140,6 +148,7 @@ pub enum RemoteOperationError {
     ConnectionError(#[from] ConnectionError),
     #[error("Config Error: {0}")]
     ConfigError(#[from] ConfigError),
+    #[cfg(feature = "native-network")]
     #[error("Reqwest Error: {0}")]
     ReqwestError(#[from] reqwest::Error),
     #[error("SQLite Error: {0}")]
@@ -478,6 +487,7 @@ pub fn parse_patch_operations(
 
 // The url-parse crate doesn't know about file-based urls, so we need to provide it with a
 // custom set of port mappings
+#[cfg(feature = "native-network")]
 fn port_mappings() -> HashMap<&'static str, (u32, &'static str)> {
     HashMap::from([
         ("file", (0, "file")),
@@ -487,6 +497,7 @@ fn port_mappings() -> HashMap<&'static str, (u32, &'static str)> {
     ])
 }
 
+#[cfg(feature = "native-network")]
 fn connect_file_remote(
     remote_url: &str,
 ) -> Result<(Workspace, OperationsConnection), RemoteOperationError> {
@@ -517,6 +528,7 @@ fn connect_file_remote(
 
     Ok((Workspace::new(remote_path), remote_op_conn))
 }
+#[cfg(feature = "native-network")]
 fn apply_operations_to_remote(
     local_context: &DbContext,
     remote_op_conn: &OperationsConnection,
@@ -742,6 +754,7 @@ fn apply_operations_to_remote(
     Ok(())
 }
 
+#[cfg(feature = "native-network")]
 fn push_to_file_remote(
     local_context: &DbContext,
     remote_url: &str,
@@ -814,6 +827,7 @@ fn push_to_file_remote(
 }
 
 // Pushes the current state of the local repo and branch to the corresponding remote repo and branch
+#[cfg(feature = "native-network")]
 pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOperationError> {
     let operation_conn = context.operations().conn();
     let remote_name = &remote
@@ -950,6 +964,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
     }
 }
 
+#[cfg(feature = "native-network")]
 pub fn pull(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOperationError> {
     let operation_conn = context.operations().conn();
     let remote_name = &remote
@@ -988,6 +1003,7 @@ pub fn pull(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
     }
 }
 
+#[cfg(feature = "native-network")]
 fn pull_from_file_remote(
     context: &DbContext,
     remote_url: &str,
@@ -1041,6 +1057,7 @@ fn pull_from_file_remote(
     Ok(())
 }
 
+#[cfg(feature = "native-network")]
 fn pull_from_remote_server(
     context: &DbContext,
     remote_name: &str,
@@ -1093,6 +1110,7 @@ fn pull_from_remote_server(
     Ok(())
 }
 
+#[cfg(feature = "native-network")]
 fn ingest_manifest_operation(
     context: &DbContext,
     manifest_operation: &ManifestOperation,
@@ -1202,6 +1220,7 @@ fn ingest_manifest_operation(
     Ok(())
 }
 
+#[cfg(feature = "native-network")]
 fn copy_operation_from_remote_fs(
     manifest_operation: &ManifestOperation,
     local_workspace: &Workspace,
@@ -1334,6 +1353,7 @@ fn copy_operation_from_remote_fs(
     Ok(())
 }
 
+#[cfg(feature = "native-network")]
 #[derive(Debug, Deserialize)]
 struct RemoteOperationAssetResponse {
     changeset: String,
@@ -1342,6 +1362,7 @@ struct RemoteOperationAssetResponse {
     files: Vec<RemoteFileAsset>,
 }
 
+#[cfg(feature = "native-network")]
 #[derive(Debug, Deserialize)]
 struct RemoteFileAsset {
     asset_path: String,
@@ -1349,6 +1370,7 @@ struct RemoteFileAsset {
     url: String,
 }
 
+#[cfg(feature = "native-network")]
 fn download_remote_operation_assets(
     client: &Client,
     auth_token: &str,
@@ -1417,6 +1439,7 @@ fn download_remote_operation_assets(
     Ok(())
 }
 
+#[cfg(feature = "native-network")]
 fn download_binary(
     client: &Client,
     url: &str,
@@ -1452,6 +1475,7 @@ fn download_binary(
     Ok(())
 }
 
+#[cfg(feature = "native-network")]
 fn send_manifest_to_remote(
     remote_name: &str,
     remote_url: &str,
@@ -1499,6 +1523,7 @@ fn send_manifest_to_remote(
     Ok(response.json()?)
 }
 
+#[cfg(feature = "native-network")]
 fn is_authorization_status(status: StatusCode) -> bool {
     matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
 }

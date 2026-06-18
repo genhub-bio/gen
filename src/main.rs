@@ -20,13 +20,14 @@ use r#gen::{
             derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
             make_stitch::make_stitch_operation,
         },
-        remote::handle_remote_command,
     },
     diffs::gfa::gfa_sample_diff,
+    fasta::FastaError,
     get_connection, get_operation_connection,
     graphs::graph_search::{GenGraphMatcher, SeedIndex},
+    imports::fasta::import_fasta,
     operation_management,
-    operation_management::{parse_patch_operations, pull, push},
+    operation_management::parse_patch_operations,
     patch,
     theme::init_theme,
     track_database,
@@ -36,6 +37,11 @@ use r#gen::{
         diff::view_diff, operations::view_operations, patch::view_patches,
         tui_runtime::install_global_panic_hook,
     },
+};
+#[cfg(feature = "native-network")]
+use r#gen::{
+    commands::remote::handle_remote_command,
+    operation_management::{pull, push},
 };
 use gen_annotations::translate;
 use gen_core::{config::Workspace, range::Range, region::Region};
@@ -65,8 +71,87 @@ fn get_default_collection(conn: &OperationsConnection) -> Result<String, rusqlit
         .unwrap_or("default".to_string()))
 }
 
+#[cfg(feature = "browser-tui")]
+fn prepare_browser_demo_workspace() -> Result<DbContext, Box<dyn std::error::Error>> {
+    std::env::set_current_dir("/workspace")?;
+    let workspace = Workspace::from_current_dir();
+    workspace.ensure_gen_dir();
+
+    let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
+    let graph_path = workspace
+        .find_gen_dir()
+        .ok_or("No .gen directory found after initialization")?
+        .join("default.db");
+    let graph_connection = get_connection(graph_path)?;
+    let db_context = DbContext::new(workspace.clone(), graph_connection, operation_conn);
+    let operation_conn = db_context.operations().conn();
+    let graph_conn = db_context.graph().conn();
+    track_database(graph_conn, operation_conn)?;
+
+    graph_conn.execute("BEGIN TRANSACTION", [])?;
+    operation_conn.execute("BEGIN TRANSACTION", [])?;
+    match import_fasta(
+        &db_context,
+        &"/workspace/plasmid.fa".to_string(),
+        "default",
+        Sample::DEFAULT_NAME,
+        false,
+    ) {
+        Ok(_) => {
+            graph_conn.execute("END TRANSACTION;", [])?;
+            operation_conn.execute("END TRANSACTION;", [])?;
+        }
+        Err(FastaError::OperationError(gen_models::errors::OperationError::NoChanges)) => {
+            graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
+            operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
+        }
+        Err(err) => {
+            graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
+            operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
+            return Err(err.into());
+        }
+    }
+
+    Ok(db_context)
+}
+
+#[cfg(feature = "browser-tui")]
+fn run_browser_demo_tui() -> Result<(), Box<dyn std::error::Error>> {
+    let db_context = prepare_browser_demo_workspace()?;
+    let workspace = db_context.workspace().clone();
+    let operation_conn = db_context.operations().conn();
+    let graph_conn = db_context.graph().conn();
+
+    view_block_group(
+        graph_conn,
+        operation_conn,
+        &workspace,
+        Some("plasmid".to_string()),
+        Some(Sample::DEFAULT_NAME.to_string()),
+        "default",
+        None,
+    )?;
+    Ok(())
+}
+
 fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "browser-tui")]
+    if std::env::var_os("GEN_BROWSER").is_some() {
+        std::env::set_current_dir("/workspace")?;
+    }
+
     let cli = Cli::parse();
+    #[cfg(feature = "browser-tui")]
+    if matches!(cli.command, Some(Commands::BrowserDemoTui)) {
+        return run_browser_demo_tui();
+    }
+    #[cfg(feature = "browser-tui")]
+    if matches!(cli.command, Some(Commands::BrowserDemoSetup)) {
+        prepare_browser_demo_workspace()?;
+        println!("Browser demo workspace ready. Try: gen view plasmid --sample reference --full");
+        return Ok(());
+    }
+
     let workspace = Workspace::from_current_dir();
 
     // commands not requiring a db connection are handled here
@@ -77,6 +162,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    #[cfg(feature = "native-network")]
     if let Some(Commands::Clone { url }) = &cli.command {
         return r#gen::commands::clone::execute(url);
     }
@@ -160,10 +246,16 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             println!("Gen repository initialized.");
             Ok(())
         }
+        #[cfg(feature = "browser-tui")]
+        Some(Commands::BrowserDemoTui) => Ok(()),
+        #[cfg(feature = "browser-tui")]
+        Some(Commands::BrowserDemoSetup) => Ok(()),
+        #[cfg(feature = "native-network")]
         Some(Commands::Clone { .. }) => Ok(()),
         Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
         Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
         Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),
+        #[cfg(feature = "native-network")]
         Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
         Some(Commands::View {
             graph,
@@ -885,11 +977,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Error making a stitch: {e}").into()),
             }
         }
+        #[cfg(feature = "native-network")]
         Some(Commands::Push { remote }) => {
             push(&db_context, remote.as_deref())?;
             println!("Push succeeded.");
             Ok(())
         }
+        #[cfg(feature = "native-network")]
         Some(Commands::Pull { remote }) => {
             pull(&db_context, remote.as_deref())?;
             Ok(())

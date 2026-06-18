@@ -1,6 +1,5 @@
 use std::{collections::HashMap, io, rc::Rc, time::Instant};
 
-use crossterm::event::{self, KeyCode, KeyModifiers};
 use gen_core::PATH_START_NODE_ID;
 use gen_diff::operations::{BlockGroupDiff, collect_operation_diff};
 use gen_graph::{GenGraph, GraphNode};
@@ -29,7 +28,7 @@ use crate::views::{
     },
     gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget},
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
-    tui_runtime::TuiSession,
+    tui_runtime::{GenKeyCode, GenKeyEvent, GenTuiEvent, TuiSession, graph_controller_handle_key},
 };
 
 fn clip_text(t: &str, limit: usize) -> String {
@@ -38,6 +37,48 @@ fn clip_text(t: &str, limit: usize) -> String {
         format!("{trunc}...", trunc = &t[0..limit - 3])
     } else {
         t.to_string()
+    }
+}
+
+fn handle_textarea_key(textarea: &mut TextAreaState, key: GenKeyEvent) {
+    match key.code {
+        GenKeyCode::Char(c) if !key.ctrl && !key.alt => {
+            textarea.insert_char(c);
+        }
+        GenKeyCode::Enter => {
+            textarea.insert_newline();
+        }
+        GenKeyCode::Tab => {
+            textarea.insert_tab();
+        }
+        GenKeyCode::BackTab => {
+            textarea.insert_backtab();
+        }
+        GenKeyCode::Backspace => {
+            textarea.delete_prev_char();
+        }
+        GenKeyCode::Delete => {
+            textarea.delete_next_char();
+        }
+        GenKeyCode::Left => {
+            textarea.move_left(1, key.shift);
+        }
+        GenKeyCode::Right => {
+            textarea.move_right(1, key.shift);
+        }
+        GenKeyCode::Up => {
+            textarea.move_up(1, key.shift);
+        }
+        GenKeyCode::Down => {
+            textarea.move_down(1, key.shift);
+        }
+        GenKeyCode::Home => {
+            textarea.move_to_line_start(key.shift);
+        }
+        GenKeyCode::End => {
+            textarea.move_to_line_end(key.shift);
+        }
+        _ => {}
     }
 }
 
@@ -198,7 +239,6 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
         .collect::<Vec<_>>();
 
     let mut session = TuiSession::enter()?;
-    let terminal = session.terminal_mut();
 
     let mut textarea = TextAreaState::new();
     let mut empty_graph: GenGraph = GenGraph::new();
@@ -228,7 +268,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
         let frame_delta = now.duration_since(last_frame_time);
         last_frame_time = now;
 
-        terminal.draw(|f| {
+        session.terminal_mut().draw(|f| {
             let rows: Vec<Row> = operation_summaries
                 .iter()
                 .enumerate()
@@ -440,21 +480,21 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
             }
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let event::Event::Key(key) = event::read()?
+        if let Some(GenTuiEvent::Key(key)) =
+            session.poll_event(std::time::Duration::from_millis(100))?
         {
             if panel_focus.is_navigation() {
                 match key.code {
-                    KeyCode::Tab => {
+                    GenKeyCode::Tab => {
                         panel_focus.cycle_next();
                     }
-                    KeyCode::BackTab => {
+                    GenKeyCode::BackTab => {
                         panel_focus.cycle_prev();
                     }
-                    KeyCode::Up => {
+                    GenKeyCode::Up => {
                         panel_focus.focus(OperationPanel::Operations);
                     }
-                    KeyCode::Down => {
+                    GenKeyCode::Down => {
                         if panel_focus.current() == OperationPanel::Operations {
                             if view_message_panel {
                                 panel_focus.focus(OperationPanel::MessageEditor);
@@ -463,21 +503,21 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                             }
                         }
                     }
-                    KeyCode::Left => {
+                    GenKeyCode::Left => {
                         if panel_focus.current() == OperationPanel::GraphView && view_message_panel
                         {
                             panel_focus.focus(OperationPanel::MessageEditor);
                         }
                     }
-                    KeyCode::Right => {
+                    GenKeyCode::Right => {
                         if panel_focus.current() == OperationPanel::MessageEditor && view_graph {
                             panel_focus.focus(OperationPanel::GraphView);
                         }
                     }
-                    KeyCode::Enter => {
+                    GenKeyCode::Enter => {
                         panel_focus.activate();
                     }
-                    KeyCode::Char('x') => match panel_focus.current() {
+                    GenKeyCode::Char('x') => match panel_focus.current() {
                         OperationPanel::MessageEditor => {
                             view_message_panel = false;
                             panel_focus.remove_panel(OperationPanel::MessageEditor);
@@ -488,17 +528,17 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         }
                         OperationPanel::Operations => {}
                     },
-                    KeyCode::Char('q') => {
+                    GenKeyCode::Char('q') => {
                         break;
                     }
                     _ => {}
                 }
-            } else if key.code == KeyCode::Esc {
+            } else if key.code == GenKeyCode::Esc {
                 panel_focus.deactivate();
             } else {
                 match panel_focus.current() {
                     OperationPanel::Operations => match key.code {
-                        KeyCode::Up => {
+                        GenKeyCode::Up => {
                             if operation_summaries.is_empty() {
                                 continue;
                             }
@@ -519,7 +559,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 );
                             }
                         }
-                        KeyCode::Down => {
+                        GenKeyCode::Down => {
                             if operation_summaries.is_empty() {
                                 continue;
                             }
@@ -540,7 +580,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 );
                             }
                         }
-                        KeyCode::Char('e') => {
+                        GenKeyCode::Char('e') => {
                             if operation_summaries.is_empty() {
                                 continue;
                             }
@@ -550,7 +590,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                             panel_focus.focus(OperationPanel::MessageEditor);
                             panel_focus.activate();
                         }
-                        KeyCode::Char('v') => {
+                        GenKeyCode::Char('v') => {
                             if operation_summaries.is_empty() {
                                 continue;
                             }
@@ -574,9 +614,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         _ => {}
                     },
                     OperationPanel::MessageEditor => {
-                        if key.code == KeyCode::Char('s')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
+                        if key.code == GenKeyCode::Char('s') && key.ctrl {
                             if operation_summaries.is_empty() {
                                 continue;
                             }
@@ -588,15 +626,11 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                             );
                             operation_summaries[selected].summary.summary = new_summary;
                         } else {
-                            let _outcome = rat_text::text_area::handle_events(
-                                &mut textarea,
-                                true,
-                                &crossterm::event::Event::Key(key),
-                            );
+                            handle_textarea_key(&mut textarea, key);
                         }
                     }
                     OperationPanel::GraphView => {
-                        if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+                        if key.code == GenKeyCode::Tab || key.code == GenKeyCode::BackTab {
                             graph_view_focus = if graph_view_focus == GraphViewFocus::DiffList {
                                 GraphViewFocus::GraphCanvas
                             } else {
@@ -604,7 +638,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                             };
                         } else if graph_view_focus == GraphViewFocus::DiffList {
                             match key.code {
-                                KeyCode::Up => {
+                                GenKeyCode::Up => {
                                     if selected_diff_component > 0 {
                                         selected_diff_component -= 1;
                                         graph_controller = build_graph_controller(
@@ -614,7 +648,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                         );
                                     }
                                 }
-                                KeyCode::Down => {
+                                GenKeyCode::Down => {
                                     if selected_diff_component + 1 < diff_components.len() {
                                         selected_diff_component += 1;
                                         graph_controller = build_graph_controller(
@@ -627,7 +661,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                 _ => {}
                             }
                         } else {
-                            let _ = graph_controller.handle_key_event(key);
+                            let _ = graph_controller_handle_key(&mut graph_controller, key);
                         }
                     }
                 }

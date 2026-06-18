@@ -1,21 +1,27 @@
+#[cfg(feature = "remote-assets")]
+use std::sync::LazyLock;
 use std::{
     fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     string::ToString,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
 };
 
 use gen_core::{HashId, Workspace, calculate_hash};
+#[cfg(feature = "remote-assets")]
 use opendal::{blocking, services};
 use sha2::{Digest, Sha256};
-use url::{Position, Url};
+#[cfg(feature = "remote-assets")]
+use url::Position;
+use url::Url;
 
 use crate::{
     errors::{FileAdditionError, FileStoreError},
     operations::{FileAddition, calculate_reader_checksum},
 };
 
+#[cfg(feature = "remote-assets")]
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -23,19 +29,33 @@ static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("failed to build OpenDAL runtime")
 });
 
+#[cfg(feature = "remote-assets")]
 fn with_opendal_runtime<T>(f: impl FnOnce() -> T) -> T {
     let _guard = OPENDAL_RUNTIME.enter();
     f()
 }
 
+#[cfg(feature = "remote-assets")]
 fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
     FileAdditionError::FileReadError(io::Error::other(err))
 }
 
+#[cfg(feature = "remote-assets")]
 fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
     FileStoreError::IoError(io::Error::other(err))
 }
 
+#[cfg(not(feature = "remote-assets"))]
+fn opendal_file_addition_error(err: io::Error) -> FileAdditionError {
+    FileAdditionError::FileReadError(err)
+}
+
+#[cfg(not(feature = "remote-assets"))]
+fn opendal_file_store_error(err: io::Error) -> FileStoreError {
+    FileStoreError::IoError(err)
+}
+
+#[cfg(feature = "remote-assets")]
 #[doc(hidden)]
 pub struct OpenDalLocation {
     operator: blocking::Operator,
@@ -115,6 +135,7 @@ impl Drop for ChecksummedReader {
     }
 }
 
+#[cfg(feature = "remote-assets")]
 impl OpenDalLocation {
     fn new_fs(root: &Path, path: &Path) -> Result<Self, opendal::Error> {
         let path = path
@@ -155,39 +176,51 @@ impl OpenDalLocation {
     }
 
     fn from_remote_uri(asset_uri: &str) -> Result<Self, FileAdditionError> {
-        let url = Url::parse(asset_uri)
-            .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
-
-        if url.scheme().eq_ignore_ascii_case("s3") {
-            let bucket = url.host_str().ok_or_else(|| {
-                FileAdditionError::FileReadError(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("s3 uri is missing bucket: {asset_uri}"),
-                ))
-            })?;
-
-            let operator = with_opendal_runtime(|| {
-                let builder = services::S3::default().bucket(bucket).allow_anonymous();
-                let op = opendal::Operator::new(builder)?.finish();
-                blocking::Operator::new(op)
-            })
-            .map_err(opendal_file_addition_error)?;
-
-            return Ok(Self {
-                operator,
-                path: url.path().trim_start_matches('/').to_string(),
-            });
+        #[cfg(not(feature = "remote-assets"))]
+        {
+            return Err(FileAdditionError::FileReadError(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("remote asset URIs are not supported in this build: {asset_uri}"),
+            )));
         }
 
-        let operator_uri = url[..Position::BeforePath].to_string();
-        opendal::init_default_registry();
-        let operator = with_opendal_runtime(|| blocking::Operator::from_uri(operator_uri.as_str()))
-            .map_err(opendal_file_addition_error)?;
+        #[cfg(feature = "remote-assets")]
+        {
+            let url = Url::parse(asset_uri)
+                .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
 
-        Ok(Self {
-            operator,
-            path: url.path().trim_start_matches('/').to_string(),
-        })
+            if url.scheme().eq_ignore_ascii_case("s3") {
+                let bucket = url.host_str().ok_or_else(|| {
+                    FileAdditionError::FileReadError(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("s3 uri is missing bucket: {asset_uri}"),
+                    ))
+                })?;
+
+                let operator = with_opendal_runtime(|| {
+                    let builder = services::S3::default().bucket(bucket).allow_anonymous();
+                    let op = opendal::Operator::new(builder)?.finish();
+                    blocking::Operator::new(op)
+                })
+                .map_err(opendal_file_addition_error)?;
+
+                return Ok(Self {
+                    operator,
+                    path: url.path().trim_start_matches('/').to_string(),
+                });
+            }
+
+            let operator_uri = url[..Position::BeforePath].to_string();
+            opendal::init_default_registry();
+            let operator =
+                with_opendal_runtime(|| blocking::Operator::from_uri(operator_uri.as_str()))
+                    .map_err(opendal_file_addition_error)?;
+
+            Ok(Self {
+                operator,
+                path: url.path().trim_start_matches('/').to_string(),
+            })
+        }
     }
 
     fn reader(self) -> Result<ChecksummedReader, FileAdditionError> {
@@ -249,6 +282,72 @@ impl OpenDalLocation {
         let bytes_copied = io::copy(&mut reader, &mut writer)?;
         writer.close()?;
         Ok(bytes_copied)
+    }
+}
+
+#[cfg(not(feature = "remote-assets"))]
+#[doc(hidden)]
+pub struct OpenDalLocation {
+    path: PathBuf,
+}
+
+#[cfg(not(feature = "remote-assets"))]
+impl OpenDalLocation {
+    fn from_workspace_path(workspace: &Workspace, path: &Path) -> Result<Self, io::Error> {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace.repo_root().map_err(io::Error::other)?.join(path)
+        };
+        Ok(Self { path })
+    }
+
+    fn from_absolute_path(path: &Path) -> Result<Self, io::Error> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local path must be absolute",
+            ));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn from_remote_uri(asset_uri: &str) -> Result<Self, FileAdditionError> {
+        Err(FileAdditionError::FileReadError(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("remote asset URIs are not supported in this build: {asset_uri}"),
+        )))
+    }
+
+    fn reader(self) -> Result<ChecksummedReader, FileAdditionError> {
+        let file = fs::File::open(&self.path).map_err(FileAdditionError::FileReadError)?;
+        Ok(ChecksummedReader::new(Box::new(file)))
+    }
+
+    fn checksum(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
+        match fs::File::open(&self.path) {
+            Ok(file) => calculate_reader_checksum(file).map_err(FileAdditionError::FileReadError),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                Ok(HashId::convert_str("non-existent"))
+            }
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => Err(
+                FileAdditionError::FilePermissionDenied(display_path.to_string()),
+            ),
+            Err(err) => Err(FileAdditionError::FileReadError(err)),
+        }
+    }
+
+    fn copy_to_local_path(
+        &self,
+        _workspace: &Workspace,
+        destination_path: &Path,
+    ) -> io::Result<u64> {
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&self.path, destination_path)
     }
 }
 
@@ -369,7 +468,10 @@ pub struct LocalAssetUri {
     source_path: Option<PathBuf>,
     workspace_root: Option<PathBuf>,
     read_file: Option<ChecksummedReader>,
+    #[cfg(feature = "remote-assets")]
     write_file: Option<opendal::blocking::StdWriter>,
+    #[cfg(not(feature = "remote-assets"))]
+    write_file: Option<fs::File>,
 }
 
 impl AssetUri for LocalAssetUri {
@@ -567,8 +669,13 @@ impl LocalAssetUri {
     }
 
     pub fn close_write(&mut self) -> io::Result<()> {
+        #[cfg(feature = "remote-assets")]
         if let Some(mut file) = self.write_file.take() {
             file.close()?;
+        }
+        #[cfg(not(feature = "remote-assets"))]
+        if let Some(mut file) = self.write_file.take() {
+            file.flush()?;
         }
         Ok(())
     }
@@ -813,15 +920,25 @@ impl Write for LocalAssetUri {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.write_file.is_none() {
             let io_path = self.io_path();
-            let location =
-                OpenDalLocation::from_absolute_path(&io_path).map_err(io::Error::other)?;
-            self.write_file = Some(
-                location
-                    .operator
-                    .writer(&location.path)
-                    .map_err(io::Error::other)?
-                    .into_std_write(),
-            );
+            #[cfg(feature = "remote-assets")]
+            {
+                let location =
+                    OpenDalLocation::from_absolute_path(&io_path).map_err(io::Error::other)?;
+                self.write_file = Some(
+                    location
+                        .operator
+                        .writer(&location.path)
+                        .map_err(io::Error::other)?
+                        .into_std_write(),
+                );
+            }
+            #[cfg(not(feature = "remote-assets"))]
+            {
+                if let Some(parent) = io_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                self.write_file = Some(fs::File::create(&io_path)?);
+            }
         }
         self.write_file.as_mut().unwrap().write(buf)
     }

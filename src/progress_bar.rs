@@ -1,10 +1,8 @@
-use std::time::Duration;
-
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub fn get_handler() -> MultiProgress {
     let p = MultiProgress::new();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-tui"))]
     {
         use indicatif::ProgressDrawTarget;
         p.set_draw_target(ProgressDrawTarget::hidden())
@@ -52,7 +50,7 @@ pub fn get_progress_bar(length: impl Into<Option<u64>>) -> ProgressBar {
             ),
         )
     };
-    bar.enable_steady_tick(Duration::from_millis(250));
+    enable_steady_tick(&bar);
     bar
 }
 
@@ -63,7 +61,7 @@ pub fn get_time_elapsed_bar() -> ProgressBar {
         )
         .unwrap(),
     );
-    bar.enable_steady_tick(Duration::from_millis(250));
+    enable_steady_tick(&bar);
     bar
 }
 
@@ -71,7 +69,7 @@ pub fn get_message_bar() -> ProgressBar {
     // This is a bar solely meant for giving messages to the user since the use of print causes
     // issues with indicatif
     let bar = ProgressBar::no_length().with_style(ProgressStyle::with_template("{msg}").unwrap());
-    bar.enable_steady_tick(Duration::from_millis(250));
+    enable_steady_tick(&bar);
     bar
 }
 
@@ -82,3 +80,13 @@ pub fn add_saving_operation_bar(progress_bar: &MultiProgress) -> ProgressBar {
     bar.set_message("Saving operation");
     bar
 }
+
+#[cfg(not(feature = "browser-tui"))]
+fn enable_steady_tick(bar: &ProgressBar) {
+    use std::time::Duration;
+
+    bar.enable_steady_tick(Duration::from_millis(250));
+}
+
+#[cfg(feature = "browser-tui")]
+fn enable_steady_tick(_bar: &ProgressBar) {}

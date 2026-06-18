@@ -1,18 +1,20 @@
 use std::{
     collections::{HashMap, HashSet},
-    convert::TryInto,
     fs,
-    io::Read,
     path::{Path as StdPath, PathBuf},
     str,
 };
+#[cfg(feature = "sqlite-session")]
+use std::{convert::TryInto, io::Read};
 
-use gen_core::{HashId, Strand, config::Workspace, is_terminal, traits::Capnp};
+#[cfg(feature = "sqlite-session")]
+use gen_core::Strand;
+use gen_core::{HashId, config::Workspace, is_terminal, traits::Capnp};
 use itertools::Itertools;
-use rusqlite::{
-    session::{ChangesetItem, ChangesetIter},
-    types::FromSql,
-};
+#[cfg(feature = "sqlite-session")]
+use rusqlite::session::{ChangesetItem, ChangesetIter};
+#[cfg(feature = "sqlite-session")]
+use rusqlite::types::FromSql;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -377,12 +379,14 @@ impl<'a> Capnp<'a> for ChangesetModels {
 }
 
 // Helper functions for parsing changeset items
+#[cfg(feature = "sqlite-session")]
 pub fn parse_string(item: &ChangesetItem, col: usize) -> String {
     str::from_utf8(item.new_value(col).unwrap().as_bytes().unwrap())
         .unwrap()
         .to_string()
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn parse_maybe_string(item: &ChangesetItem, col: usize) -> Option<String> {
     item.new_value(col)
         .unwrap()
@@ -391,12 +395,14 @@ pub fn parse_maybe_string(item: &ChangesetItem, col: usize) -> Option<String> {
         .map(|v| str::from_utf8(v).unwrap().to_string())
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn parse_blob(item: &ChangesetItem, col: usize) -> [u8; 32] {
     let bytes = item.new_value(col).unwrap().as_bytes().unwrap();
 
     bytes.try_into().expect("blob must be exactly 32 bytes")
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn parse_maybe_blob(item: &ChangesetItem, col: usize) -> Option<[u8; 32]> {
     item.new_value(col)
         .unwrap()
@@ -405,22 +411,27 @@ pub fn parse_maybe_blob(item: &ChangesetItem, col: usize) -> Option<[u8; 32]> {
         .map(|v| v.try_into().expect("blob must be exactly 32 bytes"))
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn parse_hashid(item: &ChangesetItem, col: usize) -> HashId {
     HashId(parse_blob(item, col))
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn parse_maybe_hashid(item: &ChangesetItem, col: usize) -> Option<HashId> {
     parse_maybe_blob(item, col).map(HashId)
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn parse_number(item: &ChangesetItem, col: usize) -> i64 {
     item.new_value(col).unwrap().as_i64().unwrap()
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn parse_maybe_number(item: &ChangesetItem, col: usize) -> Option<i64> {
     item.new_value(col).unwrap().as_i64_or_null().unwrap()
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn process_changesetiter(
     conn: &GraphConnection,
     mut changes: &[u8],

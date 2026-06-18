@@ -10,7 +10,7 @@ license = "Apache-2.0"
 [dependencies]
 gen-core = { path = "../gen-core", version = "0.1.31" }
 gen-graph = { path = "../gen-graph", version = "0.1.31" }
-gen-models = { path = "../gen-models", version = "0.1.31" }
+gen-models = { path = "../gen-models", version = "0.1.31", default-features = false }
 interavl = "0.3.0"
 noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }
 thiserror = "2.0.18"

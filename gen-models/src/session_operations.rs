@@ -1,6 +1,7 @@
 use std::str;
 
 use gen_core::{HashId, traits::Capnp};
+#[cfg(feature = "sqlite-session")]
 use rusqlite::session;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -8,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     accession::{Accession, AccessionEdge},
     block_group::BlockGroup,
-    changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
+    changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     collection::Collection,
     db::{DbContext, GraphConnection},
     edge::Edge,
@@ -24,13 +25,22 @@ use crate::{
     sequence::Sequence,
 };
 
+#[cfg(feature = "sqlite-session")]
 pub fn start_operation(conn: &GraphConnection) -> session::Session<'_> {
     let mut session = session::Session::new(conn).unwrap();
     attach_session(&mut session);
     session
 }
 
-#[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "sqlite-session"))]
+pub struct OperationSession;
+
+#[cfg(not(feature = "sqlite-session"))]
+pub fn start_operation(_conn: &GraphConnection) -> OperationSession {
+    OperationSession
+}
+
+#[cfg(feature = "sqlite-session")]
 pub fn end_operation(
     context: &DbContext,
     session: &mut session::Session,
@@ -39,13 +49,11 @@ pub fn end_operation(
     force_hash: impl Into<Option<HashId>>,
 ) -> Result<Operation, OperationError> {
     let conn = context.graph().conn();
-    let operation_conn = context.operations().conn();
     let db_uuid = metadata::get_db_uuid(conn);
-    // determine if this operation has already happened
     let mut output = Vec::new();
     session.changeset_strm(&mut output).unwrap();
 
-    let (changeset_models, dependencies) = process_changesetiter(conn, &output);
+    let (changeset_models, dependencies) = crate::changesets::process_changesetiter(conn, &output);
 
     let hash = if let Some(hash) = force_hash.into() {
         hash
@@ -58,6 +66,64 @@ pub fn end_operation(
         hasher.update(&output[..]);
         HashId(hasher.finalize().into())
     };
+
+    record_operation(
+        context,
+        operation_info,
+        summary_str,
+        hash,
+        changeset_models,
+        dependencies,
+    )
+}
+
+#[cfg(not(feature = "sqlite-session"))]
+pub fn end_operation(
+    context: &DbContext,
+    _session: &mut OperationSession,
+    operation_info: &OperationInfo,
+    summary_str: &str,
+    force_hash: impl Into<Option<HashId>>,
+) -> Result<Operation, OperationError> {
+    let conn = context.graph().conn();
+    let db_uuid = metadata::get_db_uuid(conn);
+    let hash = if let Some(hash) = force_hash.into() {
+        hash
+    } else {
+        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let current_operation = OperationState::get_operation(context.operations().conn());
+        let mut hasher = Sha256::new();
+        hasher.update(db_uuid.as_bytes());
+        hasher.update(timestamp.to_le_bytes());
+        hasher.update(operation_info.description.as_bytes());
+        hasher.update(summary_str.as_bytes());
+        if let Some(current_operation) = current_operation {
+            hasher.update(current_operation.0);
+        }
+        HashId(hasher.finalize().into())
+    };
+
+    record_operation(
+        context,
+        operation_info,
+        summary_str,
+        hash,
+        ChangesetModels::default(),
+        DependencyModels::default(),
+    )
+}
+
+fn record_operation(
+    context: &DbContext,
+    operation_info: &OperationInfo,
+    summary_str: &str,
+    hash: HashId,
+    changeset_models: ChangesetModels,
+    dependencies: DependencyModels,
+) -> Result<Operation, OperationError> {
+    let conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
+    let db_uuid = metadata::get_db_uuid(conn);
 
     operation_conn
         .execute("SAVEPOINT new_operation;", [])
@@ -138,6 +204,7 @@ pub fn end_operation(
     }
 }
 
+#[cfg(feature = "sqlite-session")]
 pub fn attach_session(session: &mut session::Session) {
     for table in [
         "collections",

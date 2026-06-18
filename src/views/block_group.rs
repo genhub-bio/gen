@@ -1,9 +1,9 @@
 use std::{
+    collections::VecDeque,
     error::Error,
     time::{Duration, Instant},
 };
 
-use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
@@ -32,7 +32,10 @@ use crate::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
         },
         panels::{render_status_bar, render_with_optional_clear},
-        tui_runtime::TuiSession,
+        tui_runtime::{
+            GenKeyCode, GenMouseButton, GenMouseEventKind, GenTuiEvent, TuiSession,
+            graph_controller_handle_key,
+        },
     },
 };
 
@@ -278,8 +281,6 @@ pub fn view_block_group(
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-    let terminal = session.terminal_mut();
 
     // Basic event loop
     let tick_rate = Duration::from_millis(16); // ~60fps
@@ -301,20 +302,29 @@ pub fn view_block_group(
     let mut is_loading = false;
     let mut last_refresh = Instant::now();
     let mut should_quit = false;
+    let mut pending_tui_events = VecDeque::new();
     loop {
         // Drain ALL pending input events before doing any work
-        while crossterm::event::poll(Duration::from_millis(0))? {
-            match event::read()? {
-                event::Event::Key(key) if key.kind == KeyEventKind::Press => {
+        loop {
+            let tui_event = if let Some(event) = pending_tui_events.pop_front() {
+                Some(event)
+            } else {
+                session.poll_event(Duration::ZERO)?
+            };
+            let Some(tui_event) = tui_event else {
+                break;
+            };
+            match tui_event {
+                GenTuiEvent::Key(key) => {
                     // Any keyboard navigation shows the cursor.
                     if !graph_controller.is_cursor_visible()
                         && matches!(
                             key.code,
-                            KeyCode::Left
-                                | KeyCode::Right
-                                | KeyCode::Up
-                                | KeyCode::Down
-                                | KeyCode::Char('h' | 'j' | 'k' | 'l')
+                            GenKeyCode::Left
+                                | GenKeyCode::Right
+                                | GenKeyCode::Up
+                                | GenKeyCode::Down
+                                | GenKeyCode::Char('h' | 'j' | 'k' | 'l')
                         )
                     {
                         graph_controller.show_cursor();
@@ -322,11 +332,11 @@ pub fn view_block_group(
 
                     // Global handlers
                     match key.code {
-                        KeyCode::Char('q') => {
+                        GenKeyCode::Char('q') => {
                             should_quit = true;
                             break;
                         }
-                        KeyCode::Char('m') => {
+                        GenKeyCode::Char('m') => {
                             if show_panel && panel_mode == PanelMode::Messages {
                                 show_panel = false;
                                 focus_zone = FocusZone::Canvas;
@@ -337,7 +347,7 @@ pub fn view_block_group(
                             }
                             tui_layout_change = true;
                         }
-                        KeyCode::Tab => {
+                        GenKeyCode::Tab => {
                             // Tab - cycle forwards
                             focus_zone = match focus_zone {
                                 FocusZone::Canvas => {
@@ -351,7 +361,7 @@ pub fn view_block_group(
                                 FocusZone::Panel => FocusZone::Sidebar,
                             }
                         }
-                        KeyCode::BackTab => {
+                        GenKeyCode::BackTab => {
                             // Shift+Tab - cycle backwards
                             focus_zone = match focus_zone {
                                 FocusZone::Canvas => FocusZone::Sidebar,
@@ -371,7 +381,7 @@ pub fn view_block_group(
                     // Focus-specific handlers
                     match focus_zone {
                         FocusZone::Canvas => match key.code {
-                            KeyCode::Enter => {
+                            GenKeyCode::Enter => {
                                 if graph_controller.cursor.is_coarse_mode() {
                                     graph_controller.cursor.set_coarse_mode(false);
                                 } else {
@@ -382,7 +392,7 @@ pub fn view_block_group(
                                     tui_layout_change = true;
                                 }
                             }
-                            KeyCode::Esc => {
+                            GenKeyCode::Esc => {
                                 if !graph_controller.is_cursor_visible() {
                                     graph_controller.show_cursor();
                                 } else if !graph_controller.cursor.is_coarse_mode() {
@@ -391,7 +401,7 @@ pub fn view_block_group(
                                     focus_zone = FocusZone::Sidebar;
                                 }
                             }
-                            KeyCode::Char('p') => {
+                            GenKeyCode::Char('p') => {
                                 if let Some(ref block_group_id) =
                                     explorer_state.selected_block_group_id
                                 {
@@ -420,16 +430,16 @@ pub fn view_block_group(
                                 }
                             }
                             _ => {
-                                graph_controller.handle_key_event(key).ok();
+                                graph_controller_handle_key(&mut graph_controller, key).ok();
                             }
                         },
                         FocusZone::Panel => match key.code {
-                            KeyCode::Esc => {
+                            GenKeyCode::Esc => {
                                 show_panel = false;
                                 focus_zone = FocusZone::Canvas;
                                 tui_layout_change = true;
                             }
-                            KeyCode::Char('c') => {
+                            GenKeyCode::Char('c') => {
                                 if panel_mode == PanelMode::Messages {
                                     messages.clear();
                                 }
@@ -560,8 +570,9 @@ pub fn view_block_group(
                         }
                     }
                 }
-                event::Event::Mouse(mouse)
-                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                GenTuiEvent::Mouse(mouse)
+                    if matches!(mouse.kind, GenMouseEventKind::Down)
+                        && matches!(mouse.button, GenMouseButton::Left)
                         && last_sidebar_area.contains(Position {
                             x: mouse.column,
                             y: mouse.row,
@@ -673,12 +684,12 @@ pub fn view_block_group(
                         }
                     }
                 }
-                event::Event::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
+                GenTuiEvent::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
+                    GenMouseEventKind::Down if matches!(mouse.button, GenMouseButton::Left) => {
                         mouse_last_pos = Some((mouse.column, mouse.row));
                         mouse_is_dragging = false;
                     }
-                    MouseEventKind::Drag(MouseButton::Left) => {
+                    GenMouseEventKind::Drag if matches!(mouse.button, GenMouseButton::Left) => {
                         if let Some((lx, ly)) = mouse_last_pos {
                             let dx = mouse.column as i16 - lx as i16;
                             let dy = mouse.row as i16 - ly as i16;
@@ -688,7 +699,7 @@ pub fn view_block_group(
                         }
                         mouse_last_pos = Some((mouse.column, mouse.row));
                     }
-                    MouseEventKind::Up(MouseButton::Left) => {
+                    GenMouseEventKind::Up if matches!(mouse.button, GenMouseButton::Left) => {
                         if !mouse_is_dragging {
                             graph_controller.handle_click(mouse.column, mouse.row);
                         }
@@ -697,6 +708,7 @@ pub fn view_block_group(
                     }
                     _ => {}
                 },
+                GenTuiEvent::Resize { .. } | GenTuiEvent::Tick => {}
                 _ => {}
             }
         }
@@ -808,7 +820,7 @@ pub fn view_block_group(
         last_frame_time = now;
 
         // Draw the UI
-        terminal.draw(|frame| {
+        session.terminal_mut().draw(|frame| {
             let status_bar_height: u16 = 1;
 
             // The outer layout is a vertical split between the main area, optional message bar, and status bar
@@ -1216,15 +1228,20 @@ pub fn view_block_group(
         }
 
         // If an animation is running, wake up after tick_rate to advance it.
-        // If the display is idle, block indefinitely — the next input event will wake us.
+        // Otherwise, wait briefly so browser stdin is read only after a frame is flushed.
         let wait = if graph_controller.is_animating() {
             tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or(Duration::ZERO)
         } else {
-            Duration::from_secs(3600)
+            tick_rate
         };
-        let _ = crossterm::event::poll(wait);
+        #[cfg(all(feature = "browser-tui", not(feature = "native-tui")))]
+        if let Some(event) = session.poll_event(wait)? {
+            pending_tui_events.push_back(event);
+        }
+        #[cfg(any(not(feature = "browser-tui"), feature = "native-tui"))]
+        std::thread::sleep(wait);
 
         // Update tick
         if last_tick.elapsed() >= tick_rate {

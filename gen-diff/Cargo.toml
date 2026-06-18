@@ -10,7 +10,7 @@ license = "Apache-2.0"
 [dependencies]
 gen-core = { path = "../gen-core", version = "0.1.31" }
 gen-graph = { path = "../gen-graph", version = "0.1.31" }
-gen-models = { path = "../gen-models", version = "0.1.31" }
+gen-models = { path = "../gen-models", version = "0.1.31", default-features = false }
 itertools = "0.14.0"
 petgraph = "0.6.5"
 rusqlite = { version = "0.32.1" }

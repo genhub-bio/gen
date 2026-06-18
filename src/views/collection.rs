@@ -3,7 +3,6 @@ use std::{
     fmt,
 };
 
-use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::HashId;
 use gen_models::{
     block_group::BlockGroup,
@@ -29,6 +28,7 @@ use crate::views::{
         AnnotationGroupEntry, AnnotationGroupOrigin, load_annotation_group_entries,
     },
     samples::{SampleTree, SampleTreeEntry},
+    tui_runtime::{GenKeyCode, GenKeyEvent},
 };
 
 /// Represents the different focus zones in the UI
@@ -542,11 +542,11 @@ impl CollectionExplorer {
         state.list_state.selected = self.find_prev_selectable(state, current_idx);
     }
 
-    pub fn handle_input(&self, state: &mut CollectionExplorerState, key: KeyEvent) {
+    pub fn handle_input(&self, state: &mut CollectionExplorerState, key: GenKeyEvent) {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.previous(state),
-            KeyCode::Down | KeyCode::Char('j') => self.next(state),
-            KeyCode::Left | KeyCode::Char('h') => {
+            GenKeyCode::Up | GenKeyCode::Char('k') => self.previous(state),
+            GenKeyCode::Down | GenKeyCode::Char('j') => self.next(state),
+            GenKeyCode::Left | GenKeyCode::Char('h') => {
                 if let Some(selected_idx) = state.list_state.selected {
                     let items = self.get_display_items(state);
                     if let Some(ExplorerItem::Sample { name, expanded, .. }) =
@@ -571,7 +571,7 @@ impl CollectionExplorer {
                     }
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            GenKeyCode::Right | GenKeyCode::Char('l') => {
                 if let Some(selected_idx) = state.list_state.selected {
                     let items = self.get_display_items(state);
                     if let Some(ExplorerItem::Sample {
@@ -587,7 +587,7 @@ impl CollectionExplorer {
                     }
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            GenKeyCode::Enter | GenKeyCode::Char(' ') => {
                 if let Some(selected_idx) = state.list_state.selected {
                     let items = self.get_display_items(state);
                     match &items[selected_idx] {

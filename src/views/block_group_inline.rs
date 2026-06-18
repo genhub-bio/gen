@@ -1,27 +1,34 @@
+use std::io::Result;
+#[cfg(feature = "native-tui")]
 use std::{
-    io::{Error, Result},
+    io::Error,
     panic,
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "native-tui")]
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_graph::GenGraph;
 use gen_models::{db::GraphConnection, path::Path};
+#[cfg(feature = "native-tui")]
 use gen_tui::{
     graph_controller::GraphController,
     layout::VisualDetail,
     plotter::{LineStyle, PathStyle},
     theme::current_theme,
 };
+#[cfg(feature = "native-tui")]
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
     widgets::{Block, Borders},
 };
 
+#[cfg(feature = "native-tui")]
 use crate::views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget};
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
+#[cfg(feature = "native-tui")]
 fn get_path_nodes(
     conn: &GraphConnection,
     path: &Path,
@@ -61,21 +68,25 @@ fn get_path_nodes(
 }
 
 #[derive(Debug)]
+#[cfg(feature = "native-tui")]
 pub enum AppEvent {
     Tick,
     KeyPress(crossterm::event::KeyEvent),
     Resize(u16, u16),
 }
 
+#[cfg(feature = "native-tui")]
 pub trait EventSource {
     fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent>;
 }
 
+#[cfg(feature = "native-tui")]
 pub struct TickEventSource {
     tick_rate: Duration,
     last_tick: Instant,
 }
 
+#[cfg(feature = "native-tui")]
 impl TickEventSource {
     pub fn new(tick_rate: Duration) -> Self {
         Self {
@@ -85,6 +96,7 @@ impl TickEventSource {
     }
 }
 
+#[cfg(feature = "native-tui")]
 impl EventSource for TickEventSource {
     fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent> {
         let remaining = self
@@ -115,12 +127,14 @@ impl EventSource for TickEventSource {
     }
 }
 
+#[cfg(feature = "native-tui")]
 pub struct InlineGenGraphState<'a> {
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
 }
 
+#[cfg(feature = "native-tui")]
 impl<'a> InlineGenGraphState<'a> {
     pub fn new(graph: &GenGraph, conn: &'a GraphConnection) -> Self {
         let node_sizer = GenGraphNodeSizer;
@@ -170,122 +184,134 @@ pub fn show_inline_gen_graph_widget(
     paths: Vec<Path>,
     height: u16,
 ) -> Result<bool> {
-    let terminal_result = panic::catch_unwind(|| {
-        ratatui::init_with_options(TerminalOptions {
-            viewport: Viewport::Inline(height),
-        })
-    });
+    #[cfg(all(feature = "browser-tui", not(feature = "native-tui")))]
+    {
+        let _ = (conn, graph, paths, height);
+        return Ok(true);
+    }
 
-    match terminal_result {
-        Ok(mut terminal) => {
-            let mut state = InlineGenGraphState::new(graph, conn);
-            for path in paths {
-                state.add_path(&path, conn)?;
-            }
-            // Set up tick-based event loop for 60 FPS (16ms per frame)
-            let tick_rate = Duration::from_millis(16);
-            let mut events = TickEventSource::new(tick_rate);
-            let mut last_frame_time = Instant::now();
-            let mut upgrade_requested = false;
+    #[cfg(feature = "native-tui")]
+    {
+        let terminal_result = panic::catch_unwind(|| {
+            ratatui::init_with_options(TerminalOptions {
+                viewport: Viewport::Inline(height),
+            })
+        });
 
-            loop {
-                // Process events with a reasonable timeout
-                if let Some(event) = events.poll_next(Duration::from_millis(250)) {
-                    match event {
-                        AppEvent::Tick => {
-                            // Calculate time delta since last frame
-                            let now = Instant::now();
-                            let frame_delta = now.duration_since(last_frame_time);
-                            last_frame_time = now;
+        match terminal_result {
+            Ok(mut terminal) => {
+                let mut state = InlineGenGraphState::new(graph, conn);
+                for path in paths {
+                    state.add_path(&path, conn)?;
+                }
+                // Set up tick-based event loop for 60 FPS (16ms per frame)
+                let tick_rate = Duration::from_millis(16);
+                let mut events = TickEventSource::new(tick_rate);
+                let mut last_frame_time = Instant::now();
+                let mut upgrade_requested = false;
 
-                            // Draw the frame
-                            terminal.draw(|frame| {
-                                let area = frame.area();
-                                // Calculate the actual widget area first
-                                let main_layout = Layout::default()
-                                    .direction(Direction::Vertical)
-                                    .constraints([Constraint::Min(0), Constraint::Length(1)])
-                                    .split(area);
-                                let block = Block::default().borders(Borders::ALL);
-                                let inner_area = block.inner(main_layout[0]);
+                loop {
+                    // Process events with a reasonable timeout
+                    if let Some(event) = events.poll_next(Duration::from_millis(250)) {
+                        match event {
+                            AppEvent::Tick => {
+                                // Calculate time delta since last frame
+                                let now = Instant::now();
+                                let frame_delta = now.duration_since(last_frame_time);
+                                last_frame_time = now;
 
-                                // Set viewport bounds to the actual inner area before updating animations
-                                state.controller.viewport_state.viewport_bounds = inner_area;
+                                // Draw the frame
+                                terminal.draw(|frame| {
+                                    let area = frame.area();
+                                    // Calculate the actual widget area first
+                                    let main_layout = Layout::default()
+                                        .direction(Direction::Vertical)
+                                        .constraints([Constraint::Min(0), Constraint::Length(1)])
+                                        .split(area);
+                                    let block = Block::default().borders(Borders::ALL);
+                                    let inner_area = block.inner(main_layout[0]);
 
-                                // Update animations with frame delta for smooth camera and cursor animations
-                                state.controller.update_animations(frame_delta);
+                                    // Set viewport bounds to the actual inner area before updating animations
+                                    state.controller.viewport_state.viewport_bounds = inner_area;
 
-                                render_inline(frame, &mut state);
-                            })?;
-                        }
-                        AppEvent::KeyPress(key) => {
-                            // Intercept quit signal and path highlighting
-                            match key.code {
-                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
-                                    break;
-                                }
-                                KeyCode::Char('f') => {
-                                    upgrade_requested = true;
-                                    break;
-                                }
-                                KeyCode::Char('p') => {
-                                    // Toggle path highlighting
-                                    let path_style = PathStyle::new(current_theme()[0x09])
-                                        .with_line_style(LineStyle::Bold)
-                                        .with_merge_glyphs(true);
+                                    // Update animations with frame delta for smooth camera and cursor animations
+                                    state.controller.update_animations(frame_delta);
 
-                                    if state.controller.has_highlight(&path_style) {
-                                        state.controller.clear_highlight(&path_style);
-                                    } else if let Some(last_path) = state.paths.last() {
-                                        state
-                                            .controller
-                                            .set_path_highlight(path_style, last_path.clone());
-                                    } else {
-                                        eprintln!("No paths available for path highlighting");
+                                    render_inline(frame, &mut state);
+                                })?;
+                            }
+                            AppEvent::KeyPress(key) => {
+                                // Intercept quit signal and path highlighting
+                                match key.code {
+                                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                                        break;
+                                    }
+                                    KeyCode::Char('f') => {
+                                        upgrade_requested = true;
+                                        break;
+                                    }
+                                    KeyCode::Char('p') => {
+                                        // Toggle path highlighting
+                                        let path_style = PathStyle::new(current_theme()[0x09])
+                                            .with_line_style(LineStyle::Bold)
+                                            .with_merge_glyphs(true);
+
+                                        if state.controller.has_highlight(&path_style) {
+                                            state.controller.clear_highlight(&path_style);
+                                        } else if let Some(last_path) = state.paths.last() {
+                                            state
+                                                .controller
+                                                .set_path_highlight(path_style, last_path.clone());
+                                        } else {
+                                            eprintln!("No paths available for path highlighting");
+                                        }
+                                    }
+                                    _ => {
+                                        let _ = state.controller.handle_key_event(key);
                                     }
                                 }
-                                _ => {
-                                    let _ = state.controller.handle_key_event(key);
-                                }
                             }
-                        }
-                        AppEvent::Resize(w, _h) => {
-                            // Update viewport width, but keep the fixed inline height
-                            state.controller.viewport_state.viewport_bounds.width = w;
+                            AppEvent::Resize(w, _h) => {
+                                // Update viewport width, but keep the fixed inline height
+                                state.controller.viewport_state.viewport_bounds.width = w;
+                            }
                         }
                     }
                 }
+
+                // Final render without border -> capture the viewport area
+                let viewport_area = terminal.get_frame().area();
+
+                terminal.draw(|frame| render_final(frame, &mut state))?;
+
+                // For inline viewports, we need to manually restore terminal state
+                // (ratatui::restore() loses the cursor which resets cursor position incorrectly.
+
+                // Position cursor at the end of the viewport BEFORE restoring terminal mode
+                let target_line = viewport_area.y + viewport_area.height;
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::cursor::MoveTo(0, target_line)
+                );
+
+                // Now restore terminal modes manually (show cursor, disable raw mode)
+                let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+                let _ = crossterm::terminal::disable_raw_mode();
+
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+
+                Ok(upgrade_requested)
             }
-
-            // Final render without border -> capture the viewport area
-            let viewport_area = terminal.get_frame().area();
-
-            terminal.draw(|frame| render_final(frame, &mut state))?;
-
-            // For inline viewports, we need to manually restore terminal state
-            // (ratatui::restore() loses the cursor which resets cursor position incorrectly.
-
-            // Position cursor at the end of the viewport BEFORE restoring terminal mode
-            let target_line = viewport_area.y + viewport_area.height;
-            let _ =
-                crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, target_line));
-
-            // Now restore terminal modes manually (show cursor, disable raw mode)
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
-            let _ = crossterm::terminal::disable_raw_mode();
-
-            std::io::Write::flush(&mut std::io::stdout()).ok();
-
-            Ok(upgrade_requested)
-        }
-        Err(_) => {
-            eprintln!("Interactive terminal not available, omitting visualization.");
-            Ok(false)
+            Err(_) => {
+                eprintln!("Interactive terminal not available, omitting visualization.");
+                Ok(false)
+            }
         }
     }
 }
 
 /// Draw the inline widget with a border and controls help
+#[cfg(feature = "native-tui")]
 fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
     let area = frame.area();
 
@@ -317,6 +343,7 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
 }
 
 /// Draw the final plot after the widget is done
+#[cfg(feature = "native-tui")]
 fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
     let area = frame.area();
     // Set viewport bounds and focus for the current area
@@ -336,6 +363,7 @@ fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
     );
 }
 
+#[cfg(feature = "native-tui")]
 fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
     let help_text = if state.controller.highlights.is_empty() {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
