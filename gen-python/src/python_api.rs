@@ -7,6 +7,7 @@ pub mod graph_search;
 pub mod hash_id;
 pub mod jupyter_widget;
 pub mod repository;
+pub mod sample;
 pub mod sequence_part;
 pub mod translation;
 pub mod utils;
@@ -19,6 +20,7 @@ use crate::python_api::{
     hash_id::PyHashId,
     jupyter_widget::PyGraphController,
     repository::PyRepository,
+    sample::{PySample, PySampleIter},
     sequence_part::PySequencePart,
 };
 
@@ -37,6 +39,8 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphLocus>()?;
     m.add_class::<PySequencePart>()?;
     m.add_class::<PyGraphController>()?;
+    m.add_class::<PySample>()?;
+    m.add_class::<PySampleIter>()?;
 
     Ok(())
 }

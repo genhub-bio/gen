@@ -1913,7 +1913,7 @@ mod tests {
         Branch::get_or_create(op_conn, "branch-2").unwrap();
         checkout(&context, &Some("branch-1".to_string()), None).unwrap();
 
-        let op_2 = update_with_vcf(
+        let (op_2, _) = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,

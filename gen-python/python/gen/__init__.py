@@ -19,6 +19,7 @@ from .gen import (
     NodeSlice,
     Position,
     Repository,
+    Sample,
     SequenceGraph,
     SequencePart,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "NodeSlice",
     "Position",
     "Repository",
+    "Sample",
     "SequenceGraph",
     "SequencePart",
 ]
