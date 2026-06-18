@@ -480,6 +480,44 @@ plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", .
   GenPlot(x$db_path(), x$id(), detail = detail, rows = rows, cols = cols)
 }
 
+#' The sequence graphs produced by a single import/update/derive call
+#'
+#' A \code{gen_sample} is a read-only list of \code{SequenceGraph} objects,
+#' all within one \code{collection_name}/\code{sample_name}. Index it with
+#' \code{[[}, iterate it, or call \code{length()} on it.
+#'
+#' @param x A \code{gen_sample}.
+#' @export
+length.gen_sample <- function(x) length(x$block_groups)
+
+#' @export
+`[[.gen_sample` <- function(x, i) x$block_groups[[i]]
+
+#' @export
+`[.gen_sample` <- function(x, i) x$block_groups[i]
+
+#' @export
+print.gen_sample <- function(x, ...) {
+  cat(sprintf(
+    "<gen_sample> %s (collection=%s, %d sequence graph%s)\n",
+    x$sample_name, x$collection_name, length(x),
+    if (length(x) == 1L) "" else "s"
+  ))
+  for (i in seq_along(x$block_groups)) {
+    cat(sprintf("  [[%d]]: %s\n", i, x$block_groups[[i]]$name()))
+  }
+  invisible(x)
+}
+
+#' Plot the first sequence graph in a sample
+#'
+#' @param x A \code{gen_sample}.
+#' @param ... Passed to \code{plot.SequenceGraph}.
+#' @export
+plot.gen_sample <- function(x, ...) {
+  plot(x$block_groups[[1L]], ...)
+}
+
 #' Import a combinatorial library with optional GRanges part sequences
 #'
 #' Thin wrapper around \code{repo$import_library()} that resolves any GRanges
@@ -491,7 +529,7 @@ plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", .
 #' @param seq_containers List of sequence containers for GRanges resolution.
 #' @param sample Character or \code{NULL}.
 #' @param collection Character or \code{NULL}.
-#' @return Invisibly the import message string.
+#' @return The imported \code{SequenceGraph}.
 #' @export
 import_library <- function(repo, library_name, parts_list, seq_containers = list(),
                            sample = NULL, collection = NULL) {
@@ -508,7 +546,7 @@ import_library <- function(repo, library_name, parts_list, seq_containers = list
 #' @param parts_list Named list of part vectors (character or GRanges).
 #' @param seq_containers List of sequence containers for GRanges resolution.
 #' @param collection Character or \code{NULL}.
-#' @return Invisibly the update message string.
+#' @return The updated \code{gen_sample}.
 #' @export
 update_with_library <- function(repo, sample = NULL, new_sample_name, path_name,
                                 parts_list, seq_containers = list(), collection = NULL) {

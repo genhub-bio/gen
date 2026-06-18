@@ -42,14 +42,11 @@ cds_variants <- DNAStringSet(c(
 
 terminator <- DNAStringSet(c(terminator_T1 = "GCGCAACGCAATTAATGTGAGTTAGCTCACTCATTAGGCACCCCAGGC"))
 
-repo$import_library(
+cassette_bg <- repo$import_library(
   library_name    = "expression-cassette",
   parts_list      = list(upstream, promoters, rbs_variants, cds_variants, terminator),
   sample          = "design-v1",
   collection_name = "cassette-library"
 )
-
-bgs <- repo$get_sequence_graphs_by_collection("cassette-library")
-cassette_bg <- bgs[[1]]
 
 plot(cassette_bg)

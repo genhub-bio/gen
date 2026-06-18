@@ -35,7 +35,8 @@ expect_binding_result <- function(result) {
       is.list(result) ||
       is.logical(result) ||
       is.null(result) ||
-      inherits(result, "gen_block_group") ||
+      inherits(result, "gen_sample") ||
+      inherits(result, "SequenceGraph") ||
       inherits(result, "try-error")
   )
 }
@@ -63,10 +64,12 @@ test_that("FASTA import and export work", {
   repo <- setup_repository()
   output_fasta <- tempfile(fileext = ".fa")
 
-  import_msg <- repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
+  imported <- repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
   exported_path <- repo$export_fasta(output_fasta, sample = "sample-a")
 
-  expect_match(import_msg, "imported", ignore.case = TRUE)
+  expect_s3_class(imported, "gen_sample")
+  expect_length(imported, 1)
+  expect_s3_class(imported[[1]], "SequenceGraph")
   expect_equal(normalizePath(exported_path, mustWork = FALSE), normalizePath(output_fasta, mustWork = FALSE))
   expect_equal(readLines(output_fasta)[[2]], "ATCGATCGATCGATCGATCGGGAACACACAGAGA")
 })
@@ -76,9 +79,9 @@ test_that("GFA and GenBank import/export work", {
   gfa_out <- tempfile(fileext = ".gfa")
   gb_out  <- tempfile(fileext = ".gb")
 
-  expect_match(
+  expect_s3_class(
     repo$import_gfa(fixture_path("simple.gfa"), sample = "sample-a"),
-    "imported", ignore.case = TRUE
+    "SequenceGraph"
   )
   expect_binding_result(try(repo$export_gfa(gfa_out, sample = "sample-a"), silent = TRUE))
 
@@ -183,23 +186,21 @@ test_that("graph operation bindings work", {
   repo <- setup_repository()
   repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
 
-  expect_binding_result(try(repo$derive_chunks(
+  chunked <- repo$derive_chunks(
     collection = NULL, sample = "sample-a", new_sample = "chunked",
     region = "m123", backbone = NULL,
-    breakpoints = integer(0), chunk_size = NULL
-  ), silent = TRUE))
-
-  groups <- repo$get_sequence_graphs()
-  expect_true(length(groups) >= 1)
+    breakpoints = integer(0), chunk_size = 10L
+  )
+  expect_s3_class(chunked, "gen_sample")
+  expect_true(length(chunked) >= 1)
 
   expect_binding_result(try(repo$derive_subgraph(
     collection = NULL, sample = "sample-a", new_sample = "subgraph",
     region = "m123:3-12", backbone = NULL
   ), silent = TRUE))
 
-  chunks <- Filter(function(bg) bg$sample_name() == "chunked", repo$get_sequence_graphs())
   expect_binding_result(try(
-    stitch(repo, bgs = chunks, new_sample = "stitched", new_region = "m123.stitched"),
+    stitch(repo, bgs = chunked$block_groups, new_sample = "stitched", new_region = "m123.stitched"),
     silent = TRUE
   ))
 })

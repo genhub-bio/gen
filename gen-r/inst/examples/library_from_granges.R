@@ -47,7 +47,7 @@ names(rbs_variants) <- c("rbs_strong", "rbs_weak")
 # Pass the genome container alongside the GRanges columns.
 # import_library matches each GRanges to the right container via the
 # 'genome' field: GRanges Seqinfo genome == container assembly genome.
-repo$import_library(
+library_sg <- repo$import_library(
   library_name    = "genomic-parts-library",
   parts_list      = list(promoters, rbs_variants),
   seq_containers  = list(BSgenome.Hsapiens.UCSC.hg38),
@@ -55,5 +55,4 @@ repo$import_library(
   collection_name = "genomic-library"
 )
 
-bgs <- repo$get_sequence_graphs_by_collection("genomic-library")
-plot(bgs[[1]])
+plot(library_sg)

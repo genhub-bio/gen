@@ -8,9 +8,8 @@ R bindings for the Gen sequence graph and version control system.
 library(genr)
 
 repo <- Repository()          # open workspace in current directory
-repo$import_fasta("seq.fa", sample = "ref")
-bgs  <- repo$get_sequence_graphs()
-plot(bgs[[1]])                # opens the graph viewer
+sample <- repo$import_fasta("seq.fa", sample = "ref")
+plot(sample$block_groups[[1]])  # opens the graph viewer
 ```
 
 `Repository()` is the primary entry point. It discovers the `.gen/` workspace,
@@ -23,11 +22,16 @@ operations as methods on the returned environment.
 
 | Method | Description |
 |--------|-------------|
-| `import_fasta(filename, sample, shallow, collection)` | Import a FASTA file |
-| `import_gfa(filename, sample, collection)` | Import a GFA file |
-| `import_genbank(filename, sample, collection)` | Import a GenBank file (plain or gzipped) |
-| `import_library(library_name, parts_list, seq_containers, sample, collection)` | Import a combinatorial sequence library |
-| `import_library_files(library_name, parts, library, sample, collection)` | Import a library from parts/library CSV files |
+| `import_fasta(filename, sample, shallow, collection)` | Import a FASTA file, returns a `gen_sample` |
+| `import_gfa(filename, sample, collection)` | Import a GFA file, returns a `SequenceGraph` |
+| `import_genbank(filename, sample, collection)` | Import a GenBank file (plain or gzipped), returns a `gen_sample` |
+| `import_library(library_name, parts_list, seq_containers, sample, collection)` | Import a combinatorial sequence library, returns a `SequenceGraph` |
+| `import_library_files(library_name, parts, library, sample, collection)` | Import a library from parts/library CSV files, returns a `SequenceGraph` |
+
+Every import call returns the sequence graph(s) it just created directly, so
+there's no need to follow up with `get_sequence_graphs()`. A `gen_sample` is a
+list with `collection_name`, `sample_name`, and `block_groups` (a list of
+`SequenceGraph`); index it with `sample$block_groups[[1]]` or `length(sample)`.
 
 See also the standalone `import_bioconductor()` and `import_granges()` helpers for
 Bioconductor `DNAStringSet` / `GRanges` objects.
@@ -44,21 +48,21 @@ Bioconductor `DNAStringSet` / `GRanges` objects.
 
 | Method | Description |
 |--------|-------------|
-| `update_with_fasta(...)` | Apply a FASTA update to an existing block group |
-| `update_with_gfa(...)` | Apply a GFA update |
-| `update_with_gaf(...)` | Apply a GAF update |
-| `update_with_vcf(...)` | Apply a VCF update |
-| `update_with_genbank(...)` | Apply a GenBank update |
-| `update_with_sequence(...)` | Apply a raw sequence update |
-| `update_with_library(...)` | Apply a library update |
-| `update_with_library_files(...)` | Apply a library-files update |
+| `update_with_fasta(...)` | Apply a FASTA update to an existing block group, returns a `gen_sample` |
+| `update_with_gfa(...)` | Apply a GFA update, returns a `gen_sample` |
+| `update_with_gaf(...)` | Apply a GAF update, returns a `gen_sample` |
+| `update_with_vcf(...)` | Apply a VCF update, returns a list of `gen_sample` (one per output sample) |
+| `update_with_genbank(...)` | Apply a GenBank update, returns a `gen_sample` |
+| `update_with_sequence(...)` | Apply a raw sequence update, returns a `gen_sample` |
+| `update_with_library(...)` | Apply a library update, returns a `gen_sample` |
+| `update_with_library_files(...)` | Apply a library-files update, returns a `gen_sample` |
 
 **Derive / transform**
 
 | Method | Description |
 |--------|-------------|
-| `derive_subgraph(sample, new_sample, region, ...)` | Extract a coordinate-bounded subgraph |
-| `derive_chunks(sample, new_sample, region, ...)` | Split a sequence graph at breakpoints or a fixed chunk size |
+| `derive_subgraph(sample, new_sample, region, ...)` | Extract a coordinate-bounded subgraph, returns a `SequenceGraph` |
+| `derive_chunks(sample, new_sample, region, ...)` | Split a sequence graph at breakpoints or a fixed chunk size, returns a `gen_sample` |
 | `stitch(sgs, new_sample, new_region)` | Concatenate sequence graphs end-to-end |
 
 **Query**
