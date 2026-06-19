@@ -1,4 +1,4 @@
-use gen_annotations::projection::{AnnotationSegment, accession_edges_to_segments};
+use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
 use gen_models::{
     accession::Accession,
@@ -149,11 +149,13 @@ impl PyAnnotation {
     }
 }
 
-/// Compute the annotation segments from accession edges.
+/// Compute the annotation segments from accession nodes.
 pub(super) fn annotation_segments(
     conn: &GraphConnection,
     annotation: &Annotation,
 ) -> Vec<AnnotationSegment> {
-    let edges = Accession::get_edges_by_id(conn, &annotation.accession_id);
-    accession_edges_to_segments(&edges)
+    Accession::get_nodes_by_id(conn, &annotation.accession_id)
+        .iter()
+        .map(AnnotationSegment::from)
+        .collect()
 }
