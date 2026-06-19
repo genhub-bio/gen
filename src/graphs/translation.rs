@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_annotations::projection::AnnotationSegment;
+use gen_annotations::projection::{self, AnnotationSegment};
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal,
     range::Range,
@@ -659,11 +659,7 @@ pub fn translate_annotation(
     let bg = BlockGroup::get_by_id(conn, bg_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
-    let accession_nodes = Accession::get_nodes_by_id(conn, &annotation.accession_id);
-    let segments: Vec<AnnotationSegment> = accession_nodes
-        .iter()
-        .map(AnnotationSegment::from)
-        .collect();
+    let segments = projection::annotation_segments(conn, annotation);
     if segments.is_empty() {
         return Err(TranslationError::EmptyAnnotation);
     }
@@ -1360,47 +1356,51 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     }
 
     /// Save a DNA sequence as a node. Returns the node id and its length.
-    fn mk_node(conn: &GraphConnection, dna: &str, tag: &str) -> (HashId, i64) {
+    fn build_node(conn: &GraphConnection, dna: &str, tag: &str) -> (HashId, i64) {
         let seq = Sequence::new()
             .sequence_type("DNA")
             .sequence(dna)
             .save(conn)
             .unwrap();
-        let nid = Node::create(
+        let node_id = Node::create(
             conn,
             &seq.hash,
             &HashId::convert_str(&format!("{tag}:{}", seq.hash)),
         )
         .unwrap();
-        (nid, seq.length)
+        (node_id, seq.length)
     }
 
     /// Create a forward block-group edge between two nodes at the given coordinates.
-    fn mk_edge(
+    fn build_edge(
         conn: &GraphConnection,
-        src: HashId,
-        src_coord: i64,
-        tgt: HashId,
-        tgt_coord: i64,
+        source: HashId,
+        source_coord: i64,
+        target: HashId,
+        target_coord: i64,
     ) -> HashId {
         Edge::create(
             conn,
-            src,
-            src_coord,
+            source,
+            source_coord,
             Strand::Forward,
-            tgt,
-            tgt_coord,
+            target,
+            target_coord,
             Strand::Forward,
         )
         .unwrap()
         .id
     }
 
-    fn bge(bg_id: HashId, edge_id: HashId, ci: i64) -> BlockGroupEdgeData {
+    fn build_block_group_edge(
+        bg_id: HashId,
+        edge_id: HashId,
+        chromosome_index: i64,
+    ) -> BlockGroupEdgeData {
         BlockGroupEdgeData {
             block_group_id: bg_id,
             edge_id,
-            chromosome_index: ci,
+            chromosome_index,
             phased: 0,
         }
     }
@@ -1446,7 +1446,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let chain: Vec<(HashId, i64)> = segments
             .iter()
             .enumerate()
-            .map(|(i, dna)| mk_node(&conn, dna, &format!("n{i}")))
+            .map(|(i, dna)| build_node(&conn, dna, &format!("n{i}")))
             .collect();
 
         // Wire a linear chain START → n1 → … → nk → END at chromosome_index 0.
@@ -1454,13 +1454,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let mut prev = PATH_START_NODE_ID;
         let mut prev_coord = 0;
         for (node, len) in &chain {
-            let e = mk_edge(&conn, prev, prev_coord, *node, 0);
-            edges.push(bge(bg.id, e, 0));
+            let e = build_edge(&conn, prev, prev_coord, *node, 0);
+            edges.push(build_block_group_edge(bg.id, e, 0));
             prev = *node;
             prev_coord = *len;
         }
-        let e_out = mk_edge(&conn, prev, prev_coord, PATH_END_NODE_ID, 0);
-        edges.push(bge(bg.id, e_out, 0));
+        let e_out = build_edge(&conn, prev, prev_coord, PATH_END_NODE_ID, 0);
+        edges.push(build_block_group_edge(bg.id, e_out, 0));
         BlockGroupEdge::bulk_create(&conn, &edges);
 
         let annotation = accession_annotation(&conn, &bg.id, "test-gene", &chain, Strand::Forward);
@@ -1479,27 +1479,27 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         suffix: &str,
     ) -> (GraphConnection, Annotation, HashId) {
         let (conn, bg) = new_block_group("test-gene");
-        let (pre, pre_len) = mk_node(&conn, prefix, "pre");
-        let (wt, wt_len) = mk_node(&conn, wt_mid, "wt");
-        let (alt, alt_len) = mk_node(&conn, alt_mid, "alt");
-        let (suf, suf_len) = mk_node(&conn, suffix, "suf");
+        let (pre, pre_len) = build_node(&conn, prefix, "pre");
+        let (wt, wt_len) = build_node(&conn, wt_mid, "wt");
+        let (alt, alt_len) = build_node(&conn, alt_mid, "alt");
+        let (suf, suf_len) = build_node(&conn, suffix, "suf");
 
         // Block-group graph: wild-type path (ci 0) plus the variant detour (ci 1).
-        let e_s_pre = mk_edge(&conn, PATH_START_NODE_ID, 0, pre, 0);
-        let e_pre_wt = mk_edge(&conn, pre, pre_len, wt, 0);
-        let e_wt_suf = mk_edge(&conn, wt, wt_len, suf, 0);
-        let e_suf_end = mk_edge(&conn, suf, suf_len, PATH_END_NODE_ID, 0);
-        let e_pre_alt = mk_edge(&conn, pre, pre_len, alt, 0);
-        let e_alt_suf = mk_edge(&conn, alt, alt_len, suf, 0);
+        let e_s_pre = build_edge(&conn, PATH_START_NODE_ID, 0, pre, 0);
+        let e_pre_wt = build_edge(&conn, pre, pre_len, wt, 0);
+        let e_wt_suf = build_edge(&conn, wt, wt_len, suf, 0);
+        let e_suf_end = build_edge(&conn, suf, suf_len, PATH_END_NODE_ID, 0);
+        let e_pre_alt = build_edge(&conn, pre, pre_len, alt, 0);
+        let e_alt_suf = build_edge(&conn, alt, alt_len, suf, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(bg.id, e_s_pre, 0),
-                bge(bg.id, e_pre_wt, 0),
-                bge(bg.id, e_wt_suf, 0),
-                bge(bg.id, e_suf_end, 0),
-                bge(bg.id, e_pre_alt, 1),
-                bge(bg.id, e_alt_suf, 1),
+                build_block_group_edge(bg.id, e_s_pre, 0),
+                build_block_group_edge(bg.id, e_pre_wt, 0),
+                build_block_group_edge(bg.id, e_wt_suf, 0),
+                build_block_group_edge(bg.id, e_suf_end, 0),
+                build_block_group_edge(bg.id, e_pre_alt, 1),
+                build_block_group_edge(bg.id, e_alt_suf, 1),
             ],
         );
 
@@ -1521,31 +1521,31 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, bg) = new_block_group("columns");
 
         // GGT→G, GCT→A, GAT→D, TTT→F (all codon-aligned, no junctions).
-        let (c1a, l1a) = mk_node(&conn, "GGT", "c1a");
-        let (c1b, l1b) = mk_node(&conn, "GCT", "c1b");
-        let (c2a, l2a) = mk_node(&conn, "GAT", "c2a");
-        let (c2b, _l2b) = mk_node(&conn, "TTT", "c2b");
+        let (c1a, l1a) = build_node(&conn, "GGT", "c1a");
+        let (c1b, l1b) = build_node(&conn, "GCT", "c1b");
+        let (c2a, l2a) = build_node(&conn, "GAT", "c2a");
+        let (c2b, _l2b) = build_node(&conn, "TTT", "c2b");
 
-        let e_s1a = mk_edge(&conn, PATH_START_NODE_ID, 0, c1a, 0);
-        let e_s1b = mk_edge(&conn, PATH_START_NODE_ID, 0, c1b, 0);
-        let e_1a2a = mk_edge(&conn, c1a, l1a, c2a, 0);
-        let e_1a2b = mk_edge(&conn, c1a, l1a, c2b, 0);
-        let e_1b2a = mk_edge(&conn, c1b, l1b, c2a, 0);
-        let e_1b2b = mk_edge(&conn, c1b, l1b, c2b, 0);
-        let e_2a_end = mk_edge(&conn, c2a, l2a, PATH_END_NODE_ID, 0);
-        let e_2b_end = mk_edge(&conn, c2b, l2a, PATH_END_NODE_ID, 0);
+        let e_s1a = build_edge(&conn, PATH_START_NODE_ID, 0, c1a, 0);
+        let e_s1b = build_edge(&conn, PATH_START_NODE_ID, 0, c1b, 0);
+        let e_1a2a = build_edge(&conn, c1a, l1a, c2a, 0);
+        let e_1a2b = build_edge(&conn, c1a, l1a, c2b, 0);
+        let e_1b2a = build_edge(&conn, c1b, l1b, c2a, 0);
+        let e_1b2b = build_edge(&conn, c1b, l1b, c2b, 0);
+        let e_2a_end = build_edge(&conn, c2a, l2a, PATH_END_NODE_ID, 0);
+        let e_2b_end = build_edge(&conn, c2b, l2a, PATH_END_NODE_ID, 0);
 
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(bg.id, e_s1a, 0),
-                bge(bg.id, e_s1b, 1),
-                bge(bg.id, e_1a2a, 0),
-                bge(bg.id, e_1a2b, 1),
-                bge(bg.id, e_1b2a, 1),
-                bge(bg.id, e_1b2b, 1),
-                bge(bg.id, e_2a_end, 0),
-                bge(bg.id, e_2b_end, 1),
+                build_block_group_edge(bg.id, e_s1a, 0),
+                build_block_group_edge(bg.id, e_s1b, 1),
+                build_block_group_edge(bg.id, e_1a2a, 0),
+                build_block_group_edge(bg.id, e_1a2b, 1),
+                build_block_group_edge(bg.id, e_1b2a, 1),
+                build_block_group_edge(bg.id, e_1b2b, 1),
+                build_block_group_edge(bg.id, e_2a_end, 0),
+                build_block_group_edge(bg.id, e_2b_end, 1),
             ],
         );
         Path::create(&conn, "columns", &bg.id, &[e_s1a, e_1a2a, e_2a_end]).unwrap();
@@ -1562,27 +1562,27 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn setup_real_bubble() -> (GraphConnection, Annotation, HashId) {
         let (conn, bg) = new_block_group("bubble");
 
-        let (pre, pre_len) = mk_node(&conn, "ATGG", "pre");
-        let (rf, rf_len) = mk_node(&conn, "A", "ref");
-        let (alt, alt_len) = mk_node(&conn, "C", "alt");
-        let (post, post_len) = mk_node(&conn, "ATAA", "post");
+        let (pre, pre_len) = build_node(&conn, "ATGG", "pre");
+        let (rf, rf_len) = build_node(&conn, "A", "ref");
+        let (alt, alt_len) = build_node(&conn, "C", "alt");
+        let (post, post_len) = build_node(&conn, "ATAA", "post");
 
-        let e_s_pre = mk_edge(&conn, PATH_START_NODE_ID, 0, pre, 0);
-        let e_pre_ref = mk_edge(&conn, pre, pre_len, rf, 0);
-        let e_ref_post = mk_edge(&conn, rf, rf_len, post, 0);
-        let e_post_e = mk_edge(&conn, post, post_len, PATH_END_NODE_ID, 0);
-        let e_pre_alt = mk_edge(&conn, pre, pre_len, alt, 0);
-        let e_alt_post = mk_edge(&conn, alt, alt_len, post, 0);
+        let e_s_pre = build_edge(&conn, PATH_START_NODE_ID, 0, pre, 0);
+        let e_pre_ref = build_edge(&conn, pre, pre_len, rf, 0);
+        let e_ref_post = build_edge(&conn, rf, rf_len, post, 0);
+        let e_post_e = build_edge(&conn, post, post_len, PATH_END_NODE_ID, 0);
+        let e_pre_alt = build_edge(&conn, pre, pre_len, alt, 0);
+        let e_alt_post = build_edge(&conn, alt, alt_len, post, 0);
 
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(bg.id, e_s_pre, 0),
-                bge(bg.id, e_pre_ref, 0),
-                bge(bg.id, e_ref_post, 0),
-                bge(bg.id, e_post_e, 0),
-                bge(bg.id, e_pre_alt, 1),
-                bge(bg.id, e_alt_post, 1),
+                build_block_group_edge(bg.id, e_s_pre, 0),
+                build_block_group_edge(bg.id, e_pre_ref, 0),
+                build_block_group_edge(bg.id, e_ref_post, 0),
+                build_block_group_edge(bg.id, e_post_e, 0),
+                build_block_group_edge(bg.id, e_pre_alt, 1),
+                build_block_group_edge(bg.id, e_alt_post, 1),
             ],
         );
         Path::create(
@@ -1776,8 +1776,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn translate_ambiguous_strand_error() {
         let (conn, bg) = new_block_group("test-gene");
-        let (n1, l1) = mk_node(&conn, "ATGGAATGA", "n1");
-        let (n2, l2) = mk_node(&conn, "CCCGGG", "n2");
+        let (n1, l1) = build_node(&conn, "ATGGAATGA", "n1");
+        let (n2, l2) = build_node(&conn, "CCCGGG", "n2");
 
         // Forward first segment, reverse second segment → ambiguous strand.
         let spans = vec![
@@ -1829,10 +1829,16 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let stored = revcomp(&cds);
 
         let (conn, bg) = new_block_group("rev");
-        let (node, len) = mk_node(&conn, &stored, "rev");
-        let e_in = mk_edge(&conn, PATH_START_NODE_ID, 0, node, 0);
-        let e_out = mk_edge(&conn, node, len, PATH_END_NODE_ID, 0);
-        BlockGroupEdge::bulk_create(&conn, &[bge(bg.id, e_in, 0), bge(bg.id, e_out, 0)]);
+        let (node, len) = build_node(&conn, &stored, "rev");
+        let e_in = build_edge(&conn, PATH_START_NODE_ID, 0, node, 0);
+        let e_out = build_edge(&conn, node, len, PATH_END_NODE_ID, 0);
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                build_block_group_edge(bg.id, e_in, 0),
+                build_block_group_edge(bg.id, e_out, 0),
+            ],
+        );
 
         // Accession covers the whole node on the reverse strand.
         let annotation =
@@ -2021,19 +2027,19 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         // CDS node (ATG GAA TGA → M E *) shared by both samples, plus an upstream
         // spacer that exists only in the parent.
-        let (upstream, up_len) = mk_node(&conn, "GGGGGG", "upstream");
-        let (gene, gene_len) = mk_node(&conn, "ATGGAATGA", "gene");
+        let (upstream, up_len) = build_node(&conn, "GGGGGG", "upstream");
+        let (gene, gene_len) = build_node(&conn, "ATGGAATGA", "gene");
 
         // Parent path: START → upstream → gene → END.
-        let p_start_up = mk_edge(&conn, PATH_START_NODE_ID, 0, upstream, 0);
-        let p_up_gene = mk_edge(&conn, upstream, up_len, gene, 0);
-        let gene_end = mk_edge(&conn, gene, gene_len, PATH_END_NODE_ID, 0);
+        let p_start_up = build_edge(&conn, PATH_START_NODE_ID, 0, upstream, 0);
+        let p_up_gene = build_edge(&conn, upstream, up_len, gene, 0);
+        let gene_end = build_edge(&conn, gene, gene_len, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(parent_bg.id, p_start_up, 0),
-                bge(parent_bg.id, p_up_gene, 0),
-                bge(parent_bg.id, gene_end, 0),
+                build_block_group_edge(parent_bg.id, p_start_up, 0),
+                build_block_group_edge(parent_bg.id, p_up_gene, 0),
+                build_block_group_edge(parent_bg.id, gene_end, 0),
             ],
         );
 
@@ -2049,12 +2055,12 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Child sample: the upstream spacer is deleted, so START → gene → END.
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let c_start_gene = mk_edge(&conn, PATH_START_NODE_ID, 0, gene, 0);
+        let c_start_gene = build_edge(&conn, PATH_START_NODE_ID, 0, gene, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(child_bg.id, c_start_gene, 0),
-                bge(child_bg.id, gene_end, 0),
+                build_block_group_edge(child_bg.id, c_start_gene, 0),
+                build_block_group_edge(child_bg.id, gene_end, 0),
             ],
         );
 
@@ -2089,23 +2095,23 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, parent_bg) = new_block_group("test-gene");
 
         // Shared start/stop codons; the middle codon differs between samples.
-        let (start_codon, start_len) = mk_node(&conn, "ATG", "start"); // M
-        let (wt_mid, wt_len) = mk_node(&conn, "GAA", "wt"); // E
-        let (alt_mid, alt_len) = mk_node(&conn, "CAA", "alt"); // Q
-        let (stop_codon, stop_len) = mk_node(&conn, "TGA", "stop"); // *
+        let (start_codon, start_len) = build_node(&conn, "ATG", "start"); // M
+        let (wt_mid, wt_len) = build_node(&conn, "GAA", "wt"); // E
+        let (alt_mid, alt_len) = build_node(&conn, "CAA", "alt"); // Q
+        let (stop_codon, stop_len) = build_node(&conn, "TGA", "stop"); // *
 
         // Parent path: START → ATG → GAA → TGA → END.
-        let start_in = mk_edge(&conn, PATH_START_NODE_ID, 0, start_codon, 0);
-        let p_start_wt = mk_edge(&conn, start_codon, start_len, wt_mid, 0);
-        let p_wt_stop = mk_edge(&conn, wt_mid, wt_len, stop_codon, 0);
-        let stop_out = mk_edge(&conn, stop_codon, stop_len, PATH_END_NODE_ID, 0);
+        let start_in = build_edge(&conn, PATH_START_NODE_ID, 0, start_codon, 0);
+        let p_start_wt = build_edge(&conn, start_codon, start_len, wt_mid, 0);
+        let p_wt_stop = build_edge(&conn, wt_mid, wt_len, stop_codon, 0);
+        let stop_out = build_edge(&conn, stop_codon, stop_len, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(parent_bg.id, start_in, 0),
-                bge(parent_bg.id, p_start_wt, 0),
-                bge(parent_bg.id, p_wt_stop, 0),
-                bge(parent_bg.id, stop_out, 0),
+                build_block_group_edge(parent_bg.id, start_in, 0),
+                build_block_group_edge(parent_bg.id, p_start_wt, 0),
+                build_block_group_edge(parent_bg.id, p_wt_stop, 0),
+                build_block_group_edge(parent_bg.id, stop_out, 0),
             ],
         );
 
@@ -2125,15 +2131,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Child sample: the middle codon is mutated GAA → CAA (E → Q).
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let c_start_alt = mk_edge(&conn, start_codon, start_len, alt_mid, 0);
-        let c_alt_stop = mk_edge(&conn, alt_mid, alt_len, stop_codon, 0);
+        let c_start_alt = build_edge(&conn, start_codon, start_len, alt_mid, 0);
+        let c_alt_stop = build_edge(&conn, alt_mid, alt_len, stop_codon, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(child_bg.id, start_in, 0),
-                bge(child_bg.id, c_start_alt, 0),
-                bge(child_bg.id, c_alt_stop, 0),
-                bge(child_bg.id, stop_out, 0),
+                build_block_group_edge(child_bg.id, start_in, 0),
+                build_block_group_edge(child_bg.id, c_start_alt, 0),
+                build_block_group_edge(child_bg.id, c_alt_stop, 0),
+                build_block_group_edge(child_bg.id, stop_out, 0),
             ],
         );
 
@@ -2175,20 +2181,20 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, parent_bg) = new_block_group("test-gene");
 
         // First CDS base is its own node so a SNP there forms a bubble at entry.
-        let (first_wt, _) = mk_node(&conn, "A", "first-wt"); // ATG... → M
-        let (first_alt, _) = mk_node(&conn, "C", "first-alt"); // CTG... → L
-        let (rest, rest_len) = mk_node(&conn, "TGGAATGA", "rest"); // shared remainder
+        let (first_wt, _) = build_node(&conn, "A", "first-wt"); // ATG... → M
+        let (first_alt, _) = build_node(&conn, "C", "first-alt"); // CTG... → L
+        let (rest, rest_len) = build_node(&conn, "TGGAATGA", "rest"); // shared remainder
 
         // Parent: START → A → TGGAATGA → END  (ATG GAA TGA = M E *).
-        let start_first = mk_edge(&conn, PATH_START_NODE_ID, 0, first_wt, 0);
-        let first_rest = mk_edge(&conn, first_wt, 1, rest, 0);
-        let rest_end = mk_edge(&conn, rest, rest_len, PATH_END_NODE_ID, 0);
+        let start_first = build_edge(&conn, PATH_START_NODE_ID, 0, first_wt, 0);
+        let first_rest = build_edge(&conn, first_wt, 1, rest, 0);
+        let rest_end = build_edge(&conn, rest, rest_len, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(parent_bg.id, start_first, 0),
-                bge(parent_bg.id, first_rest, 0),
-                bge(parent_bg.id, rest_end, 0),
+                build_block_group_edge(parent_bg.id, start_first, 0),
+                build_block_group_edge(parent_bg.id, first_rest, 0),
+                build_block_group_edge(parent_bg.id, rest_end, 0),
             ],
         );
 
@@ -2205,16 +2211,16 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         //   START → C → rest → END   (ci 1, variant)
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let start_alt = mk_edge(&conn, PATH_START_NODE_ID, 0, first_alt, 0);
-        let alt_rest = mk_edge(&conn, first_alt, 1, rest, 0);
+        let start_alt = build_edge(&conn, PATH_START_NODE_ID, 0, first_alt, 0);
+        let alt_rest = build_edge(&conn, first_alt, 1, rest, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(child_bg.id, start_first, 0),
-                bge(child_bg.id, first_rest, 0),
-                bge(child_bg.id, start_alt, 1),
-                bge(child_bg.id, alt_rest, 1),
-                bge(child_bg.id, rest_end, 0),
+                build_block_group_edge(child_bg.id, start_first, 0),
+                build_block_group_edge(child_bg.id, first_rest, 0),
+                build_block_group_edge(child_bg.id, start_alt, 1),
+                build_block_group_edge(child_bg.id, alt_rest, 1),
+                build_block_group_edge(child_bg.id, rest_end, 0),
             ],
         );
 
@@ -2247,20 +2253,20 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, parent_bg) = new_block_group("test-gene");
 
         // Last CDS base is its own node so a SNP there forms a bubble at exit.
-        let (head, head_len) = mk_node(&conn, "ATGGAATG", "head"); // ATG GAA TG_
-        let (last_wt, _) = mk_node(&conn, "A", "last-wt"); // …TGA → *
-        let (last_alt, _) = mk_node(&conn, "G", "last-alt"); // …TGG → W
+        let (head, head_len) = build_node(&conn, "ATGGAATG", "head"); // ATG GAA TG_
+        let (last_wt, _) = build_node(&conn, "A", "last-wt"); // …TGA → *
+        let (last_alt, _) = build_node(&conn, "G", "last-alt"); // …TGG → W
 
         // Parent: START → ATGGAATG → A → END  (ATG GAA TGA = M E *).
-        let start_head = mk_edge(&conn, PATH_START_NODE_ID, 0, head, 0);
-        let head_last = mk_edge(&conn, head, head_len, last_wt, 0);
-        let last_end = mk_edge(&conn, last_wt, 1, PATH_END_NODE_ID, 0);
+        let start_head = build_edge(&conn, PATH_START_NODE_ID, 0, head, 0);
+        let head_last = build_edge(&conn, head, head_len, last_wt, 0);
+        let last_end = build_edge(&conn, last_wt, 1, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(parent_bg.id, start_head, 0),
-                bge(parent_bg.id, head_last, 0),
-                bge(parent_bg.id, last_end, 0),
+                build_block_group_edge(parent_bg.id, start_head, 0),
+                build_block_group_edge(parent_bg.id, head_last, 0),
+                build_block_group_edge(parent_bg.id, last_end, 0),
             ],
         );
 
@@ -2277,16 +2283,16 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         //   head → G → END   (ci 1, variant)
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let head_alt = mk_edge(&conn, head, head_len, last_alt, 0);
-        let alt_end = mk_edge(&conn, last_alt, 1, PATH_END_NODE_ID, 0);
+        let head_alt = build_edge(&conn, head, head_len, last_alt, 0);
+        let alt_end = build_edge(&conn, last_alt, 1, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(child_bg.id, start_head, 0),
-                bge(child_bg.id, head_last, 0),
-                bge(child_bg.id, last_end, 0),
-                bge(child_bg.id, head_alt, 1),
-                bge(child_bg.id, alt_end, 1),
+                build_block_group_edge(child_bg.id, start_head, 0),
+                build_block_group_edge(child_bg.id, head_last, 0),
+                build_block_group_edge(child_bg.id, last_end, 0),
+                build_block_group_edge(child_bg.id, head_alt, 1),
+                build_block_group_edge(child_bg.id, alt_end, 1),
             ],
         );
 
@@ -2322,19 +2328,19 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn boundary_5prime_deletion_in_child_starts_gene_later() {
         let (conn, parent_bg) = new_block_group("test-gene");
 
-        let (first, _) = mk_node(&conn, "A", "first"); // 5′ base
-        let (rest, rest_len) = mk_node(&conn, "TGAAATAA", "rest"); // ATG AAA TAA remainder
+        let (first, _) = build_node(&conn, "A", "first"); // 5′ base
+        let (rest, rest_len) = build_node(&conn, "TGAAATAA", "rest"); // ATG AAA TAA remainder
 
         // Parent: START → A → TGAAATAA → END  (ATG AAA TAA = M K *).
-        let start_first = mk_edge(&conn, PATH_START_NODE_ID, 0, first, 0);
-        let first_rest = mk_edge(&conn, first, 1, rest, 0);
-        let rest_end = mk_edge(&conn, rest, rest_len, PATH_END_NODE_ID, 0);
+        let start_first = build_edge(&conn, PATH_START_NODE_ID, 0, first, 0);
+        let first_rest = build_edge(&conn, first, 1, rest, 0);
+        let rest_end = build_edge(&conn, rest, rest_len, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(parent_bg.id, start_first, 0),
-                bge(parent_bg.id, first_rest, 0),
-                bge(parent_bg.id, rest_end, 0),
+                build_block_group_edge(parent_bg.id, start_first, 0),
+                build_block_group_edge(parent_bg.id, first_rest, 0),
+                build_block_group_edge(parent_bg.id, rest_end, 0),
             ],
         );
 
@@ -2351,14 +2357,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         //   START → rest → END       (ci 1, deletion skips the first base)
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let start_rest = mk_edge(&conn, PATH_START_NODE_ID, 0, rest, 0);
+        let start_rest = build_edge(&conn, PATH_START_NODE_ID, 0, rest, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(child_bg.id, start_first, 0),
-                bge(child_bg.id, first_rest, 0),
-                bge(child_bg.id, start_rest, 1),
-                bge(child_bg.id, rest_end, 0),
+                build_block_group_edge(child_bg.id, start_first, 0),
+                build_block_group_edge(child_bg.id, first_rest, 0),
+                build_block_group_edge(child_bg.id, start_rest, 1),
+                build_block_group_edge(child_bg.id, rest_end, 0),
             ],
         );
 
@@ -2391,17 +2397,17 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn boundary_5prime_insertion_in_child_grows_annotation() {
         let (conn, parent_bg) = new_block_group("test-gene");
 
-        let (ins, _) = mk_node(&conn, "G", "ins"); // inserted base
-        let (gene, gene_len) = mk_node(&conn, "ATGAAATAA", "gene"); // ATG AAA TAA
+        let (ins, _) = build_node(&conn, "G", "ins"); // inserted base
+        let (gene, gene_len) = build_node(&conn, "ATGAAATAA", "gene"); // ATG AAA TAA
 
         // Parent: START → ATGAAATAA → END  (M K *).
-        let start_gene = mk_edge(&conn, PATH_START_NODE_ID, 0, gene, 0);
-        let gene_end = mk_edge(&conn, gene, gene_len, PATH_END_NODE_ID, 0);
+        let start_gene = build_edge(&conn, PATH_START_NODE_ID, 0, gene, 0);
+        let gene_end = build_edge(&conn, gene, gene_len, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(parent_bg.id, start_gene, 0),
-                bge(parent_bg.id, gene_end, 0),
+                build_block_group_edge(parent_bg.id, start_gene, 0),
+                build_block_group_edge(parent_bg.id, gene_end, 0),
             ],
         );
 
@@ -2418,15 +2424,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         //   START → G → ATGAAATAA → END     (ci 1, insertion)
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let start_ins = mk_edge(&conn, PATH_START_NODE_ID, 0, ins, 0);
-        let ins_gene = mk_edge(&conn, ins, 1, gene, 0);
+        let start_ins = build_edge(&conn, PATH_START_NODE_ID, 0, ins, 0);
+        let ins_gene = build_edge(&conn, ins, 1, gene, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                bge(child_bg.id, start_gene, 0),
-                bge(child_bg.id, gene_end, 0),
-                bge(child_bg.id, start_ins, 1),
-                bge(child_bg.id, ins_gene, 1),
+                build_block_group_edge(child_bg.id, start_gene, 0),
+                build_block_group_edge(child_bg.id, gene_end, 0),
+                build_block_group_edge(child_bg.id, start_ins, 1),
+                build_block_group_edge(child_bg.id, ins_gene, 1),
             ],
         );
 

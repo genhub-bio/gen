@@ -5,7 +5,11 @@ use gen_core::{
     path::PathBlock,
     range::{OrderedMerge, Range, merge_ordered_items},
 };
-use gen_models::accession::AccessionNode;
+use gen_models::{
+    accession::{Accession, AccessionNode},
+    annotations::Annotation,
+    db::GraphConnection,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationSegment {
@@ -38,6 +42,17 @@ impl From<&AccessionNode> for AnnotationSegment {
             strand: node.strand,
         }
     }
+}
+
+/// Compute the annotation segments from accession nodes.
+pub fn annotation_segments(
+    conn: &GraphConnection,
+    annotation: &Annotation,
+) -> Vec<AnnotationSegment> {
+    Accession::get_nodes_by_id(conn, &annotation.accession_id)
+        .iter()
+        .map(AnnotationSegment::from)
+        .collect()
 }
 
 pub fn project_annotation_segments(

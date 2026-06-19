@@ -14,6 +14,7 @@ use r#gen::{
         },
     },
 };
+use gen_annotations::projection::annotation_segments;
 use gen_graph::GraphNode;
 use gen_models::{
     annotations::Annotation, block_group::BlockGroup, db::DbContext, node::Node, sample::Sample,
@@ -21,7 +22,7 @@ use gen_models::{
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
-    annotation::{PyAnnotation, annotation_segments},
+    annotation::PyAnnotation,
     graph_node::PyGraphNode,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},

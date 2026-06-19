@@ -21,6 +21,7 @@ use r#gen::{
         inline_label_placement::draw_label_near_pos,
     },
 };
+use gen_annotations::projection::annotation_segments;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice, project_path};
 use gen_models::{
@@ -48,7 +49,7 @@ use ratatui::{
 use serde::Serialize;
 
 use crate::python_api::{
-    annotation::{PyAnnotation, annotation_segments},
+    annotation::PyAnnotation,
     block_group::PySequenceGraph,
     graph_search::{PyGraphLocus, PyGraphPos},
     repository::PyRepository,

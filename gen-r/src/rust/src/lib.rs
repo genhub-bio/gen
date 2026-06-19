@@ -39,13 +39,12 @@ use r#gen::{
     },
 };
 use gen_annotations::{
-    projection::AnnotationSegment,
+    projection::annotation_segments,
     translate::{bed::translate_bed, gff::translate_gff},
 };
 use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
-    accession::Accession,
     annotations::Annotation,
     block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
@@ -173,14 +172,6 @@ fn gen_annotation_record_id(obj: &Robj) -> std::result::Result<Option<HashId>, E
         Some(id) => Ok(Some(hash_id_from_string(&id).map_err(Error::Other)?)),
         None => Ok(None),
     }
-}
-
-/// Genomic segments covered by an annotation.
-fn annotation_segments(conn: &GraphConnection, annotation: &Annotation) -> Vec<AnnotationSegment> {
-    Accession::get_nodes_by_id(conn, &annotation.accession_id)
-        .iter()
-        .map(AnnotationSegment::from)
-        .collect()
 }
 
 /// Build a `gen_annotation` R record (id, name, group, kind, segments, length, locus).
