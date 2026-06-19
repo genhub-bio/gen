@@ -666,7 +666,7 @@ impl BlockGroup {
                 }
             })
             .collect::<Vec<_>>();
-        let accession = Accession::create(
+        let accession = Accession::get_or_create(
             conn,
             &NewAccession {
                 name: name.to_string(),
@@ -674,8 +674,7 @@ impl BlockGroup {
                 parent_accession_id: None,
                 spans,
             },
-        )
-        .expect("should create accession from path spans");
+        )?;
         Ok(accession)
     }
 

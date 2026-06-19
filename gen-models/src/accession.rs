@@ -361,7 +361,7 @@ impl Accession {
     ) -> Result<Accession, AccessionError> {
         match Accession::create(conn, new) {
             Ok(accession) => Ok(accession),
-            Err(AccessionError::Duplicate(_)) => {
+            Err(AccessionError::Duplicate(message)) => {
                 let accession = Accession {
                     id: Accession::id_hash(
                         &new.block_group_id,
@@ -372,13 +372,31 @@ impl Accession {
                     block_group_id: new.block_group_id,
                     parent_accession_id: new.parent_accession_id,
                 };
-                if Self::get_nodes_by_id(conn, &accession.id).is_empty() {
+                let nodes = Self::get_nodes_by_id(conn, &accession.id);
+                if nodes.is_empty() {
                     Self::insert_spans(conn, &accession.id, &new.spans)?;
+                } else if !Self::nodes_match_spans(&nodes, &new.spans) {
+                    return Err(AccessionError::Duplicate(message));
                 }
                 Ok(accession)
             }
             Err(err) => Err(err),
         }
+    }
+
+    fn nodes_match_spans(nodes: &[AccessionNode], spans: &[AccessionSpan]) -> bool {
+        nodes.len() == spans.len()
+            && nodes
+                .iter()
+                .zip(spans)
+                .enumerate()
+                .all(|(index, (node, span))| {
+                    node.index_in_path == index as i64
+                        && node.node_id == span.node_id
+                        && node.sequence_start == span.range.start
+                        && node.sequence_end == span.range.end
+                        && node.strand == span.strand
+                })
     }
 
     fn insert_spans(
@@ -977,6 +995,35 @@ mod tests {
 
         assert_eq!(second.id, first.id);
         assert_eq!(Accession::get_nodes_by_id(conn, &second.id).len(), 1);
+    }
+
+    #[test]
+    fn get_or_create_rejects_duplicate_name_with_different_spans() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let new_accession = NewAccession {
+            name: "test".to_string(),
+            block_group_id,
+            parent_accession_id: None,
+            spans: vec![AccessionSpan {
+                node_id: HashId::convert_str("test-a-node"),
+                range: Range { start: 2, end: 4 },
+                strand: Strand::Forward,
+            }],
+        };
+        let different_spans = NewAccession {
+            spans: vec![AccessionSpan {
+                node_id: HashId::convert_str("test-a-node"),
+                range: Range { start: 3, end: 5 },
+                strand: Strand::Forward,
+            }],
+            ..new_accession.clone()
+        };
+
+        Accession::create(conn, &new_accession).unwrap();
+        let err = Accession::get_or_create(conn, &different_spans).unwrap_err();
+
+        assert!(matches!(err, AccessionError::Duplicate(_)));
     }
 
     #[test]
