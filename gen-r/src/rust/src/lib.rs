@@ -2357,20 +2357,22 @@ impl SequenceGraph {
     ///   NULL. Must be >= 0 and <= `end`. Default: NULL.
     /// @param end Exclusive end coordinate in path space. Defaults to path
     ///   length when NULL. Must be <= path length. Default: NULL.
-    /// @param output_collection Collection for the protein block group.
+    /// @param output_collection Collection for the protein sequence graph.
     ///   Defaults to this graph's collection.
-    /// @param output_sample Sample name for the protein block group. Required.
+    /// @param name Name for the protein sequence graph. Defaults to
+    ///   "{region} (protein)".
     /// @param strand `"forward"` or `"reverse"`. NULL infers from the annotation.
     /// @param frame Initial reading frame offset: 0, 1, or 2.
     /// @param codon_table NCBI codon table ID (default: 1 = Standard).
-    /// @return A new SequenceGraph containing the protein sequence.
+    /// @return A new SequenceGraph containing the protein sequence, in this
+    ///   graph's sample.
     fn translate_annotation(
         &self,
         region: Robj,
         start: Nullable<i64>,
         end: Nullable<i64>,
         output_collection: Nullable<String>,
-        output_sample: String,
+        name: Nullable<String>,
         strand: Nullable<String>,
         frame: i32,
         codon_table: i32,
@@ -2398,12 +2400,16 @@ impl SequenceGraph {
         let out_collection = nullable_string_to_option(output_collection)
             .unwrap_or_else(|| self.collection_name.clone());
 
-        let mut tr_params = TranslationParams::new(&out_collection, &output_sample)
+        let mut tr_params = TranslationParams::new(&out_collection)
             .initial_frame(frame as u8)
             .map_err(|e| Error::Other(e.to_string()))?
             .codon_table(table);
         if let Some(s) = resolved_strand {
             tr_params = tr_params.strand(s);
+        }
+        let name = nullable_string_to_option(name);
+        if let Some(n) = name.as_deref() {
+            tr_params = tr_params.name(n);
         }
 
         let bg_id = self.id;

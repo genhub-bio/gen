@@ -537,7 +537,7 @@ impl PySequenceGraph {
     /// When ``region`` is a string it is resolved against this sequence graph
     /// only, in priority order: named path within this graph first, then
     /// annotation in this graph's lineage. No other sequence graphs are
-    /// searched.
+    /// searched. The protein sequence graph is created in this graph's sample.
     ///
     /// Parameters
     /// ----------
@@ -554,21 +554,21 @@ impl PySequenceGraph {
     ///     Exclusive end coordinate in path space. Defaults to path length when
     ///     omitted. Must be <= path length.
     /// output_collection : str, optional
-    ///     Collection for the protein block group. Defaults to this graph's collection.
-    /// output_sample : str
-    ///     Sample name for the protein block group. Required.
+    ///     Collection for the protein sequence graph. Defaults to this graph's collection.
+    /// name : str, optional
+    ///     Name for the protein sequence graph. Defaults to "{region} (protein)".
     /// strand : str, optional
     ///     ``"forward"`` or ``"reverse"``. Inferred from the annotation when omitted.
     /// frame : int
     ///     Initial reading frame offset (0, 1, or 2). Default: 0.
     /// codon_table : int
     ///     NCBI codon table ID. Default: 1 (Standard).
-    #[pyo3(signature = (region=None, output_collection=None, output_sample=None, strand=None, frame=0, codon_table=1, start=None, end=None))]
+    #[pyo3(signature = (region=None, output_collection=None, name=None, strand=None, frame=0, codon_table=1, start=None, end=None))]
     fn translate_annotation(
         &self,
         region: Option<Bound<'_, PyAny>>,
         output_collection: Option<&str>,
-        output_sample: Option<String>,
+        name: Option<&str>,
         strand: Option<&str>,
         frame: u8,
         codon_table: u8,
@@ -579,11 +579,8 @@ impl PySequenceGraph {
         let conn = ctx.graph().conn();
 
         let out_collection = output_collection.unwrap_or(&self.collection_name);
-        let out_sample =
-            output_sample.ok_or_else(|| PyRuntimeError::new_err("output_sample is required"))?;
 
-        let params =
-            build_translation_params(out_collection, &out_sample, strand, frame, codon_table)?;
+        let params = build_translation_params(out_collection, name, strand, frame, codon_table)?;
 
         let protein_bg = match region {
             None => {

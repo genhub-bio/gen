@@ -14,7 +14,7 @@ pub struct DeriveTranslationArgs {
     pub collection: Option<String>,
     pub sample: String,
     pub region: String,
-    pub output_sample: String,
+    pub name: Option<String>,
     pub strand: Option<String>,
     pub frame: u8,
     pub codon_table: u8,
@@ -46,12 +46,15 @@ pub fn derive_translation_operation(
     let table = CodonTable::ncbi(args.codon_table)
         .ok_or_else(|| Error::msg(format!("Invalid codon table id {}", args.codon_table)))?;
 
-    let mut tr_params = TranslationParams::new(&collection_name, &args.output_sample)
+    let mut tr_params = TranslationParams::new(&collection_name)
         .initial_frame(args.frame)
         .map_err(|e| Error::msg(e.to_string()))?
         .codon_table(table);
     if let Some(s) = resolved_strand {
         tr_params = tr_params.strand(s);
+    }
+    if let Some(name) = args.name.as_deref() {
+        tr_params = tr_params.name(name);
     }
 
     let region_str = &args.region;
@@ -88,7 +91,7 @@ pub fn derive_translation_operation(
     let label = region_str.clone();
 
     println!(
-        "Translated '{}' → protein block group '{}'.",
+        "Translated '{}' → protein sequence graph '{}'.",
         label, protein_bg.name
     );
 

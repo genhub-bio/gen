@@ -8,7 +8,8 @@ use crate::commands::{
 /// Translate a sequence graph or annotation into a protein sequence graph.
 ///
 /// Pass --region with just a name to translate an entire sequence graph, or
-/// include coordinates (e.g. mreB:10-200) to translate a subrange.
+/// include coordinates (e.g. mreB:10-200) to translate a subrange. The protein
+/// sequence graph is created in the same sample as the DNA sequence graph.
 #[derive(Debug, Args, Clone)]
 pub struct Command {
     /// Collection (defaults to the current default collection)
@@ -21,9 +22,9 @@ pub struct Command {
     /// coordinates (e.g. mreB, mreB:10-200, chr1:1000-2000)
     #[arg(short, long)]
     region: String,
-    /// Sample name for the output protein block group
+    /// Name for the protein sequence graph (defaults to "{region} (protein)")
     #[arg(long)]
-    new_sample: String,
+    name: Option<String>,
     /// Strand of the CDS ("forward" or "reverse"; inferred from the annotation when omitted)
     #[arg(long)]
     strand: Option<String>,
@@ -42,7 +43,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> anyhow::Result<()> {
             collection: cmd.collection,
             sample: cmd.sample,
             region: cmd.region,
-            output_sample: cmd.new_sample,
+            name: cmd.name,
             strand: cmd.strand,
             frame: cmd.frame,
             codon_table: cmd.codon_table,

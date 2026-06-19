@@ -17,14 +17,11 @@ use gen_models::{
     node::Node,
     operations::OperationInfo,
     path::revcomp,
-    sample::{NewSample, Sample},
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
 };
 use petgraph::{graphmap::DiGraphMap, visit::EdgeRef};
 use thiserror::Error;
-
-// ── CodonTable ───────────────────────────────────────────────────────────────
 
 // NCBI table 1 – Standard
 const STANDARD_TABLE: [u8; 64] =
@@ -154,8 +151,6 @@ impl CodonTable {
     }
 }
 
-// ── Error ─────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Error, PartialEq)]
 pub enum TranslationError {
     #[error("Cycle detected at node {0}")]
@@ -174,28 +169,28 @@ pub enum TranslationError {
     NodeError(String),
     #[error("Edge error: {0}")]
     EdgeError(String),
-    #[error("BlockGroup error: {0}")]
+    #[error("Sequence graph error: {0}")]
     BlockGroupError(String),
+    #[error("A sequence graph named '{0}' already exists in this sample")]
+    DuplicateBlockGroup(String),
 }
-
-// ── TranslationParams ─────────────────────────────────────────────────────────
 
 pub struct TranslationParams<'a> {
     pub strand: Option<Strand>,
     pub initial_frame: u8,
     pub codon_table: CodonTable,
     pub output_collection_name: &'a str,
-    pub output_sample_name: &'a str,
+    pub name: Option<&'a str>,
 }
 
 impl<'a> TranslationParams<'a> {
-    pub fn new(output_collection_name: &'a str, output_sample_name: &'a str) -> Self {
+    pub fn new(output_collection_name: &'a str) -> Self {
         Self {
             strand: None,
             initial_frame: 0,
             codon_table: CodonTable::standard(),
             output_collection_name,
-            output_sample_name,
+            name: None,
         }
     }
 
@@ -216,9 +211,15 @@ impl<'a> TranslationParams<'a> {
         self.codon_table = table;
         self
     }
-}
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+    /// Name for the protein sequence graph. Defaults to "{source name} (protein)"
+    /// when not set, where the source name is the translated annotation,
+    /// region, or sequence graph's name.
+    pub fn name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+}
 
 /// The complete codons a DNA node contributes at a given entry frame, plus the
 /// trailing bases that spill into successors.
@@ -416,8 +417,6 @@ fn virtual_id(gn: GraphNode) -> HashId {
     ))
 }
 
-// ── Main function ─────────────────────────────────────────────────────────────
-
 /// The DNA sub-DAG to translate, plus its entry/exit frontiers.
 ///
 /// `graph` keys are "virtual IDs" — one per GraphNode slice. `node_ranges` maps a
@@ -433,9 +432,9 @@ struct TranslationSubgraph {
     exit_nodes: Vec<HashId>,
 }
 
-/// Translate the full block group: the whole sub-DAG between the graph start and
-/// end nodes, with every parallel branch represented. Stop codons are recorded as
-/// `*` and translation continues through them.
+/// Translate the full sequence graph: the whole sub-DAG between the graph start
+/// and end nodes, with every parallel branch represented. Stop codons are
+/// recorded as `*` and translation continues through them.
 pub fn translate_block_group(
     conn: &GraphConnection,
     block_group_id: &HashId,
@@ -446,11 +445,22 @@ pub fn translate_block_group(
     let subgraph = extract_full_graph(conn, block_group_id)?;
     let strand = params.strand.unwrap_or(Strand::Forward);
     let label = HashId::convert_str(&format!("translate-full:{block_group_id}"));
-    let bg_name = format!("{}-protein", bg.name);
-    translate_core(conn, subgraph, strand, params, &bg_name, label)
+    let bg_name = params
+        .name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} (protein)", bg.name));
+    translate_core(
+        conn,
+        subgraph,
+        strand,
+        params,
+        &bg.sample_name,
+        &bg_name,
+        label,
+    )
 }
 
-/// Extract the entire block-group graph (everything between the start and end
+/// Extract the entire sequence graph (everything between the start and end
 /// terminals) as an in-memory sub-DAG. No database writes.
 fn extract_full_graph(
     conn: &GraphConnection,
@@ -525,8 +535,9 @@ fn extract_full_graph(
 }
 
 /// Extract the sub-DAG between an annotation's entry and exit coordinates from the
-/// block group's GenGraph, capturing every variant branch in between. No database
-/// writes. The entry/exit nodes are trimmed to the annotation's coordinates.
+/// sequence graph's GenGraph, capturing every variant branch in between. No
+/// database writes. The entry/exit nodes are trimmed to the annotation's
+/// coordinates.
 fn extract_annotation(
     conn: &GraphConnection,
     bg_id: &HashId,
@@ -635,7 +646,7 @@ fn extract_annotation(
 }
 
 /// Translate a gene annotation. The variant branches inside the annotated region
-/// come from the block group's GenGraph, so a `block_group_id` is required.
+/// come from the sequence graph's GenGraph, so a `block_group_id` is required.
 pub fn translate_annotation(
     conn: &GraphConnection,
     annotation: &Annotation,
@@ -643,8 +654,10 @@ pub fn translate_annotation(
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
     let bg_id = block_group_id.ok_or_else(|| {
-        TranslationError::BlockGroupError("translation requires a block group id".into())
+        TranslationError::BlockGroupError("translation requires a sequence graph id".into())
     })?;
+    let bg = BlockGroup::get_by_id(conn, bg_id)
+        .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let accession_nodes = Accession::get_nodes_by_id(conn, &annotation.accession_id);
     let segments: Vec<AnnotationSegment> = accession_nodes
@@ -670,12 +683,23 @@ pub fn translate_annotation(
     };
 
     let subgraph = extract_annotation(conn, bg_id, &segments)?;
-    let bg_name = format!("{}-protein", annotation.name);
-    translate_core(conn, subgraph, strand, params, &bg_name, annotation.id)
+    let bg_name = params
+        .name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} (protein)", annotation.name));
+    translate_core(
+        conn,
+        subgraph,
+        strand,
+        params,
+        &bg.sample_name,
+        &bg_name,
+        annotation.id,
+    )
 }
 
-/// Translate a coordinate range on a block group's current path into a protein
-/// sequence graph, in memory. The path's interval tree maps the path-space
+/// Translate a coordinate range on a sequence graph's current path into a
+/// protein sequence graph, in memory. The path's interval tree maps the path-space
 /// `start`/`end` coordinates to node-level entry/exit points; the same
 /// `extract_annotation` + `translate_core` pipeline used by `translate_annotation`
 /// is then applied to the resulting subgraph.
@@ -746,12 +770,21 @@ pub fn translate_path_range(
     };
 
     let subgraph = extract_annotation(conn, bg_id, &segments)?;
-    let bg_name = format!("{}-protein", bg.name);
+    let bg_name = params
+        .name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} (protein)", bg.name));
     let label = HashId::convert_str(&format!("translate-range:{bg_id}:{start}-{end}"));
-    translate_core(conn, subgraph, strand, params, &bg_name, label)
+    translate_core(
+        conn,
+        subgraph,
+        strand,
+        params,
+        &bg.sample_name,
+        &bg_name,
+        label,
+    )
 }
-
-// ── Operation wrapper ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
 pub enum TranslationOperationError {
@@ -797,7 +830,7 @@ where
     };
 
     let summary = format!(
-        " {}: protein block group derived from {label}",
+        " {}: protein sequence graph derived from {label}",
         protein_bg.name
     );
     if let Err(e) = end_operation(
@@ -826,7 +859,7 @@ where
 }
 
 /// Shared translation core: fetch sequences, orient by strand, propagate reading
-/// frames, then build and persist the protein block group.
+/// frames, then build and persist the protein sequence graph.
 ///
 /// `label_hash` seeds the Merkle hash of nodes with no protein predecessor.
 fn translate_core(
@@ -834,6 +867,7 @@ fn translate_core(
     subgraph: TranslationSubgraph,
     strand: Strand,
     params: TranslationParams<'_>,
+    sample_name: &str,
     bg_name: &str,
     label_hash: HashId,
 ) -> Result<BlockGroup, TranslationError> {
@@ -978,26 +1012,26 @@ fn translate_core(
         }
     }
 
-    // Create the protein BlockGroup that steps 5 and 6 will populate.
+    // Create the protein sequence graph that steps 5 and 6 will populate, in the
+    // same sample as the DNA sequence graph it was translated from. Not a
+    // SampleLineage child of that sample: SampleLineage backs annotation-name
+    // resolution across a sample's ancestors (see Annotation::resolve), and the
+    // protein/DNA relationship isn't an ancestry relationship in that sense.
     //
-    // Deliberately not registered as a SampleLineage child of the DNA sample:
-    // that table backs annotation-name resolution across a sample's ancestors
-    // (see Annotation::resolve), and the protein/DNA relationship isn't an
-    // ancestry relationship in that sense.
-    Sample::get_or_create(
-        conn,
-        NewSample {
-            name: params.output_sample_name,
-            is_reference: false,
-        },
-    )
-    .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
+    // BlockGroup::create silently no-ops on a name collision instead of erroring
+    // (its id is a deterministic hash of collection+sample+name), so check for an
+    // existing sequence graph up front rather than risk merging new protein edges
+    // into someone else's sequence graph.
+    let existing_id = BlockGroup::get_id(params.output_collection_name, sample_name, bg_name, None);
+    if BlockGroup::get_by_id(conn, &existing_id).is_ok() {
+        return Err(TranslationError::DuplicateBlockGroup(bg_name.to_string()));
+    }
 
     let protein_bg = BlockGroup::create(
         conn,
         NewBlockGroup {
             collection_name: params.output_collection_name,
-            sample_name: params.output_sample_name,
+            sample_name,
             name: bg_name,
             parent_block_group_id: None,
             is_default: false,
@@ -1201,8 +1235,6 @@ fn translate_core(
     Ok(protein_bg)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -1229,8 +1261,6 @@ mod tests {
         translate_block_group,
     };
     use crate::test_helpers::{create_bg, get_connection};
-
-    // ── CodonTable unit tests ─────────────────────────────────────────────────
 
     #[test]
     fn standard_met() {
@@ -1319,8 +1349,6 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn ncbi_unknown_id() {
         assert!(CodonTable::ncbi(99).is_none());
     }
-
-    // ── Graph fixtures ────────────────────────────────────────────────────────
 
     /// Fresh connection seeded with a `test` collection, the default sample, and an
     /// empty block group of the given name.
@@ -1649,24 +1677,53 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         results
     }
 
-    // ── Translation integration tests ─────────────────────────────────────────
-
     #[test]
     fn translate_simple_forward() {
         // ATG→M, GAA→E, TGA→* : single node, frame 0
         let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
+    }
+
+    #[test]
+    fn translate_default_name_is_source_name_protein_suffixed() {
+        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let params = TranslationParams::new("test");
+        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        assert_eq!(protein.name, "test-gene (protein)");
+    }
+
+    #[test]
+    fn translate_explicit_name_overrides_default() {
+        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let params = TranslationParams::new("test").name("custom-protein-name");
+        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        assert_eq!(protein.name, "custom-protein-name");
+    }
+
+    #[test]
+    fn translate_duplicate_name_in_sample_errors() {
+        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let params = TranslationParams::new("test");
+        translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+
+        // Same collection, same sample (it's always the source sample now), same
+        // default name: the second translation must error instead of silently
+        // merging new protein edges into the first run's sequence graph.
+        let params = TranslationParams::new("test");
+        let result = translate_annotation(&conn, &annotation, Some(&bg_id), params);
+        assert!(matches!(
+            result,
+            Err(TranslationError::DuplicateBlockGroup(name)) if name == "test-gene (protein)"
+        ));
     }
 
     #[test]
     fn translate_frame1() {
         // initial_frame=1 → head_skip=2, reads "GGAATG" → G,M; tail "A" dropped
         let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME)
-            .initial_frame(1)
-            .unwrap();
+        let params = TranslationParams::new("test").initial_frame(1).unwrap();
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["GM"]);
     }
@@ -1676,7 +1733,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Node A = "ATGG": ATG→M, tail "G" (1 base)
         // Node B = "AATGA": junction G+"AA"="GAA"→E; B[2..]="TGA"→*
         let (conn, annotation, bg_id) = setup_linear_gene(&["ATGG", "AATGA"]);
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
     }
@@ -1686,7 +1743,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // A="AT" (2b), B="G" (1b), C="GAATGA" (6b), frame 0
         // Junction ATG=M (B fully consumed); node C: GAA→E, TGA→* → "E*"
         let (conn, annotation, bg_id) = setup_linear_gene(&["AT", "G", "GAATGA"]);
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
     }
@@ -1696,7 +1753,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // A="T" (1b), B="G" (1b), C="GGAATGA" (7b), frame 0
         // Multi-hop junction "T"+"G"+"G" = TGG = W; node C → "E*"
         let (conn, annotation, bg_id) = setup_linear_gene(&["T", "G", "GGAATGA"]);
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["WE*"]);
     }
@@ -1705,15 +1762,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn translate_table4_tga() {
         // Table 4: TGA → W (Trp), not stop
         let (conn, annotation, bg_id) = setup_linear_gene(&["ATGTGA"]);
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME)
-            .codon_table(CodonTable::ncbi(4).unwrap());
+        let params = TranslationParams::new("test").codon_table(CodonTable::ncbi(4).unwrap());
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["MW"]);
     }
 
     #[test]
     fn translate_invalid_frame() {
-        let result = TranslationParams::new("test", "default").initial_frame(3);
+        let result = TranslationParams::new("test").initial_frame(3);
         assert!(matches!(result, Err(TranslationError::InvalidFrame(3))));
     }
 
@@ -1750,7 +1806,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let annotation =
             Annotation::create(&conn, "test-gene", "gene", &accession.id, None).unwrap();
 
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         // Strand is resolved before subgraph extraction, so a valid block-group id is
         // required even though this case errors out first.
         let result = translate_annotation(&conn, &annotation, Some(&bg.id), params);
@@ -1782,7 +1838,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let annotation =
             accession_annotation(&conn, &bg.id, "rev-gene", &[(node, len)], Strand::Reverse);
 
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg.id), params).unwrap();
 
         assert_eq!(
@@ -1791,8 +1847,6 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             "reverse-strand protein should read N → C left to right"
         );
     }
-
-    // ── Variant / chromosome_index tests ──────────────────────────────────────
 
     /// A non-synonymous SNP in the middle node should produce two parallel protein
     /// paths: wildtype (ci 0) and variant (ci 1).
@@ -1805,7 +1859,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn non_synonymous_snp_creates_variant_protein_path() {
         let (conn, annotation, bg_id) = setup_variant_gene("ATG", "GAA", "CAA", "TGA");
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
 
         // Both amino acids must appear as protein nodes.
@@ -1845,7 +1899,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn synonymous_snp_collapses_to_single_protein_node() {
         let (conn, annotation, bg_id) = setup_variant_gene("ATG", "GAA", "GAG", "TGA");
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
 
         // Synonymous collapse: exactly one protein node with sequence "E".
@@ -1876,7 +1930,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn synonymous_junction_snp_collapses_junction_node() {
         let (conn, annotation, bg_id) = setup_variant_gene("ATGG", "AA", "AG", "TAA");
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
 
         // Exactly one junction node coding for E.
@@ -1899,7 +1953,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn full_block_group_keeps_parallel_columns() {
         let (conn, bg_id) = setup_parallel_columns();
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_block_group(&conn, &bg_id, params).unwrap();
 
         for aa in ["G", "A", "D", "F"] {
@@ -1918,7 +1972,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn variant_bubble_protein_graph_is_connected() {
         let (conn, annotation, bg_id) = setup_real_bubble();
-        let params = TranslationParams::new("test", Sample::DEFAULT_NAME);
+        let params = TranslationParams::new("test");
         let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
 
         // Both the wild-type (E) and variant (A) junction residues must appear.
@@ -1951,7 +2005,6 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
     }
 
-    // ── Sample-lineage edit tests ─────────────────────────────────────────────
     //
     // `translate_annotation` operates per block group: the annotation pins the
     // entry/exit nodes, and the sequence between them is read from the block
@@ -2009,14 +2062,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             &conn,
             &annotation,
             Some(&parent_bg.id),
-            TranslationParams::new("test", Sample::DEFAULT_NAME),
+            TranslationParams::new("test"),
         )
         .unwrap();
         let child_protein = translate_annotation(
             &conn,
             &annotation,
             Some(&child_bg.id),
-            TranslationParams::new("test", "child"),
+            TranslationParams::new("test"),
         )
         .unwrap();
 
@@ -2088,14 +2141,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             &conn,
             &annotation,
             Some(&parent_bg.id),
-            TranslationParams::new("test", Sample::DEFAULT_NAME),
+            TranslationParams::new("test"),
         )
         .unwrap();
         let child_protein = translate_annotation(
             &conn,
             &annotation,
             Some(&child_bg.id),
-            TranslationParams::new("test", "child"),
+            TranslationParams::new("test"),
         )
         .unwrap();
 
@@ -2169,7 +2222,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             &conn,
             &annotation,
             Some(&child_bg.id),
-            TranslationParams::new("test", "child"),
+            TranslationParams::new("test"),
         )
         .unwrap();
 
@@ -2241,7 +2294,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             &conn,
             &annotation,
             Some(&child_bg.id),
-            TranslationParams::new("test", "child"),
+            TranslationParams::new("test"),
         )
         .unwrap();
 
@@ -2313,7 +2366,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             &conn,
             &annotation,
             Some(&child_bg.id),
-            TranslationParams::new("test", "child"),
+            TranslationParams::new("test"),
         )
         .unwrap();
 
@@ -2381,7 +2434,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             &conn,
             &annotation,
             Some(&child_bg.id),
-            TranslationParams::new("test", "child"),
+            TranslationParams::new("test"),
         )
         .unwrap();
 
