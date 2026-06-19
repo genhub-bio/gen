@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionError},
-    block_group::{BlockGroup, PathCache},
+    accession::{Accession, AccessionError, AccessionSpan, NewAccession},
     changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, GraphConnection, OperationsConnection},
     errors::{FileAdditionError, OperationError},
@@ -27,7 +26,6 @@ use crate::{
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     metadata,
     operations::{FileAddition, Operation, OperationInfo, OperationSummary},
-    sample::Sample,
     session_operations::{DependencyModels, end_operation, start_operation},
     traits::Query,
 };
@@ -664,26 +662,22 @@ pub fn add_annotation(
     let graph_conn = context.graph().conn();
     let operation_conn = context.operations().conn();
     let parsed_region = Region::parse(region)?;
-    let (start, end) = parsed_region.require_coordinates()?;
-
-    let block_groups = Sample::get_block_groups(graph_conn, collection, sample);
-    let block_group = block_groups
-        .iter()
-        .find(|bg| bg.name == parsed_region.name)
-        .ok_or_else(|| anyhow!("Graph {} not found for sample {sample}", parsed_region.name))?;
-    let path = BlockGroup::get_current_path(graph_conn, &block_group.id)?;
-    let path_length = path.length(graph_conn)?;
-    if start < 0 || end < 0 || start > path_length || end > path_length {
-        return Err(anyhow!("Region {region} is outside the path bounds (0-{path_length})").into());
-    }
+    let resolved_region = crate::region::resolve(&parsed_region, graph_conn, collection, sample)?;
+    let spans = AccessionSpan::from_resolved_region(graph_conn, &resolved_region, None)?;
 
     let mut session = start_operation(graph_conn);
     graph_conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;
 
-    let mut cache = PathCache::new(graph_conn);
-    let _ = PathCache::lookup(&mut cache, &block_group.id, path.name.clone())?;
-    let accession = BlockGroup::add_accession(graph_conn, &path, name, start, end, &mut cache)?;
+    let accession = Accession::create(
+        graph_conn,
+        &NewAccession {
+            name: name.to_string(),
+            block_group_id: resolved_region.block_group.id,
+            parent_accession_id: None,
+            spans,
+        },
+    )?;
 
     let annotation_group = group.unwrap_or("default");
     let annotation =

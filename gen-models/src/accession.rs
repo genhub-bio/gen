@@ -1,7 +1,9 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, ops::Range as StdRange, rc::Rc};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
+    is_terminal,
+    range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
@@ -15,6 +17,7 @@ use crate::{
     db::GraphConnection,
     errors::QueryError,
     gen_models_capnp::{accession, accession_node},
+    region::ResolvedGenRegion,
     traits::*,
 };
 
@@ -36,6 +39,14 @@ pub enum AccessionError {
     Duplicate(String),
     #[error("Accession {0} has no nodes in accession_nodes")]
     MissingPath(HashId),
+    #[error("Accession has no spans")]
+    EmptySpans,
+    #[error("Invalid accession range: {start}-{end}")]
+    InvalidRange { start: i64, end: i64 },
+    #[error("Unable to determine interval tree length")]
+    MissingIntervalTreeLength,
+    #[error("Unable to project region into accession spans: {0}")]
+    RegionProjection(String),
 }
 
 impl<'a> Capnp<'a> for Accession {
@@ -175,6 +186,15 @@ pub struct AccessionNodeData {
     pub index_in_path: i64,
 }
 
+/// AccessionSpan is similar to AnnotationSegment in shape, but its primary use is
+/// for creating AccessionNodes
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AccessionSpan {
+    pub node_id: HashId,
+    pub range: Range,
+    pub strand: Strand,
+}
+
 impl AccessionNodeData {
     pub fn id_hash(&self) -> HashId {
         HashId(calculate_hash(&format!(
@@ -214,6 +234,14 @@ impl From<AccessionNodeData> for AccessionNode {
             index_in_path: item.index_in_path,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewAccession {
+    pub name: String,
+    pub block_group_id: HashId,
+    pub parent_accession_id: Option<HashId>,
+    pub spans: Vec<AccessionSpan>,
 }
 
 impl Accession {
@@ -257,35 +285,41 @@ impl Accession {
         )))
     }
 
-    pub fn create(
-        conn: &GraphConnection,
-        name: &str,
-        block_group_id: &HashId,
-        parent_accession_id: Option<&HashId>,
-    ) -> Result<Accession, AccessionError> {
+    pub fn create(conn: &GraphConnection, new: &NewAccession) -> Result<Accession, AccessionError> {
+        if new.spans.is_empty() {
+            return Err(AccessionError::EmptySpans);
+        }
         let query = "INSERT INTO accessions (id, name, block_group_id, parent_accession_id) VALUES (?1, ?2, ?3, ?4);";
         let mut stmt = match conn.prepare(query) {
             Ok(s) => s,
             Err(e) => return Err(AccessionError::DatabaseError(e)),
         };
-
-        let hash = Accession::id_hash(block_group_id, parent_accession_id, name);
-        match stmt.execute((hash, name, block_group_id, parent_accession_id)) {
-            Ok(_) => Ok(Accession {
+        let parent_accession_id = new.parent_accession_id.as_ref();
+        let hash = Accession::id_hash(&new.block_group_id, parent_accession_id, &new.name);
+        let accession = match stmt.execute((
+            hash,
+            &new.name,
+            &new.block_group_id,
+            parent_accession_id,
+        )) {
+            Ok(_) => Accession {
                 id: hash,
-                name: name.to_string(),
-                block_group_id: *block_group_id,
-                parent_accession_id: parent_accession_id.copied(),
-            }),
+                name: new.name.clone(),
+                block_group_id: new.block_group_id,
+                parent_accession_id: new.parent_accession_id,
+            },
             Err(rusqlite::Error::SqliteFailure(err, _details))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Err(AccessionError::Duplicate(format!(
-                    "An accession with the same name, block_group_id, and parent_accession_id already exists. name: {name}, block_group_id: {block_group_id}, parent_accession_id: {parent_accession_id:?}"
-                )))
+                return Err(AccessionError::Duplicate(format!(
+                    "An accession with the same name, block_group_id, and parent_accession_id already exists. name: {}, block_group_id: {}, parent_accession_id: {:?}",
+                    new.name, new.block_group_id, new.parent_accession_id
+                )));
             }
-            Err(e) => Err(AccessionError::DatabaseError(e)),
-        }
+            Err(e) => return Err(AccessionError::DatabaseError(e)),
+        };
+        Self::insert_spans(conn, &accession.id, &new.spans)?;
+        Ok(accession)
     }
 
     pub fn create_from_edges(
@@ -295,46 +329,95 @@ impl Accession {
         parent_accession_id: Option<&HashId>,
         edges: &[AugmentedEdgeData],
     ) -> Result<Accession, AccessionError> {
-        let accession = Self::create(conn, name, block_group_id, parent_accession_id)?;
-        let accession_nodes = edges
+        let spans = edges
             .windows(2)
-            .enumerate()
-            .map(|(index, edge_pair)| {
+            .map(|edge_pair| {
                 let into = &edge_pair[0].edge_data;
                 let out_of = &edge_pair[1].edge_data;
-                AccessionNodeData {
-                    accession_id: accession.id,
+                AccessionSpan {
                     node_id: into.target_node_id,
-                    sequence_start: into.target_coordinate,
-                    sequence_end: out_of.source_coordinate,
+                    range: Range {
+                        start: into.target_coordinate,
+                        end: out_of.source_coordinate,
+                    },
                     strand: into.target_strand,
-                    index_in_path: index as i64,
                 }
             })
             .collect::<Vec<_>>();
-        AccessionNode::bulk_create(conn, &accession_nodes)?;
-        Ok(accession)
+        Self::create(
+            conn,
+            &NewAccession {
+                name: name.to_string(),
+                block_group_id: *block_group_id,
+                parent_accession_id: parent_accession_id.copied(),
+                spans,
+            },
+        )
     }
 
     pub fn get_or_create(
         conn: &GraphConnection,
-        name: &str,
-        block_group_id: &HashId,
-        parent_accession_id: Option<&HashId>,
+        new: &NewAccession,
     ) -> Result<Accession, AccessionError> {
-        match Accession::create(conn, name, block_group_id, parent_accession_id) {
+        match Accession::create(conn, new) {
             Ok(accession) => Ok(accession),
-            Err(AccessionError::Duplicate(_)) => {
-                let hash = Accession::id_hash(block_group_id, parent_accession_id, name);
-                Ok(Accession {
-                    id: hash,
-                    name: name.to_string(),
-                    block_group_id: *block_group_id,
-                    parent_accession_id: parent_accession_id.copied(),
-                })
+            Err(AccessionError::Duplicate(message)) => {
+                let accession = Accession {
+                    id: Accession::id_hash(
+                        &new.block_group_id,
+                        new.parent_accession_id.as_ref(),
+                        &new.name,
+                    ),
+                    name: new.name.clone(),
+                    block_group_id: new.block_group_id,
+                    parent_accession_id: new.parent_accession_id,
+                };
+                let nodes = Self::get_nodes_by_id(conn, &accession.id);
+                if nodes.is_empty() {
+                    Self::insert_spans(conn, &accession.id, &new.spans)?;
+                } else if !Self::nodes_match_spans(&nodes, &new.spans) {
+                    return Err(AccessionError::Duplicate(message));
+                }
+                Ok(accession)
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
+    }
+
+    fn nodes_match_spans(nodes: &[AccessionNode], spans: &[AccessionSpan]) -> bool {
+        nodes.len() == spans.len()
+            && nodes
+                .iter()
+                .zip(spans)
+                .enumerate()
+                .all(|(index, (node, span))| {
+                    node.index_in_path == index as i64
+                        && node.node_id == span.node_id
+                        && node.sequence_start == span.range.start
+                        && node.sequence_end == span.range.end
+                        && node.strand == span.strand
+                })
+    }
+
+    fn insert_spans(
+        conn: &GraphConnection,
+        accession_id: &HashId,
+        spans: &[AccessionSpan],
+    ) -> Result<(), AccessionError> {
+        let nodes = spans
+            .iter()
+            .enumerate()
+            .map(|(index, span)| AccessionNodeData {
+                accession_id: *accession_id,
+                node_id: span.node_id,
+                sequence_start: span.range.start,
+                sequence_end: span.range.end,
+                strand: span.strand,
+                index_in_path: index as i64,
+            })
+            .collect::<Vec<_>>();
+        AccessionNode::bulk_create(conn, &nodes)?;
+        Ok(())
     }
 
     pub fn get_nodes_by_id(conn: &GraphConnection, accession_id: &HashId) -> Vec<AccessionNode> {
@@ -408,6 +491,94 @@ impl Accession {
             .map(|block| (block.start..block.end, block))
             .collect())
     }
+}
+
+impl AccessionSpan {
+    /// Given an intervaltree, create AccessionSpans on the provided range positions.
+    /// For example:
+    /// from_intervaltree_ranges(tree, [(1..3), (5..10)])
+    /// would create 2 AccessionSpans corresponding to the Nodes and positions in the
+    /// input ranges.
+    pub fn from_intervaltree_ranges(
+        tree: &IntervalTree<i64, NodeIntervalBlock>,
+        ranges: &[StdRange<i64>],
+    ) -> Result<Vec<AccessionSpan>, AccessionError> {
+        let length = intervaltree_length(tree)?;
+        let mut spans = Vec::new();
+        for range in ranges {
+            if range.start > range.end {
+                // TODO: When circular stuff is better supported, this should not be an error. We should
+                // check if the blockgroup is circular and wrap around.
+                return Err(AccessionError::InvalidRange {
+                    start: range.start,
+                    end: range.end,
+                });
+            }
+            if range.start < 0 || range.end < 0 || range.start > length || range.end > length {
+                return Err(AccessionError::InvalidRange {
+                    start: range.start,
+                    end: range.end,
+                });
+            }
+            if range.start == range.end {
+                continue;
+            }
+            let mut blocks = tree
+                .query(range.start..range.end)
+                .map(|entry| &entry.value)
+                .filter(|block| !is_terminal(block.node_id))
+                .collect::<Vec<_>>();
+            blocks.sort_by_key(|block| block.start);
+            spans.extend(blocks.into_iter().map(|block| {
+                let clipped_start = range.start.max(block.start);
+                let clipped_end = range.end.min(block.end);
+                AccessionSpan {
+                    node_id: block.node_id,
+                    range: Range {
+                        start: clipped_start - block.start + block.sequence_start,
+                        end: clipped_end - block.start + block.sequence_start,
+                    },
+                    strand: block.strand,
+                }
+            }));
+        }
+        Ok(spans)
+    }
+
+    /// convert a ResolvedGenRegion to an AccessionSpan. If no sub-region is selected,
+    /// the entire region is used.
+    pub fn from_resolved_region(
+        conn: &GraphConnection,
+        region: &ResolvedGenRegion,
+        ranges: Option<&[StdRange<i64>]>,
+    ) -> Result<Vec<AccessionSpan>, AccessionError> {
+        let tree = region
+            .intervaltree(conn)
+            .map_err(|err| AccessionError::RegionProjection(err.to_string()))?;
+        match ranges {
+            Some(ranges) => Self::from_intervaltree_ranges(&tree, ranges),
+            None => {
+                let range = region.start..region.end;
+                Self::from_intervaltree_ranges(&tree, std::slice::from_ref(&range))
+            }
+        }
+    }
+}
+
+fn intervaltree_length(tree: &IntervalTree<i64, NodeIntervalBlock>) -> Result<i64, AccessionError> {
+    if let Some(end_block) = tree
+        .query_point(i64::MAX - 2)
+        .map(|entry| &entry.value)
+        .find(|block| block.node_id == PATH_END_NODE_ID)
+    {
+        return Ok(end_block.start);
+    }
+
+    tree.iter_sorted()
+        .map(|entry| &entry.value.end)
+        .last()
+        .copied()
+        .ok_or(AccessionError::MissingIntervalTreeLength)
 }
 
 impl RegionResolver for Accession {
@@ -595,7 +766,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn resolves_accession_by_name_case_insensitively() {
+        fn test_resolves_accession_by_name_case_insensitively() {
             let conn = &get_connection(None).unwrap();
             let (_bg, path) = setup_block_group(conn);
             let mut path_cache = PathCache::new(conn);
@@ -608,7 +779,7 @@ mod tests {
         }
 
         #[test]
-        fn returns_not_found_for_missing_accession() {
+        fn test_returns_not_found_for_missing_accession() {
             let conn = &get_connection(None).unwrap();
             let (_bg, _path) = setup_block_group(conn);
 
@@ -621,7 +792,7 @@ mod tests {
         }
 
         #[test]
-        fn returns_ambiguous_for_multiple_matching_accessions() {
+        fn test_returns_ambiguous_for_multiple_matching_accessions() {
             let conn = &get_connection(None).unwrap();
             let (_bg, path) = setup_block_group(conn);
             let mut path_cache = PathCache::new(conn);
@@ -728,8 +899,34 @@ mod tests {
     fn test_accession_create_query() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let accession = Accession::create(conn, "test", &block_group_id, None).unwrap();
-        let _accession_2 = Accession::create(conn, "test2", &block_group_id, None).unwrap();
+        let accession = Accession::create(
+            conn,
+            &NewAccession {
+                name: "test".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![AccessionSpan {
+                    node_id: HashId::convert_str("test-a-node"),
+                    range: Range { start: 0, end: 1 },
+                    strand: Strand::Forward,
+                }],
+            },
+        )
+        .unwrap();
+        let _accession_2 = Accession::create(
+            conn,
+            &NewAccession {
+                name: "test2".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![AccessionSpan {
+                    node_id: HashId::convert_str("test-a-node"),
+                    range: Range { start: 1, end: 2 },
+                    strand: Strand::Forward,
+                }],
+            },
+        )
+        .unwrap();
         assert_eq!(
             Accession::query(
                 conn,
@@ -743,6 +940,131 @@ mod tests {
                 parent_accession_id: None,
             }]
         );
+    }
+
+    #[test]
+    fn test_create_from_new_accession_inserts_ordered_spans() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let new_accession = NewAccession {
+            name: "test".to_string(),
+            block_group_id,
+            parent_accession_id: None,
+            spans: vec![
+                AccessionSpan {
+                    node_id: HashId::convert_str("test-a-node"),
+                    range: Range { start: 2, end: 4 },
+                    strand: Strand::Forward,
+                },
+                AccessionSpan {
+                    node_id: HashId::convert_str("test-t-node"),
+                    range: Range { start: 0, end: 2 },
+                    strand: Strand::Forward,
+                },
+            ],
+        };
+
+        let accession = Accession::create(conn, &new_accession).unwrap();
+
+        assert_eq!(accession.name, "test");
+        let nodes = Accession::get_nodes_by_id(conn, &accession.id);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].node_id, HashId::convert_str("test-a-node"));
+        assert_eq!(nodes[0].index_in_path, 0);
+        assert_eq!(nodes[1].node_id, HashId::convert_str("test-t-node"));
+        assert_eq!(nodes[1].index_in_path, 1);
+    }
+
+    #[test]
+    fn test_get_or_create_returns_existing_accession_for_duplicate() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let new_accession = NewAccession {
+            name: "test".to_string(),
+            block_group_id,
+            parent_accession_id: None,
+            spans: vec![AccessionSpan {
+                node_id: HashId::convert_str("test-a-node"),
+                range: Range { start: 2, end: 4 },
+                strand: Strand::Forward,
+            }],
+        };
+
+        let first = Accession::create(conn, &new_accession).unwrap();
+        let second = Accession::get_or_create(conn, &new_accession).unwrap();
+
+        assert_eq!(second.id, first.id);
+        assert_eq!(Accession::get_nodes_by_id(conn, &second.id).len(), 1);
+    }
+
+    #[test]
+    fn get_or_create_rejects_duplicate_name_with_different_spans() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let new_accession = NewAccession {
+            name: "test".to_string(),
+            block_group_id,
+            parent_accession_id: None,
+            spans: vec![AccessionSpan {
+                node_id: HashId::convert_str("test-a-node"),
+                range: Range { start: 2, end: 4 },
+                strand: Strand::Forward,
+            }],
+        };
+        let different_spans = NewAccession {
+            spans: vec![AccessionSpan {
+                node_id: HashId::convert_str("test-a-node"),
+                range: Range { start: 3, end: 5 },
+                strand: Strand::Forward,
+            }],
+            ..new_accession.clone()
+        };
+
+        Accession::create(conn, &new_accession).unwrap();
+        let err = Accession::get_or_create(conn, &different_spans).unwrap_err();
+
+        assert!(matches!(err, AccessionError::Duplicate(_)));
+    }
+
+    #[test]
+    fn test_spans_from_intervaltree_ranges_preserve_range_order_and_clip_blocks() {
+        let conn = &get_connection(None).unwrap();
+        let (_block_group_id, path) = setup_block_group(conn);
+        let tree = path.intervaltree(conn).unwrap();
+
+        let spans = AccessionSpan::from_intervaltree_ranges(&tree, &[12..16, 2..4]).unwrap();
+
+        assert_eq!(
+            spans,
+            vec![
+                AccessionSpan {
+                    node_id: HashId::convert_str("test-t-node"),
+                    range: Range { start: 2, end: 6 },
+                    strand: Strand::Forward,
+                },
+                AccessionSpan {
+                    node_id: HashId::convert_str("test-a-node"),
+                    range: Range { start: 2, end: 4 },
+                    strand: Strand::Forward,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_spans_from_intervaltree_ranges_errors_on_wraparound_range() {
+        let conn = &get_connection(None).unwrap();
+        let (_block_group_id, path) = setup_block_group(conn);
+        let tree = path.intervaltree(conn).unwrap();
+
+        let range = StdRange { start: 35, end: 3 };
+        let err = AccessionSpan::from_intervaltree_ranges(&tree, std::slice::from_ref(&range))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AccessionError::InvalidRange { start: 35, end: 3 }
+        ));
     }
 
     #[test]
@@ -808,28 +1130,25 @@ mod tests {
     fn test_accession_node_to_accession_blocks_conversion() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let accession = Accession::create(conn, "test", &block_group_id, None).unwrap();
-
-        AccessionNode::bulk_create(
+        let accession = Accession::create(
             conn,
-            &[
-                AccessionNodeData {
-                    accession_id: accession.id,
-                    node_id: HashId::convert_str("test-a-node"),
-                    sequence_start: 2,
-                    sequence_end: 4,
-                    strand: Strand::Forward,
-                    index_in_path: 0,
-                },
-                AccessionNodeData {
-                    accession_id: accession.id,
-                    node_id: HashId::convert_str("test-t-node"),
-                    sequence_start: 0,
-                    sequence_end: 2,
-                    strand: Strand::Forward,
-                    index_in_path: 1,
-                },
-            ],
+            &NewAccession {
+                name: "test".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-a-node"),
+                        range: Range { start: 2, end: 4 },
+                        strand: Strand::Forward,
+                    },
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-t-node"),
+                        range: Range { start: 0, end: 2 },
+                        strand: Strand::Forward,
+                    },
+                ],
+            },
         )
         .unwrap();
 
@@ -876,8 +1195,41 @@ mod tests {
     fn test_query_accessions() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let accession_1 = Accession::create(conn, "test-1", &block_group_id, None).unwrap();
-        let accession_2 = Accession::create(conn, "test-2", &block_group_id, None).unwrap();
+        let accession_1 = Accession::create(
+            conn,
+            &NewAccession {
+                name: "test-1".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-a-node"),
+                        range: Range { start: 2, end: 4 },
+                        strand: Strand::Forward,
+                    },
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-t-node"),
+                        range: Range { start: 0, end: 2 },
+                        strand: Strand::Reverse,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let accession_2 = Accession::create(
+            conn,
+            &NewAccession {
+                name: "test-2".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![AccessionSpan {
+                    node_id: HashId::convert_str("test-c-node"),
+                    range: Range { start: 1, end: 3 },
+                    strand: Strand::Forward,
+                }],
+            },
+        )
+        .unwrap();
         let accession_1_nodes = vec![
             AccessionNodeData {
                 accession_id: accession_1.id,
@@ -904,8 +1256,6 @@ mod tests {
             strand: Strand::Forward,
             index_in_path: 0,
         }];
-        AccessionNode::bulk_create(conn, &accession_1_nodes).unwrap();
-        AccessionNode::bulk_create(conn, &accession_2_nodes).unwrap();
 
         let grouped =
             AccessionNode::query_accessions(conn, &[accession_2.id, accession_1.id]).unwrap();

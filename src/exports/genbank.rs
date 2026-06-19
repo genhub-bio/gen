@@ -14,7 +14,7 @@ use gen_annotations::projection::{AnnotationSegment, project_annotation_segments
 use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
-    accession::Accession,
+    accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
     db::GraphConnection,
@@ -538,20 +538,27 @@ mod tests {
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
-        let accession = Accession::get_or_create(conn, name, &path.block_group_id, None).unwrap();
-        let nodes = segments
+        let spans = segments
             .iter()
-            .enumerate()
-            .map(|(index, segment)| AccessionNodeData {
-                accession_id: accession.id,
+            .map(|segment| AccessionSpan {
                 node_id: blocks[segment.0].node_id,
-                sequence_start: segment.1,
-                sequence_end: segment.2,
+                range: Range {
+                    start: segment.1,
+                    end: segment.2,
+                },
                 strand: segment.3,
-                index_in_path: index as i64,
             })
             .collect::<Vec<_>>();
-        AccessionNode::bulk_create(conn, &nodes).unwrap();
+        let accession = Accession::get_or_create(
+            conn,
+            &NewAccession {
+                name: name.to_string(),
+                block_group_id: path.block_group_id,
+                parent_accession_id: None,
+                spans,
+            },
+        )
+        .unwrap();
         Annotation::create_with_samples(
             conn,
             name,

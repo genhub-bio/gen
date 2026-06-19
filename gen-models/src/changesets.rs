@@ -7,7 +7,7 @@ use std::{
     str,
 };
 
-use gen_core::{HashId, Strand, config::Workspace, is_terminal, traits::Capnp};
+use gen_core::{HashId, Strand, config::Workspace, is_terminal, range::Range, traits::Capnp};
 use itertools::Itertools;
 use rusqlite::{
     session::{ChangesetItem, ChangesetIter},
@@ -16,7 +16,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    accession::{Accession, AccessionNode, AccessionNodeData},
+    accession::{Accession, AccessionNode, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationGroup, AnnotationGroupSample},
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -851,22 +851,20 @@ pub fn apply_changeset(
         Path::create(conn, &path.name, &path.block_group_id, &[])?;
     }
 
+    let dependency_accession_nodes_by_id =
+        accession_nodes_by_accession_id(&dependencies.accession_nodes);
     for accession in dependencies.accessions.iter() {
         Accession::get_or_create(
             conn,
-            &accession.name,
-            &accession.block_group_id,
-            accession.parent_accession_id.as_ref(),
+            &new_accession_from_nodes(
+                accession,
+                dependency_accession_nodes_by_id
+                    .get(&accession.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            ),
         )?;
     }
-    AccessionNode::bulk_create(
-        conn,
-        &dependencies
-            .accession_nodes
-            .iter()
-            .map(AccessionNodeData::from)
-            .collect::<Vec<_>>(),
-    )?;
 
     for collection in &changeset.collections {
         Collection::create(conn, &collection.name)?;
@@ -934,22 +932,20 @@ pub fn apply_changeset(
         let _ = PathEdge::bulk_create(conn, &path.id, &edges.collect::<Vec<_>>());
     }
 
+    let changeset_accession_nodes_by_id =
+        accession_nodes_by_accession_id(&changeset.accession_nodes);
     for accession in &changeset.accessions {
         Accession::get_or_create(
             conn,
-            &accession.name,
-            &accession.block_group_id,
-            accession.parent_accession_id.as_ref(),
+            &new_accession_from_nodes(
+                accession,
+                changeset_accession_nodes_by_id
+                    .get(&accession.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            ),
         )?;
     }
-    AccessionNode::bulk_create(
-        conn,
-        &changeset
-            .accession_nodes
-            .iter()
-            .map(AccessionNodeData::from)
-            .collect::<Vec<_>>(),
-    )?;
 
     for annotation_group in &changeset.annotation_groups {
         AnnotationGroup::get_or_create(conn, &annotation_group.name).map_err(|err| match err {
@@ -1005,6 +1001,45 @@ pub fn apply_changeset(
         })?;
     }
     Ok(())
+}
+
+/// AccessionNodes in changeset and dependencies are a single vec of accessionnodes. This groups
+/// them by accession_id
+fn accession_nodes_by_accession_id(
+    nodes: &[AccessionNode],
+) -> HashMap<HashId, Vec<&AccessionNode>> {
+    let mut nodes_by_accession_id: HashMap<HashId, Vec<&AccessionNode>> = HashMap::new();
+    for node in nodes {
+        nodes_by_accession_id
+            .entry(node.accession_id)
+            .or_default()
+            .push(node);
+    }
+    for nodes in nodes_by_accession_id.values_mut() {
+        nodes.sort_by_key(|node| node.index_in_path);
+    }
+    nodes_by_accession_id
+}
+
+fn new_accession_from_nodes(accession: &Accession, nodes: &[&AccessionNode]) -> NewAccession {
+    let spans = nodes
+        .iter()
+        .map(|node| AccessionSpan {
+            node_id: node.node_id,
+            range: Range {
+                start: node.sequence_start,
+                end: node.sequence_end,
+            },
+            strand: node.strand,
+        })
+        .collect::<Vec<_>>();
+
+    NewAccession {
+        name: accession.name.clone(),
+        block_group_id: accession.block_group_id,
+        parent_accession_id: accession.parent_accession_id,
+        spans,
+    }
 }
 
 pub fn revert_changeset(
