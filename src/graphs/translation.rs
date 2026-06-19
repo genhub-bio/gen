@@ -7,7 +7,6 @@ use gen_core::{
 };
 use gen_graph::{GraphNode, all_intermediate_edges};
 use gen_models::{
-    accession::Accession,
     annotations::Annotation,
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
