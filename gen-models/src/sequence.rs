@@ -213,6 +213,7 @@ impl<'a> NewSequence<'a> {
             }
         }
         let hash = self.hash();
+        let mut inserted = false;
         match conn.query_row(
             "SELECT hash from sequences where hash = ?1;",
             [hash],
@@ -236,11 +237,12 @@ impl<'a> NewSequence<'a> {
                     Ok(_) => {}
                     Err(err) => return Err(SequenceError::DatabaseError(err)),
                 }
+                inserted = true;
             }
             Err(err) => return Err(SequenceError::DatabaseError(err)),
         };
 
-        Ok(Sequence {
+        let sequence = Sequence {
             hash,
             sequence_type: self.sequence_type.unwrap().to_string(),
             sequence: self.sequence.unwrap_or("").to_string(),
@@ -248,7 +250,11 @@ impl<'a> NewSequence<'a> {
             file_path: self.file_path.unwrap_or("").to_string(),
             length: self.length.unwrap_or(length),
             external_sequence: !self.file_path.unwrap_or("").is_empty(),
-        })
+        };
+        if inserted {
+            crate::operation_recorder::record_sequence(sequence.clone());
+        }
+        Ok(sequence)
     }
 }
 

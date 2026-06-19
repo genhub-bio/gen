@@ -21,6 +21,7 @@ pub mod manifest;
 pub mod metadata;
 pub mod migrations;
 pub mod node;
+pub mod operation_recorder;
 pub mod operations;
 pub mod path;
 pub mod path_edge;

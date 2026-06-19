@@ -205,12 +205,16 @@ impl Path {
         let mut stmt = conn.prepare(query).unwrap();
 
         let path = match stmt.execute(params![hash, name, block_group_id, timestamp]) {
-            Ok(_) => Path {
-                id: hash,
-                name: name.to_string(),
-                block_group_id: *block_group_id,
-                created_on: timestamp,
-            },
+            Ok(_) => {
+                let path = Path {
+                    id: hash,
+                    name: name.to_string(),
+                    block_group_id: *block_group_id,
+                    created_on: timestamp,
+                };
+                crate::operation_recorder::record_path(path.clone());
+                path
+            }
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {

@@ -144,8 +144,8 @@ impl BlockGroupEdge {
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             for block_group_edge in chunk {
-                rows_to_insert.push("(?, ?, ?, ?, ?, ?)".to_string());
                 let hash = block_group_edge.id_hash();
+                rows_to_insert.push("(?, ?, ?, ?, ?, ?)".to_string());
                 params.push(Box::new(hash));
                 params.push(Box::new(block_group_edge.block_group_id));
                 params.push(Box::new(block_group_edge.edge_id));
@@ -153,11 +153,22 @@ impl BlockGroupEdge {
                 params.push(Box::new(block_group_edge.phased));
                 params.push(Box::new(timestamp));
             }
+            if rows_to_insert.is_empty() {
+                continue;
+            }
 
             sql.push_str(&rows_to_insert.join(", "));
+            sql.push_str(" RETURNING *");
 
             let mut stmt = conn.prepare(&sql).unwrap();
-            stmt.execute(rusqlite::params_from_iter(params)).unwrap();
+            let inserted_block_group_edges = stmt
+                .query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok(BlockGroupEdge::process_row(row))
+                })
+                .unwrap();
+            for block_group_edge in inserted_block_group_edges {
+                crate::operation_recorder::record_block_group_edge(block_group_edge.unwrap());
+            }
         }
     }
 

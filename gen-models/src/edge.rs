@@ -241,15 +241,19 @@ impl Edge {
             target_coordinate,
             target_strand
         ]) {
-            Ok(_) => Ok(Edge {
-                id: hash,
-                source_node_id,
-                source_coordinate,
-                source_strand,
-                target_node_id,
-                target_coordinate,
-                target_strand,
-            }),
+            Ok(_) => {
+                let edge = Edge {
+                    id: hash,
+                    source_node_id,
+                    source_coordinate,
+                    source_strand,
+                    target_node_id,
+                    target_coordinate,
+                    target_strand,
+                };
+                crate::operation_recorder::record_edge(edge.clone());
+                Ok(edge)
+            }
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
@@ -270,14 +274,9 @@ impl Edge {
 
     pub fn bulk_create(conn: &GraphConnection, edges: &[EdgeData]) -> Vec<HashId> {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
-        let query = Edge::query_by_ids(conn, &edge_ids);
-        let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
-
         let mut edges_to_insert = IndexSet::new();
-        for (index, edge) in edge_ids.iter().enumerate() {
-            if !existing_edges.contains(edge) {
-                edges_to_insert.insert(&edges[index]);
-            }
+        for edge in edges {
+            edges_to_insert.insert(edge);
         }
 
         let batch_size = max_rows_per_batch(conn, 7);
@@ -286,7 +285,8 @@ impl Edge {
             let mut rows = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for edge in chunk {
-                params.push(Box::new(edge.id_hash()));
+                let id = edge.id_hash();
+                params.push(Box::new(id));
                 params.push(Box::new(edge.source_node_id));
                 params.push(Box::new(edge.source_coordinate));
                 params.push(Box::new(edge.source_strand));
@@ -296,11 +296,18 @@ impl Edge {
                 rows.push("(?, ?, ?, ?, ?, ?, ?)");
             }
             let sql = format!(
-                "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {};",
+                "INSERT OR IGNORE INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {} RETURNING *;",
                 rows.join(",")
             );
-            conn.execute(&sql, rusqlite::params_from_iter(params))
+            let mut stmt = conn.prepare(&sql).unwrap();
+            let inserted_edges = stmt
+                .query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok(Edge::process_row(row))
+                })
                 .unwrap();
+            for edge in inserted_edges {
+                crate::operation_recorder::record_edge(edge.unwrap());
+            }
         }
         edge_ids
     }

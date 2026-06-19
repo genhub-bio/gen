@@ -53,7 +53,9 @@ impl AnnotationGroup {
         let mut stmt = conn
             .prepare("INSERT INTO annotation_groups (name) VALUES (?1) returning (name);")
             .unwrap();
-        stmt.query_row((name,), |row| Ok(AnnotationGroup { name: row.get(0)? }))
+        let group = stmt.query_row((name,), |row| Ok(AnnotationGroup { name: row.get(0)? }))?;
+        crate::operation_recorder::record_annotation_group(group.clone());
+        Ok(group)
     }
 
     pub fn get_or_create(
@@ -282,13 +284,15 @@ impl Annotation {
         let mut stmt = conn.prepare(query)?;
         let extra_json = serialize_annotation_extra(extra)?;
         stmt.execute(params![id, name, group, accession_id, extra_json])?;
-        Ok(Annotation {
+        let annotation = Annotation {
             id,
             name: name.to_string(),
             group: group.to_string(),
             accession_id: *accession_id,
             extra: extra.cloned(),
-        })
+        };
+        crate::operation_recorder::record_annotation(annotation.clone());
+        Ok(annotation)
     }
 
     pub fn get_or_create(
@@ -342,7 +346,13 @@ impl Annotation {
         let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
         let mut stmt = conn.prepare(query)?;
         for sample_name in sample_names {
-            stmt.execute(params![self.group, sample_name])?;
+            let rows_changed = stmt.execute(params![self.group, sample_name])?;
+            if rows_changed > 0 {
+                crate::operation_recorder::record_annotation_group_sample(AnnotationGroupSample {
+                    annotation_group: self.group.clone(),
+                    sample_name: (*sample_name).to_string(),
+                });
+            }
         }
         Ok(())
     }

@@ -3,7 +3,8 @@ use rusqlite::{Result as SQLResult, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    db::GraphConnection, gen_models_capnp::sample_lineage, lineage::SqlLineage, traits::Query,
+    db::GraphConnection, gen_models_capnp::sample_lineage, lineage::SqlLineage, operation_recorder,
+    traits::Query,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -112,12 +113,17 @@ impl SampleLineage {
             VALUES (?1, ?2)
             ON CONFLICT(parent_sample_name, child_sample_name) DO NOTHING;";
         let mut stmt = conn.prepare(query).unwrap();
-        stmt.execute(params![parent_sample_name, child_sample_name])?;
+        let rows_changed = stmt.execute(params![parent_sample_name, child_sample_name])?;
 
-        Ok(SampleLineage {
+        let sample_lineage = SampleLineage {
             parent_sample_name: parent_sample_name.to_string(),
             child_sample_name: child_sample_name.to_string(),
-        })
+        };
+        if rows_changed > 0 {
+            operation_recorder::record_sample_lineage(sample_lineage.clone());
+        }
+
+        Ok(sample_lineage)
     }
 
     pub fn delete(

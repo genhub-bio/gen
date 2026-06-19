@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group::BlockGroup, db::GraphConnection, gen_models_capnp::collection, traits::*,
+    block_group::BlockGroup, db::GraphConnection, gen_models_capnp::collection, operation_recorder,
+    traits::*,
 };
 
 #[derive(Debug, Error, PartialEq)]
@@ -68,7 +69,10 @@ impl Collection {
                 name: name.to_string(),
             })
         }) {
-            Ok(res) => Ok(res),
+            Ok(res) => {
+                operation_recorder::record_collection(res.clone());
+                Ok(res)
+            }
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
@@ -110,7 +114,11 @@ impl Collection {
                 Ok(Collection { name: row.get(0)? })
             })
             .unwrap();
-        rows.map(|row| row.unwrap()).collect()
+        let collections = rows.map(|row| row.unwrap()).collect::<Vec<_>>();
+        for collection in &collections {
+            operation_recorder::record_collection(collection.clone());
+        }
+        collections
     }
 
     pub fn get_block_groups(conn: &GraphConnection, collection_name: &str) -> Vec<BlockGroup> {

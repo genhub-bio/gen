@@ -282,7 +282,10 @@ impl BlockGroup {
             new_block_group.parent_block_group_id,
             new_block_group.is_default,
         ]) {
-            Ok(_) => Ok(bg),
+            Ok(_) => {
+                crate::operation_recorder::record_block_group(bg.clone());
+                Ok(bg)
+            }
             Err(rusqlite::Error::SqliteFailure(err, _details))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {

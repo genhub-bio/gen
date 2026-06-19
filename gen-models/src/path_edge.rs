@@ -128,22 +128,24 @@ impl PathEdge {
         edge_ids: &[HashId],
     ) -> Result<(), PathEdgeError> {
         let batch_size = max_rows_per_batch(conn, 4);
-
         for (index1, chunk) in edge_ids.chunks(batch_size).enumerate() {
             let mut rows_to_insert = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for (index2, edge_id) in chunk.iter().enumerate() {
-                rows_to_insert.push("(?, ?, ?, ?)".to_string());
                 let index_in = index1 * 100000 + index2;
                 let hash = HashId(calculate_hash(&format!("{path_id}:{edge_id}:{index_in}")));
+                rows_to_insert.push("(?, ?, ?, ?)".to_string());
                 params.push(Box::new(hash));
                 params.push(Box::new(path_id));
                 params.push(Box::new(edge_id));
                 params.push(Box::new(index_in));
             }
+            if rows_to_insert.is_empty() {
+                continue;
+            }
 
             let sql = format!(
-                "INSERT OR IGNORE INTO path_edges (id, path_id, edge_id, index_in_path) VALUES {};",
+                "INSERT OR IGNORE INTO path_edges (id, path_id, edge_id, index_in_path) VALUES {} RETURNING *;",
                 rows_to_insert.join(", ")
             );
 
@@ -151,9 +153,17 @@ impl PathEdge {
                 Ok(stmt) => stmt,
                 Err(e) => return Err(PathEdgeError::DatabaseError(e)),
             };
-            match stmt.execute(rusqlite::params_from_iter(params)) {
-                Ok(_) => (),
+            let inserted_path_edges = match stmt
+                .query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok(PathEdge::process_row(row))
+                }) {
+                Ok(rows) => rows,
                 Err(e) => return Err(PathEdgeError::DatabaseError(e)),
+            };
+            for path_edge in inserted_path_edges {
+                crate::operation_recorder::record_path_edge(
+                    path_edge.map_err(PathEdgeError::DatabaseError)?,
+                );
             }
         }
 

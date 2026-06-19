@@ -15,7 +15,7 @@ use crate::{
     traits::Query,
 };
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Sample {
     pub name: String,
     pub is_reference: bool,
@@ -91,10 +91,14 @@ impl Sample {
             };
 
         match stmt.execute(params![new_sample.name, new_sample.is_reference]) {
-            Ok(_) => Ok(Sample {
-                name: new_sample.name.to_string(),
-                is_reference: new_sample.is_reference,
-            }),
+            Ok(_) => {
+                let sample = Sample {
+                    name: new_sample.name.to_string(),
+                    is_reference: new_sample.is_reference,
+                };
+                crate::operation_recorder::record_sample(sample.clone());
+                Ok(sample)
+            }
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {

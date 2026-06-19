@@ -1,14 +1,13 @@
 use std::str;
 
 use gen_core::{HashId, traits::Capnp};
-use rusqlite::session;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     accession::{Accession, AccessionNode},
     block_group::BlockGroup,
-    changesets::{DatabaseChangeset, process_changesetiter, write_changeset},
+    changesets::{DatabaseChangeset, write_changeset},
     collection::Collection,
     db::{DbContext, GraphConnection},
     edge::Edge,
@@ -18,22 +17,21 @@ use crate::{
     gen_models_capnp::dependency_models,
     metadata::{self, get_db_uuid},
     node::Node,
+    operation_recorder::OperationRecorder,
     operations::{FileAddition, Operation, OperationInfo, OperationState, OperationSummary},
     path::Path,
     sample::Sample,
     sequence::Sequence,
 };
 
-pub fn start_operation(conn: &GraphConnection) -> session::Session<'_> {
-    let mut session = session::Session::new(conn).unwrap();
-    attach_session(&mut session);
-    session
+pub fn start_operation(_conn: &GraphConnection) -> OperationRecorder {
+    OperationRecorder::start()
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn end_operation(
     context: &DbContext,
-    session: &mut session::Session,
+    session: &mut OperationRecorder,
     operation_info: &OperationInfo,
     summary_str: &str,
     force_hash: impl Into<Option<HashId>>,
@@ -42,20 +40,17 @@ pub fn end_operation(
     let operation_conn = context.operations().conn();
     let db_uuid = metadata::get_db_uuid(conn);
     // determine if this operation has already happened
-    let mut output = Vec::new();
-    session.changeset_strm(&mut output).unwrap();
-
-    let (changeset_models, dependencies) = process_changesetiter(conn, &output)?;
+    let (changeset_models, dependencies) = session.finish(conn);
 
     let hash = if let Some(hash) = force_hash.into() {
         hash
     } else {
-        if output.is_empty() {
+        if changeset_models == Default::default() {
             return Err(OperationError::NoChanges);
         }
         let mut hasher = Sha256::new();
         hasher.update(&db_uuid[..]);
-        hasher.update(&output[..]);
+        hasher.update(serde_json::to_vec(&changeset_models).unwrap());
         HashId(hasher.finalize().into())
     };
 
@@ -135,28 +130,6 @@ pub fn end_operation(
                 .unwrap();
             Err(OperationError::SqliteError(err))
         }
-    }
-}
-
-pub fn attach_session(session: &mut session::Session) {
-    for table in [
-        "collections",
-        "samples",
-        "sequences",
-        "block_groups",
-        "paths",
-        "nodes",
-        "edges",
-        "path_edges",
-        "block_group_edges",
-        "accessions",
-        "accession_nodes",
-        "annotation_groups",
-        "annotations",
-        "annotation_group_samples",
-        "sample_lineage",
-    ] {
-        session.attach(Some(table)).unwrap();
     }
 }
 
@@ -457,5 +430,38 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_path, "nested/input.fa");
+    }
+
+    #[test]
+    fn test_end_operation_writes_recorded_changeset_models() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let operation_conn = context.operations().conn();
+
+        let db_uuid = metadata::get_db_uuid(graph_conn);
+        GenDatabase::create(operation_conn, &db_uuid, "default", "default.db").unwrap();
+
+        let mut session = start_operation(graph_conn);
+        Collection::create(graph_conn, "collection").unwrap();
+        create_bg(graph_conn, "collection", "sample", "bg");
+
+        let operation = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![],
+                description: "test".to_string(),
+            },
+            "test operation",
+            None,
+        )
+        .unwrap();
+
+        let changeset = operation.get_changeset(context.workspace());
+
+        assert_eq!(changeset.changes.samples.len(), 1);
+        assert_eq!(changeset.changes.samples[0].name, "sample");
+        assert_eq!(changeset.changes.block_groups.len(), 1);
+        assert_eq!(changeset.changes.block_groups[0].name, "bg");
     }
 }

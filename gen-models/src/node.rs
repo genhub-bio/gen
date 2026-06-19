@@ -78,7 +78,13 @@ impl Node {
             Err(e) => return Err(NodeError::DatabaseError(e)),
         };
         match stmt.execute(params![node_hash, sequence_hash]) {
-            Ok(_) => Ok(*node_hash),
+            Ok(_) => {
+                crate::operation_recorder::record_node(crate::operation_recorder::NodeRecord {
+                    id: *node_hash,
+                    sequence_hash: *sequence_hash,
+                });
+                Ok(*node_hash)
+            }
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
