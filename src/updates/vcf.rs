@@ -140,12 +140,12 @@ impl<'a> SequenceCache<'_> {
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_change(
-    conn: &GraphConnection,
-    sample_bg_id: &HashId,
+    block_group: BlockGroup,
     sample_path: &Path,
     ids: Option<String>,
     ref_start: i64,
     ref_end: i64,
+    path_length: i64,
     chromosome_index: i64,
     phased: i64,
     block_sequence: String,
@@ -162,8 +162,21 @@ fn prepare_change(
         path_end: ref_end,
         strand: Strand::Forward,
     };
-    let region =
-        ResolvedGenRegion::from_path(conn, *sample_bg_id, sample_path, ref_start, ref_end)?;
+    let region = ResolvedGenRegion {
+        block_group,
+        path: Some(sample_path.clone()),
+        accession: None,
+        annotation: None,
+        kind: ResolvedRegionKind::Path,
+        anchor_start: 0,
+        anchor_end: path_length,
+        feature_length: path_length,
+        start: ref_start,
+        end: ref_end,
+        start_anchors: None,
+        end_anchors: None,
+        remove_ambiguous_positions: false,
+    };
     Ok(BlockGroupChange {
         region,
         path_accession: ids,
@@ -181,6 +194,7 @@ struct VcfEntry {
     path: Path,
     ids: Option<String>,
     ref_start: i64,
+    path_length: i64,
     alt_seq: String,
     chromosome_index: i64,
     phased: i64,
@@ -261,6 +275,7 @@ pub fn update_with_vcf(
     let mut created_samples: HashSet<&str> = HashSet::new();
 
     let mut path_lengths: HashMap<HashId, i64> = HashMap::new();
+    let mut block_groups_by_id: HashMap<HashId, BlockGroup> = HashMap::new();
 
     let mut block_group_names = vec![];
     for parent_sample in &parent_samples {
@@ -389,6 +404,7 @@ pub fn update_with_vcf(
                                 block_group_id: *sample_bg_id,
                                 path: sample_path.clone(),
                                 sample_name: fixed_sample.to_string(),
+                                path_length,
                                 alt_seq: alt_seq.clone(),
                                 chromosome_index: chromosome_index as i64,
                                 phased,
@@ -508,6 +524,7 @@ pub fn update_with_vcf(
                                             ref_start,
                                             path: sample_path.clone(),
                                             sample_name: sample_name.to_string(),
+                                            path_length,
                                             alt_seq: alt_seq.clone(),
                                             chromosome_index: chromosome_index as i64,
                                             phased,
@@ -577,13 +594,19 @@ pub fn update_with_vcf(
                     sequence_hash = sequence.hash
                 )),
             )?;
+            let block_group = match block_groups_by_id.entry(vcf_entry.block_group_id) {
+                Entry::Occupied(entry) => entry.get().clone(),
+                Entry::Vacant(entry) => entry
+                    .insert(BlockGroup::get_by_id(conn, &vcf_entry.block_group_id)?)
+                    .clone(),
+            };
             let change = prepare_change(
-                conn,
-                &vcf_entry.block_group_id,
+                block_group,
                 &vcf_entry.path,
                 vcf_entry.ids,
                 ref_start,
                 ref_end,
+                vcf_entry.path_length,
                 vcf_entry.chromosome_index,
                 vcf_entry.phased,
                 sequence_string.clone(),
