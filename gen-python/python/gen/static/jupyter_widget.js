@@ -374,7 +374,7 @@ function render({ model, el }) {
       "padding: 0"
     ].join("; ");
     const btnContainer = document.createElement("div");
-    btnContainer.style.cssText = "position: absolute; top: 1px; right: 1px; display: flex; flex-direction: row; gap: 4px; z-index: 1;";
+    btnContainer.style.cssText = "position: absolute; top: 8px; right: 8px; display: flex; flex-direction: row; gap: 4px; z-index: 1;";
     const pageArrowStyle = [
       "box-sizing: border-box",
       "width: 20px",
@@ -404,7 +404,7 @@ function render({ model, el }) {
       "overflow: hidden",
       "user-select: none"
     ].join("; ");
-    pageIndicator.style.cssText += "; position: absolute; top: 1px; left: 1px; z-index: 1;";
+    pageIndicator.style.cssText += "; position: absolute; top: 8px; left: 8px; z-index: 1;";
     pageIndicator.style.display = pageable ? "flex" : "none";
     const pageLeftBtn = makePageArrow2(
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
