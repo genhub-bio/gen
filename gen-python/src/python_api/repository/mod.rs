@@ -94,7 +94,7 @@ impl PyRepository {
             .unwrap_or_else(|| "default".to_string())
     }
 
-    pub(crate) fn into_py_block_group(&self, bg: BlockGroup) -> PySequenceGraph {
+    pub(crate) fn to_py_block_group(&self, bg: BlockGroup) -> PySequenceGraph {
         PySequenceGraph {
             id: bg.id,
             collection_name: bg.collection_name,
@@ -214,14 +214,14 @@ impl PyRepository {
         let conn = self.context.graph().conn();
         let block_group =
             BlockGroup::get_by_id(conn, &id.hash_id).map_err(block_group_err_to_pyerr)?;
-        Ok(self.into_py_block_group(block_group))
+        Ok(self.to_py_block_group(block_group))
     }
 
     fn get_sequence_graphs(&self) -> PyResult<Vec<PySequenceGraph>> {
         let conn = self.context.graph().conn();
         Ok(BlockGroup::all(conn)
             .into_iter()
-            .map(|bg| self.into_py_block_group(bg))
+            .map(|bg| self.to_py_block_group(bg))
             .collect())
     }
 
@@ -232,7 +232,7 @@ impl PyRepository {
         let conn = self.context.graph().conn();
         Ok(Collection::get_block_groups(conn, collection_name)
             .into_iter()
-            .map(|bg| self.into_py_block_group(bg))
+            .map(|bg| self.to_py_block_group(bg))
             .collect())
     }
 
@@ -275,9 +275,9 @@ impl PyRepository {
                 node_key.node_id
             ))
         })?;
-        Ok(sequence
+        sequence
             .get_sequence(node_key.sequence_start, node_key.sequence_end)
-            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?)
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
     }
 }
 

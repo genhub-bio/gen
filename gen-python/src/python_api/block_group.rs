@@ -316,9 +316,9 @@ impl PySequenceGraph {
                 node.node_id
             ))
         })?;
-        Ok(sequence
+        sequence
             .get_sequence(node.sequence_start, node.sequence_end)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -566,6 +566,7 @@ impl PySequenceGraph {
     /// codon_table : int
     ///     NCBI codon table ID. Default: 1 (Standard).
     #[pyo3(signature = (region=None, output_collection=None, name=None, strand=None, frame=0, codon_table=1, start=None, end=None))]
+    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn translate_annotation(
         &self,
         region: Option<Bound<'_, PyAny>>,
@@ -707,7 +708,7 @@ impl PySequenceGraph {
             }
         };
 
-        Ok(self.into_py_block_group(protein_bg))
+        Ok(self.to_py_block_group(protein_bg))
     }
 }
 
@@ -725,7 +726,7 @@ impl PySequenceGraph {
     }
 
     /// Wraps a raw `BlockGroup` model with this sequence graph's database context.
-    fn into_py_block_group(&self, bg: BlockGroup) -> Self {
+    fn to_py_block_group(&self, bg: BlockGroup) -> Self {
         PySequenceGraph {
             id: bg.id,
             collection_name: bg.collection_name,
@@ -778,7 +779,7 @@ impl PySequenceGraph {
         );
         let found = BlockGroup::get_by_id(conn, &child_id)
             .map_err(|e| PyRuntimeError::new_err(format!("Subgraph created but not found: {e}")))?;
-        Ok(self.into_py_block_group(found))
+        Ok(self.to_py_block_group(found))
     }
 
     /// Split this sequence graph into coordinate-bounded subgraphs.
@@ -819,7 +820,7 @@ impl PySequenceGraph {
             Sample::get_block_groups(conn, &self.collection_name, &new_sample)
                 .into_iter()
                 .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
-                .map(|bg| self.into_py_block_group(bg))
+                .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         )
     }

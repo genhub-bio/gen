@@ -536,7 +536,7 @@ fn load_tracks_from_specs(
     for spec in specs {
         match spec {
             TrackSpec::Group { name } => {
-                if let Some(bg) = BlockGroup::get_by_id(conn, sequence_graph_id).ok() {
+                if let Ok(bg) = BlockGroup::get_by_id(conn, sequence_graph_id) {
                     let entry = AnnotationGroupEntry {
                         id: name.clone(),
                         name: name.clone(),
@@ -969,14 +969,14 @@ impl Repository {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
-        Ok(self.into_sequence_graph(bg))
+        Ok(self.to_sequence_graph(bg))
     }
 
     fn get_sequence_graphs(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
         let values = BlockGroup::all(conn)
             .into_iter()
-            .map(|bg| r!(self.into_sequence_graph(bg)))
+            .map(|bg| r!(self.to_sequence_graph(bg)))
             .collect::<Vec<_>>();
         Ok(List::from_values(values))
     }
@@ -992,7 +992,7 @@ impl Repository {
             rusqlite::params![collection_name],
         )
         .into_iter()
-        .map(|bg| r!(self.into_sequence_graph(bg)))
+        .map(|bg| r!(self.to_sequence_graph(bg)))
         .collect::<Vec<_>>();
         Ok(List::from_values(values))
     }
@@ -1009,9 +1009,8 @@ impl Repository {
         let seq = sequences
             .get(&nid)
             .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
-        Ok(seq
-            .get_sequence(sequence_start, sequence_end)
-            .map_err(|e| Error::Other(e.to_string()))?)
+        seq.get_sequence(sequence_start, sequence_end)
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
     fn import_fasta(
@@ -1136,6 +1135,7 @@ impl Repository {
         }
     }
 
+    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn import_genomic_regions(
         &self,
         seq_names: Vec<String>,
@@ -1746,7 +1746,7 @@ impl Repository {
         BlockGroup::query(conn, "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3", rusqlite::params![collection_name, new_sample, new_region])
             .into_iter()
             .next()
-            .map(|bg| self.into_sequence_graph(bg))
+            .map(|bg| self.to_sequence_graph(bg))
             .ok_or_else(|| Error::Other("Stitched block group not found after creation".to_string()))
     }
 
@@ -1830,7 +1830,7 @@ impl Repository {
             };
             if !matches.is_empty() {
                 let locus_records = matches.iter().map(graph_locus_record).collect::<Vec<_>>();
-                let gen_bg = self.into_sequence_graph(bg);
+                let gen_bg = self.to_sequence_graph(bg);
                 results.push(list!(
                     sequence_graph = r!(gen_bg),
                     matches = List::from_values(locus_records)
@@ -1892,6 +1892,7 @@ impl Repository {
         Ok("Derived subgraph.".to_string())
     }
 
+    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn derive_chunks(
         &self,
         collection: Nullable<String>,
@@ -1997,7 +1998,7 @@ impl Repository {
 }
 
 impl Repository {
-    fn into_sequence_graph(&self, bg: BlockGroup) -> SequenceGraph {
+    fn to_sequence_graph(&self, bg: BlockGroup) -> SequenceGraph {
         SequenceGraph {
             context: self.context.clone(),
             id: bg.id,
@@ -2181,9 +2182,8 @@ impl SequenceGraph {
         let seq = sequences
             .get(&nid)
             .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
-        Ok(seq
-            .get_sequence(sequence_start, sequence_end)
-            .map_err(|e| Error::Other(e.to_string()))?)
+        seq.get_sequence(sequence_start, sequence_end)
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
     fn subgraph(
@@ -2353,6 +2353,7 @@ impl SequenceGraph {
     /// @param codon_table NCBI codon table ID (default: 1 = Standard).
     /// @return A new SequenceGraph containing the protein sequence, in this
     ///   graph's sample.
+    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn translate_annotation(
         &self,
         region: Robj,

@@ -20,7 +20,6 @@ use crate::python_api::sequence_part::PySequencePart;
 #[pymethods]
 impl PyRepository {
     #[pyo3(signature = (filename, sample, new_sample, region_name, collection=None))]
-    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_fasta(
         &self,
         filename: String,
@@ -174,7 +173,6 @@ impl PyRepository {
     }
 
     #[pyo3(signature = (sequence, sample, new_sample, region_name, no_reference_path_update=false, collection=None))]
-    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_sequence(
         &self,
         sequence: String,
@@ -201,7 +199,6 @@ impl PyRepository {
     }
 
     #[pyo3(signature = (sample, new_sample_name, path_name, parts_list, collection=None))]
-    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_library(
         &self,
         sample: Option<String>,
@@ -242,7 +239,6 @@ impl PyRepository {
     }
 
     #[pyo3(signature = (sample, new_sample, path_name, library, parts, collection=None))]
-    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn update_with_library_files(
         &self,
         sample: String,

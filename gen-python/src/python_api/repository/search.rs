@@ -40,7 +40,7 @@ impl PyRepository {
             Some(bgs) if !bgs.is_empty() => bgs,
             _ => BlockGroup::all(conn)
                 .into_iter()
-                .map(|bg| self.into_py_block_group(bg))
+                .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         };
 
@@ -85,7 +85,7 @@ impl PyRepository {
             Some(bgs) if !bgs.is_empty() => bgs,
             _ => BlockGroup::all(conn)
                 .into_iter()
-                .map(|bg| self.into_py_block_group(bg))
+                .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         };
 

@@ -44,6 +44,10 @@ impl PyHashId {
     }
 
     /// Returns the HashId as a 32-byte bytes object.
+    #[expect(
+        clippy::wrong_self_convention,
+        reason = "exposed to Python as to_bytes(); pyo3 pyclass methods require &self"
+    )]
     fn to_bytes(&self, py: Python<'_>) -> Py<PyBytes> {
         PyBytes::new(py, &self.hash_id.0).into()
     }
